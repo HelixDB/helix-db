@@ -51,17 +51,17 @@ pub mod macros {
     /// ```
     macro_rules! node_matches {
         ($key:expr, $value:expr) => {
-            |node: &protocol::Node| {
+            |node: &helixdb::protocol::items::Node| {
                 if let Some(val) = node.check_property($key) {
-                    if let protocol::value::Value::String(val) = &val {
+                    if let helixdb::protocol::value::Value::String(val) = &val {
                         Ok(*val == $value)
                     } else {
-                        Err(helix_engine::types::GraphError::from(
+                        Err(helixdb::helix_engine::types::GraphError::from(
                             "Invalid node".to_string(),
                         ))
                     }
                 } else {
-                    Err(helix_engine::types::GraphError::from(
+                    Err(helixdb::helix_engine::types::GraphError::from(
                         "Invalid node".to_string(),
                     ))
                 }
@@ -72,17 +72,17 @@ pub mod macros {
     #[macro_export]
     macro_rules! edge_matches {
         ($key:expr, $value:expr) => {
-            |edge: &protocol::Edge| {
+            |edge: &helixdb::protocol::items::Edge| {
                 if let Some(val) = edge.check_property($key) {
-                    if let protocol::value::Value::String(val) = &val {
+                    if let helixdb::protocol::value::Value::String(val) = &val {
                         Ok(*val == $value)
                     } else {
-                        Err(helix_engine::types::GraphError::from(
+                        Err(helixdb::helix_engine::types::GraphError::from(
                             "Invalid edge".to_string(),
                         ))
                     }
                 } else {
-                    Err(helix_engine::types::GraphError::from(
+                    Err(helixdb::helix_engine::types::GraphError::from(
                         "Invalid edge".to_string(),
                     ))
                 }

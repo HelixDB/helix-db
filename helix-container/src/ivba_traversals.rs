@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::props;
 use get_routes::handler;
+use helixdb::node_matches;
 use helixdb::{
     helix_engine::graph_core::traversal::TraversalBuilder,
     helix_engine::graph_core::traversal_steps::{
@@ -237,5 +238,52 @@ pub fn cancel_venue_booking(
 
     tr.finish()?;
 
+    response.body = sonic_rs::to_vec(&"Success").unwrap();
+
     Ok(())
+}
+
+/**
+ * QUERY GetAllVenues(UserID, limit, lastPage) =>
+    venues <- V<Venue>()::WHERE(_::Props(Status)::EQ("active"))::Range(limit, lastPage)  
+    RETURN venues::{
+        VenueInfo: {
+            _::Props(SizeQM, Price, Currency, TimeUnit, MaxCapacitiy),
+            Facilities: _::Out<HasFacility>,
+            BookedDates: _::In<Booking>::Props(StartDateTime, EndDateTime)
+        }
+    }
+ */
+
+#[handler]
+pub fn get_all_venues(input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
+    let mut return_vals: HashMap<String, ReturnValue> = HashMap::with_capacity(2);
+
+    #[derive(Serialize, Deserialize)]
+    struct GetAllVenuesData {
+        user_id: String,
+        limit: usize,
+        last_page: usize,
+    }
+    
+
+    let data: GetAllVenuesData = sonic_rs::from_slice(&input.request.body).unwrap();
+
+    let db = Arc::clone(&input.graph.storage);
+    let mut txn = db.graph_env.write_txn().unwrap();
+
+    let mut tr = TraversalBuilder::new(Arc::clone(&db), TraversalValue::Empty);
+
+    tr.v_from_types(&txn, &["Venue".to_string()]).filter_nodes(&txn, node_matches!("Status", "active")).range(data.limit, data.last_page);
+    let venues = tr.finish()?;
+
+    struct Venue {
+        
+    }
+
+    response.body = sonic_rs::to_vec(&"Success").unwrap();
+
+    Ok(())
+    
+    
 }
