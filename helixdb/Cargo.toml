@@ -42,6 +42,10 @@ default = ["engine", "compiler", "protocol"]
 name = "graph_benchmarks"
 harness = false
 
+[[bench]]
+name = "vector_benchmarks"
+harness = false
+
 [profile.release]
 strip = "debuginfo"
 lto = true

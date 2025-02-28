@@ -1,22 +1,7 @@
 // vector struct to store raw data, dimension and de
-
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, HashSet},
-    path::Path,
-    sync::{Arc, Mutex},
-    vec,
-};
-
-use bincode::deserialize;
-use heed3::{types::Bytes, Database, Env, EnvOpenOptions, RoTxn, RwTxn};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::num::ParseIntError;
 
 use crate::helix_engine::types::GraphError;
-
-use super::storage_methods::{BasicStorageMethods, StorageMethods, VectorMethods};
 
 const DB_VECTORS: &str = "vectors"; // For vector data (v:)
 const DB_HNSW_OUT_NODES: &str = "hnsw_out_nodes"; // For hnsw out node data
@@ -26,9 +11,12 @@ const VECTOR_PREFIX: &[u8] = b"v:";
 const OUT_PREFIX: &[u8] = b"o:";
 const IN_PREFIX: &[u8] = b"i:";
 
-#[repr(C, align(16))] // Align to 16 bytes for better SIMD performance
-#[derive(Clone)]
+#[repr(C, align(16))]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HVector {
+    id: String,
+    is_deleted: bool,
+    pub level: usize,
     data: Vec<f64>,
 }
 
@@ -49,21 +37,28 @@ impl EuclidianDistance for HVector {
             return from.scalar_distance(to);
         }
 
-        // Fallback to scalar implementation for different lengths
         from.scalar_distance(to)
     }
 }
 
 impl HVector {
     #[inline(always)]
-    pub fn new(data: Vec<f64>) -> Self {
-        HVector { data }
+    pub fn new(id: String, data: Vec<f64>) -> Self {
+        HVector {
+            id,
+            is_deleted: false,
+            level: 0,
+            data,
+        }
     }
 
     #[inline(always)]
-    pub fn from_slice(data: &[f64]) -> Self {
+    pub fn from_slice(id: String, level: usize, data: Vec<f64>) -> Self {
         HVector {
-            data: data.to_vec(),
+            id,
+            is_deleted: false,
+            level,
+            data,
         }
     }
 
@@ -81,7 +76,7 @@ impl HVector {
         bytes
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, GraphError> {
+    pub fn from_bytes(id: String, level: usize, bytes: &[u8]) -> Result<Self, GraphError> {
         if bytes.len() % std::mem::size_of::<f64>() != 0 {
             return Err(GraphError::Default);
         }
@@ -94,7 +89,12 @@ impl HVector {
             data.push(value);
         }
 
-        Ok(HVector { data })
+        Ok(HVector {
+            id,
+            is_deleted: false,
+            level,
+            data,
+        })
     }
 
     #[inline(always)]
@@ -112,7 +112,6 @@ impl HVector {
         HVector::distance(self, other)
     }
 
-    // Internal methods for distance calculation
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     unsafe fn simd_distance_unchecked(&self, other: &HVector) -> f64 {
@@ -122,7 +121,6 @@ impl HVector {
         let n = self.len();
         let mut i = 0;
 
-        // Process 2 elements at a time using NEON SIMD
         while i + 2 <= n {
             let a = vld1q_f64(self.data[i..].as_ptr());
             let b = vld1q_f64(other.data[i..].as_ptr());
@@ -132,7 +130,6 @@ impl HVector {
             i += 2;
         }
 
-        // Handle remaining elements
         while i < n {
             let diff = self.data[i] - other.data[i];
             sum += diff * diff;
@@ -167,60 +164,60 @@ mod vector_tests {
     #[test]
     fn test_hvector_new() {
         let data = vec![1.0, 2.0, 3.0];
-        let vector = HVector::new(data);
+        let vector = HVector::new("test".to_string(), data);
         assert_eq!(vector.get_data(), &[1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn test_hvector_from_slice() {
         let data = [1.0, 2.0, 3.0];
-        let vector = HVector::from_slice(&data);
+        let vector = HVector::from_slice("test".to_string(), 0, data.to_vec());
         assert_eq!(vector.get_data(), &[1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn test_hvector_distance() {
-        let v1 = HVector::new(vec![1.0, 0.0]);
-        let v2 = HVector::new(vec![0.0, 1.0]);
+        let v1 = HVector::new("test".to_string(), vec![1.0, 0.0]);
+        let v2 = HVector::new("test".to_string(), vec![0.0, 1.0]);
         let distance = HVector::distance(&v1, &v2);
         assert!((distance - 2.0_f64.sqrt()).abs() < 1e-10);
     }
 
     #[test]
     fn test_hvector_distance_zero() {
-        let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
-        let v2 = HVector::new(vec![1.0, 2.0, 3.0]);
+        let v1 = HVector::new("test".to_string(), vec![1.0, 2.0, 3.0]);
+        let v2 = HVector::new("test".to_string(), vec![1.0, 2.0, 3.0]);
         let distance = HVector::distance(&v1, &v2);
         assert!(distance.abs() < 1e-10);
     }
 
     #[test]
     fn test_hvector_distance_to() {
-        let v1 = HVector::new(vec![0.0, 0.0]);
-        let v2 = HVector::new(vec![3.0, 4.0]);
+        let v1 = HVector::new("test".to_string(), vec![0.0, 0.0]);
+        let v2 = HVector::new("test".to_string(), vec![3.0, 4.0]);
         let distance = v1.distance_to(&v2);
         assert!((distance - 5.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_bytes_roundtrip() {
-        let original = HVector::new(vec![1.0, 2.0, 3.0]);
+        let original = HVector::new("test".to_string(), vec![1.0, 2.0, 3.0]);
         let bytes = original.to_bytes();
-        let reconstructed = HVector::from_bytes(&bytes).unwrap();
+        let reconstructed = HVector::from_bytes("test".to_string(), 0, &bytes).unwrap();
         assert_eq!(original.get_data(), reconstructed.get_data());
     }
 
     #[test]
     fn test_hvector_len() {
         let data = vec![1.0, 2.0, 3.0, 4.0];
-        let vector = HVector::new(data);
+        let vector = HVector::new("test".to_string(), data);
         assert_eq!(vector.len(), 4);
     }
 
     #[test]
     fn test_hvector_is_empty() {
-        let empty_vector = HVector::new(vec![]);
-        let non_empty_vector = HVector::new(vec![1.0, 2.0]);
+        let empty_vector = HVector::new("test".to_string(), vec![]);
+        let non_empty_vector = HVector::new("test".to_string(), vec![1.0, 2.0]);
 
         assert!(empty_vector.is_empty());
         assert!(!non_empty_vector.is_empty());
@@ -228,24 +225,24 @@ mod vector_tests {
 
     #[test]
     fn test_hvector_distance_different_dimensions() {
-        let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
-        let v2 = HVector::new(vec![1.0, 2.0, 3.0, 4.0]);
+        let v1 = HVector::new("test".to_string(), vec![1.0, 2.0, 3.0]);
+        let v2 = HVector::new("test".to_string(), vec![1.0, 2.0, 3.0, 4.0]);
         let distance = HVector::distance(&v1, &v2);
         assert!(distance.is_finite());
     }
 
     #[test]
     fn test_hvector_large_values() {
-        let v1 = HVector::new(vec![1e6, 2e6]);
-        let v2 = HVector::new(vec![1e6, 2e6]);
+        let v1 = HVector::new("test".to_string(), vec![1e6, 2e6]);
+        let v2 = HVector::new("test".to_string(), vec![1e6, 2e6]);
         let distance = HVector::distance(&v1, &v2);
         assert!(distance.abs() < 1e-10);
     }
 
     #[test]
     fn test_hvector_negative_values() {
-        let v1 = HVector::new(vec![-1.0, -2.0]);
-        let v2 = HVector::new(vec![1.0, 2.0]);
+        let v1 = HVector::new("test".to_string(), vec![-1.0, -2.0]);
+        let v2 = HVector::new("test".to_string(), vec![1.0, 2.0]);
         let distance = HVector::distance(&v1, &v2);
         assert!((distance - (20.0_f64).sqrt()).abs() < 1e-10);
     }

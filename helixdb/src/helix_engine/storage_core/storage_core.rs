@@ -15,7 +15,7 @@ use crate::protocol::{
     value::Value,
 };
 
-use super::storage_methods::{BasicStorageMethods, DBMethods, VectorMethods};
+use super::storage_methods::{BasicStorageMethods, DBMethods};
 use super::vectors::HVector;
 
 // Database names for different stores
@@ -447,9 +447,7 @@ impl StorageMethods for HelixGraphStorage {
                         Some(data) => Ok(deserialize(data)?),
                         None => Err(GraphError::NodeNotFound),
                     };
-                println!("NODE: {:?}", n);
                 if let Ok(node) = n {
-                    println!("Node: {:?}", node);
                     nodes.push(node);
                 }
             }
@@ -1146,9 +1144,7 @@ mod tests {
         txn.commit().unwrap();
 
         let txn = storage.graph_env.read_txn().unwrap();
-        let nodes = storage
-            .get_nodes_by_types(&txn, &["person"])
-            .unwrap(); // TODO: Handle Error
+        let nodes = storage.get_nodes_by_types(&txn, &["person"]).unwrap(); // TODO: Handle Error
 
         assert_eq!(nodes.len(), 2);
 

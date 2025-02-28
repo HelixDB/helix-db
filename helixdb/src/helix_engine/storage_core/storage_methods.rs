@@ -150,10 +150,3 @@ pub trait SearchMethods {
         to_id: &str,
     ) -> Result<(Vec<Node>, Vec<Edge>), GraphError>;
 }
-
-pub trait VectorMethods {
-    fn get_vector(& self, txn: &RoTxn, id: &str) -> Result<HVector, GraphError>;
-    fn insert(&self, txn: &mut RwTxn, id: &str, data: &[f64]) -> Result<(), GraphError>;
-    // fn get_vector(&self, txn: &RoTxn, id: &str) -> Result<protocol::Node, GraphError> 
-}
-

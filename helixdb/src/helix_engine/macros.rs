@@ -143,4 +143,19 @@ pub mod macros {
             }
         };
     }
+
+    #[macro_export]
+    macro_rules! decode_string {
+        ($value:expr) => {
+            match $value.decode() {
+                Ok(v) => String::from_utf8(v.to_vec())?,
+                Err(e) => {
+                    return Err(GraphError::ConversionError(format!(
+                        "Error Decoding: {:?}",
+                        e
+                    )))
+                }
+            }
+        };
+    }
 }
