@@ -1,18 +1,11 @@
-use crate::helix_engine::vector_core::vector::HVector;
-use crate::helix_engine::{storage_core::storage_core::OUT_EDGES_PREFIX, types::VectorError};
 use bincode::{deserialize, serialize};
-use heed3::{
-    types::{Bytes, Unit},
-    Database, Env, RoTxn, RwTxn,
-};
 use indexmap::IndexMap;
 use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, HashSet},
-    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
-};
+use heed3::{types::{Bytes, Unit}, Database, Env, RoTxn, RwTxn};
+use std::{cmp::Ordering, collections::{BinaryHeap, HashSet}};
+use crate::helix_engine::vector_core::{vector::HVector, pca::PCA};
+use crate::helix_engine::{storage_core::storage_core::OUT_EDGES_PREFIX, types::VectorError};
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_HNSW_OUT_EDGES: &str = "hnsw_out_nodes"; // for hnsw out node data
@@ -66,52 +59,6 @@ impl HNSWConfig {
     }
 }
 
-pub struct VecConfig {
-    og_dimensions: usize,
-    reduced_dimensions: Option<usize>,
-    quantization: Option<usize>,
-}
-
-impl Default for VecConfig {
-    fn default() -> Self {
-        Self {
-            og_dimensions: 0,
-            reduced_dimensions: None,
-            quantization: None,
-        }
-    }
-}
-
-impl VecConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn new_dims_reduced(og_dims: usize) -> Self {
-        Self {
-            og_dimensions: og_dims,
-            reduced_dimensions: Some(Self::calc_target_dim(og_dims)),
-            quantization: None,
-        }
-    }
-
-    fn calc_target_dim(og_dims: usize) -> usize {
-        let sqrt_dim = (og_dims as f64).sqrt().ceil() as usize;
-        let log_dim = ((og_dims as f64).log2() * 2.0).ceil() as usize;
-        let percent_dim = (og_dims as f64 * 0.2).ceil() as usize;
-
-        let mut dims = vec![sqrt_dim, log_dim, percent_dim];
-        dims.sort_unstable();
-        let target_dim = dims[1];
-
-        target_dim.clamp(3, og_dims.min(256))
-    }
-
-    pub fn get_reduced_dims(&self) -> Option<usize> {
-        self.reduced_dimensions
-    }
-}
-
 #[derive(PartialEq)]
 struct Candidate {
     id: String,
@@ -136,29 +83,27 @@ pub struct VectorCore {
     vectors_db: Database<Bytes, Bytes>,
     out_edges_db: Database<Bytes, Unit>,
     hnsw_config: HNSWConfig,
-    optims_config: VecConfig,
+    dimensions: usize,
+    pca: Option<PCA>,
 }
 
 impl VectorCore {
     pub fn new(
         env: &Env,
         txn: &mut RwTxn,
+        config: Option<HNSWConfig>,
         dimensions: usize,
-        i_hnsw_config: Option<HNSWConfig>,
-        i_optims_config: Option<VecConfig>,
+        pca: Option<PCA>,
     ) -> Result<Self, VectorError> {
         let vectors_db = env.create_database(txn, Some(DB_VECTORS))?;
         let out_edges_db = env.create_database(txn, Some(DB_HNSW_OUT_EDGES))?;
-
-        let hnsw_config = i_hnsw_config.unwrap_or_default();
-        let mut optims_config = i_optims_config.unwrap_or_default();
-        optims_config.og_dimensions = dimensions;
-
+        let hnsw_config = config.unwrap_or_default();
         Ok(Self {
             vectors_db,
             out_edges_db,
             hnsw_config,
-            optims_config,
+            dimensions,
+            pca,
         })
     }
 
@@ -186,49 +131,8 @@ impl VectorCore {
         .concat()
     }
 
-    fn set_dims(&self, id: &String, data: &[f64]) -> HVector {
-        let mut n_vec: HVector = HVector::from_slice(id.clone(), 0, data.to_vec());
-
-        let target_dim = match self.optims_config.reduced_dimensions {
-            None => return n_vec,
-            Some(dim) => dim,
-        };
-
-        if data.len() <= target_dim {
-            return n_vec;
-        }
-
-        n_vec.reduce_dims(target_dim);
-
-        n_vec
-    }
-
     #[inline]
     pub fn get_new_level(&self) -> usize {
-        // // Atomically update the RNG seed
-        // let mut seed = self.rng_seed.fetch_add(1, AtomicOrdering::Relaxed);
-        // if seed == 0 {
-        //     seed = 1;
-        // }
-
-        // // XorShift64* algorithm
-        // seed ^= seed >> 12;
-        // seed ^= seed << 25;
-        // seed ^= seed >> 27;
-        // let random_value = seed.wrapping_mul(0x2545F4914F6CDD1D);
-
-        // // Convert to [0,1) range
-        // let r = (random_value as f64) / (u64::MAX as f64);
-
-        // // Level calculation with exponential distribution
-        // // Use a constant like 1/ln(M) where M is base parameter (often 2-16)
-        // // Alternatively, you can use a fixed value like self.config.m_l
-        // let level = (-r.ln() * self.config.m_l).floor() as usize;
-
-        // // Cap the maximum level to prevent extremely rare but very high levels
-        // println!("level: {:?}, max_level: {:?}", level, self.config.max_level);
-        // level.min(self.config.max_level)
-
         let mut rng = rand::rng();
         let level = (-rng.random::<f64>().ln()).floor() as usize;
         level.min(self.hnsw_config.max_level)
@@ -277,6 +181,24 @@ impl VectorCore {
                 &serialize(vector)?,
             )
             .map_err(VectorError::from)
+    }
+
+    /// fit pca to downsize all vecs
+    pub fn pca_fit(&mut self) -> Result<(), VectorError> {
+        if self.pca.is_none() {
+            return Err(VectorError::ConversionError("no pca set".to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// transform all data stored
+    pub fn pca_transform(&mut self, txn: &mut RwTxn) -> Result<(), VectorError> {
+        if self.pca.is_none() {
+            return Err(VectorError::ConversionError("no pca set".to_string()));
+        }
+
+        Ok(())
     }
 
     #[inline(always)]
@@ -413,7 +335,8 @@ impl VectorCore {
     }
 
     pub fn search(&self, txn: &RoTxn, query: &[f64], k: usize) -> Result<Vec<HVector>, VectorError> {
-        let query = self.set_dims(&"".to_string(), query);
+        // TODO: run through pca here if exists
+        let query = HVector::from_slice("".to_string(), 0, query.to_vec());
 
         let mut entry_point = match self.get_entry_point(txn) {
             Ok(ep) => ep,
@@ -450,7 +373,10 @@ impl VectorCore {
         let id = uuid::Uuid::new_v4().as_simple().to_string();
         let new_level = self.get_new_level();
 
-        let mut data_query = self.set_dims(&id, data);
+        let mut data_query = HVector::from_slice(id.clone(), 0, data.to_vec());
+        //if self.pca.is_none() {
+        //    self.pca.transform()
+        //}
 
         self.put_vector(txn, &data_query)?;
         data_query.level = new_level;
@@ -504,5 +430,12 @@ impl VectorCore {
             vectors.push(vector);
         }
         Ok(vectors)
+    }
+
+    pub fn load_data(&mut self, txn: &mut RwTxn, vectors: Vec<(String, Vec<f64>)>) -> Result<(), VectorError> {
+        for (_, data) in vectors.iter() {
+            self.insert(txn, data).unwrap();
+        }
+        Ok(())
     }
 }
