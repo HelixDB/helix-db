@@ -1,82 +1,14 @@
 use crate::helix_engine::graph_core::graph_core::HelixGraphEngine;
-use chrono::format;
+use crate::helix_gateway::router::router::{HelixRouter, RouterError};
+use crate::protocol::{request::Request, response::Response};
+
 use flume::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::helix_gateway::gateway::GatewayOpts;
-use crate::helix_gateway::router::router::{HelixRouter, RouterError};
-use crate::protocol::request::Request;
-use crate::protocol::response::Response;
-
-extern crate futures;
-extern crate tokio;
-
-use futures::future::{lazy, Future};
-use tokio::net::{TcpListener, TcpStream};
-
-pub struct Worker {
-    pub id: usize,
-    pub handle: JoinHandle<()>,
-}
-
-impl Worker {
-    fn new(
-        id: usize,
-        graph_access: Arc<HelixGraphEngine>,
-        router: Arc<HelixRouter>,
-        rx: Receiver<TcpStream>,
-    ) -> Worker {
-        let handle = tokio::spawn(async move {
-            loop {
-                let mut conn = match rx.recv_async().await {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        eprintln!("Error receiving connection: {:?}", e);
-                        continue;
-                    }
-                };
-
-                let request = match Request::from_stream(&mut conn).await {
-                    Ok(request) => request,
-                    Err(e) => {
-                        eprintln!("Error parsing request: {:?}", e);
-                        continue;
-                    }
-                };
-                let mut response = Response::new();
-
-                if let Err(e) = router.handle(Arc::clone(&graph_access), request, &mut response) {
-                    eprintln!("Error handling request: {:?}", e);
-                    response.status = 500;
-                    response.body = format!("\n{:?}", e).into_bytes();
-                }
-
-                if let Err(e) = response.send(&mut conn).await {
-                    eprintln!("Error sending response: {:?}", e);
-                    match e.kind() {
-                        std::io::ErrorKind::BrokenPipe => {
-                            eprintln!("Client disconnected before response could be sent");
-                        }
-                        std::io::ErrorKind::ConnectionReset => {
-                            eprintln!("Connection was reset by peer");
-                        }
-                        _ => {
-                            eprintln!("Unexpected error type: {:?}", e);
-                        }
-                    }
-                }
-            }
-        });
-
-        Worker { id, handle }
-    }
-}
-
 pub struct ThreadPool {
-    pub sender: Sender<TcpStream>,
+    pub sender: Sender<(Request, oneshot::Sender<Response>)>,
     pub num_unused_workers: Mutex<usize>,
     pub num_used_workers: Mutex<usize>,
     pub workers: Vec<Worker>,
@@ -94,13 +26,12 @@ impl ThreadPool {
             size
         );
 
-        let (tx, rx) = flume::unbounded::<TcpStream>();
+        let (tx, rx) = flume::bounded::<(Request, oneshot::Sender<Response>)>(size * 2); // Bounded channel
         let mut workers = Vec::with_capacity(size);
         for id in 0..size {
             workers.push(Worker::new(id, Arc::clone(&graph), Arc::clone(&router), rx.clone()));
         }
         println!("Thread pool initialized with {} workers", workers.len());
-
 
         Ok(ThreadPool {
             sender: tx,
@@ -108,5 +39,44 @@ impl ThreadPool {
             num_used_workers: Mutex::new(0),
             workers,
         })
+    }
+}
+
+pub struct Worker {
+    pub id: usize,
+    pub handle: JoinHandle<()>,
+}
+
+impl Worker {
+    fn new(
+        id: usize,
+        graph_access: Arc<HelixGraphEngine>,
+        router: Arc<HelixRouter>,
+        rx: Receiver<(Request, oneshot::Sender<Response>)>,
+    ) -> Worker {
+        let handle = tokio::spawn(async move {
+            loop {
+                let (request, response_tx) = match rx.recv_async().await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        eprintln!("Worker {} error receiving request: {:?}", id, e);
+                        continue;
+                    }
+                };
+
+                let mut response = Response::new();
+                if let Err(e) = router.handle(Arc::clone(&graph_access), request, &mut response) {
+                    eprintln!("Worker {} error handling request: {:?}", id, e);
+                    response.status = 500;
+                    response.body = format!("Error handling request: {:?}", e).into_bytes();
+                }
+
+                if let Err(e) = response_tx.send(response) {
+                    eprintln!("Worker {} error sending response: {:?}", id, e);
+                }
+            }
+        });
+
+        Worker { id, handle }
     }
 }

@@ -1,8 +1,31 @@
-use std::{collections::HashMap, sync::Arc};
+use crate::protocol::{request::Request, response::Response};
+use crate::helix_engine::{
+    graph_core::graph_core::HelixGraphEngine,
+    types::GraphError,
+};
+use crate::helix_gateway::{
+    router::router::{HelixRouter, HandlerFn},
+    thread_pool::thread_pool::ThreadPool,
+};
 
-use super::connection::connection::ConnectionHandler;
-use crate::helix_engine::graph_core::graph_core::HelixGraphEngine;
-use super::router::router::{HandlerFn, HelixRouter};
+use hyper::server::conn::AddrIncoming;
+use tokio::sync::oneshot;
+use flume::Sender;
+use hyper::{
+    service::{make_service_fn, Service},
+    Body,
+    Request as HyperRequest,
+    Response as HyperResponse,
+    Server,
+};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    convert::Infallible,
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 pub struct GatewayOpts {}
 
@@ -10,8 +33,33 @@ impl GatewayOpts {
     pub const DEFAULT_POOL_SIZE: usize = 1024;
 }
 
+#[derive(Clone)]
+struct GatewayService {
+    graph: Arc<HelixGraphEngine>,
+    router: Arc<HelixRouter>,
+    sender: Sender<(Request, oneshot::Sender<Response>)>,
+}
+
+impl Service<HyperRequest<Body>> for GatewayService {
+    type Response = HyperResponse<hyper::body::Body>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: HyperRequest<Body>) -> Self::Future {
+        let graph = Arc::clone(&self.graph);
+        let router = Arc::clone(&self.router);
+        let sender = self.sender.clone();
+        Box::pin(handle_request(req, graph, router, sender))
+    }
+}
+
 pub struct HelixGateway {
-    pub connection_handler: ConnectionHandler,
+    pub server: Server<AddrIncoming, GatewayService>,
+    pub thread_pool: ThreadPool,
 }
 
 impl HelixGateway {
@@ -20,14 +68,105 @@ impl HelixGateway {
         graph: Arc<HelixGraphEngine>,
         size: usize,
         routes: Option<HashMap<(String, String), HandlerFn>>,
-    ) -> HelixGateway {
-        let router = HelixRouter::new(routes);
-        let connection_handler = ConnectionHandler::new(address, graph, size, router).unwrap();
-        println!("Gateway created");
-        HelixGateway { connection_handler }
+    ) -> Result<HelixGateway, GraphError> {
+        let addr: SocketAddr = address.parse().map_err(|e| {
+            format!("Invalid address: {}", e)
+        })?;
+
+        let router = Arc::new(HelixRouter::new(routes));
+        let thread_pool = ThreadPool::new(size, Arc::clone(&graph), Arc::clone(&router))?;
+        let sender = thread_pool.sender.clone();
+
+        let service = GatewayService {
+            graph: Arc::clone(&graph),
+            router: Arc::clone(&router),
+            sender,
+        };
+
+        //let make_service = make_service_fn(move |_conn| {
+        //    let service = service.clone();
+        //    async move { Ok::<_, Infallible>(service) }
+        //});
+
+        let server = Server::bind(&addr).serve(service);
+
+        println!("Gateway created, listening on {}", address);
+        Ok(HelixGateway { server, thread_pool })
+    }
+
+    pub async fn run(self) -> Result<(), hyper::Error> {
+        self.server.await
     }
 }
 
+async fn hyper_to_internal_request(hyper_req: HyperRequest<Body>) -> Result<Request, GraphError> {
+    let method = hyper_req.method().to_string();
+    let path = hyper_req.uri().path().to_string();
+    let headers: HashMap<String, String> = hyper_req
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    let body_bytes = hyper::body::to_bytes(hyper_req.into_body()).await
+        .map_err(|e| GraphError::New(format!("Failed to read request body: {}", e)))?;
+    let body = body_bytes.to_vec();
+
+    Ok(Request { method, path, headers, body })
+}
+
+fn internal_to_hyper_response(response: Response) -> HyperResponse<Body> {
+    let mut builder = HyperResponse::builder()
+        .status(response.status);
+
+    for (key, value) in response.headers {
+        builder = builder.header(key.as_str(), value.as_str());
+    }
+
+    builder.body(Body::from(response.body)).unwrap()
+}
+
+async fn handle_request(
+    req: HyperRequest<Body>,
+    graph: Arc<HelixGraphEngine>,
+    router: Arc<HelixRouter>,
+    sender: Sender<(Request, oneshot::Sender<Response>)>,
+) -> Result<HyperResponse<hyper::body::Body>, Infallible> {
+    let internal_req = match hyper_to_internal_request(req).await {
+        Ok(req) => req,
+        Err(e) => {
+            let mut response = Response::new();
+            response.status = 500;
+            response.body = format!("Error parsing request: {}", e).into_bytes();
+            return Ok(internal_to_hyper_response(response));
+        }
+    };
+
+    let (tx, rx) = oneshot::channel();
+
+    // send request to thread pool
+    if let Err(e) = sender.send_async((internal_req, tx)).await {
+        let mut response = Response::new();
+        response.status = 500;
+        response.body = format!("Error sending to thread pool: {}", e).into_bytes();
+        return Ok(internal_to_hyper_response(response));
+    }
+
+    // wait for response from worker
+    let response = match rx.await {
+        Ok(response) => response,
+        Err(e) => {
+            let mut response = Response::new();
+            response.status = 500;
+            response.body = format!("Error receiving response: {}", e).into_bytes();
+            return Ok(internal_to_hyper_response(response));
+        }
+    };
+
+    Ok(internal_to_hyper_response(response))
+}
+
+/*
 #[cfg(test)]
 mod tests {
     use crate::helix_engine::graph_core::config::Config;
@@ -194,3 +333,4 @@ mod tests {
         Ok(())
     }
 }
+*/

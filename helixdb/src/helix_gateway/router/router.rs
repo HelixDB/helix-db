@@ -1,29 +1,19 @@
-// router
-
-// takes in raw [u8] data
-// parses to request type
-
-// then locks graph and passes parsed data and graph to handler to execute query
-
-// returns response
-
-use core::fmt;
-use crate::helix_engine::{graph_core::graph_core::HelixGraphEngine, types::GraphError};
-use std::{collections::HashMap, sync::Arc};
-
+use crate::helix_engine::graph_core::graph_core::HelixGraphEngine;
+use crate::helix_engine::types::GraphError;
 use crate::protocol::{request::Request, response::Response};
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use inventory;
 
 pub struct HandlerInput {
     pub request: Request,
     pub graph: Arc<HelixGraphEngine>,
 }
 
-// basic type for function pointer
 pub type BasicHandlerFn = fn(&HandlerInput, &mut Response) -> Result<(), GraphError>;
-
-// thread safe type for multi threaded use
 pub type HandlerFn =
-    Arc<dyn Fn(&HandlerInput, &mut Response) -> Result<(), GraphError> + Send + Sync>;
+Arc<dyn Fn(&HandlerInput, &mut Response) -> Result<(), GraphError> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct HandlerSubmission(pub Handler);
@@ -43,12 +33,10 @@ impl Handler {
 inventory::collect!(HandlerSubmission);
 
 pub struct HelixRouter {
-    /// Method+Path => Function
     pub routes: HashMap<(String, String), HandlerFn>,
 }
 
 impl HelixRouter {
-    /// Create a new router with a set of routes
     pub fn new(routes: Option<HashMap<(String, String), HandlerFn>>) -> Self {
         let rts = match routes {
             Some(routes) => routes,
@@ -57,24 +45,11 @@ impl HelixRouter {
         Self { routes: rts }
     }
 
-    /// Add a route to the router
     pub fn add_route(&mut self, method: &str, path: &str, handler: BasicHandlerFn) {
         self.routes
             .insert((method.to_uppercase(), path.to_string()), Arc::new(handler));
     }
 
-    /// Handle a request by finding the appropriate handler and executing it
-    ///
-    /// ## Arguments
-    ///
-    /// * `graph_access` - A reference to the graph engine
-    /// * `request` - The request to handle
-    /// * `response` - The response to write to
-    ///
-    /// ## Returns
-    ///
-    /// * `Ok(())` if the request was handled successfully
-    /// * `Err(RouterError)` if there was an error handling the request
     pub fn handle(
         &self,
         graph_access: Arc<HelixGraphEngine>,
@@ -105,8 +80,8 @@ pub enum RouterError {
     New(String),
 }
 
-impl fmt::Display for RouterError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for RouterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RouterError::Io(e) => write!(f, "IO error: {}", e),
             RouterError::New(msg) => write!(f, "Graph error: {}", msg),
