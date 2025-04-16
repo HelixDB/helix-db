@@ -8,15 +8,12 @@ use crate::helix_gateway::{
     thread_pool::thread_pool::ThreadPool,
 };
 
-use hyper::server::conn::AddrIncoming;
 use tokio::sync::oneshot;
 use flume::Sender;
 use hyper::{
-    service::{make_service_fn, Service},
-    Body,
+    service::{service_fn, Service},
     Request as HyperRequest,
     Response as HyperResponse,
-    Server,
 };
 use std::{
     collections::HashMap,
@@ -24,7 +21,6 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     pin::Pin,
-    task::{Context, Poll},
 };
 
 pub struct GatewayOpts {}
@@ -40,16 +36,12 @@ struct GatewayService {
     sender: Sender<(Request, oneshot::Sender<Response>)>,
 }
 
-impl Service<HyperRequest<Body>> for GatewayService {
-    type Response = HyperResponse<hyper::body::Body>;
+impl Service<HyperRequest<hyper::body::Incoming>> for GatewayService {
+    type Response = HyperResponse<hyper::body::Incoming>;
     type Error = Infallible;
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: HyperRequest<Body>) -> Self::Future {
+    fn call(&self, req: HyperRequest<hyper::body::Incoming>) -> Self::Future {
         let graph = Arc::clone(&self.graph);
         let router = Arc::clone(&self.router);
         let sender = self.sender.clone();
@@ -58,7 +50,7 @@ impl Service<HyperRequest<Body>> for GatewayService {
 }
 
 pub struct HelixGateway {
-    pub server: Server<AddrIncoming, GatewayService>,
+    pub server: Server<hyper::server::conn::http1::Builder, GatewayService>,
     pub thread_pool: ThreadPool,
 }
 
@@ -83,12 +75,12 @@ impl HelixGateway {
             sender,
         };
 
-        //let make_service = make_service_fn(move |_conn| {
-        //    let service = service.clone();
-        //    async move { Ok::<_, Infallible>(service) }
-        //});
+        let make_service = service_fn(move |_conn| {
+            let service = service.clone();
+            async move { Ok::<_, Infallible>(service) }
+        });
 
-        let server = Server::bind(&addr).serve(service);
+        let server = Server::bind(&addr).serve(make_service);
 
         println!("Gateway created, listening on {}", address);
         Ok(HelixGateway { server, thread_pool })
@@ -99,7 +91,7 @@ impl HelixGateway {
     }
 }
 
-async fn hyper_to_internal_request(hyper_req: HyperRequest<Body>) -> Result<Request, GraphError> {
+async fn hyper_to_internal_request(hyper_req: HyperRequest<hyper::body::Incoming>) -> Result<Request, GraphError> {
     let method = hyper_req.method().to_string();
     let path = hyper_req.uri().path().to_string();
     let headers: HashMap<String, String> = hyper_req
@@ -115,7 +107,7 @@ async fn hyper_to_internal_request(hyper_req: HyperRequest<Body>) -> Result<Requ
     Ok(Request { method, path, headers, body })
 }
 
-fn internal_to_hyper_response(response: Response) -> HyperResponse<Body> {
+fn internal_to_hyper_response(response: Response) -> HyperResponse<hyper::body::Incoming> {
     let mut builder = HyperResponse::builder()
         .status(response.status);
 
@@ -127,11 +119,11 @@ fn internal_to_hyper_response(response: Response) -> HyperResponse<Body> {
 }
 
 async fn handle_request(
-    req: HyperRequest<Body>,
+    req: HyperRequest<hyper::body::Incoming>,
     graph: Arc<HelixGraphEngine>,
     router: Arc<HelixRouter>,
     sender: Sender<(Request, oneshot::Sender<Response>)>,
-) -> Result<HyperResponse<hyper::body::Body>, Infallible> {
+) -> Result<HyperResponse<hyper::body::Incoming>, Infallible> {
     let internal_req = match hyper_to_internal_request(req).await {
         Ok(req) => req,
         Err(e) => {
