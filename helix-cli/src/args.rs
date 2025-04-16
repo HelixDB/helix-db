@@ -180,6 +180,8 @@ pub enum CliError {
     Io(std::io::Error),
     New(String),
     ConfigFileNotFound,
+    MissingFile(String),
+    MissingBinary(String),
 }
 
 impl std::fmt::Display for CliError {
@@ -188,6 +190,8 @@ impl std::fmt::Display for CliError {
             CliError::Io(e) => write!(f, "IO error: {}", e),
             CliError::New(msg) => write!(f, "{}", msg),
             CliError::ConfigFileNotFound => write!(f, "Config file not found"),
+            CliError::MissingFile(file) => write!(f, "File not found: {}", file),
+            CliError::MissingBinary(binary) => write!(f, "Binary not found: {}", binary),
         }
     }
 }

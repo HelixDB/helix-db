@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use uuid::Uuid;
 
+use crate::args::CliError;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InstanceInfo {
     pub id: String,
@@ -44,15 +46,24 @@ impl InstanceManager {
         source_binary: &Path,
         port: u16,
         endpoints: Vec<String>,
-    ) -> io::Result<InstanceInfo> {
+    ) -> Result<InstanceInfo, CliError> {
         let instance_id = Uuid::new_v4().to_string();
         let cached_binary = self.cache_dir.join(&instance_id);
-        fs::copy(source_binary, &cached_binary)?;
+        fs::copy(source_binary, &cached_binary).map_err(|e| {
+            CliError::MissingBinary(format!(
+                "at path: {}",
+                source_binary.to_str().unwrap()
+            ))
+        })?;
+        // assert that the binary exists
+        assert!(cached_binary.exists());
 
         // make sure data dir exists
         // make it .cached_builds/data/instance_id/
         let data_dir = self.cache_dir.join("data").join(&instance_id);
         fs::create_dir_all(&data_dir)?;
+        // assert that the data dir exists
+        assert!(data_dir.exists());
 
         // Create log file for this instance
         let log_file = self.logs_dir.join(format!("instance_{}.log", instance_id));

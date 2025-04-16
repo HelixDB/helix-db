@@ -5,7 +5,8 @@ use helixdb::{
     helixc::{
         generator::generator::CodeGenerator,
         parser::helix_parser::{HelixParser, Source},
-    }, ingestion_engine::{postgres_ingestion::PostgresIngestor, sql_ingestion::SqliteIngestor},
+    },
+    ingestion_engine::{postgres_ingestion::PostgresIngestor, sql_ingestion::SqliteIngestor},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use instance_manager::InstanceManager;
@@ -457,7 +458,6 @@ fn main() {
                     } else {
                         println!("\tPlease specify --all or provide an instance ID");
                     }
-
                 }
                 Err(e) => {
                     println!("\t❌ Failed to find instances: {}", e);
@@ -842,13 +842,13 @@ QUERY size() =>
                         .map(|ext| valid_extensions.iter().any(|&valid_ext| valid_ext == ext))
                         .unwrap_or(false);
 
-            if !is_valid_extension {
-                println!(
-                    "❌The file '{}' must have a .sqlite, .db, or .sqlite3 extension.",
-                    path.display()
-                );
-                return;
-            }
+                    if !is_valid_extension {
+                        println!(
+                            "❌The file '{}' must have a .sqlite, .db, or .sqlite3 extension.",
+                            path.display()
+                        );
+                        return;
+                    }
 
                     let instance_manager = InstanceManager::new().unwrap();
                     match instance_manager.list_instances() {
@@ -886,7 +886,11 @@ QUERY size() =>
                     let output_dir = command.output_dir.as_deref().unwrap_or("./");
                     if !Path::new(output_dir).exists() {
                         fs::create_dir_all(output_dir).unwrap_or_else(|e| {
-                            finish_spinner_with_message(&spinner, false, &format!("Failed to create output directory: {}", e));
+                            finish_spinner_with_message(
+                                &spinner,
+                                false,
+                                &format!("Failed to create output directory: {}", e),
+                            );
                             std::process::exit(1);
                         });
                     }
@@ -956,20 +960,24 @@ QUERY size() =>
 }
 
 fn check_and_read_files(path: &str) -> Result<Vec<DirEntry>, CliError> {
+    // check that the path exists
+    println!("Checking path: {}", path);
+    assert!(Path::new(path).exists(), "Path does not exist");
     // check there is schema and at least one query
     if !fs::read_dir(&path)
-        .map_err(CliError::Io)?
+        .map_err(|_| CliError::MissingFile(path.to_string()))?
         .any(|file| file.unwrap().file_name() == "schema.hx")
     {
-        //println!("{}", CliError::from("\t❌ No schema file found"));
-        return Err(CliError::from("No schema file found"));
+        println!("{}", CliError::from("\t❌ No schema file found"));
+        // return Err(CliError::from("No schema file found"));
     }
 
     if !fs::read_dir(&path)
         .map_err(CliError::Io)?
-            .any(|file| file.unwrap().file_name() == "config.hx.json")
+        .any(|file| file.unwrap().file_name() == "config.hx.json")
     {
-        return Err(CliError::from("No config.hx.json file found"));
+        println!("{}", CliError::from("\t❌ No config.hx.json file found"));
+        // return Err(CliError::from("No config.hx.json file found"));
     }
 
     let files: Vec<DirEntry> = fs::read_dir(&path)?
@@ -978,9 +986,7 @@ fn check_and_read_files(path: &str) -> Result<Vec<DirEntry>, CliError> {
         .collect();
 
     // Check for query files (exclude schema.hx)
-    let has_queries = files
-        .iter()
-        .any(|file| file.file_name() != "schema.hx");
+    let has_queries = files.iter().any(|file| file.file_name() != "schema.hx");
     if !has_queries {
         return Err(CliError::from("No query files (.hx) found"));
     }
