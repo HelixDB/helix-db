@@ -1,7 +1,7 @@
 use helixdb::helix_engine::graph_core::config::Config;
 use helixdb::helix_engine::graph_core::graph_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use helixdb::helix_gateway::{
-    gateway::{GatewayOpts, HelixGateway},
+    gateway::HelixGateway,
     router::router::{HandlerFn, HandlerSubmission},
 };
 use inventory;
@@ -74,13 +74,13 @@ async fn main() {
     let gateway = HelixGateway::new(
         &format!("0.0.0.0:{}", port),
         graph,
-        GatewayOpts::DEFAULT_POOL_SIZE,
+        1024, // size of threadpool
         Some(routes),
     ).await;
 
     // start server
     println!("Starting server...");
-    let a = gateway.connection_handler.accept_conns().await.unwrap();
-    let b = a.await.unwrap();
-
+    if let Err(e) = gateway.expect("reason").run().await {
+        eprintln!("Server error: {}", e);
+    }
 }

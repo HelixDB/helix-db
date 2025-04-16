@@ -651,6 +651,8 @@ fn main() {
 
             let mut runner = Command::new("git");
             runner.arg("clone");
+            //runner.arg("--branch");
+            //runner.arg("gateway");
             runner.arg("https://github.com/HelixDB/helix-db.git");
             runner.current_dir(&repo_path);
 
@@ -879,7 +881,7 @@ QUERY size() =>
                 }
                 "pg" | "postgres" => {
                     let spinner = create_spinner("Connecting to PostgreSQL database...");
-                    
+
                     // Create output directory if specified
                     let output_dir = command.output_dir.as_deref().unwrap_or("./");
                     if !Path::new(output_dir).exists() {
@@ -888,30 +890,30 @@ QUERY size() =>
                             std::process::exit(1);
                         });
                     }
-                    
+
                     // Run the PostgreSQL ingestion
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let result = rt.block_on(async {
                         let mut ingestor = PostgresIngestor::new(&command.db_url, Some(command.instance.clone()), command.batch_size, command.use_ssl).await;
-                        
+
                         match ingestor {
                             Ok(mut ingestor) => {
                                 finish_spinner_with_message(&spinner, true, "Connected to PostgreSQL database");
-                                
+
                                 let dump_spinner = create_spinner("Dumping data to JSONL files...");
                                 match ingestor.dump_to_json(output_dir).await {
                                     Ok(_) => {
                                         finish_spinner_with_message(&dump_spinner, true, "Successfully dumped data to JSONL files");
-                                        
+
                                         // Create schema file
                                         let schema_path = Path::new(output_dir).join("schema.hx");
                                         println!("Schema file created at: {}", schema_path.display());
-                                        
+
                                         println!("PostgreSQL ingestion completed successfully!");
                                         println!("Press ENTER to open the Helix dashboard in your browser...");
                                         let mut input = String::new();
                                         std::io::stdin().read_line(&mut input).unwrap();
-                                        
+
                                         #[cfg(target_os = "macos")]
                                         {
                                             if let Err(e) = std::process::Command::new("open")
@@ -922,7 +924,7 @@ QUERY size() =>
                                                 println!("Please visit https://helix-db.com/dashboard");
                                             }
                                         }
-                                        
+
                                         #[cfg(not(target_os = "macos"))]
                                         {
                                             if let Err(e) = open::that("https://helix-db.com/dashboard") {
