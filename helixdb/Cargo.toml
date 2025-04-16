@@ -35,7 +35,9 @@ get_routes = { path = "../get_routes" }
 rust_decimal = { version = "1.34", features = ["tokio-pg"] }
 native-tls = "0.2"
 postgres-native-tls = "0.5"
-hyper = { version = "1.6", features = ["server", "http1"] }
+hyper = { version = "1.0", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = { version = "0.1", features = ["full"] }
 
 [dev-dependencies]
 criterion = "0.5"

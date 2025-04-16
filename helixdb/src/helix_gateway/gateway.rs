@@ -8,49 +8,31 @@ use crate::helix_gateway::{
     thread_pool::thread_pool::ThreadPool,
 };
 
-use tokio::sync::oneshot;
 use flume::Sender;
+use futures::FutureExt;
+use tokio::{sync::oneshot, net::TcpListener};
+use http_body_util::{Full, combinators::BoxBody, BodyExt};
 use hyper::{
-    service::{service_fn, Service},
+    service::service_fn,
+    body::{Bytes, Incoming},
     Request as HyperRequest,
     Response as HyperResponse,
+};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
 };
 use std::{
     collections::HashMap,
     sync::Arc,
     convert::Infallible,
     net::SocketAddr,
-    pin::Pin,
 };
 
-pub struct GatewayOpts {}
-
-impl GatewayOpts {
-    pub const DEFAULT_POOL_SIZE: usize = 1024;
-}
-
-#[derive(Clone)]
-struct GatewayService {
-    graph: Arc<HelixGraphEngine>,
-    router: Arc<HelixRouter>,
-    sender: Sender<(Request, oneshot::Sender<Response>)>,
-}
-
-impl Service<HyperRequest<hyper::body::Incoming>> for GatewayService {
-    type Response = HyperResponse<hyper::body::Incoming>;
-    type Error = Infallible;
-    type Future = Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn call(&self, req: HyperRequest<hyper::body::Incoming>) -> Self::Future {
-        let graph = Arc::clone(&self.graph);
-        let router = Arc::clone(&self.router);
-        let sender = self.sender.clone();
-        Box::pin(handle_request(req, graph, router, sender))
-    }
-}
-
 pub struct HelixGateway {
-    pub server: Server<hyper::server::conn::http1::Builder, GatewayService>,
+    pub address: SocketAddr,
+    pub graph: Arc<HelixGraphEngine>,
+    pub router: Arc<HelixRouter>,
     pub thread_pool: ThreadPool,
 }
 
@@ -60,38 +42,55 @@ impl HelixGateway {
         graph: Arc<HelixGraphEngine>,
         size: usize,
         routes: Option<HashMap<(String, String), HandlerFn>>,
-    ) -> Result<HelixGateway, GraphError> {
-        let addr: SocketAddr = address.parse().map_err(|e| {
-            format!("Invalid address: {}", e)
-        })?;
-
+    ) -> Result<Self, GraphError> {
+        let addr: SocketAddr = address.parse().map_err(|e| format!("Invalid address: {}", e))?;
         let router = Arc::new(HelixRouter::new(routes));
         let thread_pool = ThreadPool::new(size, Arc::clone(&graph), Arc::clone(&router))?;
-        let sender = thread_pool.sender.clone();
-
-        let service = GatewayService {
-            graph: Arc::clone(&graph),
-            router: Arc::clone(&router),
-            sender,
-        };
-
-        let make_service = service_fn(move |_conn| {
-            let service = service.clone();
-            async move { Ok::<_, Infallible>(service) }
-        });
-
-        let server = Server::bind(&addr).serve(make_service);
-
-        println!("Gateway created, listening on {}", address);
-        Ok(HelixGateway { server, thread_pool })
+        Ok(Self {
+            address: addr,
+            graph,
+            router,
+            thread_pool,
+        })
     }
 
-    pub async fn run(self) -> Result<(), hyper::Error> {
-        self.server.await
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = TcpListener::bind(self.address).await?;
+        let sender = self.thread_pool.sender.clone();
+        let graph = self.graph.clone();
+        let router = self.router.clone();
+
+        println!("Gateway created, listening on {}", self.address);
+
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let sender = sender.clone();
+            let graph = graph.clone();
+            let router = router.clone();
+
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+
+                // Use hyper_util's Builder to serve the connection
+                if let Err(err) = Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        io,
+                        service_fn(move |req| {
+                            // Pass clones into handler
+                            handle_request(req, graph.clone(), router.clone(), sender.clone())
+                                .map(|r| r.map(|resp| resp.map(BoxBody::new)))
+                        }),
+                    )
+                        .await
+                {
+                    eprintln!("Error serving connection: {:?}", err);
+                }
+            });
+        }
     }
 }
 
-async fn hyper_to_internal_request(hyper_req: HyperRequest<hyper::body::Incoming>) -> Result<Request, GraphError> {
+async fn hyper_to_internal_request(hyper_req: HyperRequest<Incoming>) -> Result<Request, GraphError> {
     let method = hyper_req.method().to_string();
     let path = hyper_req.uri().path().to_string();
     let headers: HashMap<String, String> = hyper_req
@@ -100,30 +99,35 @@ async fn hyper_to_internal_request(hyper_req: HyperRequest<hyper::body::Incoming
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
-    let body_bytes = hyper::body::to_bytes(hyper_req.into_body()).await
+    let body_bytes = hyper_req
+        .into_body()
+        .collect()
+        .await
         .map_err(|e| GraphError::New(format!("Failed to read request body: {}", e)))?;
-    let body = body_bytes.to_vec();
+
+    let body = body_bytes.to_bytes().to_vec();
 
     Ok(Request { method, path, headers, body })
 }
 
-fn internal_to_hyper_response(response: Response) -> HyperResponse<hyper::body::Incoming> {
-    let mut builder = HyperResponse::builder()
-        .status(response.status);
+fn internal_to_hyper_response(response: Response) -> HyperResponse<Full<Bytes>> {
+    let mut builder = HyperResponse::builder().status(response.status);
 
     for (key, value) in response.headers {
         builder = builder.header(key.as_str(), value.as_str());
     }
 
-    builder.body(Body::from(response.body)).unwrap()
+    builder
+        .body(Full::new(Bytes::from(response.body)))
+        .unwrap()
 }
 
 async fn handle_request(
-    req: HyperRequest<hyper::body::Incoming>,
+    req: HyperRequest<Incoming>,
     graph: Arc<HelixGraphEngine>,
     router: Arc<HelixRouter>,
     sender: Sender<(Request, oneshot::Sender<Response>)>,
-) -> Result<HyperResponse<hyper::body::Incoming>, Infallible> {
+) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     let internal_req = match hyper_to_internal_request(req).await {
         Ok(req) => req,
         Err(e) => {
