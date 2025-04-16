@@ -76,11 +76,11 @@ async fn main() {
         graph,
         1024, // size of threadpool
         Some(routes),
-    ).await;
+    ).expect("Failed to create gateway");
 
     // start server
     println!("Starting server...");
-    if let Err(e) = gateway.expect("reason").run().await {
+    if let Err(e) = gateway.run().await {
         eprintln!("Server error: {}", e);
     }
 }

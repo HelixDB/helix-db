@@ -1,33 +1,25 @@
-use crate::protocol::{request::Request, response::Response};
-use crate::helix_engine::{
-    graph_core::graph_core::HelixGraphEngine,
-    types::GraphError,
-};
+use crate::helix_engine::{graph_core::graph_core::HelixGraphEngine, types::GraphError};
 use crate::helix_gateway::{
-    router::router::{HelixRouter, HandlerFn},
+    router::router::{HandlerFn, HelixRouter},
     thread_pool::thread_pool::ThreadPool,
 };
+use crate::protocol::{request::Request, response::Response};
 
 use flume::Sender;
 use futures::FutureExt;
-use tokio::{sync::oneshot, net::TcpListener};
-use http_body_util::{Full, combinators::BoxBody, BodyExt};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{
-    service::service_fn,
     body::{Bytes, Incoming},
-    Request as HyperRequest,
-    Response as HyperResponse,
+    service::service_fn,
+    Request as HyperRequest, Response as HyperResponse,
 };
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
 };
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    convert::Infallible,
-    net::SocketAddr,
-};
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc};
+use tokio::net::TcpStream;
+use tokio::{net::TcpListener, sync::oneshot};
 
 pub struct HelixGateway {
     pub address: SocketAddr,
@@ -37,13 +29,15 @@ pub struct HelixGateway {
 }
 
 impl HelixGateway {
-    pub async fn new(
+    pub fn new(
         address: &str,
         graph: Arc<HelixGraphEngine>,
         size: usize,
         routes: Option<HashMap<(String, String), HandlerFn>>,
     ) -> Result<Self, GraphError> {
-        let addr: SocketAddr = address.parse().map_err(|e| format!("Invalid address: {}", e))?;
+        let addr: SocketAddr = address
+            .parse()
+            .map_err(|e| format!("Invalid address: {}", e))?;
         let router = Arc::new(HelixRouter::new(routes));
         let thread_pool = ThreadPool::new(size, Arc::clone(&graph), Arc::clone(&router))?;
         Ok(Self {
@@ -54,43 +48,28 @@ impl HelixGateway {
         })
     }
 
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let listener = TcpListener::bind(self.address).await?;
-        let sender = self.thread_pool.sender.clone();
-        let graph = self.graph.clone();
-        let router = self.router.clone();
-
+    pub async fn run(&self) -> Result<(), GraphError> {
         println!("Gateway created, listening on {}", self.address);
-
+        
+        let listener = TcpListener::bind(self.address).await?;
         loop {
             let (stream, _) = listener.accept().await?;
-            let sender = sender.clone();
-            let graph = graph.clone();
-            let router = router.clone();
+            println!("Connection accepted");
+            let sender = self.thread_pool.sender.clone();
+            let graph = Arc::clone(&self.graph);
+            let router = Arc::clone(&self.router);
 
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-
-                // Use hyper_util's Builder to serve the connection
-                if let Err(err) = Builder::new(TokioExecutor::new())
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| {
-                            // Pass clones into handler
-                            handle_request(req, graph.clone(), router.clone(), sender.clone())
-                                .map(|r| r.map(|resp| resp.map(BoxBody::new)))
-                        }),
-                    )
-                        .await
-                {
-                    eprintln!("Error serving connection: {:?}", err);
-                }
-            });
+            match sender.send_async(stream).await {
+                Ok(_) => println!("Connection sent to thread pool"),
+                Err(e) => println!("Error sending connection to thread pool: {}", e),
+            }
         }
     }
 }
 
-async fn hyper_to_internal_request(hyper_req: HyperRequest<Incoming>) -> Result<Request, GraphError> {
+async fn hyper_to_internal_request(
+    hyper_req: HyperRequest<Incoming>,
+) -> Result<Request, GraphError> {
     let method = hyper_req.method().to_string();
     let path = hyper_req.uri().path().to_string();
     let headers: HashMap<String, String> = hyper_req
@@ -107,7 +86,12 @@ async fn hyper_to_internal_request(hyper_req: HyperRequest<Incoming>) -> Result<
 
     let body = body_bytes.to_bytes().to_vec();
 
-    Ok(Request { method, path, headers, body })
+    Ok(Request {
+        method,
+        path,
+        headers,
+        body,
+    })
 }
 
 fn internal_to_hyper_response(response: Response) -> HyperResponse<Full<Bytes>> {
@@ -117,9 +101,7 @@ fn internal_to_hyper_response(response: Response) -> HyperResponse<Full<Bytes>> 
         builder = builder.header(key.as_str(), value.as_str());
     }
 
-    builder
-        .body(Full::new(Bytes::from(response.body)))
-        .unwrap()
+    builder.body(Full::new(Bytes::from(response.body))).unwrap()
 }
 
 async fn handle_request(

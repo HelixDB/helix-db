@@ -1,6 +1,17 @@
 use std::{collections::HashMap};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, BufWriter, Result};
+use http_body_util::BodyExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, BufWriter, Result as TokioResult};
+use hyper::{
+    body::{Bytes, Incoming},
+    service::service_fn,
+    Request as HyperRequest, Response as HyperResponse,
+};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
+};
 
+use crate::helix_engine::types::GraphError;
 #[derive(Debug)]
 pub struct Request {
     pub method: String,
@@ -22,7 +33,7 @@ impl Request {
     /// assert_eq!(request.method, "GET");
     /// assert_eq!(request.path, "/test");
     /// ```
-    pub async fn from_stream<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Request> {
+    pub async fn from_stream<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Request, GraphError> {
         let mut reader = BufReader::new(stream);
         let mut first_line = String::new();
         reader.read_line(&mut first_line).await?;
@@ -69,17 +80,11 @@ impl Request {
                     Ok(Ok(_)) => body = buffer,
                     Ok(Err(e)) => {
                         eprintln!("Error reading body: {}", e);
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Error reading body"
-                        ));
+                        return Err(GraphError::New("Error reading body".to_string()));
                     },
                     Err(_) => {
                         eprintln!("Timeout reading body");
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "Timeout reading body"
-                        ));
+                        return Err(GraphError::New("Timeout reading body".to_string()));
                     }
                 }
             }
@@ -91,5 +96,28 @@ impl Request {
             path,
             body,
         })
+    }
+
+    pub async fn from_hyper_request(req: HyperRequest<Incoming>) -> Result<Request, GraphError> {
+        let method = req.method().to_string();
+        let path = req.uri().path().to_string();
+        let headers: HashMap<String, String> = req
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+    
+        let body_bytes = req.into_body().collect().await.map_err(|e| GraphError::New(format!("Failed to read request body: {}", e)))?;
+    
+        let body = body_bytes.to_bytes().to_vec();
+
+        let request = Request {
+            method,
+            path,
+            headers,
+            body,
+        };
+
+        Ok(request)
     }
 }
