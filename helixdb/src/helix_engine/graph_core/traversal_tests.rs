@@ -1,14 +1,11 @@
 use std::{
-    collections::HashMap,
-    ops::{Deref, DerefMut},
     sync::Arc,
     time::Instant,
 };
 
 use crate::protocol::{
     filterable::Filterable,
-    items::{Edge, Node},
-    traversal_value::TraversalValue,
+    items::Node,
     value::Value,
 };
 use crate::{helix_engine::graph_core::ops::source::bulk_add_e::BulkAddEAdapter, props};
@@ -19,7 +16,7 @@ use crate::{
             in_::{in_e::InEdgesAdapter, to_n::ToNAdapter},
             out::{from_n::FromNAdapter, out::OutAdapter},
             source::{
-                add_e::AddE, add_n::AddNAdapter, bulk_add_n::BulkAddNAdapter, e::EAdapter,
+                add_n::AddNAdapter, bulk_add_n::BulkAddNAdapter, e::EAdapter,
                 e_from_id::EFromIdAdapter, n::NAdapter, n_from_id::NFromIdAdapter,
             },
             tr_val::{Traversable, TraversalVal},
@@ -30,19 +27,13 @@ use crate::{
     },
     protocol::items::v6_uuid,
 };
-use heed3::RoTxn;
 use rand::Rng;
 use tempfile::TempDir;
 
 use super::ops::{
     in_::in_::InAdapter,
     out::out_e::OutEdgesAdapter,
-    source::{
-        add_e::{AddEAdapter, EdgeType},
-        e::E,
-        n::N,
-        n_from_id::NFromId,
-    },
+    source::add_e::{AddEAdapter, EdgeType},
     util::filter_ref::FilterRefAdapter,
 };
 

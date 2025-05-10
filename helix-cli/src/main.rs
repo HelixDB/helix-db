@@ -10,10 +10,6 @@ use clap::Parser;
 use colored::*;
 use helixdb::{
     helix_engine::graph_core::config::Config,
-    helixc::{
-        analyzer::analyzer::analyze, generator::generator::CodeGenerator,
-        parser::helix_parser::HelixParser,
-    },
     ingestion_engine::{postgres_ingestion::PostgresIngestor, sql_ingestion::SqliteIngestor},
 };
 use std::{
@@ -33,19 +29,6 @@ fn main() {
 
     match args.command {
         CommandType::Deploy(command) => {
-            /* cases
-                - [ ] cargo is not installed
-                - [ ] helix is not installed
-                - [ ] default port not available
-                - [ ] no port available
-                - [ ] invalid queries path
-                - [ ] no queries found to compile
-                - [ ] failed to compile some queries
-                - [ ] failed to check rust code
-                - [ ] failed to build helix
-                - [ ] failed to start helix
-            */
-
             match Command::new("cargo").output() {
                 Ok(_) => {}
                 Err(_) => {
@@ -82,7 +65,7 @@ fn main() {
 
             let start_port = match command.port {
                 Some(port) => port,
-                None => 6969, // TODO: no more 6969
+                None => 6969,
             };
 
             let port = match find_available_port(start_port) {
@@ -111,7 +94,6 @@ fn main() {
 
             let local = command.local;
 
-            // TODO: remove this once remote instance is supported
             if !local {
                 println!("{}", "Building for remote instance is not supported yet, use --local flag to build for local machine".yellow().bold());
                 println!("└── Example: helix deploy --local");
@@ -137,7 +119,8 @@ fn main() {
             let code = match generate(&files) {
                 Ok(code) => code,
                 Err(e) => {
-                    sp.stop_with_message(format!("{}", e.to_string().red().bold()));
+                    sp.stop_with_message(format!("{}", "Error compiling queries".red().bold()));
+                    println!("└── {}", e);
                     return;
                 }
             };
@@ -328,7 +311,9 @@ fn main() {
             }
         }
 
-        CommandType::Start(command) => {
+        CommandType::Start(_command) => {
+            unimplemented!("helix start has not been implemented yet!");
+            /*
             let instance_manager = InstanceManager::new().unwrap();
             let mut sp = Spinner::new(Spinners::Dots9, "Starting Helix instance".into());
 
@@ -360,38 +345,34 @@ fn main() {
                     println!("└── {} {}", "Error:".red().bold(), e);
                 }
             }
+            */
         }
 
         CommandType::Compile(command) => {
-            let mut sp = Spinner::new(Spinners::Dots9, "Compiling Helix queries".into());
             let path = if let Some(p) = &command.path {
                 p
             } else {
-                println!("No path provided, defaulting to '{}'", DB_DIR);
+                println!("{} '{}'", "No path provided, defaulting to".yellow().bold(), DB_DIR.yellow().bold());
                 DB_DIR
             };
 
             let output = match &command.output {
                 Some(output) => output.to_owned(),
-                None => dirs::home_dir()
-                    .map(|path| {
-                        path.join(".helix/cache/generated/")
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                    .unwrap_or_else(|| "./.helix/cache/generated/".to_string()),
+                None => ".".to_string(),
             };
 
+            let mut sp = Spinner::new(Spinners::Dots9, "Compiling Helix queries".into());
             let files = match check_and_read_files(&path) {
                 Ok(files) => files,
                 Err(e) => {
-                    println!("{}", e);
+                    sp.stop_with_message(format!("{}", "Failed to read files".red().bold()));
+                    println!("└── {}", e);
                     return;
                 }
             };
 
             if files.is_empty() {
-                println!("{}", "No queries found, nothing to compile".red().bold());
+                sp.stop_with_message(format!("{}", "No queries found, nothing to compile".red().bold()));
                 return;
             }
 
@@ -406,42 +387,52 @@ fn main() {
             // write source to file
             let file_path = PathBuf::from(&output).join("queries.rs");
             fs::write(file_path, code.content).unwrap();
-            println!(
+            sp.stop_with_message(format!(
                 "{} {}",
                 "Successfully compiled queries to".green().bold(),
                 output
-            );
+            ));
         }
 
         CommandType::Check(command) => {
-            let mut sp = Spinner::new(Spinners::Dots9, "Checking Helix queries\n".into());
             let path = if let Some(p) = &command.path {
                 p
             } else {
-                println!("{} '{}'", "No path provided, defaulting to".bold(), DB_DIR);
+                println!("{} '{}'", "No path provided, defaulting to".yellow().bold(), DB_DIR.yellow().bold());
                 DB_DIR
             };
+
+            let mut sp = Spinner::new(Spinners::Dots9, "Checking Helix queries".into());
 
             let files = match check_and_read_files(&path) {
                 Ok(files) => files,
                 Err(e) => {
-                    println!("{} {}", "Error:".red().bold(), e);
+                    sp.stop_with_message(format!("{}", "Error checking files".red().bold()));
+                    println!("└── {}", e);
                     return;
                 }
             };
 
             if files.is_empty() {
-                println!("{}", "No queries found, nothing to compile".red().bold());
+                sp.stop_with_message(format!("{}", "No queries found, nothing to compile".red().bold()));
                 return;
             }
 
             match generate(&files) {
-                Ok(code) => {}
+                Ok(_) => {}
                 Err(e) => {
-                    sp.stop_with_message(format!("{}", e.to_string().red().bold()));
+                    sp.stop_with_message(format!("{}", "Failed to generate queries".red().bold()));
+                    println!("└── {}", e);
                     return;
                 }
             }
+
+            sp.stop_with_message(
+                format!(
+                    "{}",
+                    "Helix-QL schema and queries validated successfully with zero errors".green().bold()
+                )
+            );
         }
 
         CommandType::Install(command) => {
@@ -493,7 +484,7 @@ fn main() {
                 println!(
                     "{} {}",
                     "Helix repo already exists at".yellow().bold(),
-                    repo_path.join("helix-db").display()
+                    repo_path.join("helix-db").display().to_string().yellow().bold(),
                 );
                 return;
             }
@@ -542,32 +533,8 @@ fn main() {
             }
         }
 
-        CommandType::Test(command) => {
-            let path = if let Some(p) = command.path {
-                p
-            } else {
-                println!("{} '{}'", "No path provided, defaulting to".bold(), DB_DIR);
-                DB_DIR.to_string()
-            };
-
-            let _ = match check_and_read_files(&path) {
-                Ok(files) => files,
-                Err(e) => {
-                    println!("{} {}", "Error:".red().bold(), e);
-                    return;
-                }
-            };
-
-            // TODO:
-            //let temp_dir = TempDir::new().unwrap();
-            // parse
-            // interpret
-            // generate rust code
-
-            match command.test {
-                Some(test) => println!("{} {:?}", "Testing:".bold(), test),
-                None => println!("{}", "No test provided".red().bold()),
-            }
+        CommandType::Test(_command) => {
+            unimplemented!("helix test coming soon!");
         }
 
         CommandType::Init(command) => {
@@ -610,8 +577,6 @@ fn main() {
         }
 
         CommandType::Ingest(command) => {
-            unimplemented!();
-            /*
             match command.db_type.as_str() {
                 "sqlite" => {
                     let path_str = command.db_url; // Database path for SQLite
@@ -619,7 +584,12 @@ fn main() {
 
                     let path = Path::new(&path_str);
                     if !path.exists() {
-                        println!("❌The file '{}' does not exist", path.display());
+                        println!(
+                            "{} '{}' {}",
+                            "The file".red().bold(),
+                            path.display().to_string().red().bold(),
+                            "does not exist".red().bold()
+                        );
                         return;
                     }
 
@@ -630,19 +600,21 @@ fn main() {
                         .map(|ext| valid_extensions.iter().any(|&valid_ext| valid_ext == ext))
                         .unwrap_or(false);
 
-            if !is_valid_extension {
-                println!(
-                    "❌The file '{}' must have a .sqlite, .db, or .sqlite3 extension.",
-                    path.display()
-                );
-                return;
-            }
+                    if !is_valid_extension {
+                        println!(
+                            "{} '{}' {}",
+                            "The file".red().bold(),
+                            path.display().to_string().red().bold(),
+                            "must have a .sqlite, .db, or .sqlite3 file extension".red().bold(),
+                        );
+                        return;
+                    }
 
                     let instance_manager = InstanceManager::new().unwrap();
                     match instance_manager.list_instances() {
                         Ok(instances) => {
                             if instances.is_empty() {
-                                println!("There are no running Helix instances!");
+                                println!("{}", "There are no running Helix instances!".red().bold());
                                 return;
                             }
                             let mut is_valid_instance = false;
@@ -664,18 +636,18 @@ fn main() {
                         }
                     }
 
-                    let mut ingestor = SqliteIngestor::new(&path_str, None, 5).unwrap();
+                    let ingestor = SqliteIngestor::new(&path_str, None, 5).unwrap();
                     // TODO: Add ingestion logic
-                }
+                },
                 "pg" | "postgres" => {
-                    let spinner = create_spinner("Connecting to PostgreSQL database...");
-
+                    let mut sp = Spinner::new(Spinners::Dots9, "Connecting to PostgreSQL database...".into());
                     // Create output directory if specified
                     let output_dir = command.output_dir.as_deref().unwrap_or("./");
                     if !Path::new(output_dir).exists() {
                         fs::create_dir_all(output_dir).unwrap_or_else(|e| {
-                            finish_spinner_with_message(&spinner, false, &format!("Failed to create output directory: {}", e));
-                            std::process::exit(1);
+                            sp.stop_with_message(format!("{}", "Failed to create output directory".red().bold()));
+                            println!("└── {}", e);
+                            return;
                         });
                     }
 
@@ -686,12 +658,12 @@ fn main() {
 
                         match ingestor {
                             Ok(mut ingestor) => {
-                                finish_spinner_with_message(&spinner, true, "Connected to PostgreSQL database");
+                                sp.stop_with_message(format!("{}", "Connected to PostgreSQL database".red().bold()));
 
-                                let dump_spinner = create_spinner("Dumping data to JSONL files...");
+                                let mut sp = Spinner::new(Spinners::Dots9, "Dumping data to JSONL files".into());
                                 match ingestor.dump_to_json(output_dir).await {
                                     Ok(_) => {
-                                        finish_spinner_with_message(&dump_spinner, true, "Successfully dumped data to JSONL files");
+                                        sp.stop_with_message(format!("{}", "Successfully dumped data to JSONL files".red().bold()));
 
                                         // Create schema file
                                         let schema_path = Path::new(output_dir).join("schema.hx");
@@ -722,24 +694,25 @@ fn main() {
                                         }
                                     },
                                     Err(e) => {
-                                        finish_spinner_with_message(&dump_spinner, false, &format!("Failed to dump data: {}", e));
-                                        std::process::exit(1);
+                                        sp.stop_with_message(format!("{}", "Failed to dump data".red().bold()));
+                                        println!("└── {}", e);
+                                        return;
                                     }
                                 }
                             },
                             Err(e) => {
-                                finish_spinner_with_message(&spinner, false, &format!("Failed to connect to PostgreSQL: {}", e));
-                                std::process::exit(1);
+                                sp.stop_with_message(format!("{}", "Failed to connect to PostgreSQL".red().bold()));
+                                println!("└── {}", e);
+                                return;
                             }
                         }
                     });
                 }
                 _ => {
-                    println!("❌ Invalid database type. Must be either 'sqlite' or 'pg/postgres'");
+                    println!("{}", "Invalid database type. Must be either 'sqlite' or 'pg/postgres'".red().bold());
                     return;
                 }
             }
-            */
         }
     }
 }

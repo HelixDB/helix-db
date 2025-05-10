@@ -1,7 +1,6 @@
 use std::{iter::Once, sync::Arc};
 
 use heed3::{
-    types::{Bytes, Lazy, Unit},
     RoTxn, RwTxn,
 };
 
@@ -11,10 +10,7 @@ use crate::{
         storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node},
-    },
+    protocol::items::Node,
 };
 
 use super::super::tr_val::TraversalVal;

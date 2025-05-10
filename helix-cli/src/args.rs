@@ -102,9 +102,6 @@ pub struct InstallCommand {
 pub struct InitCommand {
     #[clap(short, long, help = "The path to the project")]
     pub path: Option<String>,
-
-    #[clap(short, long, help = "Should initialize for python")]
-    pub py: bool,
 }
 
 #[derive(Debug, Args)]

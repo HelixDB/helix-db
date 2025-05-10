@@ -1,18 +1,12 @@
 use heed3::PutFlags;
-use std::{collections::HashMap, time::Instant};
-use uuid::Uuid;
+use std::collections::HashMap;
 
 use crate::{
     helix_engine::{
         graph_core::traversal_iter::RwTraversalIterator,
-        storage_core::storage_core::HelixGraphStorage, types::GraphError,
+        types::GraphError,
     },
-    protocol::{
-        filterable::Filterable,
-        items::{Node, SerializedNode},
-        label_hash::hash_label,
-        value::Value,
-    },
+    protocol::items::{Node, SerializedNode},
 };
 
 use super::super::tr_val::TraversalVal;
@@ -116,7 +110,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddNAdapt
                 //     }
                 // }
             }
-            
+
             if count % 1000000 == 0 {
                 println!("processed: {:?}", count);
             }

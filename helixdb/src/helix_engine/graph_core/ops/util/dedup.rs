@@ -1,17 +1,11 @@
 use std::{collections::HashSet, sync::Arc};
 
-use heed3::{RoTxn, RwTxn};
-
-use crate::{
-    helix_engine::{
-        graph_core::{ops::tr_val::{Traversable, TraversalVal}, traversal_iter::RoTraversalIterator},
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
-        types::GraphError,
+use crate::helix_engine::{
+    graph_core::{
+        ops::tr_val::{Traversable, TraversalVal},
+        traversal_iter::RoTraversalIterator
     },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node},
-    },
+    types::GraphError,
 };
 
 pub struct Dedup<I> {

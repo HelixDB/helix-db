@@ -4,7 +4,7 @@ use crate::helix_engine::{
 };
 
 use super::super::tr_val::TraversalVal;
-use heed3::{RoTxn, RwTxn};
+use heed3::RoTxn;
 
 pub struct Map<'a, I, F> {
     iter: I,

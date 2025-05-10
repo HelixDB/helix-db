@@ -1,12 +1,10 @@
 use crate::args::*;
 use colored::*;
-use colored::*;
 use helixdb::helixc::{
     analyzer::{analyzer::analyze, types::Source as HelixSource},
     generator::generator::CodeGenerator,
     parser::helix_parser::{Content, HelixParser, HxFile, Source},
 };
-use indicatif::{ProgressBar, ProgressStyle};
 use std::{
     fs,
     fs::DirEntry,
@@ -305,68 +303,3 @@ pub fn generate(files: &Vec<DirEntry>) -> Result<Content, CliError> {
         .push_str(&generator.generate_source(&analyzed_source));
     Ok(content)
 }
-
-/*
-
-pub fn update_cli(spinner: &ProgressBar) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("curl")
-        .args(&["-sSL", "https://install.helix-db.com"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            finish_spinner_with_message(&spinner, false, "Failed to start curl");
-            e
-        })?
-        .stdout
-        .ok_or_else(|| {
-            finish_spinner_with_message(&spinner, false, "Failed to capture curl output");
-            "Failed to capture curl output"
-        })?;
-
-    let status = Command::new("bash").stdin(status).status().map_err(|e| {
-        finish_spinner_with_message(&spinner, false, "Failed to execute install script");
-        e
-    })?;
-
-    if status.success() {
-        finish_spinner_with_message(&spinner, true, "Successfully updated Helix CLI");
-        Ok(())
-    } else {
-        finish_spinner_with_message(&spinner, false, "Update script failed");
-        Err(format!("Exit code: {}", status).into())
-    }
-}
-
-pub fn check_is_dir(path: &str) -> bool {
-    match fs::metadata(&path) {
-        Ok(metadata) => metadata.is_dir(),
-        Err(e) => {
-            println!("{}", CliError::Io(e));
-            return false;
-        }
-    }
-}
-
-pub fn format_rust_file(file_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("rustfmt").arg(file_path).status()?;
-
-    if !status.success() {
-        return Err(format!("rustfmt failed with exit code: {}", status).into());
-    }
-
-    Ok(())
-}
-
-pub fn check_hql_files(files: &Vec<DirEntry>) -> Result<(), CliError> {
-    for file in files {
-        let contents = fs::read_to_string(file.path()).unwrap();
-        match HelixParser::parse_source(&contents) {
-            Ok(_) => (),
-            Err(e) => {
-                return Err(CliError::from(format!("{}\n", e)));
-            }
-        }
-    }
-    Ok(())
-}
-*/

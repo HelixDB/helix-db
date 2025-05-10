@@ -1,7 +1,5 @@
 use heed3::PutFlags;
-use itertools::Itertools;
 use std::collections::HashMap;
-use uuid::Uuid;
 
 use crate::{
     helix_engine::{
@@ -11,7 +9,6 @@ use crate::{
     protocol::{
         items::{Edge, SerializedEdge},
         label_hash::hash_label,
-        value::Value,
     },
 };
 

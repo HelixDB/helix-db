@@ -1,23 +1,17 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
-
-use heed3::{types::Bytes, PutFlags, RoTxn, RwTxn};
-use itertools::Itertools;
-
+use super::tr_val::TraversalVal;
 use crate::{
-    decode_str,
     helix_engine::{
         graph_core::traversal_iter::{RoTraversalIterator, RwTraversalIterator},
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::storage_core::HelixGraphStorage,
         types::GraphError,
     },
     protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node, SerializedEdge},
+        items::{Edge, SerializedEdge},
         label_hash::hash_label,
     },
 };
-
-use super::tr_val::{Traversable, TraversalVal};
+use std::{collections::HashMap, sync::Arc};
+use heed3::{PutFlags, RoTxn, RwTxn};
 
 pub struct G {
     iter: std::iter::Once<Result<TraversalVal, GraphError>>,

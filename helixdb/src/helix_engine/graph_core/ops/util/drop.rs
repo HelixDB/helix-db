@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use heed3::RwTxn;
-
-use crate::{
-    helix_engine::{
-        graph_core::{ops::tr_val::TraversalVal, traversal_iter::RwTraversalIterator},
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
-        types::GraphError,
+use crate::helix_engine::{
+    graph_core::{
+        ops::tr_val::TraversalVal,
+        traversal_iter::RwTraversalIterator
     },
-    protocol::filterable::{Filterable, FilterableType},
+    storage_core::storage_methods::StorageMethods,
+    types::GraphError,
 };
 
 pub struct Drop<I> {

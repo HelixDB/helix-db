@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use tokio::io::{AsyncWrite, AsyncWriteExt, Result};
 #[derive(Debug)]
 pub struct Response {

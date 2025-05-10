@@ -2,20 +2,16 @@ use std::sync::Arc;
 
 use heed3::{
     byteorder::BE,
-    types::{Bytes, Lazy, U128},
+    types::{Bytes, U128},
     RoTxn,
 };
 
 use crate::{
     helix_engine::{
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::storage_core::HelixGraphStorage,
         types::GraphError,
     },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, SerializedEdge},
-        label_hash::hash_label,
-    },
+    protocol::items::SerializedEdge,
 };
 
 use super::super::tr_val::TraversalVal;

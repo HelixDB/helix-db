@@ -1,20 +1,16 @@
 use std::{iter::Once, sync::Arc};
 
 use heed3::{
-    types::{Bytes, Lazy, Unit},
     RoTxn, RwTxn,
 };
 
 use crate::{
     helix_engine::{
-        graph_core::traversal_iter::{RoTraversalIterator},
+        graph_core::traversal_iter::RoTraversalIterator,
         storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node},
-    },
+    protocol::items::Edge,
 };
 
 use super::super::tr_val::TraversalVal;

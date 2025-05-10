@@ -4,7 +4,7 @@ use heed3::{RoTxn, RwTxn};
 
 use super::ops::tr_val::TraversalVal;
 use crate::helix_engine::{
-    graph_core::ops::tr_val::Traversable, storage_core::storage_core::HelixGraphStorage,
+    storage_core::storage_core::HelixGraphStorage,
     types::GraphError,
 };
 use itertools::Itertools;

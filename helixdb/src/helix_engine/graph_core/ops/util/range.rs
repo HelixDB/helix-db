@@ -1,17 +1,8 @@
 use std::sync::Arc;
 
-use heed3::{RoTxn, RwTxn};
-
-use crate::{
-    helix_engine::{
-        graph_core::{ops::tr_val::TraversalVal, traversal_iter::RoTraversalIterator},
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
-        types::GraphError,
-    },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node},
-    },
+use crate::helix_engine::{
+    graph_core::{ops::tr_val::TraversalVal, traversal_iter::RoTraversalIterator},
+    types::GraphError,
 };
 
 pub struct Range<I> {

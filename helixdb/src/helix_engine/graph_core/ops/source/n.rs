@@ -1,21 +1,14 @@
-use std::sync::Arc;
-
 use heed3::{
     byteorder::BE,
-    types::{Bytes, Lazy, U128},
-    RoTxn,
+    types::{Bytes, U128},
 };
 
 use crate::{
     helix_engine::{
         graph_core::traversal_iter::RoTraversalIterator,
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node, SerializedNode},
-    },
+    protocol::items::SerializedNode,
 };
 
 use super::super::tr_val::TraversalVal;

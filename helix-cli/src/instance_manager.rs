@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

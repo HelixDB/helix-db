@@ -1,24 +1,16 @@
-use std::{ops::Deref, sync::Arc};
-
-use heed3::{
-    byteorder::BE,
-    types::{Bytes, Lazy, U128},
-    RoTxn,
-};
-
+use super::super::tr_val::TraversalVal;
 use crate::{
     helix_engine::{
         graph_core::traversal_iter::{RoTraversalIterator, RwTraversalIterator},
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node, SerializedEdge},
-    },
+    protocol::items::{Edge, SerializedEdge},
 };
-
-use super::super::tr_val::TraversalVal;
+use std::ops::Deref;
+use heed3::{
+    byteorder::BE,
+    types::{Bytes, U128},
+};
 
 pub struct E<'a> {
     iter: heed3::RoIter<'a, U128<BE>, heed3::types::LazyDecode<Bytes>>,
