@@ -23,5 +23,4 @@ helixdb_test/
 other_data/
 *.jsonl
 *.hx
-*.png
 !examples/rag_demo/**
