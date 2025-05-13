@@ -1,21 +1,20 @@
-<p align="center">
-  <img src="./icon-1.png" alt="HelixDB Logo" width="200" height="200">
-</p>
+<div align="center">
 
-# HelixDB
+<picture>
+  <img src="./docs/icon-1.png" alt="HelixDB Logo" width="200" height="200">
+</picture>
 
-HelixDB is a Rust written, open-source, graph-vector database built for RAG and AI applications.
+<h3>
+[Homepage](https://helix-db.com) | [Docs](https://docs.helix-db.com) | [Discord](https://discord.gg/2stgMPr5BD) | [X](https://x.com/hlx_db)
+</h3>
 
-## Social Links
+[![GitHub Repo stars](https://img.shields.io/github/stars/HelixDB/helix-db)](https://github.com/HelixDB/helix-db/stargazers)
 
-- [Website](https://helix-db.com)
-- [Docs](https://docs.helix-db.com)
-- [Discord](https://discord.gg/2stgMPr5BD)
-- [Twitter](https://x.com/hlx_db)
-- [LinkedIn](https://www.linkedin.com/company/helixdb)
+<b>HelixDB</b>: an open-source graph-vector database written in Rust built for RAG and AI applications.
 
+</div>
 
-## Overview
+--
 
 HelixDB is a high-performance graph-vector database  designed with a focus on developer experience and performance. Built in Rust and powered by LMDB as its storage engine, it combines the reliability of a proven storage layer with modern features tailored for AI and vector-based applications.
 
@@ -28,8 +27,6 @@ We are currently using LMDB via Heed3, a rust wrapper built by the amazing team 
 - **Graph-Vector**: Easiest database for storing relationships between nodes, vectors, or nodes AND vectors.
 - **Reliable Storage**: Powered by LMDB (Lightning Memory-Mapped Database) for robust and efficient data persistence
 - **ACID Compliant**: Ensures data integrity and consistency
-
-
 
 ## Getting Started
 
@@ -68,9 +65,9 @@ The Helix CLI tool can be used to check, compile and deploy Helix locally.
       user <- N<User::WHERE(_::{name}::EQ(user_name))
       RETURN user
    ```
-   
+
 6. Check your queries compile before building them into API endpoints (optional)
-   
+
    ```bash
    # in ./<path-to-project>
    helix check
@@ -86,7 +83,7 @@ The Helix CLI tool can be used to check, compile and deploy Helix locally.
    ```typescript
    import HelixDB from "helix-ts";
 
-   // Create a new HelixDB client 
+   // Create a new HelixDB client
    // The default port is 6969
    const client = new HelixDB();
 
@@ -117,10 +114,10 @@ Other commands:
 Our current focus areas include:
 
 - Expanding vector data type capabilities for RAG applications
-- Enhancing the query language with more robust type checking 
+- Enhancing the query language with more robust type checking
 - Implementing a test suite to enable end-to-end testing of queries before deployment
 - Building a Deterministic Simulation Testing engine enabling us to robustly iterate faster
-- Binary quantisation for even better performance 
+- Binary quantisation for even better performance
 
 Long term projects:
 - In-house graph-vector storage engine (to replace LMDB)
