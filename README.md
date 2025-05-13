@@ -14,6 +14,7 @@
 </h3>
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/HelixDB/helix-db)](https://github.com/HelixDB/helix-db/stargazers)
+[![Discord](https://img.shields.io/discord/1354148209005559819)](https://discord.gg/2stgMPr5BD)
 
 </div>
 
