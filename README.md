@@ -25,7 +25,6 @@ HelixDB is a high-performance graph-vector database  designed with a focus on de
 We are currently using LMDB via Heed3, a rust wrapper built by the amazing team over at [Meilisearch](https://github.com/meilisearch/heed).
 
 ## Key Features
-
 - **Fast & Efficient**: Built for performance we're currently 1000x faster than Neo4j, 100x faster than TigerGraph and on par with Qdrant for vectors.
 - **RAG-First**: Native support for graph and vector data types, making it ideal for RAG (Retrieval Augmented Generation) and AI applications
 - **Graph-Vector**: Easiest database for storing relationships between nodes, vectors, or nodes AND vectors.
@@ -33,9 +32,7 @@ We are currently using LMDB via Heed3, a rust wrapper built by the amazing team 
 - **ACID Compliant**: Ensures data integrity and consistency
 
 ## Getting Started
-
 #### Helix CLI
-
 The Helix CLI tool can be used to check, compile and deploy Helix locally.
 
 1. Install CLI
@@ -113,7 +110,6 @@ Other commands:
 - `helix stop --all` to stop all your local instances.
 
 ## Roadmap
-
 Our current focus areas include:
 
 - Expanding vector data type capabilities for RAG applications
@@ -127,9 +123,7 @@ Long term projects:
 - In-house network protocol & serdes libraries (similar to protobufs/gRPC)
 
 ## License
-
 HelixDB is licensed under the The AGPL (Affero General Public License).
 
 ## Commercial Support
-
-HelixDB is available as a managed service for selected users, if you're interested in using Helix's managed service or want enterprise support contact us for more information and deployment options.
+HelixDB is available as a managed service for selected users, if you're interested in using Helix's managed service or want enterprise support [contact](mailto:founders@helix-db.com) us for more information and deployment options.
