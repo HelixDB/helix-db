@@ -4,13 +4,16 @@
   <img src="/docs/icon-1.png" alt="HelixDB Logo" width="200" height="200">
 </picture>
 
+<b>HelixDB</b>: an open-source graph-vector database written in Rust built for RAG and AI applications.
+
 <h3>
-[Homepage](https://helix-db.com) | [Docs](https://docs.helix-db.com) | [Discord](https://discord.gg/2stgMPr5BD) | [X](https://x.com/hlx_db)
+  <a href="https://helix-db.com">Homepage</a> |
+  <a href="https://docs.helix-db.com">Docs</a> |
+  <a href="https://discord.gg/2stgMPr5BD">Discord</a> |
+  <a href="https://x.com/hlx_db">X</a>
 </h3>
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/HelixDB/helix-db)](https://github.com/HelixDB/helix-db/stargazers)
-
-<b>HelixDB</b>: an open-source graph-vector database written in Rust built for RAG and AI applications.
 
 </div>
 
