@@ -110,7 +110,6 @@ Other commands:
 - `helix instances` to see all your local instances.
 - `helix stop <instance-id>` to stop your local instance with specified id.
 - `helix stop --all` to stop all your local instances.
-- `helix start <instance-id>` to start your local instance with specific id.
 
 ## Roadmap
 
