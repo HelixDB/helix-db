@@ -126,4 +126,4 @@ Long term projects:
 HelixDB is licensed under the The AGPL (Affero General Public License).
 
 ## Commercial Support
-HelixDB is available as a managed service for selected users, if you're interested in using Helix's managed service or want enterprise support [contact](mailto:founders@helix-db.com) us for more information and deployment options.
+HelixDB is available as a managed service for selected users, if you're interested in using Helix's managed service or want enterprise support, [contact](mailto:founders@helix-db.com) us for more information and deployment options.
