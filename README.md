@@ -1,7 +1,7 @@
 <div align="center">
 
 <picture>
-  <img src="./docs/icon-1.png" alt="HelixDB Logo" width="200" height="200">
+  <img src="/docs/icon-1.png" alt="HelixDB Logo" width="200" height="200">
 </picture>
 
 <h3>
