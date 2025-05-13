@@ -17,7 +17,7 @@
 
 </div>
 
---
+<br>
 
 HelixDB is a high-performance graph-vector database  designed with a focus on developer experience and performance. Built in Rust and powered by LMDB as its storage engine, it combines the reliability of a proven storage layer with modern features tailored for AI and vector-based applications.
 
