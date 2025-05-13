@@ -56,7 +56,6 @@ lazy_static = "1.4.0"
 
 [features]
 compiler = ["pest", "pest_derive"]
-testing = ["polars", "tempfile"]
 cosine = []
 ingestion = [
     "rusqlite",

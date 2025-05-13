@@ -450,7 +450,7 @@ impl Filterable for HVector {
     }
 
     // TODO: Implement this
-    fn check_property(&self, _key: &str) -> Option<&Value> {
+    fn check_property(&self, _key: &str) -> Result<&Value, GraphError> {
         unreachable!()
     }
 

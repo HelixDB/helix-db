@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::protocol::{
+use crate::{helix_engine::types::GraphError, protocol::{
     items::{Edge, Node},
     value::Value,
-};
+}};
 
 #[derive(Debug, Clone)]
 pub enum FilterableType {
@@ -39,7 +39,7 @@ pub trait Filterable {
 
     fn properties_ref(&self) -> &HashMap<String, Value>;
 
-    fn check_property(&self, key: &str) -> Option<&Value>;
+    fn check_property(&self, key: &str) -> Result<&Value, GraphError>;
 
     fn find_property<'a>(
         &'a self,
@@ -106,8 +106,11 @@ impl Filterable for Node {
     }
 
     #[inline(always)]
-    fn check_property(&self, key: &str) -> Option<&Value> {
-        self.properties.get(key)
+    fn check_property(&self, key: &str) -> Result<&Value, GraphError> {
+        self.properties.get(key).ok_or(GraphError::ConversionError(format!(
+            "Property {} not found",
+            key
+        )))
     }
 
     #[inline(always)]
@@ -184,8 +187,11 @@ impl Filterable for Edge {
     }
 
     #[inline(always)]
-    fn check_property(&self, key: &str) -> Option<&Value> {
-        self.properties.get(key)
+    fn check_property(&self, key: &str) -> Result<&Value, GraphError> {
+        self.properties.get(key).ok_or(GraphError::ConversionError(format!(
+            "Property {} not found",
+            key
+        )))
     }
 
     #[inline(always)]

@@ -170,6 +170,7 @@ impl CodeGenerator {
             FieldType::U64 => "u64".to_string(),
             FieldType::U128 => "u128".to_string(),
             FieldType::Boolean => "bool".to_string(),
+            FieldType::Uuid => "String".to_string(), // TODO: Look into using UUID (would require custom serdes impl)
             FieldType::Array(field) => {
                 format!("{}", self.field_type_to_rust(&field, &param_name))
             }

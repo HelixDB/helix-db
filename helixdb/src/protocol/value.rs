@@ -5,7 +5,7 @@ use serde::{
 };
 use serde_json::Value as JsonValue;
 use sonic_rs::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::HashMap, fmt};
+use std::{cmp::Ordering, collections::HashMap, fmt::{self, Display}};
 
 /// A flexible value type that can represent various property values in nodes and edges.
 /// Handles both JSON and binary serialisation formats via custom implementaions of the Serialize and Deserialize traits.

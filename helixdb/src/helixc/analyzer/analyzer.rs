@@ -2,7 +2,22 @@
 
 use colored::Colorize;
 
-use crate::helixc::parser::{helix_parser::*, location::Loc};
+use crate::helixc::{
+    generator::new::{
+        generator_types::{
+            GeneratedType, Parameter as GeneratedParameter, Query as GeneratedQuery, Separator,
+            Source as GeneratedSource,
+        },
+        object_remapping_generation::{ExcludeField, FieldRemapping},
+        source_steps::{EFromID, NFromID, SourceStep},
+        traversal_steps::{
+            In as GeneratedIn, InE as GeneratedInE, Out as GeneratedOut, OutE as GeneratedOutE,
+            Step as GeneratedStep, Traversal as GeneratedTraversal,
+        },
+        types::GenRef,
+    },
+    parser::{helix_parser::*, location::Loc},
+};
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,11 +66,11 @@ impl Diagnostic {
     }
 }
 
-pub fn analyze(src: &Source) -> Vec<Diagnostic> {
+pub fn analyze(src: &Source) -> (Vec<Diagnostic>, GeneratedSource) {
     let mut ctx = Ctx::new(src);
     ctx.check_schema();
     ctx.check_queries();
-    ctx.diagnostics
+    (ctx.diagnostics, ctx.output)
 }
 
 /// Internal working context shared by all passes.
@@ -70,6 +85,7 @@ struct Ctx<'a> {
     edge_fields: HashMap<&'a str, HashMap<&'a str, &'a FieldType>>,
     vector_fields: HashMap<&'a str, HashMap<&'a str, &'a FieldType>>,
     diagnostics: Vec<Diagnostic>,
+    output: GeneratedSource,
 }
 
 impl<'a> Ctx<'a> {
@@ -130,6 +146,7 @@ impl<'a> Ctx<'a> {
             vector_fields,
             src,
             diagnostics: Vec::new(),
+            output: GeneratedSource::default(),
         }
     }
 
@@ -137,7 +154,9 @@ impl<'a> Ctx<'a> {
     /// Validate that every edge references declared node types.
     fn check_schema(&mut self) {
         for edge in &self.src.edge_schemas {
-            if !self.node_set.contains(edge.from.1.as_str()) && !self.vector_set.contains(edge.from.1.as_str()) {
+            if !self.node_set.contains(edge.from.1.as_str())
+                && !self.vector_set.contains(edge.from.1.as_str())
+            {
                 self.push_schema_err(
                     &edge.from.1,
                     edge.from.0.clone(),
@@ -145,7 +164,9 @@ impl<'a> Ctx<'a> {
                     Some(format!("Declare `N::{}` before this edge", edge.from.1)),
                 );
             }
-            if !self.node_set.contains(edge.to.1.as_str()) && !self.vector_set.contains(edge.to.1.as_str()) {
+            if !self.node_set.contains(edge.to.1.as_str())
+                && !self.vector_set.contains(edge.to.1.as_str())
+            {
                 self.push_schema_err(
                     &edge.to.1,
                     edge.to.0.clone(),
@@ -153,6 +174,13 @@ impl<'a> Ctx<'a> {
                     Some(format!("Declare `N::{}` before this edge", edge.to.1)),
                 );
             }
+            self.output.edges.push(edge.clone().into());
+        }
+        for node in &self.src.node_schemas {
+            self.output.nodes.push(node.clone().into());
+        }
+        for vector in &self.src.vector_schemas {
+            self.output.vectors.push(vector.clone().into());
         }
     }
 
@@ -164,6 +192,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn check_query(&mut self, q: &'a Query) {
+        let mut query = GeneratedQuery::default();
+        query.name = q.name.clone();
         // -------------------------------------------------
         // Parameter validation
         // -------------------------------------------------
@@ -178,6 +208,12 @@ impl<'a> Ctx<'a> {
                     );
                 }
             }
+            // constructs parameters and sub‑parameters for generator
+            GeneratedParameter::unwrap_param(
+                param.clone(),
+                &mut query.parameters,
+                &mut query.sub_parameters,
+            );
         }
 
         // -------------------------------------------------
@@ -187,7 +223,7 @@ impl<'a> Ctx<'a> {
         for param in &q.parameters {
             scope.insert(param.name.1.as_str(), Type::from(&param.param_type.1));
         }
-        
+
         use StatementType::*;
         for stmt in &q.statements {
             match &stmt.statement {
@@ -555,67 +591,79 @@ impl<'a> Ctx<'a> {
         scope: &HashMap<&'a str, Type<'a>>,
         q: &'a Query,
         parent_ty: Option<Type<'a>>,
+        gen_traversal: &mut GeneratedTraversal,
     ) -> Type<'a> {
         let mut previous_step = None;
         let mut cur_ty = match &tr.start {
-            StartNode::Node { types, .. } => {
-                if let Some(ref ts) = types {
-                    // Check node types exist
-                    for t in ts {
-                        if !self.node_set.contains(t.as_str()) {
-                            self.push_query_err(
-                                q,
-                                tr.loc.clone(),
-                                format!("unknown node type `{}`", t),
-                                format!("declare N::{} in the schema first", t),
-                            );
-                        }
-                    }
-                    Type::Nodes(ts.first().map(|s| s.as_str()))
-                } else {
-                    Type::Nodes(None)
+            StartNode::Node { node_type, ids } => {
+                if !self.node_set.contains(node_type.as_str()) {
+                    self.push_query_err(
+                        q,
+                        tr.loc.clone(),
+                        format!("unknown node type `{}`", node_type),
+                        format!("declare N::{} in the schema first", node_type),
+                    );
                 }
-            }
-            StartNode::Edge { types, .. } => {
-                if let Some(ref ts) = types {
-                    for t in ts {
-                        if !self.edge_map.contains_key(t.as_str()) {
-                            self.push_query_err(
-                                q,
-                                tr.loc.clone(),
-                                format!("unknown edge type `{}`", t),
-                                format!("declare E::{} in the schema first", t),
-                            );
-                        }
-                    }
-                    Type::Edges(ts.first().map(|s| s.as_str()))
-                } else {
-                    Type::Edges(None)
+                if let Some(ids) = ids {
+                    assert!(ids.len() == 1, "multiple ids not supported yet");
+                    gen_traversal.source_step = SourceStep::NFromID(NFromID {
+                        id: GenRef::Literal(ids[0].clone()),
+                        label: GenRef::Literal(node_type.clone()),
+                    });
                 }
+                Type::Nodes(Some(node_type))
             }
-            StartNode::Variable(var) => scope.get(var.as_str()).cloned().unwrap_or_else(|| {
-                self.push_query_err(
-                    q,
-                    tr.loc.clone(),
-                    format!("variable named `{}` is not in scope", var),
-                    format!("declare {} in the current scope or fix the typo", var),
-                );
-                Type::Unknown
-            }),
-            StartNode::Anonymous => {
-                parent_ty.unwrap_or(Type::Unknown)
+            StartNode::Edge { edge_type, ids } => {
+                if !self.edge_map.contains_key(edge_type.as_str()) {
+                    self.push_query_err(
+                        q,
+                        tr.loc.clone(),
+                        format!("unknown edge type `{}`", edge_type),
+                        format!("declare E::{} in the schema first", edge_type),
+                    );
+                }
+                if let Some(ids) = ids {
+                    assert!(ids.len() == 1, "multiple ids not supported yet");
+                    gen_traversal.source_step = SourceStep::EFromID(EFromID {
+                        id: GenRef::Literal(ids[0].clone()),
+                        label: GenRef::Literal(edge_type.clone()),
+                    });
+                }
+                Type::Edges(Some(edge_type))
             }
+
+            StartNode::Variable(var) => scope.get(var.as_str()).cloned().map_or_else(
+                || {
+                    self.push_query_err(
+                        q,
+                        tr.loc.clone(),
+                        format!("variable named `{}` is not in scope", var),
+                        format!("declare {} in the current scope or fix the typo", var),
+                    );
+                    Type::Unknown
+                },
+                |var_type| {
+                    gen_traversal.source_step = SourceStep::Variable(GenRef::Literal(var.clone()));
+                    var_type.clone()
+                },
+            ),
+            // anonymous will be the traversal type rather than the start type
+            StartNode::Anonymous => parent_ty.unwrap_or(Type::Unknown),
         };
 
         // Track excluded fields for property validation
         let mut excluded: HashMap<&str, Loc> = HashMap::new();
 
         // Stream through the steps
-        for graph_step in &tr.steps {
+        let number_of_steps = match tr.steps.len() {
+            0 => 0,
+            n => n - 1,
+        };
+        for (i, graph_step) in tr.steps.iter().enumerate() {
             let step = &graph_step.step;
             match step {
                 StepType::Node(gs) | StepType::Edge(gs) => {
-                    match self.apply_graph_step(&gs, &cur_ty, q) {
+                    match self.apply_graph_step(&gs, &cur_ty, q, gen_traversal) {
                         Some(new_ty) => cur_ty = new_ty,
                         None => { /* error already recorded */ }
                     }
@@ -625,16 +673,56 @@ impl<'a> Ctx<'a> {
                 StepType::Count => {
                     cur_ty = Type::Scalar(FieldType::I64);
                     excluded.clear();
+                    gen_traversal
+                        .steps
+                        .push(Separator::Comma(GeneratedStep::Count));
                 }
 
                 StepType::Exclude(ex) => {
+                    // checks if exclude is either the last step or the step before an object remapping or closure
+                    // i.e. you cant have `N<Type>::!{field1}::Out<Label>`
+                    if !(i == number_of_steps
+                        || (i != number_of_steps - 1
+                            && (!matches!(tr.steps[i + 1].step, StepType::Closure(_))
+                                || !matches!(tr.steps[i + 1].step, StepType::Object(_)))))
+                    {
+                        self.push_query_err(
+                            q,
+                            ex.loc.clone(),
+                            "exclude is only valid as the last step in a traversal, 
+                            or as the step before an object remapping or closure"
+                                .to_string(),
+                            "move exclude steps to the end of the traversal, 
+                            or remove the traversal steps following the exclude"
+                                .to_string(),
+                        );
+                    }
                     self.validate_exclude(&cur_ty, tr, ex, &excluded, q);
                     for (_, key) in &ex.fields {
                         excluded.insert(key.as_str(), ex.loc.clone());
                     }
+                    gen_traversal
+                        .steps
+                        .push(Separator::Comma(GeneratedStep::ExcludeField(
+                            ExcludeField {
+                                fields_to_exclude: ex
+                                    .fields
+                                    .iter()
+                                    .map(|(_, field)| field.clone())
+                                    .collect(),
+                            },
+                        )));
                 }
 
                 StepType::Object(obj) => {
+                    if i != number_of_steps {
+                        self.push_query_err(
+                            q,
+                            obj.loc.clone(),
+                            "object is only valid as the last step in a traversal".to_string(),
+                            "move the object to the end of the traversal",
+                        );
+                    }
                     self.validate_object(&cur_ty, tr, obj, &excluded, q);
                 }
 
@@ -776,6 +864,14 @@ impl<'a> Ctx<'a> {
 
                 StepType::Range(_) => { /* doesn't affect type */ }
                 StepType::Closure(cl) => {
+                    if i != number_of_steps {
+                        self.push_query_err(
+                            q,
+                            cl.loc.clone(),
+                            "closure is only valid as the last step in a traversal".to_string(),
+                            "move the closure to the end of the traversal",
+                        );
+                    }
                     // Add identifier to a temporary scope so inner uses pass
                     // let mut tmp_scope = scope.clone();
                     // tmp_scope.insert(cl.identifier.as_str(), cur_ty.clone());
@@ -901,10 +997,40 @@ impl<'a> Ctx<'a> {
         obj: &Object,
         excluded: &HashMap<&str, Loc>,
         q: &'a Query,
+        gen_traversal: &mut GeneratedTraversal,
     ) {
         match &cur_ty {
             Type::Nodes(Some(node_ty)) => {
                 if let Some(field_set) = self.node_fields.get(node_ty).cloned() {
+                    // if there is only one field then it is a property access
+                    if obj.fields.len() == 1 {
+                        let field = match &obj.fields[0].1.value {
+                            FieldValueType::Identifier(lit) => lit.clone(),
+                            field_type => {
+                                self.push_query_err(
+                                    q,
+                                    obj.fields[0].1.loc.clone(),
+                                    format!(
+                                        "field access `{:?}` must be a valid field name",
+                                        field_type
+                                    ),
+                                    "check the schema for valid field names",
+                                );
+                                return;
+                            }
+                        };
+                        gen_traversal
+                            .steps
+                            .push(Separator::Comma(GeneratedStep::Property(GenRef::Literal(
+                                field,
+                            ))));
+                    } else {
+                        // if there are multiple fields then it is a field remapping
+                        // push object remapping where
+                        // for each field if field value is identifier then push field remapping
+                        // if the field value is a traversal then it is a TraversalRemapping
+                        // if the field value is another object or closure then recurse (sub mapping would go where traversal would go)
+                    }
                     self.validate_object_fields(
                         obj,
                         &field_set,
@@ -965,31 +1091,81 @@ impl<'a> Ctx<'a> {
         gs: &'a GraphStep,
         cur_ty: &Type<'a>,
         q: &'a Query,
+        traversal: &mut GeneratedTraversal,
     ) -> Option<Type<'a>> {
         use GraphStepType::*;
         match (&gs.step, cur_ty.base()) {
             // Node‑to‑Edge
-            (OutE(_) | InE(_), Type::Nodes(_)) => Some(Type::Edges(Some(
-                gs.loc
-                    .span
-                    .trim_matches(|c: char| c == '"' || c.is_whitespace() || c == '\n')
-                    .trim_start_matches("OutE<")
-                    .trim_start_matches("InE<")
-                    .trim_end_matches(">"),
-            ))),
+            (OutE(Some(label)), Type::Nodes(_)) => {
+                traversal
+                    .steps
+                    .push(Separator::Comma(GeneratedStep::OutE(GeneratedOutE {
+                        label: GenRef::Literal(label.clone()),
+                    })));
+                Some(Type::Edges(Some(
+                    gs.loc
+                        .span
+                        .trim_matches(|c: char| c == '"' || c.is_whitespace() || c == '\n')
+                        .trim_start_matches("OutE<")
+                        .trim_end_matches(">"),
+                )))
+            }
+            (InE(Some(label)), Type::Nodes(_)) => {
+                traversal
+                    .steps
+                    .push(Separator::Comma(GeneratedStep::InE(GeneratedInE {
+                        label: GenRef::Literal(label.clone()),
+                    })));
+                Some(Type::Edges(Some(
+                    gs.loc
+                        .span
+                        .trim_matches(|c: char| c == '"' || c.is_whitespace() || c == '\n')
+                        .trim_start_matches("InE<")
+                        .trim_end_matches(">"),
+                )))
+            }
 
             // Node‑to‑Node
-            (Out(_) | In(_), Type::Nodes(_)) => Some(Type::Nodes(Some(
-                gs.loc
-                    .span
-                    .trim_matches(|c: char| c == '"' || c.is_whitespace() || c == '\n')
-                    .trim_start_matches("Out<")
-                    .trim_start_matches("In<")
-                    .trim_end_matches(">"),
-            ))),
+            (Out(Some(label)), Type::Nodes(_)) => {
+                traversal
+                    .steps
+                    .push(Separator::Comma(GeneratedStep::Out(GeneratedOut {
+                        label: GenRef::Literal(label.clone()),
+                    })));
+                Some(Type::Nodes(Some(
+                    gs.loc
+                        .span
+                        .trim_matches(|c: char| c == '"' || c.is_whitespace() || c == '\n')
+                        .trim_start_matches("Out<")
+                        .trim_start_matches("In<")
+                        .trim_end_matches(">"),
+                )))
+            }
+            (In(Some(label)), Type::Nodes(_)) => {
+                traversal
+                    .steps
+                    .push(Separator::Comma(GeneratedStep::In(GeneratedIn {
+                        label: GenRef::Literal(label.clone()),
+                    })));
+                Some(Type::Nodes(Some(
+                    gs.loc
+                        .span
+                        .trim_matches(|c: char| c == '"' || c.is_whitespace() || c == '\n')
+                        .trim_start_matches("Out<")
+                        .trim_start_matches("In<")
+                        .trim_end_matches(">"),
+                )))
+            }
 
             // Edge‑to‑Node
-            (FromN | ToN, Type::Edges(_)) => {
+            (FromN, Type::Edges(_)) => {
+                traversal.steps.push(Separator::Comma(GeneratedStep::FromN));
+                Some(Type::Nodes(Some(gs.loc.span.trim_matches(|c: char| {
+                    c == '"' || c.is_whitespace() || c == '\n'
+                }))))
+            }
+            (ToN, Type::Edges(_)) => {
+                traversal.steps.push(Separator::Comma(GeneratedStep::ToN));
                 Some(Type::Nodes(Some(gs.loc.span.trim_matches(|c: char| {
                     c == '"' || c.is_whitespace() || c == '\n'
                 }))))
@@ -1127,9 +1303,8 @@ impl<'a> From<&'a FieldType> for Type<'a> {
     fn from(ft: &'a FieldType) -> Self {
         use FieldType::*;
         match ft {
-            String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128 => {
-                Type::Scalar(ft.clone())
-            }
+            String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128
+            | Uuid | Date => Type::Scalar(ft.clone()),
             Array(_) | Object(_) | Identifier(_) => Type::Unknown,
         }
     }
@@ -1148,7 +1323,7 @@ mod analyzer_tests {
         let input = write_to_temp_file(vec![src]);
         let parsed = HelixParser::parse_source(&input)
             .expect("parser should succeed – these tests are for the analyzer");
-        analyze(&parsed)
+        analyze(&parsed).0
     }
 
     #[test]

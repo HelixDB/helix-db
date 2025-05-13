@@ -461,34 +461,34 @@ impl StorageMethods for HelixGraphStorage {
             properties: HashMap::from_iter(properties),
         };
 
-        // Store node data
-        self.nodes_db
-            .put(txn, &Self::node_key(&node.id), &SerializedNode::encode_node(&node)?)?;
-        let label_hash = hash_label(label, None);
-        // Store node label index
+    //     // Store node data
+    //     self.nodes_db
+    //         .put(txn, &Self::node_key(&node.id), &SerializedNode::encode_node(&node)?)?;
+    //     let label_hash = hash_label(label, None);
+    //     // Store node label index
 
-        for index in secondary_indices.unwrap_or(&[]) {
-            match self.secondary_indices.get(index) {
-                Some(db) => {
-                    let key = match node.check_property(index) {
-                        Some(value) => value,
-                        None => {
-                            return Err(GraphError::New(format!(
-                                "Secondary Index {} not found",
-                                index
-                            )))
-                        }
-                    };
-                    db.put(txn, &bincode::serialize(&key)?, &node.id.to_be_bytes())?;
-                }
-                None => {
-                    return Err(GraphError::New(format!(
-                        "Secondary Index {} not found",
-                        index
-                    )))
-                }
-            }
-        }
+    //     for index in secondary_indices.unwrap_or(&[]) {
+    //         match self.secondary_indices.get(index) {
+    //             Some(db) => {
+    //                 let key = match node.check_property(index) {
+    //                     Some(value) => value,
+    //                     None => {
+    //                         return Err(GraphError::New(format!(
+    //                             "Secondary Index {} not found",
+    //                             index
+    //                         )))
+    //                     }
+    //                 };
+    //                 db.put(txn, &bincode::serialize(&key)?, &node.id.to_be_bytes())?;
+    //             }
+    //             None => {
+    //                 return Err(GraphError::New(format!(
+    //                     "Secondary Index {} not found",
+    //                     index
+    //                 )))
+    //             }
+    //         }
+    //     }
 
         Ok(node)
     }

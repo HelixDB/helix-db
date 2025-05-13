@@ -1,13 +1,36 @@
+// ---------------------------------------------------------------------
 // Main rules
+// ---------------------
 source = { SOI ~ (node_def | edge_def | vector_def | query_def)* ~ EOI }
 
+
+// ---------------------------------------------------------------------
+// Schema definitions
+// ---------------------------------------------------------------------
+vector_def = { "V::" ~ identifier_upper ~ node_body }
+node_def   = { "N::" ~ identifier_upper ~ node_body }
+edge_def   = { "E::" ~ identifier_upper ~ edge_body }
+
+node_body  = { "{" ~ field_defs ~ "}" }
+edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ "To:" ~ identifier_upper ~ "," ~ properties ~ "}" }
+field_def  = { index? ~ identifier ~ ":" ~ param_type }
+field_defs = { field_def ~ ("," ~ field_def)* }
+index= { "INDEX" }
+properties = { "Properties" ~ ":" ~ "{" ~ field_defs? ~ "}" }
+
+
+// ---------------------------------------------------------------------
 // Query definitions
+// ---------------------------------------------------------------------
 query_def    = { "QUERY" ~ identifier ~ query_params ~ "=>" ~ query_body ~ return_stmt }
 query_params = { "(" ~ (param_def ~ ("," ~ param_def)*)? ~ ")" }
 param_def    = { identifier ~ ":" ~ param_type }
 query_body   = { (get_stmt | AddN | AddV | BatchAddV | AddE | drop | for_loop)* }
 
+
+// ---------------------------------------------------------------------
 // Assignments and traversals
+// ---------------------------------------------------------------------
 get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | start_vector ) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
@@ -19,7 +42,9 @@ for_loop            = { "FOR" ~ for_argument ~ "IN" ~ identifier ~ "{" ~ query_b
 for_argument        = { identifier | object_destructuring }
 object_destructuring = { "{" ~ identifier ~ ("," ~ identifier)* ~ "}" }
 
+// ---------------------------------------------------------------------
 // Evaluation rules for different types
+// ---------------------------------------------------------------------
 evaluates_to_anything = {
     AddN
   | AddV
@@ -39,6 +64,9 @@ evaluates_to_anything = {
   | or
 }
 
+// ---------------------------------------------------------------------
+// Evaluates to bool
+// ---------------------------------------------------------------------
 evaluates_to_bool = {
     exists
   | boolean
@@ -49,6 +77,9 @@ evaluates_to_bool = {
   | id_traversal
 }
 
+// ---------------------------------------------------------------------
+// Evaluates to number
+// ---------------------------------------------------------------------
 evaluates_to_number = {
     float
   | integer
@@ -57,11 +88,35 @@ evaluates_to_number = {
   | id_traversal
 }
 
+// ---------------------------------------------------------------------
 // Return statement
+// ---------------------------------------------------------------------
 return_stmt = { "RETURN" ~ evaluates_to_anything ~ ("," ~ evaluates_to_anything)* }
 
-// Vertex-related steps
+// ---------------------------------------------------------------------
+// Creation steps
+// ---------------------------------------------------------------------
+create_field  = { "{" ~ new_field ~ ("," ~ new_field)* ~ "}" }
+new_field     = { identifier ~ ":" ~ (anonymous_traversal | evaluates_to_anything | create_field) }
+to_from       = { to ~ from? | from ~ to? }
+to            = { "::" ~ "To" ~ "(" ~ id_arg ~ ")" }
+from          = { "::" ~ "From" ~ "(" ~ id_arg ~ ")" }
+vec_literal   = { "[" ~ (float) ~ ("," ~ (float))* ~ "]" }
+vector_data = { identifier | vec_literal }
+AddN          = { "AddN" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? }
+AddE          = { "AddE" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? ~ to_from }
+AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~ ("," ~ create_field)* ~ ")") }
+
+// ---------------------------------------------------------------------
+// Source steps
+// ---------------------------------------------------------------------
 start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
+start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
+start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
+
+// ---------------------------------------------------------------------
+// Traversal steps
+// ---------------------------------------------------------------------
 graph_step   = {
     "OutE" ~ ("<" ~ type_args ~ ">")?
   | "InE" ~ ("<" ~ type_args ~ ">")?
@@ -71,30 +126,28 @@ graph_step   = {
   | "In" ~ ("<" ~ type_args ~ ">")?
 }
 
-// Edge-related steps
-start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-
-// Vector-related steps
-start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-
-// Where and Exists steps
+// ---------------------------------------------------------------------
+// Util steps
+// ---------------------------------------------------------------------
 where_step = { "WHERE" ~ "(" ~ (evaluates_to_bool | anonymous_traversal) ~ ")" }
 exists     = { "EXISTS" ~ "(" ~ (traversal | id_traversal | anonymous_traversal) ~ ")" }
+range_step = { "RANGE" ~ "(" ~ (evaluates_to_number) ~ "," ~ (evaluates_to_number) ~ ")" }
+count        = { "COUNT" }
+none         = { "NONE" }
+ID           = { "ID" }
+update_field = { identifier ~ ":" ~ (evaluates_to_anything | anonymous_traversal) }
+update       = { "UPDATE" ~ "(" ~ "{" ~ update_field ~ ("," ~ update_field)* ~ "}" ~ ")" }
+drop = { "DROP" ~ (traversal | id_traversal | identifier)? }
 
-// Search
+// ---------------------------------------------------------------------
+// Vector steps
+// ---------------------------------------------------------------------
 search_vector = { "SearchV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ vector_data ~ "," ~ evaluates_to_number ~ ")" }
 BatchAddV = { "BatchAddV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ identifier ~ ")" }
 
-// Arguments for various steps
-type_args = { identifier_upper ~ ("," ~ identifier_upper)* }
-id_arg    = { (identifier | string_literal) }
-id_args   = { (id_arg) ~ ("," ~ id_arg)* }
-
-// Range step
-range_step = { "RANGE" ~ "(" ~ (evaluates_to_number) ~ "," ~ (evaluates_to_number) ~ ")" }
-
-
+// ---------------------------------------------------------------------
 // Boolean operations
+// ---------------------------------------------------------------------
 and             = { "AND" ~ "(" ~ (evaluates_to_bool | anonymous_traversal) ~ ("," ~ (evaluates_to_bool | anonymous_traversal))* ~ ")" }
 or              = { "OR" ~ "(" ~ (evaluates_to_bool | anonymous_traversal) ~ ("," ~ (evaluates_to_bool | anonymous_traversal))* ~ ")" }
 bool_operations = { GT | GTE | LT | LTE | EQ | NEQ }
@@ -105,59 +158,43 @@ LTE             = { "LTE" ~ "(" ~ (evaluates_to_number | anonymous_traversal) ~ 
 EQ              = { "EQ" ~ "(" ~ (evaluates_to_anything | anonymous_traversal) ~ ")" }
 NEQ             = { "NEQ" ~ "(" ~ (evaluates_to_anything | anonymous_traversal) ~ ")" }
 
-count        = { "COUNT" }
-none         = { "NONE" }
-ID           = { "ID" }
-update_field = { identifier ~ ":" ~ (evaluates_to_anything | anonymous_traversal) }
-update       = { "UPDATE" ~ "(" ~ "{" ~ update_field ~ ("," ~ update_field)* ~ "}" ~ ")" }
 
+// ---------------------------------------------------------------------
+// Object access and remapping steps
+// ---------------------------------------------------------------------
 object_step   = { "{" ~ mapping_field ~ ("," ~ mapping_field)* ~ ("," ~ spread_object)? ~ "}" }
 exclude_field = { "!" ~ "{" ~ identifier ~ ("," ~ identifier)* ~ ("," ~ spread_object)? ~ "}" }
 closure_step  = { "|" ~ identifier ~ "|" ~ object_step }
 spread_object = { ".." }
-
 mapping_field = { (identifier ~ (":" ~ (anonymous_traversal | evaluates_to_anything | object_step))) | identifier }
 
-// Schema definitions
-vector_def = { "V::" ~ identifier_upper ~ node_body }
-node_def   = { "N::" ~ identifier_upper ~ node_body }
-edge_def   = { "E::" ~ identifier_upper ~ edge_body }
 
-node_body  = { "{" ~ field_defs ~ "}" }
-edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ "To:" ~ identifier_upper ~ "," ~ properties ~ "}" }
-field_def  = { (identifier ~ ":" ~ param_type) }
-field_defs = { field_def ~ ("," ~ field_def)* }
-properties = { "Properties" ~ ":" ~ "{" ~ field_defs? ~ "}" }
-
-// Values and literals
+// ---------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------
+type_args = { identifier_upper ~ ("," ~ identifier_upper)* }
+id_arg    = { (identifier | string_literal) }
+id_args   = { (id_arg) ~ ("," ~ id_arg)* }
 array            = { "[" ~ param_type ~ "]" }
 object           = { "{" ~ field_defs ~ "}" }
+named_type       = { "String" | "Boolean" | "F32" | "F64" | "I8" | "I16" | "I32" | "I64" | "U8" | "U16" | "U32" | "U64" | "U128" }
+ID_TYPE          = { "ID" }
+param_type       = { named_type | ID_TYPE | array | object | identifier }
+
+// ---------------------------------------------------------------------
+// Literals
+// ---------------------------------------------------------------------
 string_literal   = ${ "\"" ~ inner_string ~ "\"" }
 inner_string     = @{ (!("\"" | "\\") ~ ANY)* }
 boolean          =  { "true" | "false" }
-named_type       = { "String" | "Boolean" | "F32" | "F64" | "I8" | "I16" | "I32" | "I64" | "U8" | "U16" | "U32" | "U64" | "U128" }
-param_type       = { named_type | array | object | identifier }
 identifier       = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
 identifier_upper = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
 integer          = @{ ASCII_DIGIT+ }
 float            = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 
+// ---------------------------------------------------------------------
 // Whitespace and comments
+// ---------------------------------------------------------------------
 WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
 COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
-// Add edged and vertices
-create_field  = { "{" ~ new_field ~ ("," ~ new_field)* ~ "}" }
-new_field     = { identifier ~ ":" ~ (anonymous_traversal | evaluates_to_anything | create_field) }
-AddN          = { "AddN" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? }
-AddE          = { "AddE" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? ~ to_from }
-AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~ ("," ~ create_field)* ~ ")") }
-
-vector_data = { identifier | vec_literal }
-doc_data    = { identifier | string_literal }
-vec_literal   = { "[" ~ (float) ~ ("," ~ (float))* ~ "]" }
-to_from       = { to ~ from? | from ~ to? }
-to            = { "::" ~ "To" ~ "(" ~ id_arg ~ ")" }
-from          = { "::" ~ "From" ~ "(" ~ id_arg ~ ")" }
-
-drop = { "DROP" ~ (traversal | id_traversal | identifier)? }

@@ -13,14 +13,21 @@ pub struct FilterRef<'a, I, F> {
 impl<'a, I, F> Iterator for FilterRef<'a, I, F>
 where
     I: Iterator<Item = Result<TraversalVal, GraphError>>,
-    F: Fn(&I::Item, &RoTxn) -> bool,
+    F: Fn(&I::Item, &RoTxn) -> Result<bool, GraphError>,
 {
     type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(item) = self.iter.next() {
-            if (self.f)(&item, &self.txn) {
-                return Some(item);
+            match (self.f)(&item, &self.txn) {
+                Ok(result) => {
+                    if result {
+                        return Some(item);
+                    }
+                }
+                Err(e) => {
+                    return Some(Err(e));
+                }
             }
         }
         None
@@ -35,9 +42,7 @@ pub trait FilterRefAdapter<'a>: Iterator + Sized {
         f: F,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&Result<TraversalVal, GraphError>, &RoTxn) -> bool;
-
-    
+        F: Fn(&Result<TraversalVal, GraphError>, &RoTxn) -> Result<bool, GraphError>;
 }
 
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>> FilterRefAdapter<'a>
@@ -48,7 +53,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>> FilterRefAdapter<
         f: F,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&Result<TraversalVal, GraphError>, &RoTxn) -> bool,
+        F: Fn(&Result<TraversalVal, GraphError>, &RoTxn) -> Result<bool, GraphError>,
     {
         RoTraversalIterator {
             inner: FilterRef {

@@ -22,7 +22,6 @@ pub struct OutNodesIterator<'a, T> {
     >,
     storage: Arc<HelixGraphStorage>,
     txn: &'a T,
-    length: usize,
 }
 
 // implementing iterator for OutIterator
@@ -93,7 +92,6 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> OutAdapter<'
                         iter,
                         storage: Arc::clone(&db),
                         txn,
-                        length: prefix.len(),
                     }),
                     Ok(None) => None,
                     Err(e) => {

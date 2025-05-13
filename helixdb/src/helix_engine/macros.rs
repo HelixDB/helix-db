@@ -59,11 +59,11 @@ pub mod macros {
     vec![]
     };
     ($($key:expr => $value:expr),* $(,)?) => {
-    vec![
-    $(
-    (String::from($key), $value.into()),
-    )*
-    ]
+        vec![
+            $(
+            (String::from($key), $value.into()),
+            )*
+        ]
     };
  }
 
@@ -175,6 +175,103 @@ pub mod macros {
                     )))
                 }
             }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! field_remapping {
+        ($remapping_vals:expr, $var_name:expr, $old_name:expr => $new_name:expr) => {
+            match $var_name {
+                Ok(item) => {
+                    // TODO: ref?
+                    let old_value = match item.check_property($old_name) {
+                        Ok(val) => val,
+                        Err(e) => {
+                            return Err(GraphError::ConversionError(format!(
+                                "Error Decoding: {:?}",
+                                "Invalid node".to_string()
+                            )))
+                        }
+                    };
+                    let old_value_remapping =
+                        Remapping::new(false, Some($new_name), Some(ReturnValue::from(old_value)));
+                    $remapping_vals.borrow_mut().insert(
+                        item.id(),
+                        ResponseRemapping::new(
+                            HashMap::from([($old_name.to_string(), old_value_remapping)]),
+                            false,
+                        ),
+                    );
+                    Ok(item) // Return the Ok value
+                }
+                Err(e) => Err(GraphError::ConversionError(format!(
+                    "Error Decoding: {:?}",
+                    e
+                ))),
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! traversal_remapping {
+        ($remapping_vals:expr, $var_name:expr, $new_name:expr => $traversal:expr) => {
+            match $var_name {
+                Ok(item) => {
+                    // TODO: ref?
+                    let traversal_result: Vec<TraversalVal> = $traversal;
+                    let new_remapping = Remapping::new(
+                        false,
+                        Some($new_name.to_string()),
+                        Some(ReturnValue::from(traversal_result)),
+                    );
+                    $remapping_vals.borrow_mut().insert(
+                        item.id(),
+                        ResponseRemapping::new(
+                            HashMap::from([($new_name.to_string(), new_remapping)]),
+                            false,
+                        ),
+                    );
+                    Ok(item)
+                }
+                Err(e) => {
+                    return Err(GraphError::ConversionError(format!(
+                        "Error Decoding: {:?}",
+                        e
+                    )))
+                }
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! exclude_field {
+        ($remapping_vals:expr, $($field_to_exclude:expr),* $(,)?) => {
+            match item {
+                Ok(ref item) => {
+                    // TODO: ref?
+                    $(
+                    let $field_to_exclude_remapping = Remapping::new(
+                        true,
+                        Some($field_to_exclude),
+                        None,
+                    );
+                    $remapping_vals.borrow_mut().insert(
+                        item.id(),
+                        ResponseRemapping::new(
+                            HashMap::from([($field_to_exclude.to_string(), $field_to_exclude_remapping)]),
+                            false,
+                        ),
+                    );
+                    )*
+                }
+                Err(e) => {
+                    return Err(GraphError::ConversionError(format!(
+                        "Error Decoding: {:?}",
+                        e
+                    )))
+                }
+            };
+            item
         };
     }
 }

@@ -34,7 +34,6 @@ pub trait AddNAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>>
         label: &'a str,
         properties: Vec<(String, Value)>,
         secondary_indices: Option<&'a [String]>,
-        id: Option<u128>,
     ) -> RwTraversalIterator<'a, 'b, std::iter::Once<Result<TraversalVal, GraphError>>>;
 }
 
@@ -46,11 +45,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
         label: &'a str,
         properties: Vec<(String, Value)>,
         secondary_indices: Option<&'a [String]>,
-        id: Option<u128>, // TODO: can't be an option has to generated because always needs to be in order
     ) -> RwTraversalIterator<'a, 'b, std::iter::Once<Result<TraversalVal, GraphError>>> {
         let node = Node {
-            id: id.unwrap_or(v6_uuid()),
-            label: label.to_string(),
+            id: v6_uuid(),
+            label: label.to_string(), // TODO: just &str or Cow<'a, str>
             properties: properties.into_iter().collect(),
         };
 
@@ -75,12 +73,9 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
             match self.storage.secondary_indices.get(index.as_str()) {
                 Some(db) => {
                     let key = match node.check_property(&index) {
-                        Some(value) => value,
-                        None => {
-                            result = Err(GraphError::New(format!(
-                                "Secondary Index {} not found",
-                                index
-                            )));
+                        Ok(value) => value,
+                        Err(e) => {
+                            result = Err(e);
                             continue;
                         }
                     };

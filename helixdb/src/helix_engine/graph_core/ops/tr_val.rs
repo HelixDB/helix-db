@@ -1,5 +1,5 @@
 use crate::{
-    helix_engine::vector_core::vector::HVector,
+    helix_engine::{types::GraphError, vector_core::vector::HVector},
     protocol::{
         count::Count,
         filterable::Filterable,
@@ -50,7 +50,8 @@ impl PartialEq for TraversalVal {
 pub trait Traversable {
     fn id(&self) -> u128;
     fn label(&self) -> String;
-    fn check_property(&self, prop: &str) -> Option<&Value>;
+    fn check_property(&self, prop: &str) -> Result<&Value, GraphError>;
+    fn uuid(&self) -> String;
 }
 
 impl Traversable for TraversalVal {
@@ -63,6 +64,15 @@ impl Traversable for TraversalVal {
         }
     }
 
+    fn uuid(&self) -> String {
+        match self {
+            TraversalVal::Node(node) => uuid::Uuid::from_u128(node.id).to_string(),
+            TraversalVal::Edge(edge) => uuid::Uuid::from_u128(edge.id).to_string(),
+            TraversalVal::Vector(vector) => uuid::Uuid::from_u128(vector.id).to_string(),
+            _ => panic!("Invalid traversal value"),
+        }
+    }
+
     fn label(&self) -> String {
         match self {
             TraversalVal::Node(node) => node.label.clone(),
@@ -71,15 +81,16 @@ impl Traversable for TraversalVal {
         }
     }
 
-    fn check_property(&self, prop: &str) -> Option<&Value> {
+    fn check_property(&self, prop: &str) -> Result<&Value, GraphError> {
         match self {
             TraversalVal::Node(node) => node.check_property(prop),
             TraversalVal::Edge(edge) => edge.check_property(prop),
             TraversalVal::Vector(vector) => vector.check_property(prop),
-            _ => None,
+            _ => Err(GraphError::ConversionError(format!(
+                "Invalid traversal value"
+            ))),
         }
     }
-
 }
 
 impl Traversable for Vec<TraversalVal> {
@@ -91,7 +102,11 @@ impl Traversable for Vec<TraversalVal> {
         self[0].label()
     }
 
-    fn check_property(&self, prop: &str) -> Option<&Value> {
+    fn check_property(&self, prop: &str) -> Result<&Value, GraphError> {
         self[0].check_property(prop)
+    }
+
+    fn uuid(&self) -> String {
+        self[0].uuid()
     }
 }

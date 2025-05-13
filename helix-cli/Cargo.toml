@@ -4,18 +4,18 @@ version = "1.0.66"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5.36", features = ["derive"] }
+clap = { version = "4.5.37", features = ["derive"] }
 helixdb = { path = "../helixdb", features = ["full"] }
 tempfile = "3.19.1"
 dirs = "6.0.0"
 serde = { version = "1.0.219", features = ["derive"] }
-sonic-rs = "0.5.0"
+sonic-rs = "0.5.1"
 uuid = { version = "1.16.0", features = ["v4"] }
 chrono = "0.4"
-libc = "0.2.171"
-tokio = { version = "1.41.1", features = ["full"] }
+libc = "0.2.172"
+tokio = { version = "1.45.0", features = ["full"] }
 open = "5.0.1"
-colored = "2.1.0"
+colored = "3.0.0"
 spinners = "4"
 indicatif = "0.17.11"
 
