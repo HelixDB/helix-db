@@ -1,56 +1,123 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use helixdb::helix_engine::vector_core::{
-    vector::HVector,
-    vector_core::{HNSWConfig, VectorCore},
-};
-use polars::prelude::*;
-
-use std::collections::HashSet;
+use helixdb::helix_engine::graph_core::graph_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use heed3::{EnvOpenOptions, Env};
-use rand::{
-    rngs::StdRng,
-    SeedableRng,
-    Rng,
-    prelude::SliceRandom,
+use std::{
+    sync::Arc,
+    time::{
+        Duration,
+        Instant,
+    },
 };
-use std::time::Duration;
+use criterion::{
+    criterion_group,
+    criterion_main,
+    BenchmarkId,
+    Criterion,
+    black_box
+};
 use tempfile::TempDir;
+use polars::error;
 
-/*
- * things to benchmark:
- * - speed
- * - memory
- * - (putting precision in vector_core_tests)
- */
-
-fn setup_temp_env() -> (Env, TempDir) {
+fn setup_temp_env() -> Env {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_str().unwrap();
-
-    let env = unsafe {
+    unsafe {
         EnvOpenOptions::new()
-            .map_size(1024 * 1024 * 1024)
+            .map_size(4 * 1024 * 1024 * 1024) // 4 GB
             .max_dbs(10)
             .open(path)
             .unwrap()
-    };
-
-    (env, temp_dir)
+    }
 }
 
-fn generate_random_vectors(count: usize, dim: usize, seed: u64) -> Vec<(String, Vec<f64>)> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut vectors = Vec::with_capacity(count);
+fn setup_db() -> HelixGraphEngine {
+    HelixGraphEngine::new(HelixGraphEngineOpts::default()).unwrap() // TODO: should be to temp dir
+                                                                    // maybe?
+}
 
-    for i in 0..count {
-        let id = format!("vec_{}", i);
-        let data: Vec<f64> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
-        vectors.push((id, data));
+// download the data from 'https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M'
+//      and put it into '../data/dbpedia-openai-1m/'. this will just be a set of .parquet files.
+//      this is the same dataset used here: 'https://qdrant.tech/benchmarks/'. we use this dataset
+//      because the vectors are of higher dimensionality
+fn load_dbpedia_vectors(limit: usize) -> Result<Vec<(String, Vec<f64>)>, PolarsError> {
+    if limit > 1_000_000 {
+        return Err(PolarsError::OutOfBounds(
+            "can't load more than 1,000,000 vecs from this dataset".into(),
+        ));
     }
 
-    vectors
+    let data_dir = "../data/dbpedia-openai-1m/";
+    let mut all_vectors = Vec::new();
+    let mut total_loaded = 0;
+
+    for entry in fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "parquet") {
+            let df = ParquetReader::new(File::open(&path)?)
+                .finish()?
+                .lazy()
+                .limit((limit - total_loaded) as u32)
+                .collect()?;
+
+            let ids = df.column("_id")?.str()?;
+            let embeddings = df.column("openai")?.list()?;
+
+            for (_id, embedding) in ids.into_iter().zip(embeddings.into_iter()) {
+                if total_loaded >= limit {
+                    break;
+                }
+
+                let embedding = embedding.unwrap();
+                let f64_series = embedding.cast(&DataType::Float64).unwrap();
+                let chunked = f64_series.f64().unwrap();
+                let vector: Vec<f64> = chunked.into_no_null_iter().collect();
+
+                all_vectors.push((_id.unwrap().to_string(), vector));
+
+                total_loaded += 1;
+            }
+
+            if total_loaded >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(all_vectors)
 }
 
+fn bench_hnsw_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hnsw_insert");
+
+    let vectors = load_dbpedia_vectors(100_000);
+    let env = setup_temp_env();
+    let mut txn = env.write_txn().unwrap();
+    let graph_engine = Arc::new(setup_db());
+
+    group.sample_size(1);
+
+    let start = Instant::now();
+    group.bench_function(BenchmarkId::new("hnsw_insert_100k", dims), |b| {
+        b.iter(|| {
+            for vector in vectors.iter() {
+                black_box(index.insert(black_box(vector)));
+            }
+        });
+    });
+
+    //let mut total_insertion_time = Duration::from_secs(0);
+}
+
+fn bench_hnsw_bulk_insert(c: &mut Criterion) {}
+
+fn bench_hnsw_search(c: &mut Criterion) {}
+
+fn bench_hnsw_memory(c: &mut Criterion) {}
+
+fn bench_hnsw_precision(c: &mut Criterion) {}
+
+/*
 fn bench_vector_insertion(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_insertion");
     group.measurement_time(Duration::from_secs(20));
@@ -124,13 +191,16 @@ fn bench_vector_search(c: &mut Criterion) {
 
     group.finish();
 }
-
-// TODO: bench memory usage
+*/
 
 criterion_group!(
     benches,
-    bench_vector_search,
-    bench_vector_insertion,
+    bench_hnsw_insert,
+    bench_hnsw_bulk_insert,
+    bench_hnsw_search,
+    bench_hnsw_memory,
+    bench_hnsw_precision,
 );
 
 criterion_main!(benches);
+

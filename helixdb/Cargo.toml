@@ -79,6 +79,10 @@ harness = false
 name = "vector_benchmarks"
 harness = false
 
+[[bench]]
+name = "general_benchmarks"
+harness = false
+
 [profile.release]
 strip = "debuginfo"
 lto = true

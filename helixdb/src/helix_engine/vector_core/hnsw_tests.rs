@@ -150,110 +150,110 @@
 
 // // cargo test --release test_recall_precision_real_data -- --nocapture
 
-// #[test]
-// fn test_recall_precision_real_data() {
-//     type Filter = fn(&HVector) -> bool;
-//     let n_base = 50_000;
-//     //let dims = 1536;
-//     let vectors = load_dbpedia_vectors(n_base).unwrap();
-//     // let vectors = load_ann_gist1m_vectors(n_base).unwrap();
-//     println!("loaded {} vectors", vectors.len());
+#[test]
+fn test_recall_precision_real_data() {
+    type Filter = fn(&HVector) -> bool;
+    let n_base = 50_000;
+    //let dims = 1536;
+    let vectors = load_dbpedia_vectors(n_base).unwrap();
+    // let vectors = load_ann_gist1m_vectors(n_base).unwrap();
+    println!("loaded {} vectors", vectors.len());
 
-//     let n_query = 5_000; // 10-20%
-//     let mut rng = rand::rng();
-//     let mut shuffled_vectors = vectors.clone();
-//     shuffled_vectors.shuffle(&mut rng);
-//     let base_vectors = &shuffled_vectors[..n_base - n_query];
-//     let query_vectors = &shuffled_vectors[n_base - n_query..];
+    let n_query = 5_000; // 10-20%
+    let mut rng = rand::rng();
+    let mut shuffled_vectors = vectors.clone();
+    shuffled_vectors.shuffle(&mut rng);
+    let base_vectors = &shuffled_vectors[..n_base - n_query];
+    let query_vectors = &shuffled_vectors[n_base - n_query..];
 
-//     println!("num of base vecs: {}", base_vectors.len());
-//     println!("num of query vecs: {}", query_vectors.len());
+    println!("num of base vecs: {}", base_vectors.len());
+    println!("num of query vecs: {}", query_vectors.len());
 
-//     let k = 10;
+    let k = 10;
 
-//     let env = setup_temp_env();
-//     let mut txn = env.write_txn().unwrap();
+    let env = setup_temp_env();
+    let mut txn = env.write_txn().unwrap();
 
-//     let mut total_insertion_time = std::time::Duration::from_secs(0);
-//     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let mut total_insertion_time = std::time::Duration::from_secs(0);
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
-//     let mut all_vectors: Vec<HVector> = Vec::new();
+    let mut all_vectors: Vec<HVector> = Vec::new();
 
-//     let over_all_time = Instant::now();
-//     for (i, (id, data)) in vectors.iter().enumerate() {
-//         let start_time = Instant::now();
-//         let vec = index.insert::<Filter>(&mut txn, data, Some(id.parse::<u128>().unwrap())).unwrap();
-//         all_vectors.push(vec);
-//         let time = start_time.elapsed();
-//         if i % 1000 == 0 {
-//             println!(
-//                 "{} => inserting in {} ms, vector: {}",
-//                 i,
-//                 time.as_millis(),
-//                 id
-//             );
-//             println!("time taken so far: {:?}", over_all_time.elapsed());
-//         }
-//         total_insertion_time += time;
-//     }
-//     txn.commit().unwrap();
-//     let txn = env.read_txn().unwrap();
-//     println!("{:?}", index.config);
+    let over_all_time = Instant::now();
+    for (i, (id, data)) in vectors.iter().enumerate() {
+        let start_time = Instant::now();
+        let vec = index.insert::<Filter>(&mut txn, data, Some(id.parse::<u128>().unwrap())).unwrap();
+        all_vectors.push(vec);
+        let time = start_time.elapsed();
+        if i % 1000 == 0 {
+            println!(
+                "{} => inserting in {} ms, vector: {}",
+                i,
+                time.as_millis(),
+                id
+            );
+            println!("time taken so far: {:?}", over_all_time.elapsed());
+        }
+        total_insertion_time += time;
+    }
+    txn.commit().unwrap();
+    let txn = env.read_txn().unwrap();
+    println!("{:?}", index.config);
 
-//     println!(
-//         "total insertion time: {:.2?} seconds",
-//         total_insertion_time.as_secs_f64()
-//     );
-//     println!(
-//         "average insertion time per vec: {:.2?} milliseconds",
-//         total_insertion_time.as_millis() as f64 / n_base as f64
-//     );
+    println!(
+        "total insertion time: {:.2?} seconds",
+        total_insertion_time.as_secs_f64()
+    );
+    println!(
+        "average insertion time per vec: {:.2?} milliseconds",
+        total_insertion_time.as_millis() as f64 / n_base as f64
+    );
 
-//     println!("calculating ground truths");
-//     let ground_truths = calc_ground_truths(all_vectors, query_vectors.to_vec(), k);
+    println!("calculating ground truths");
+    let ground_truths = calc_ground_truths(all_vectors, query_vectors.to_vec(), k);
 
-//     println!("searching and comparing...");
-//     let test_id = format!("k = {} with {} queries", k, n_query);
+    println!("searching and comparing...");
+    let test_id = format!("k = {} with {} queries", k, n_query);
 
-//     let mut total_recall = 0.0;
-//     let mut total_precision = 0.0;
-//     let mut total_search_time = std::time::Duration::from_secs(0);
-//     for ((_, query), gt) in query_vectors.iter().zip(ground_truths.iter()) {
-//         let start_time = Instant::now();
-//         let results = index.search::<Filter>(&txn, query, k, None, false).unwrap();
-//         let search_duration = start_time.elapsed();
-//         total_search_time += search_duration;
+    let mut total_recall = 0.0;
+    let mut total_precision = 0.0;
+    let mut total_search_time = std::time::Duration::from_secs(0);
+    for ((_, query), gt) in query_vectors.iter().zip(ground_truths.iter()) {
+        let start_time = Instant::now();
+        let results = index.search::<Filter>(&txn, query, k, None, false).unwrap();
+        let search_duration = start_time.elapsed();
+        total_search_time += search_duration;
 
-//         let result_indices: HashSet<String> = results
-//             .into_iter()
-//             .map(|hvector| hvector.get_id().to_string())
-//             .collect();
+        let result_indices: HashSet<String> = results
+            .into_iter()
+            .map(|hvector| hvector.get_id().to_string())
+            .collect();
 
-//         let gt_indices: HashSet<String> = gt.iter().cloned().collect();
-//         //println!("gt: {:?}\nresults: {:?}\n", gt_indices, result_indices);
-//         let true_positives = result_indices.intersection(&gt_indices).count();
+        let gt_indices: HashSet<String> = gt.iter().cloned().collect();
+        //println!("gt: {:?}\nresults: {:?}\n", gt_indices, result_indices);
+        let true_positives = result_indices.intersection(&gt_indices).count();
 
-//         let recall: f64 = true_positives as f64 / gt_indices.len() as f64;
-//         let precision: f64 = true_positives as f64 / result_indices.len() as f64;
+        let recall: f64 = true_positives as f64 / gt_indices.len() as f64;
+        let precision: f64 = true_positives as f64 / result_indices.len() as f64;
 
-//         total_recall += recall;
-//         total_precision += precision;
-//     }
+        total_recall += recall;
+        total_precision += precision;
+    }
 
-//     println!(
-//         "total search time: {:.2?} seconds",
-//         total_search_time.as_secs_f64()
-//     );
-//     println!(
-//         "average search time per query: {:.2?} milliseconds",
-//         total_search_time.as_millis() as f64 / n_query as f64
-//     );
+    println!(
+        "total search time: {:.2?} seconds",
+        total_search_time.as_secs_f64()
+    );
+    println!(
+        "average search time per query: {:.2?} milliseconds",
+        total_search_time.as_millis() as f64 / n_query as f64
+    );
 
-//     total_recall = total_recall / n_query as f64;
-//     total_precision = total_precision / n_query as f64;
-//     println!(
-//         "{}: avg. recall: {:.4?}, avg. precision: {:.4?}",
-//         test_id, total_recall, total_precision
-//     );
-//     assert!(total_recall >= 0.8, "recall not high enough!");
-// }
+    total_recall = total_recall / n_query as f64;
+    total_precision = total_precision / n_query as f64;
+    println!(
+        "{}: avg. recall: {:.4?}, avg. precision: {:.4?}",
+        test_id, total_recall, total_precision
+    );
+    assert!(total_recall >= 0.8, "recall not high enough!");
+}

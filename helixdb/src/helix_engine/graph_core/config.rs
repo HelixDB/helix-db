@@ -82,8 +82,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             vector_config: VectorConfig {
-                m: Some(25),
-                ef_construction: Some(512),
+                m: Some(16),
+                ef_construction: Some(128),
                 ef_search: Some(768),
                 db_max_size: Some(10_000),
             },
