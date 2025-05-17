@@ -608,6 +608,7 @@ impl HNSW for VectorCore {
         Ok(query)
     }
 
+    // TODO: unused used
     fn get_all_vectors(&self, txn: &RoTxn, level: Option<usize>) -> Result<Vec<HVector>, VectorError> {
         self.vectors_db
             .prefix_iter(txn, VECTOR_PREFIX)?
@@ -622,6 +623,7 @@ impl HNSW for VectorCore {
             .collect()
     }
 
+    // TODO: unused used
     fn load<F>(&self, txn: &mut RwTxn, data: Vec<&[f64]>) -> Result<(), VectorError>
     where
         F: Fn(&HVector) -> bool,
@@ -635,3 +637,4 @@ impl HNSW for VectorCore {
         Ok(())
     }
 }
+

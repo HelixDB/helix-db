@@ -50,7 +50,8 @@ impl Config {
         }
     }
 
-    pub fn from_config_file(input_path: PathBuf) -> Result<Self, GraphError> {
+    pub fn from_config_file(input_path: PathBuf) -> Result<Self, GraphError> { // TODO: this isn't
+                                                                               // read
         if !input_path.exists() {
             return Err(GraphError::ConfigFileNotFound);
         }

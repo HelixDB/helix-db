@@ -1,25 +1,20 @@
 use crate::helix_engine::{
     storage_core::storage_core::HelixGraphStorage,
+    vector_core::vector::HVector,
     graph_core::{
         config::Config,
         ops::{
             g::G,
-            vectors::insert::InsertVAdapter,
+            vectors::{insert::InsertVAdapter, search::SearchVAdapter},
         },
     },
-    vector_core::{
-        vector::HVector,
-    },
 };
-use heed3::RwTxn;
 use std::{
     sync::Arc,
-    time::{
-        Duration,
-        Instant,
-    },
+    time::{Duration, Instant},
     fs::{self, File},
 };
+use heed3::RwTxn;
 use polars::prelude::*;
 use kdam::tqdm;
 
@@ -80,6 +75,8 @@ fn load_dbpedia_vectors(limit: usize) -> Result<Vec<Vec<f64>>, PolarsError> {
         }
     }
 
+    println!("loaded {} vectors", all_vectors.len());
+
     Ok(all_vectors)
 }
 
@@ -126,26 +123,10 @@ fn bench_hnsw_insert_100k() {
 }
 
 #[test]
-fn bench_hnsw_bulk_insert_100k() {
-    let n_vecs = 100_000;
-    let vectors = load_dbpedia_vectors(n_vecs).unwrap();
-    let db = Arc::new(setup_db());
-    let mut txn = db.graph_env.write_txn().unwrap();
-    clear_dbs(&mut txn, &db);
-
-    let start = Instant::now();
-    G::new_mut(Arc::clone(&db), &mut txn)
-        .insert_vs::<Filter>(&vectors, None);
-    let duration = start.elapsed();
-
-    println!("Total insertion time for {} vectors: {:?}", n_vecs, duration);
-}
-
-#[test]
 fn bench_hnsw_memory_inserted() {
     let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
-    let mut txn = db.graph_env.write_txn().unwrap();
     let size = db.graph_env.real_disk_size().unwrap() as usize;
+    assert!(size > 5000, "vectors have been inserted before running this test");
     println!("Storage space size: {} bytes", size); // div 1024 for kb, div 1024 for mb
 }
 
@@ -166,18 +147,46 @@ fn bench_hnsw_memory_100k() {
     println!("Storage space size: {} bytes", size); // div 1024 for kb, div 1024 for mb
 }
 
-//#[test]
-//fn bench_hnsw_search() {}
+#[test]
+fn bench_hnsw_search() {
+    let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
+    let txn = db.graph_env.read_txn().unwrap();
+    let size = db.graph_env.real_disk_size().unwrap() as usize;
+    assert!(size >= 49152, "vectors have been inserted before running this test");
 
-//#[test]
-//fn bench_hnsw_precision() {}
+    let n_vecs = 5_000;
+    let k: usize = 50;
+    let query_vectors = load_dbpedia_vectors(n_vecs).unwrap();
 
-/*
+    let mut search_times = Vec::with_capacity(n_vecs);
+    let start = Instant::now();
+    for vec in query_vectors {
+        let search_start = Instant::now();
+        let _  = G::new(Arc::clone(&db), &txn)
+            .search_v::<Filter>(&vec, k, None);
+        search_times.push(search_start.elapsed());
+    }
+    let duration = start.elapsed();
+
+    let total_search_time: Duration = search_times.iter().sum();
+    let avg_search_time = if !search_times.is_empty() {
+        total_search_time / search_times.len() as u32
+    } else {
+        Duration::from_secs(0)
+    };
+
+    println!("Total search time for {} queries, at k = {}: {:?}", n_vecs, k, total_search_time);
+    println!("Average time per search (total/num_vectors): {:?}", duration / n_vecs as u32);
+    println!("Average search time per query (measured individually): {:?}", avg_search_time);
+}
+
 fn calc_ground_truths(
     vectors: Vec<HVector>,
     query_vectors: Vec<(String, Vec<f64>)>,
     k: usize,
 ) -> Vec<Vec<String>> {
+    println!("calculating ground truths");
+
     query_vectors
         .par_iter()
         .map(|query| {
@@ -197,70 +206,46 @@ fn calc_ground_truths(
 
 // cargo test --release test_recall_precision_real_data -- --nocapture
 #[test]
-fn test_hnsw_precision_dbpedia_vectors() {
-    let n_vecs = 50_000;
+fn test_hnsw_precision() {
+    let n_vecs = 100_00;
+    let n_query = 12_000; // 10-20%
+    let k = 10;
     let vectors = load_dbpedia_vectors(n_vecs).unwrap();
     let db = Arc::new(setup_db());
     let mut txn = db.graph_env.write_txn().unwrap();
-    db.clear(&mut txn).unwrap();
-    println!("loaded {} vectors", vectors.len());
-
-    let n_query = 5_000; // 10-20%
-    let mut rng = rand::rng();
-    let mut shuffled_vectors = vectors.clone();
-    shuffled_vectors.shuffle(&mut rng);
-    let base_vectors = &shuffled_vectors[..n_base - n_query];
-    let query_vectors = &shuffled_vectors[n_base - n_query..];
-
-    println!("num of base vecs: {}", base_vectors.len());
-    println!("num of query vecs: {}", query_vectors.len());
-
-    let k = 10;
-
-    let env = setup_temp_env();
-    let mut txn = env.write_txn().unwrap();
-
-    let mut total_insertion_time = std::time::Duration::from_secs(0);
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    clear_dbs(&mut txn, &db);
 
     let mut all_vectors: Vec<HVector> = Vec::new();
 
+    let mut total_insertion_time = std::time::Duration::from_secs(0);
     let over_all_time = Instant::now();
-    for (i, (id, data)) in vectors.iter().enumerate() {
+    for (i, data) in vectors.iter().enumerate() {
         let start_time = Instant::now();
-        let vec = index.insert::<Filter>(&mut txn, data, Some(id.parse::<u128>().unwrap())).unwrap();
+
+        let tr = G::new_mut(Arc::clone(&db), &mut txn)
+            .insert_v::<Filter>(&data, "vector", None);
+        let vec = tr.collect_to::<Vec<_>>();
+
         all_vectors.push(vec);
         let time = start_time.elapsed();
+
         if i % 1000 == 0 {
-            println!(
-                "{} => inserting in {} ms, vector: {}",
-                i,
-                time.as_millis(),
-                id
-            );
+            println!("{} => inserting in {:?}", i, time);
             println!("time taken so far: {:?}", over_all_time.elapsed());
         }
         total_insertion_time += time;
     }
-    txn.commit().unwrap();
-    let txn = env.read_txn().unwrap();
-    println!("{:?}", index.config);
 
-    println!(
-        "total insertion time: {:.2?} seconds",
-        total_insertion_time.as_secs_f64()
-    );
+    println!("total insertion time: {:.2?} seconds", total_insertion_time.as_secs_f64());
     println!(
         "average insertion time per vec: {:.2?} milliseconds",
-        total_insertion_time.as_millis() as f64 / n_base as f64
+        total_insertion_time.as_millis() as f64 / n_vecs as f64
     );
 
-    println!("calculating ground truths");
     let ground_truths = calc_ground_truths(all_vectors, query_vectors.to_vec(), k);
 
     println!("searching and comparing...");
     let test_id = format!("k = {} with {} queries", k, n_query);
-
     let mut total_recall = 0.0;
     let mut total_precision = 0.0;
     let mut total_search_time = std::time::Duration::from_secs(0);
@@ -286,22 +271,15 @@ fn test_hnsw_precision_dbpedia_vectors() {
         total_precision += precision;
     }
 
-    println!(
-        "total search time: {:.2?} seconds",
-        total_search_time.as_secs_f64()
-    );
+    total_recall = total_recall / n_query as f64;
+    total_precision = total_precision / n_query as f64;
+
+    println!("total search time: {:.2?} seconds", total_search_time.as_secs_f64());
     println!(
         "average search time per query: {:.2?} milliseconds",
         total_search_time.as_millis() as f64 / n_query as f64
     );
-
-    total_recall = total_recall / n_query as f64;
-    total_precision = total_precision / n_query as f64;
-    println!(
-        "{}: avg. recall: {:.4?}, avg. precision: {:.4?}",
-        test_id, total_recall, total_precision
-    );
+    println!("{}: avg. recall: {:.4?}, avg. precision: {:.4?}", test_id, total_recall, total_precision);
     assert!(total_recall >= 0.8, "recall not high enough!");
 }
-*/
 
