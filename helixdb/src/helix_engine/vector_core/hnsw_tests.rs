@@ -142,6 +142,14 @@ fn bench_hnsw_bulk_insert_100k() {
 }
 
 #[test]
+fn bench_hnsw_memory_inserted() {
+    let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
+    let mut txn = db.graph_env.write_txn().unwrap();
+    let size = db.graph_env.real_disk_size().unwrap() as usize;
+    println!("Storage space size: {} bytes", size); // div 1024 for kb, div 1024 for mb
+}
+
+#[test]
 fn bench_hnsw_memory_100k() {
     let n_vecs = 100_000;
     let vectors = load_dbpedia_vectors(n_vecs).unwrap();
