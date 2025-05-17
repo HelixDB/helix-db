@@ -1,162 +1,200 @@
-// use crate::helix_engine::vector_core::{
-//     hnsw::HNSW,
-//     vector::HVector,
-//     vector_core::{HNSWConfig, VectorCore},
-// };
-// use heed3::{Env, EnvOpenOptions};
-// use polars::prelude::*;
-// use rand::prelude::SliceRandom;
-// use rayon::prelude::*;
-// use std::{
-//     collections::HashSet,
-//     env,
-//     fs::{self, File},
-//     io::{BufReader, Error as IoError, Read},
-//     time::Instant,
-// };
+use crate::helix_engine::{
+    storage_core::storage_core::HelixGraphStorage,
+    graph_core::{
+        config::Config,
+        ops::{
+            g::G,
+            vectors::insert::InsertVAdapter,
+        },
+    },
+    vector_core::{
+        vector::HVector,
+    },
+};
+use heed3::RwTxn;
+use std::{
+    sync::Arc,
+    time::{
+        Duration,
+        Instant,
+    },
+    fs::{self, File},
+};
+use polars::prelude::*;
+use kdam::tqdm;
 
-// fn setup_temp_env() -> Env {
-//     let temp_dir = tempfile::tempdir().unwrap();
-//     let path = temp_dir.path().to_str().unwrap();
+type Filter = fn(&HVector) -> bool;
 
-//     // let home_dir = dirs::home_dir().unwrap();
-//     // let path = format!("{}/dev/helix-db/helixdb_test", home_dir.to_str().unwrap());
+fn setup_db() -> HelixGraphStorage {
+    let config = Config::new(16, 128, 768, 10);
+    let db = HelixGraphStorage::new("test-store/", config).unwrap();
+    db
+}
 
-//     unsafe {
-//         EnvOpenOptions::new()
-//             .map_size(40 * 1024 * 1024 * 1024) // 40 GB
-//             .max_dbs(10)
-//             .open(path)
-//             .unwrap()
-//     }
-// }
+// download the data from 'https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M'
+//      and put it into '../data/dbpedia-openai-1m/'. this will just be a set of .parquet files.
+//      this is the same dataset used here: 'https://qdrant.tech/benchmarks/'. we use this dataset
+//      because the vectors are of higher dimensionality
+fn load_dbpedia_vectors(limit: usize) -> Result<Vec<Vec<f64>>, PolarsError> {
+    if limit > 1_000_000 {
+        return Err(PolarsError::OutOfBounds(
+            "can't load more than 1,000,000 vecs from this dataset".into(),
+        ));
+    }
 
-// fn calc_ground_truths(
-//     vectors: Vec<HVector>,
-//     query_vectors: Vec<(String, Vec<f64>)>,
-//     k: usize,
-// ) -> Vec<Vec<String>> {
-//     query_vectors
-//         .par_iter()
-//         .map(|(_, query)| {
-//             let hquery = HVector::from_slice(0, 0, query.clone());
+    let data_dir = "../data/dbpedia-openai-1m/";
+    let mut all_vectors = Vec::new();
+    let mut total_loaded = 0;
 
-//             let mut distances: Vec<(String, f64)> = vectors
-//                 .iter()
-//                 .map(|hvector| (hvector.get_id().to_string(), hvector.distance_to(&hquery)))
-//                 .collect();
+    for entry in fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let path = entry.path();
 
-//             distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "parquet") {
+            let df = ParquetReader::new(File::open(&path)?)
+                .finish()?
+                .lazy()
+                .limit((limit - total_loaded) as u32)
+                .collect()?;
 
-//             distances.iter().take(k).map(|(id, _)| id.clone()).collect()
-//         })
-//         .collect()
-// }
+            let embeddings = df.column("openai")?.list()?;
 
-// fn load_dbpedia_vectors(limit: usize) -> Result<Vec<(String, Vec<f64>)>, PolarsError> {
-//     // https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M
-//     if limit > 1_000_000 {
-//         return Err(PolarsError::OutOfBounds(
-//             "can't load more than 1,000,000 vecs from this dataset".into(),
-//         ));
-//     }
+            for embedding in embeddings.into_iter() {
+                if total_loaded >= limit {
+                    break;
+                }
 
-//     let data_dir = "../data/dbpedia-openai-1m/";
-//     let mut all_vectors = Vec::new();
-//     let mut total_loaded = 0;
+                let embedding = embedding.unwrap();
+                let f64_series = embedding.cast(&DataType::Float64).unwrap();
+                let chunked = f64_series.f64().unwrap();
+                let vector: Vec<f64> = chunked.into_no_null_iter().collect();
 
-//     for entry in fs::read_dir(data_dir)? {
-//         let entry = entry?;
-//         let path = entry.path();
+                all_vectors.push(vector);
 
-//         if path.is_file() && path.extension().map_or(false, |ext| ext == "parquet") {
-//             let df = ParquetReader::new(File::open(&path)?)
-//                 .finish()?
-//                 .lazy()
-//                 .limit((limit - total_loaded) as u32)
-//                 .collect()?;
+                total_loaded += 1;
+            }
 
-//             let ids = df.column("_id")?.str()?;
-//             let embeddings = df.column("openai")?.list()?;
+            if total_loaded >= limit {
+                break;
+            }
+        }
+    }
 
-//             for (_id, embedding) in ids.into_iter().zip(embeddings.into_iter()) {
-//                 if total_loaded >= limit {
-//                     break;
-//                 }
+    Ok(all_vectors)
+}
 
-//                 let embedding = embedding.unwrap();
-//                 let f64_series = embedding.cast(&DataType::Float64).unwrap();
-//                 let chunked = f64_series.f64().unwrap();
-//                 let vector: Vec<f64> = chunked.into_no_null_iter().collect();
+fn clear_dbs(txn: &mut RwTxn, db: &Arc<HelixGraphStorage>) {
+    let _ = db.nodes_db.clear(txn);
+    let _ = db.edges_db.clear(txn);
+    let _ = db.out_edges_db.clear(txn);
+    let _ = db.in_edges_db.clear(txn);
+    let _ = db.in_edges_db.clear(txn);
 
-//                 all_vectors.push((_id.unwrap().to_string(), vector));
-
-//                 total_loaded += 1;
-//             }
-
-//             if total_loaded >= limit {
-//                 break;
-//             }
-//         }
-//     }
-
-//     Ok(all_vectors)
-// }
-
-// fn load_ann_gist1m_vectors(limit: usize) -> Result<Vec<(String, Vec<f64>)>, IoError> {
-//     // http://corpus-texmex.irisa.fr/
-//     let path = env::current_dir()?.join("../data/ann-gist1m/gist_base.fvecs");
-//     let file = File::open(path)?;
-//     let mut reader = BufReader::new(file);
-
-//     let mut vectors = Vec::new();
-//     let mut buffer = Vec::new();
-
-//     while vectors.len() < limit {
-//         let mut dim_bytes = [0u8; 4];
-//         match reader.read_exact(&mut dim_bytes) {
-//             Ok(_) => {
-//                 let dim = u32::from_le_bytes(dim_bytes) as usize;
-
-//                 buffer.resize(dim * 4, 0);
-//                 reader.read_exact(&mut buffer)?;
-
-//                 let vec_f32: Vec<f32> = buffer[..dim * 4]
-//                     .chunks_exact(4)
-//                     .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-//                     .collect();
-
-//                 let vec_f64: Vec<f64> = vec_f32.iter().map(|&x| x as f64).collect();
-
-//                 let vector_id = format!("vector_{}", vectors.len());
-
-//                 vectors.push((vector_id, vec_f64));
-//             }
-//             Err(e) => {
-//                 if e.kind() != std::io::ErrorKind::UnexpectedEof {
-//                     return Err(e);
-//                 }
-//                 break;
-//             }
-//         }
-
-//         if vectors.len() >= limit {
-//             break;
-//         }
-//     }
-
-//     Ok(vectors)
-// }
-
-// // cargo test --release test_recall_precision_real_data -- --nocapture
+    let _ = db.vectors.vectors_db.clear(txn);
+    let _ = db.vectors.vector_data_db.clear(txn);
+    let _ = db.vectors.out_edges_db.clear(txn);
+}
 
 #[test]
-fn test_recall_precision_real_data() {
-    type Filter = fn(&HVector) -> bool;
-    let n_base = 50_000;
-    //let dims = 1536;
-    let vectors = load_dbpedia_vectors(n_base).unwrap();
-    // let vectors = load_ann_gist1m_vectors(n_base).unwrap();
+fn bench_hnsw_insert_100k() {
+    let n_vecs = 100_000;
+    let vectors = load_dbpedia_vectors(n_vecs).unwrap();
+    let db = Arc::new(setup_db());
+    let mut txn = db.graph_env.write_txn().unwrap();
+    clear_dbs(&mut txn, &db);
+
+    let mut insert_times = Vec::with_capacity(n_vecs);
+    let start = Instant::now();
+    for vec in tqdm!(vectors.iter()) {
+        let insert_start = Instant::now();
+        G::new_mut(Arc::clone(&db), &mut txn)
+            .insert_v::<Filter>(&vec, "vector", None);
+        insert_times.push(insert_start.elapsed());
+    }
+    let duration = start.elapsed();
+
+    let total_insert_time: Duration = insert_times.iter().sum();
+    let avg_insert_time = if !insert_times.is_empty() {
+        total_insert_time / insert_times.len() as u32
+    } else {
+        Duration::from_secs(0)
+    };
+
+    println!("Total insertion time for {} vectors: {:?}", n_vecs, duration);
+    println!("Average time per insertion (total/num_vectors): {:?}", duration / n_vecs as u32);
+    println!("Average insertion time per query (measured individually): {:?}", avg_insert_time);
+}
+
+#[test]
+fn bench_hnsw_bulk_insert_100k() {
+    let n_vecs = 100_000;
+    let vectors = load_dbpedia_vectors(n_vecs).unwrap();
+    let db = Arc::new(setup_db());
+    let mut txn = db.graph_env.write_txn().unwrap();
+    clear_dbs(&mut txn, &db);
+
+    let start = Instant::now();
+    G::new_mut(Arc::clone(&db), &mut txn)
+        .insert_vs::<Filter>(&vectors, None);
+    let duration = start.elapsed();
+
+    println!("Total insertion time for {} vectors: {:?}", n_vecs, duration);
+}
+
+#[test]
+fn bench_hnsw_memory_100k() {
+    let n_vecs = 100_000;
+    let vectors = load_dbpedia_vectors(n_vecs).unwrap();
+    let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
+    let mut txn = db.graph_env.write_txn().unwrap();
+    clear_dbs(&mut txn, &db);
+
+    for vec in tqdm!(vectors.iter()) {
+        let _  = G::new_mut(Arc::clone(&db), &mut txn)
+            .insert_v::<Filter>(&vec, "vector", None);
+    }
+
+    let size = db.graph_env.real_disk_size().unwrap() as usize;
+    println!("Storage space size: {} bytes", size); // div 1024 for kb, div 1024 for mb
+}
+
+//#[test]
+//fn bench_hnsw_search() {}
+
+//#[test]
+//fn bench_hnsw_precision() {}
+
+/*
+fn calc_ground_truths(
+    vectors: Vec<HVector>,
+    query_vectors: Vec<(String, Vec<f64>)>,
+    k: usize,
+) -> Vec<Vec<String>> {
+    query_vectors
+        .par_iter()
+        .map(|query| {
+            let hquery = HVector::from_slice(0, 0, query.clone());
+
+            let mut distances: Vec<(String, f64)> = vectors
+                .iter()
+                .map(|hvector| (hvector.get_id().to_string(), hvector.distance_to(&hquery)))
+                .collect();
+
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+            distances.iter().take(k).map(|(id, _)| id.clone()).collect()
+        })
+        .collect()
+}
+
+// cargo test --release test_recall_precision_real_data -- --nocapture
+#[test]
+fn test_hnsw_precision_dbpedia_vectors() {
+    let n_vecs = 50_000;
+    let vectors = load_dbpedia_vectors(n_vecs).unwrap();
+    let db = Arc::new(setup_db());
+    let mut txn = db.graph_env.write_txn().unwrap();
+    db.clear(&mut txn).unwrap();
     println!("loaded {} vectors", vectors.len());
 
     let n_query = 5_000; // 10-20%
@@ -257,3 +295,5 @@ fn test_recall_precision_real_data() {
     );
     assert!(total_recall >= 0.8, "recall not high enough!");
 }
+*/
+

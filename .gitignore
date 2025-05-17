@@ -25,3 +25,5 @@ other_data/
 *.hx
 *.png
 !examples/rag_demo/**
+test-store/
+

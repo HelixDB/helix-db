@@ -46,7 +46,7 @@ const DB_IN_EDGES: &str = "in_edges"; // For incoming edge indices (i:)
 
 // Key prefixes for different types of data
 
-pub struct HelixGraphStorage {
+pub struct HelixGraphStorage { // TODO: maybe make not public?
     pub graph_env: Env<WithTls>,
     pub nodes_db: Database<U128<BE>, Bytes>,
     pub edges_db: Database<U128<BE>, Bytes>,
@@ -79,27 +79,26 @@ impl HelixGraphStorage {
         let nodes_db = graph_env
             .database_options()
             .types::<U128<BE>, Bytes>()
-            //.flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED) // NOTE: commend out because add_n gave error upon inserting
             .name(DB_NODES)
             .create(&mut wtxn)?;
         let edges_db = graph_env
             .database_options()
             .types::<U128<BE>, Bytes>()
-            // .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED)
             .name(DB_EDGES)
             .create(&mut wtxn)?;
         let out_edges_db: Database<Bytes, Bytes> = graph_env
             .database_options()
             .types::<Bytes, Bytes>()
-            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED)
+            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED) // TODO: remove as well?
             .name(DB_OUT_EDGES)
             .create(&mut wtxn)?;
         let in_edges_db: Database<Bytes, Bytes> = graph_env
             .database_options()
             .types::<Bytes, Bytes>()
-            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED)
+            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED) // TODO: remove as well?
             .name(DB_IN_EDGES)
             .create(&mut wtxn)?;
+
         // Create secondary indices
         let mut secondary_indices = HashMap::new();
         if let Some(indexes) = config.graph_config.secondary_indices {
@@ -110,7 +109,6 @@ impl HelixGraphStorage {
                 );
             }
         }
-        println!("Secondary Indices: {:?}", secondary_indices);
 
         let vectors = VectorCore::new(
             &graph_env,

@@ -44,15 +44,13 @@ tokio-postgres = { version = "0.7", features = [
     "with-chrono-0_4",
 ], optional = true }
 
-# testing
-polars = { version = "0.46.0", optional = true, features = ["parquet", "lazy"] }
 tempfile = { version = "3.2", optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
 rand = "0.9.0"
-csv = "1.1"
 lazy_static = "1.4.0"
+polars = { version = "0.46.0", features = ["parquet", "lazy", "json"] }
+kdam = "0.3"
 
 [features]
 compiler = ["pest", "pest_derive"]
@@ -71,19 +69,8 @@ build = ["compiler"]
 full = ["build", "compiler", "ingestion", "cosine"]
 default = ["full"]
 
-[[bench]]
-name = "graph_benchmarks"
-harness = false
-
-[[bench]]
-name = "vector_benchmarks"
-harness = false
-
-[[bench]]
-name = "general_benchmarks"
-harness = false
-
 [profile.release]
 strip = "debuginfo"
 lto = true
 opt-level = "z"
+
