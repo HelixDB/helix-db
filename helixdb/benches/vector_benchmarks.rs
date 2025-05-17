@@ -1,4 +1,17 @@
-use helixdb::helix_engine::graph_core::graph_core::{HelixGraphEngine, HelixGraphEngineOpts};
+use helixdb::helix_engine::{
+    graph_core::{
+        graph_core::{
+            HelixGraphEngine,
+            HelixGraphEngineOpts,
+        },
+        ops::{
+            g::G,
+            vectors::insert::InsertVAdapter,
+        },
+    },
+    vector_core::vector::HVector,
+};
+
 use heed3::{EnvOpenOptions, Env};
 use std::{
     sync::Arc,
@@ -15,7 +28,7 @@ use criterion::{
     black_box
 };
 use tempfile::TempDir;
-use polars::error;
+//use polars::error;
 
 fn setup_temp_env() -> Env {
     let temp_dir = TempDir::new().unwrap();
@@ -30,8 +43,7 @@ fn setup_temp_env() -> Env {
 }
 
 fn setup_db() -> HelixGraphEngine {
-    HelixGraphEngine::new(HelixGraphEngineOpts::default()).unwrap() // TODO: should be to temp dir
-                                                                    // maybe?
+    HelixGraphEngine::new(HelixGraphEngineOpts::default()).unwrap()
 }
 
 // download the data from 'https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M'
@@ -91,9 +103,12 @@ fn bench_hnsw_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("hnsw_insert");
 
     let vectors = load_dbpedia_vectors(100_000);
+    let dims = 1536;
     let env = setup_temp_env();
     let mut txn = env.write_txn().unwrap();
-    let graph_engine = Arc::new(setup_db());
+    let db = Arc::new(&setup_db().storage);
+    db.graph_env = setup_temp_env();
+    let txn = db.graph_env.write_txn().unwrap();
 
     group.sample_size(1);
 
@@ -101,7 +116,8 @@ fn bench_hnsw_insert(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("hnsw_insert_100k", dims), |b| {
         b.iter(|| {
             for vector in vectors.iter() {
-                black_box(index.insert(black_box(vector)));
+                let tr = G::new_mut(Arc::clone(&db), &mut txn)
+                    .insert_v::<fn(&HVector) -> bool>(&vector, None);
             }
         });
     });
