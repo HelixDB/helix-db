@@ -13,7 +13,6 @@ use std::{
         HashMap,
     },
 };
-use flume::unbounded;
 use heed3::{
     types::{Bytes, Unit},
     Database, Env, RoTxn, RwTxn,
@@ -22,7 +21,7 @@ use crate::protocol::value::Value;
 use itertools::Itertools;
 use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
-use rayon::prelude::*;
+//use rayon::prelude::*;
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
@@ -407,6 +406,7 @@ impl VectorCore {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
         let mut results: BinaryHeap<HVector> = BinaryHeap::new();
+
         entry_point.set_distance(entry_point.distance_to(query)?);
         candidates.push(Candidate {
             id: entry_point.get_id(),
@@ -415,9 +415,7 @@ impl VectorCore {
         results.push(entry_point.clone());
         visited.insert(entry_point.get_id());
 
-        while !candidates.is_empty() {
-            let curr_cand = candidates.pop().unwrap();
-
+        while let Some(curr_cand) = candidates.pop() {
             if results.len() >= ef
                 && results
                     .get_max()
@@ -426,65 +424,34 @@ impl VectorCore {
                 break;
             }
 
-            let neighbors = self.get_neighbors(txn, curr_cand.id, level, filter)?;
+            let max_distance = if results.len() >= ef {
+                results.get_max().map(|f| f.get_distance())
+            } else {
+                None
+            };
 
-            let neighbor_results: Vec<(u128, f64, HVector)> = neighbors
-                .into_par_iter()
-                .filter_map(|neighbor| {
-                    if visited.contains(&neighbor.get_id()) {
-                        return None;
+            self.get_neighbors(txn, curr_cand.id, level, filter)?.into_iter()
+                .filter(|neighbor| visited.insert(neighbor.get_id()))
+                .filter_map(|mut neighbor| {
+                    let distance = neighbor.distance_to(query).ok()?;
+                    if max_distance.map_or(true, |max| distance < max) {
+                        neighbor.set_distance(distance);
+                        Some((neighbor, distance))
+                    } else {
+                        None
                     }
-                    let distance = match neighbor.distance_to(query) {
-                        Ok(d) => d,
-                        Err(_) => return None,
-                    };
-                    Some((neighbor.get_id(), distance, neighbor))
                 })
-                .collect();
-
-            for (id, distance, mut neighbor) in neighbor_results {
-                if !visited.insert(id) {
-                    continue;
+            .for_each(|(neighbor, distance)| {
+                candidates.push(Candidate {
+                    id: neighbor.get_id(),
+                    distance,
+                });
+                results.push(neighbor);
+                if results.len() > ef {
+                    results = results.take_inord(ef);
                 }
-
-                let f = results.get_max().unwrap();
-                if results.len() < ef || distance < f.get_distance() {
-                    neighbor.set_distance(distance);
-                    candidates.push(Candidate {
-                        id: neighbor.get_id(),
-                        distance,
-                    });
-                    results.push(neighbor);
-                    if results.len() > ef {
-                        results = results.take_inord(ef);
-                    }
-                }
-            }
-
-            /*
-            for mut neighbor in self.get_neighbors(txn, curr_cand.id, level, filter)? {
-                if !visited.insert(neighbor.get_id()) {
-                    continue;
-                }
-
-                let distance = neighbor.distance_to(query)?;
-
-                let f = results.get_max().unwrap();
-                if results.len() < ef || distance < f.get_distance() {
-                    neighbor.set_distance(distance);
-                    candidates.push(Candidate {
-                        id: neighbor.get_id(),
-                        distance,
-                    });
-                    results.push(neighbor);
-                    if results.len() > ef {
-                        results = results.take_inord(ef);
-                    }
-                }
-            }
-            */
+            });
         }
-
         Ok(results)
     }
 }
@@ -572,7 +539,8 @@ impl HNSW for VectorCore {
     where
         F: Fn(&HVector) -> bool,
     {
-        let id = nid.unwrap_or(uuid::Uuid::new_v4().as_u128());
+        let id = nid.unwrap_or(uuid::Uuid::new_v4().as_u128()); // TODO: put this id generation
+                                                                // into HVector::new()
         let new_level = self.get_new_level();
 
         let mut query = HVector::from_slice(id, 0, data.to_vec());

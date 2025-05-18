@@ -53,6 +53,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
                 .map(|vector| Ok::<TraversalVal, GraphError>(TraversalVal::Vector(vector)))
                 .collect::<Vec<_>>()
                 .into_iter(),
+            // TODO: handle all of these errors
             //Err(VectorError::VectorNotFound()) =>
             //Err(VectorError::InvalidVectorData) =>
             //Err(VectorError::InvalidVectorId) =>
