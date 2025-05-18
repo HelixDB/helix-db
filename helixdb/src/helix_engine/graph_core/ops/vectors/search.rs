@@ -53,24 +53,30 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
                 .map(|vector| Ok::<TraversalVal, GraphError>(TraversalVal::Vector(vector)))
                 .collect::<Vec<_>>()
                 .into_iter(),
-            // TODO: handle all of these errors
-            //Err(VectorError::VectorNotFound()) =>
-            //Err(VectorError::InvalidVectorData) =>
-            //Err(VectorError::InvalidVectorId) =>
-            //Err(VectorError::InvalidVectorLevel) =>
-            //Err(VectorError::InvalidEntryPoint) =>
+            Err(VectorError::VectorNotFound(id)) => {
+                let error = GraphError::VectorError(format!("vector not found for id {}", id));
+                once(Err(error)).collect::<Vec<_>>().into_iter()
+            },
+            Err(VectorError::InvalidVectorData) => {
+                let error = GraphError::VectorError("invalid vector data".to_string());
+                once(Err(error)).collect::<Vec<_>>().into_iter()
+            },
             Err(VectorError::EntryPointNotFound) => {
                 let error = GraphError::VectorError("no entry point found for hnsw index".to_string());
                 once(Err(error)).collect::<Vec<_>>().into_iter()
-            }
-            //Err(VectorError::InvalidVectorCoreConfig) =>
-            //Err(VectorError::ConversionError()) =>
-            //Err(VectorError::VectorCoreError()) =>
+            },
+            Err(VectorError::ConversionError(e)) => {
+                let error = GraphError::VectorError(format!("conversion error: {}", e));
+                once(Err(error)).collect::<Vec<_>>().into_iter()
+            },
+            Err(VectorError::VectorCoreError(e)) => {
+                let error = GraphError::VectorError(format!("vector core error: {}", e));
+                once(Err(error)).collect::<Vec<_>>().into_iter()
+            },
             Err(VectorError::InvalidVectorLength) => {
                 let error = GraphError::VectorError("invalid vector dimensions!".to_string());
                 once(Err(error)).collect::<Vec<_>>().into_iter()
-            }
-            Err(_) => once(Err(GraphError::VectorError("a vector error has occured!".to_string()))).collect::<Vec<_>>().into_iter(),
+            },
         };
 
         let iter = SearchV { iter };

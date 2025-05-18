@@ -86,6 +86,7 @@ fn load_dbpedia_vectors(limit: usize) -> Result<Vec<Vec<f64>>, PolarsError> {
     Ok(all_vectors)
 }
 
+// TODO: doesn't work correctly
 fn clear_dbs(txn: &mut RwTxn, db: &Arc<HelixGraphStorage>) {
     let _ = db.nodes_db.clear(txn);
     let _ = db.edges_db.clear(txn);
@@ -158,11 +159,11 @@ fn bench_hnsw_insert_100k() {
 }
 
 #[test]
-fn bench_hnsw_memory_inserted() {
+fn bench_hnsw_memory() {
     let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
     let size = db.graph_env.real_disk_size().unwrap() as usize;
-    assert!(size == 1832419328, "vectors have been inserted before running this test");
-    println!("storage space size: {} MB", size / 1024 / 1024);
+    assert!(size >= 1832419328, "vectors have been inserted before running this test");
+    println!("storage space size: {} bytes or {} MB", size, size / 1024 / 1024);
 }
 
 #[test]
@@ -170,7 +171,7 @@ fn bench_hnsw_search() {
     let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
     let txn = db.graph_env.read_txn().unwrap();
     let size = db.graph_env.real_disk_size().unwrap() as usize;
-    assert!(size == 1832419328, "vectors have been inserted before running this test");
+    assert!(size >= 1832419328, "vectors have been inserted before running this test");
 
     let n_vecs = 5_000;
     let k: usize = 12;

@@ -155,11 +155,7 @@ pub enum VectorError {
     VectorNotFound(String),
     InvalidVectorLength,
     InvalidVectorData,
-    InvalidVectorId,
-    InvalidVectorLevel,
-    InvalidEntryPoint,
     EntryPointNotFound,
-    InvalidVectorCoreConfig,
     ConversionError(String),
     VectorCoreError(String),
 }
@@ -170,11 +166,7 @@ impl fmt::Display for VectorError {
             VectorError::VectorNotFound(id) => write!(f, "Vector not found: {}", id),
             VectorError::InvalidVectorLength => write!(f, "Invalid vector length"),
             VectorError::InvalidVectorData => write!(f, "Invalid vector data"),
-            VectorError::InvalidVectorId => write!(f, "Invalid vector id"),
-            VectorError::InvalidVectorLevel => write!(f, "Invalid vector level"),
-            VectorError::InvalidEntryPoint => write!(f, "Invalid entry point"),
             VectorError::EntryPointNotFound => write!(f, "Entry point not found"),
-            VectorError::InvalidVectorCoreConfig => write!(f, "Invalid vector core config"),
             VectorError::ConversionError(msg) => write!(f, "Conversion error: {}", msg),
             VectorError::VectorCoreError(msg) => write!(f, "Vector core error: {}", msg),
         }

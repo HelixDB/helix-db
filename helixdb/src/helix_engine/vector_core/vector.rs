@@ -48,7 +48,8 @@ impl DistanceCalc for HVector {
 
 impl HVector {
     #[inline(always)]
-    pub fn new(id: u128, data: Vec<f64>) -> Self {
+    pub fn new(data: Vec<f64>) -> Self {
+        let id = uuid::Uuid::new_v4().as_u128();
         HVector {
             id,
             is_deleted: false,
@@ -60,7 +61,8 @@ impl HVector {
     }
 
     #[inline(always)]
-    pub fn from_slice(id: u128, level: usize, data: Vec<f64>) -> Self {
+    pub fn from_slice(level: usize, data: Vec<f64>) -> Self {
+        let id = uuid::Uuid::new_v4().as_u128();
         HVector {
             id,
             is_deleted: false,
@@ -344,3 +346,4 @@ impl Filterable for HVector {
         unreachable!()
     }
 }
+

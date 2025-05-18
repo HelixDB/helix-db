@@ -470,7 +470,7 @@ impl HNSW for VectorCore {
             Some(bytes) => {
                 let vector = match with_data {
                     true => HVector::from_bytes(id, level, &bytes),
-                    false => Ok(HVector::from_slice(id, level, vec![])),
+                    false => Ok(HVector::from_slice(level, vec![])),
                 }?;
                 Ok(vector)
             }
@@ -490,7 +490,7 @@ impl HNSW for VectorCore {
     where
         F: Fn(&HVector) -> bool,
     {
-        let query = HVector::from_slice(0, 0, query.to_vec());
+        let query = HVector::from_slice(0, query.to_vec());
 
         let mut entry_point = self.get_entry_point(txn)?;
 
@@ -533,17 +533,14 @@ impl HNSW for VectorCore {
         &self,
         txn: &mut RwTxn,
         data: &[f64],
-        nid: Option<u128>,
         fields: Option<HashMap<String, Value>>,
     ) -> Result<HVector, VectorError>
     where
         F: Fn(&HVector) -> bool,
     {
-        let id = nid.unwrap_or(uuid::Uuid::new_v4().as_u128()); // TODO: put this id generation
-                                                                // into HVector::new()
         let new_level = self.get_new_level();
 
-        let mut query = HVector::from_slice(id, 0, data.to_vec());
+        let mut query = HVector::from_slice(0, data.to_vec());
         self.put_vector(txn, &query)?;
 
         query.level = new_level;
@@ -628,20 +625,6 @@ impl HNSW for VectorCore {
             })
             .filter_ok(|vector: &HVector| level.map_or(true, |l| vector.level == l))
             .collect()
-    }
-
-    // TODO: unused used
-    fn load<F>(&self, txn: &mut RwTxn, data: Vec<&[f64]>) -> Result<(), VectorError>
-    where
-        F: Fn(&HVector) -> bool,
-    {
-        for v in data.iter() {
-            let _ = self.insert::<F>(txn, v, None, None);
-        }
-
-        // NOTE: need to txn.commit() outside of call
-
-        Ok(())
     }
 }
 

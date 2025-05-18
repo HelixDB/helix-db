@@ -531,8 +531,7 @@ impl PostgresIngestor {
                 Some(vector_str) => {
                     // Parse the string representation, e.g., "[1,2,3]"
                     let vec_f64 = Self::parse_vector_string(&vector_str)?;
-                    let id = rand::rng().random();
-                    Ok(Value::Vector(HVector::new(id, vec_f64)))
+                    Ok(Value::Vector(HVector::new(vec_f64)))
                 }
                 None => Ok(Value::Null),
             }
