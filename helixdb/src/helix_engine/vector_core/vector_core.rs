@@ -5,10 +5,6 @@ use crate::helix_engine::{
         hnsw::HNSW,
     },
 };
-use crate::protocol::value::Value;
-use itertools::Itertools;
-use rand::prelude::Rng;
-use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::{
@@ -17,10 +13,16 @@ use std::{
         HashMap,
     },
 };
+use flume::unbounded;
 use heed3::{
     types::{Bytes, Unit},
     Database, Env, RoTxn, RwTxn,
 };
+use crate::protocol::value::Value;
+use itertools::Itertools;
+use rand::prelude::Rng;
+use serde::{Deserialize, Serialize};
+use rayon::prelude::*;
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
@@ -375,7 +377,7 @@ impl VectorCore {
             let mut result = BinaryHeap::with_capacity(m * cands.len());
             for candidate in cands.iter() {
                 for mut neighbor in self.get_neighbors(txn, candidate.get_id(), level, filter)? {
-                    if visited.insert(neighbor.get_id().to_string()) {
+                    if visited.insert(neighbor.get_id().to_string()) { // TODO: NOT TO_STRING()
                         neighbor.set_distance(neighbor.distance_to(query)?);
                         if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor)) {
                             result.push(neighbor);
@@ -402,7 +404,7 @@ impl VectorCore {
     where
         F: Fn(&HVector) -> bool,
     {
-        let mut visited: HashSet<String> = HashSet::new();
+        let mut visited: HashSet<u128> = HashSet::new();
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
         let mut results: BinaryHeap<HVector> = BinaryHeap::new();
         entry_point.set_distance(entry_point.distance_to(query)?);
@@ -411,7 +413,7 @@ impl VectorCore {
             distance: entry_point.get_distance(),
         });
         results.push(entry_point.clone());
-        visited.insert(entry_point.get_id().to_string());
+        visited.insert(entry_point.get_id());
 
         while !candidates.is_empty() {
             let curr_cand = candidates.pop().unwrap();
@@ -424,8 +426,44 @@ impl VectorCore {
                 break;
             }
 
+            let neighbors = self.get_neighbors(txn, curr_cand.id, level, filter)?;
+
+            let neighbor_results: Vec<(u128, f64, HVector)> = neighbors
+                .into_par_iter()
+                .filter_map(|neighbor| {
+                    if visited.contains(&neighbor.get_id()) {
+                        return None;
+                    }
+                    let distance = match neighbor.distance_to(query) {
+                        Ok(d) => d,
+                        Err(_) => return None,
+                    };
+                    Some((neighbor.get_id(), distance, neighbor))
+                })
+                .collect();
+
+            for (id, distance, mut neighbor) in neighbor_results {
+                if !visited.insert(id) {
+                    continue;
+                }
+
+                let f = results.get_max().unwrap();
+                if results.len() < ef || distance < f.get_distance() {
+                    neighbor.set_distance(distance);
+                    candidates.push(Candidate {
+                        id: neighbor.get_id(),
+                        distance,
+                    });
+                    results.push(neighbor);
+                    if results.len() > ef {
+                        results = results.take_inord(ef);
+                    }
+                }
+            }
+
+            /*
             for mut neighbor in self.get_neighbors(txn, curr_cand.id, level, filter)? {
-                if !visited.insert(neighbor.get_id().to_string()) {
+                if !visited.insert(neighbor.get_id()) {
                     continue;
                 }
 
@@ -444,6 +482,7 @@ impl VectorCore {
                     }
                 }
             }
+            */
         }
 
         Ok(results)

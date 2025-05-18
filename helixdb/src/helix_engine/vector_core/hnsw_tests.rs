@@ -11,14 +11,16 @@ use crate::helix_engine::{
     },
 };
 use std::{
-    collections::HashSet, fs::{self, File}, sync::Arc, time::{Duration, Instant}
+    collections::HashSet,
+    fs::{self, File},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 use heed3::RwTxn;
 use rand::seq::SliceRandom;
 use polars::prelude::*;
 use kdam::tqdm;
 use rayon::prelude::*;
-use tokio::fs::metadata;
 
 // make sure to test with cargo test --release <test_name> -- --nocapture
 
