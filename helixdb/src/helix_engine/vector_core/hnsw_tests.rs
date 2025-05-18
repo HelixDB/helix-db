@@ -11,14 +11,16 @@ use crate::helix_engine::{
     },
 };
 use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-    fs::{self, File},
+    collections::HashSet, fs::{self, File}, sync::Arc, time::{Duration, Instant}
 };
 use heed3::RwTxn;
-use itertools::Itertools;
+use rand::seq::SliceRandom;
 use polars::prelude::*;
 use kdam::tqdm;
+use rayon::prelude::*;
+use tokio::fs::metadata;
+
+// make sure to test with cargo test --release <test_name> -- --nocapture
 
 type Filter = fn(&HVector) -> bool;
 
@@ -94,6 +96,34 @@ fn clear_dbs(txn: &mut RwTxn, db: &Arc<HelixGraphStorage>) {
     let _ = db.vectors.out_edges_db.clear(txn);
 }
 
+fn calc_ground_truths(
+    vectors: Vec<HVector>,
+    query_vectors: Vec<HVector>,
+    k: usize,
+) -> Vec<Vec<u128>> {
+    println!("calculating ground truths");
+
+    query_vectors
+        .par_iter()
+        .map(|query| {
+            let mut distances: Vec<(u128, f64)> = vectors
+                .iter()
+                .map(|hvector| (hvector.get_id(), hvector.distance_to(query).unwrap()))
+                .collect();
+
+            distances.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1).unwrap()
+            });
+
+            distances
+                .iter()
+                .take(k)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<u128>>()
+        })
+        .collect()
+}
+
 #[test]
 fn bench_hnsw_insert_100k() {
     let n_vecs = 100_000;
@@ -110,6 +140,7 @@ fn bench_hnsw_insert_100k() {
             .insert_v::<Filter>(&vec, "vector", None);
         insert_times.push(insert_start.elapsed());
     }
+    txn.commit().unwrap();
     let duration = start.elapsed();
 
     let total_insert_time: Duration = insert_times.iter().sum();
@@ -128,25 +159,8 @@ fn bench_hnsw_insert_100k() {
 fn bench_hnsw_memory_inserted() {
     let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
     let size = db.graph_env.real_disk_size().unwrap() as usize;
-    assert!(size > 5000, "vectors have been inserted before running this test");
-    println!("Storage space size: {} bytes", size); // div 1024 for kb, div 1024 for mb
-}
-
-#[test]
-fn bench_hnsw_memory_100k() {
-    let n_vecs = 100_000;
-    let vectors = load_dbpedia_vectors(n_vecs).unwrap();
-    let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
-    let mut txn = db.graph_env.write_txn().unwrap();
-    clear_dbs(&mut txn, &db);
-
-    for vec in tqdm!(vectors.iter()) {
-        let _  = G::new_mut(Arc::clone(&db), &mut txn)
-            .insert_v::<Filter>(&vec, "vector", None);
-    }
-
-    let size = db.graph_env.real_disk_size().unwrap() as usize;
-    println!("Storage space size: {} bytes", size); // div 1024 for kb, div 1024 for mb
+    assert!(size == 1832419328, "vectors have been inserted before running this test");
+    println!("storage space size: {} MB", size / 1024 / 1024);
 }
 
 #[test]
@@ -154,18 +168,32 @@ fn bench_hnsw_search() {
     let db: Arc<HelixGraphStorage> = Arc::new(setup_db());
     let txn = db.graph_env.read_txn().unwrap();
     let size = db.graph_env.real_disk_size().unwrap() as usize;
-    assert!(size >= 49152, "vectors have been inserted before running this test");
+    assert!(size == 1832419328, "vectors have been inserted before running this test");
 
     let n_vecs = 5_000;
-    let k: usize = 50;
+    let k: usize = 12;
     let query_vectors = load_dbpedia_vectors(n_vecs).unwrap();
 
+    println!("searching...");
     let mut search_times = Vec::with_capacity(n_vecs);
     let start = Instant::now();
-    for vec in query_vectors {
+    for vec in tqdm!(query_vectors.iter()) {
         let search_start = Instant::now();
-        let _  = G::new(Arc::clone(&db), &txn)
+        let tr  = G::new(Arc::clone(&db), &txn)
             .search_v::<Filter>(&vec, k, None);
+        let results: Vec<HVector> = tr
+            .filter_map(|result| match result {
+                Ok(TraversalVal::Vector(hvector)) => Some(hvector),
+                Err(e) => {
+                    println!("Error: {}", e);
+                    None
+                }
+                _ => None,
+            })
+        .collect();
+
+        assert!(results.len() > 0);
+
         search_times.push(search_start.elapsed());
     }
     let duration = start.elapsed();
@@ -182,38 +210,11 @@ fn bench_hnsw_search() {
     println!("Average search time per query (measured individually): {:?}", avg_search_time);
 }
 
-/*
-fn calc_ground_truths(
-    vectors: Vec<HVector>,
-    query_vectors: Vec<(String, Vec<f64>)>,
-    k: usize,
-) -> Vec<Vec<String>> {
-    println!("calculating ground truths");
-
-    query_vectors
-        .par_iter()
-        .map(|query| {
-            let hquery = HVector::from_slice(0, 0, query.clone());
-
-            let mut distances: Vec<(String, f64)> = vectors
-                .iter()
-                .map(|hvector| (hvector.get_id().to_string(), hvector.distance_to(&hquery)))
-                .collect();
-
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-            distances.iter().take(k).map(|(id, _)| id.clone()).collect()
-        })
-        .collect()
-}
-*/
-
-// cargo test --release test_recall_precision_real_data -- --nocapture
 #[test]
-fn test_hnsw_precision() {
+fn bench_hnsw_precision() {
     let n_vecs = 100_000;
-    let n_query = 12_000; // 10-20%
-    let k = 10;
+    let n_query = 10_000; // 10-20%
+    let k = 12;
     let vectors = load_dbpedia_vectors(n_vecs).unwrap();
     let db = Arc::new(setup_db());
     let mut txn = db.graph_env.write_txn().unwrap();
@@ -249,7 +250,17 @@ fn test_hnsw_precision() {
         total_insertion_time.as_millis() as f64 / n_vecs as f64
     );
 
-    /*
+    txn.commit().unwrap();
+    let txn = db.graph_env.read_txn().unwrap();
+    let size = db.graph_env.real_disk_size().unwrap() as usize;
+    assert!(size >= 49152, "vectors have been inserted before running this test");
+
+    let mut rng = rand::rng();
+    let mut shuffled_vectors: Vec<HVector> = all_vectors.clone();
+    shuffled_vectors.shuffle(&mut rng);
+    let _base_vectors = &shuffled_vectors[..n_vecs - n_query];
+    let query_vectors = &shuffled_vectors[n_vecs - n_query..];
+
     let ground_truths = calc_ground_truths(all_vectors, query_vectors.to_vec(), k);
 
     println!("searching and comparing...");
@@ -257,18 +268,28 @@ fn test_hnsw_precision() {
     let mut total_recall = 0.0;
     let mut total_precision = 0.0;
     let mut total_search_time = std::time::Duration::from_secs(0);
-    for ((_, query), gt) in query_vectors.iter().zip(ground_truths.iter()) {
+    for (query, gt) in query_vectors.iter().zip(ground_truths.iter()) {
         let start_time = Instant::now();
-        let results = index.search::<Filter>(&txn, query, k, None, false).unwrap();
+
+        let query_vec = query.get_data().to_vec();
+        let tr  = G::new(Arc::clone(&db), &txn)
+            .search_v::<Filter>(&query_vec, k, None);
+        let results: Vec<HVector> = tr
+            .filter_map(|result| match result {
+                Ok(TraversalVal::Vector(hvector)) => Some(hvector),
+                _ => None,
+            })
+        .collect();
+
         let search_duration = start_time.elapsed();
         total_search_time += search_duration;
 
-        let result_indices: HashSet<String> = results
+        let result_indices: HashSet<u128> = results
             .into_iter()
-            .map(|hvector| hvector.get_id().to_string())
+            .map(|hvector| hvector.get_id())
             .collect();
 
-        let gt_indices: HashSet<String> = gt.iter().cloned().collect();
+        let gt_indices: HashSet<u128> = gt.iter().cloned().collect();
         //println!("gt: {:?}\nresults: {:?}\n", gt_indices, result_indices);
         let true_positives = result_indices.intersection(&gt_indices).count();
 
@@ -289,6 +310,5 @@ fn test_hnsw_precision() {
     );
     println!("{}: avg. recall: {:.4?}, avg. precision: {:.4?}", test_id, total_recall, total_precision);
     assert!(total_recall >= 0.8, "recall not high enough!");
-    */
 }
 

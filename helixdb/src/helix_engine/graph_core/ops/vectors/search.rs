@@ -58,7 +58,10 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
             //Err(VectorError::InvalidVectorId) =>
             //Err(VectorError::InvalidVectorLevel) =>
             //Err(VectorError::InvalidEntryPoint) =>
-            //Err(VectorError::EntryPointNotFound) =>
+            Err(VectorError::EntryPointNotFound) => {
+                let error = GraphError::VectorError("no entry point found for hnsw index".to_string());
+                once(Err(error)).collect::<Vec<_>>().into_iter()
+            }
             //Err(VectorError::InvalidVectorCoreConfig) =>
             //Err(VectorError::ConversionError()) =>
             //Err(VectorError::VectorCoreError()) =>
@@ -70,7 +73,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
         };
 
         let iter = SearchV { iter };
-        // Wrap it with the RoTraversalIterator adapter
+
         RoTraversalIterator {
             inner: iter,
             storage: self.storage,
