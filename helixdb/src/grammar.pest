@@ -14,7 +14,7 @@ edge_def   = { "E::" ~ identifier_upper ~ edge_body }
 node_body  = { "{" ~ field_defs ~ "}" }
 edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ "To:" ~ identifier_upper ~ "," ~ properties ~ "}" }
 field_def  = { index? ~ identifier ~ ":" ~ param_type }
-field_defs = { field_def ~ ("," ~ field_def)* }
+field_defs = { (field_def ~ ",")* ~ (field_def ~ ","?)? }
 index= { "INDEX" }
 properties = { "Properties" ~ ":" ~ "{" ~ field_defs? ~ "}" }
 
@@ -162,10 +162,11 @@ NEQ             = { "NEQ" ~ "(" ~ (evaluates_to_anything | anonymous_traversal) 
 // ---------------------------------------------------------------------
 // Object access and remapping steps
 // ---------------------------------------------------------------------
-object_step   = { "{" ~ mapping_field ~ ("," ~ mapping_field)* ~ ("," ~ spread_object)? ~ "}" }
+object_step   = { "{" ~ ((mapping_field ~ ("," ~ mapping_field)* ~ ","?) |
+(mapping_field ~ ("," ~ mapping_field)* ~ ","?)? ~ spread_object)  ~ "}" }
 exclude_field = { "!" ~ "{" ~ identifier ~ ("," ~ identifier)* ~ ("," ~ spread_object)? ~ "}" }
 closure_step  = { "|" ~ identifier ~ "|" ~ object_step }
-spread_object = { ".." }
+spread_object = { ".." ~ ","?}
 mapping_field = { (identifier ~ (":" ~ (anonymous_traversal | evaluates_to_anything | object_step))) | identifier }
 
 

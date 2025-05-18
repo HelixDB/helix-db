@@ -5,7 +5,7 @@ use crate::protocol::value::Value;
 
 use super::{
     traversal_steps::Traversal,
-    utils::{write_headers, GenRef, GeneratedType},
+    utils::{write_headers, GenRef, GeneratedType, GeneratedValue},
 };
 
 pub struct Source {

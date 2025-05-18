@@ -1,4 +1,4 @@
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 
 #[derive(Clone)]
 pub enum GenRef<T>
@@ -35,7 +35,6 @@ where
             GenRef::MutDeRef(t) => write!(f, "mut *{}", t),
             GenRef::RefLiteral(t) => write!(f, "ref {}", t),
             GenRef::Unknown => write!(f, ""),
-
         }
     }
 }
@@ -60,13 +59,35 @@ where
         }
     }
 }
-
+impl<T> Debug for GenRef<T>
+where
+    T: Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GenRef::Literal(t) => write!(f, "Literal({})", t),
+            GenRef::Std(t) => write!(f, "Std({})", t),
+            GenRef::Mut(t) => write!(f, "Mut({})", t),
+            GenRef::Ref(t) => write!(f, "Ref({})", t),
+            GenRef::RefLT(lifetime_name, t) => write!(f, "RefLT({}, {})", lifetime_name, t),
+            GenRef::DeRef(t) => write!(f, "DeRef({})", t),
+            GenRef::MutRef(t) => write!(f, "MutRef({})", t),
+            GenRef::MutRefLT(lifetime_name, t) => write!(f, "MutRefLT({}, {})", lifetime_name, t),
+            GenRef::MutDeRef(t) => write!(f, "MutDeRef({})", t),
+            GenRef::RefLiteral(t) => write!(f, "RefLiteral({})", t),
+            GenRef::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
 impl From<GenRef<String>> for String {
     fn from(value: GenRef<String>) -> Self {
         match value {
             GenRef::Literal(s) => format!("\"{}\"", s),
             GenRef::Std(s) => format!("\"{}\"", s),
-            _ => panic!("Cannot convert to string"),
+            _ => {
+                println!("Cannot convert to string: {:?}", value);
+                panic!("Cannot convert to string")
+            }
         }
     }
 }
@@ -102,7 +123,11 @@ pub fn write_secondary_indices(secondary_indices: &Option<Vec<String>>) -> Strin
     match secondary_indices {
         Some(indices) => format!(
             "Some(&[{}]",
-            indices.iter().map(|idx| format!("\"{}\"", idx)).collect::<Vec<String>>().join(", ")
+            indices
+                .iter()
+                .map(|idx| format!("\"{}\"", idx))
+                .collect::<Vec<String>>()
+                .join(", ")
         ),
         None => "None".to_string(),
     }

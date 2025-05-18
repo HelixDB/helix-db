@@ -122,3 +122,5 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> UpdateAdapter
         }
     }
 }
+
+

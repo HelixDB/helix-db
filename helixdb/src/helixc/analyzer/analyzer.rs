@@ -1151,8 +1151,111 @@ impl<'a> Ctx<'a> {
                     // so `cur_ty` stays the same.
                 }
 
-                StepType::Update(_) => {
+                StepType::Update(update) => {
                     // Update returns the same type (nodes/edges) it started with.
+                    
+                    match tr.steps.last() {
+                        Some(step) => match &step.step {
+                            StepType::Node(gs) => {
+                                let node_ty = gs.get_item_type().unwrap();
+                                let field_set = self.node_fields.get(node_ty.as_str()).cloned();
+                                if let Some(field_set) = field_set {
+                                    for FieldAddition { key, value, loc } in &update.fields {
+                                        if !field_set.contains_key(key.as_str()) {
+                                            self.push_query_err(
+                                                q,
+                                                loc.clone(),
+                                                format!(
+                                                    "`{}` is not a field of node `{}`",
+                                                    key, node_ty
+                                                ),
+                                                "check the schema field names",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            StepType::Edge(gs) => {
+                                let edge_ty = gs.get_item_type().unwrap();
+                                let field_set = self.edge_fields.get(edge_ty.as_str()).cloned();
+                                if let Some(field_set) = field_set {
+                                    for FieldAddition { key, value, loc } in &update.fields {
+                                        if !field_set.contains_key(key.as_str()) {
+                                            self.push_query_err(
+                                                q,
+                                                loc.clone(),
+                                                format!(
+                                                    "`{}` is not a field of edge `{}`",
+                                                    key, edge_ty
+                                                ),
+                                                "check the schema field names",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                self.push_query_err(
+                                    q,
+                                    update.loc.clone(),
+                                    "update is only valid on nodes or edges".to_string(),
+                                    "update is only valid on nodes or edges".to_string(),
+                                );
+                                return cur_ty.clone();
+                            }
+                        },
+                        None => match &tr.start {
+                            StartNode::Node { node_type, .. } => {
+                                let node_ty = node_type.as_str();
+                                let field_set = self.node_fields.get(node_ty).cloned();
+                                if let Some(field_set) = field_set {
+                                    for FieldAddition { key, value, loc } in &update.fields {
+                                        if !field_set.contains_key(key.as_str()) {
+                                            self.push_query_err(
+                                                q,
+                                                loc.clone(),
+                                                format!(
+                                                    "`{}` is not a field of node `{}`",
+                                                    key, node_ty
+                                                ),
+                                                "check the schema field names",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            StartNode::Edge { edge_type, .. } => {
+                                let edge_ty = edge_type.as_str();
+                                let field_set = self.edge_fields.get(edge_ty).cloned();
+                                if let Some(field_set) = field_set {
+                                    for FieldAddition { key, value, loc } in &update.fields {
+                                        if !field_set.contains_key(key.as_str()) {
+                                            self.push_query_err(
+                                                q,
+                                                loc.clone(),
+                                                format!(
+                                                    "`{}` is not a field of edge `{}`",
+                                                    key, edge_ty
+                                                ),
+                                                "check the schema field names",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                self.push_query_err(
+                                    q,
+                                    update.loc.clone(),
+                                    "update is only valid on nodes or edges".to_string(),
+                                    "update is only valid on nodes or edges".to_string(),
+                                );
+                                return cur_ty.clone();
+                            }
+                        },
+                    };
+
                     excluded.clear();
                 }
 

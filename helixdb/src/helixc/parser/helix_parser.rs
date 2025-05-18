@@ -359,6 +359,17 @@ pub enum GraphStepType {
     OutE(Option<String>),
     InE(Option<String>),
 }
+impl GraphStep {
+    pub fn get_item_type(&self) -> Option<String> {
+        match &self.step {
+            GraphStepType::Out(Some(s)) => Some(s.clone()),
+            GraphStepType::In(Some(s)) => Some(s.clone()),
+            GraphStepType::OutE(Some(s)) => Some(s.clone()),
+            GraphStepType::InE(Some(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BooleanOp {
@@ -494,6 +505,7 @@ impl From<String> for IdType {
 #[derive(Debug, Clone)]
 pub struct Update {
     pub fields: Vec<FieldAddition>,
+    pub loc: Loc,
 }
 
 #[derive(Debug, Clone)]
@@ -1783,8 +1795,11 @@ impl HelixParser {
     }
 
     fn parse_update(&self, pair: Pair<Rule>) -> Result<Update, ParserError> {
-        let fields = self.parse_field_additions(pair)?;
-        Ok(Update { fields })
+        let fields = self.parse_field_additions(pair.clone())?;
+        Ok(Update {
+            fields,
+            loc: pair.loc(),
+        })
     }
 
     fn parse_object_step(&self, pair: Pair<Rule>) -> Result<Object, ParserError> {
