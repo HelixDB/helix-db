@@ -14,7 +14,7 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     println!("fn_name_str: {}", fn_name_str);
     // Create a unique static name for each handler
     let static_name = quote::format_ident!("__HANDLER_REGISTRATION_{}", fn_name.to_string().to_uppercase());
-    
+
     let expanded = quote! {
         #input_fn
 
@@ -43,7 +43,7 @@ pub fn local_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     println!("fn_name_str: {}", fn_name_str);
     // Create a unique static name for each handler
     let static_name = quote::format_ident!("__HANDLER_REGISTRATION_{}", fn_name.to_string().to_uppercase());
-    
+
     let expanded = quote! {
         #input_fn
 
@@ -62,3 +62,4 @@ pub fn local_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     expanded.into()
 }
+

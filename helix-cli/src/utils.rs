@@ -1,5 +1,7 @@
-use crate::args::*;
-use colored::*;
+use crate::{
+    args::*,
+    instance_manager::InstanceInfo,
+};
 use helixdb::helixc::{
     analyzer::{analyzer::analyze, types::Source as HelixSource},
     generator::generator::CodeGenerator,
@@ -208,29 +210,6 @@ pub fn check_and_read_files(path: &str) -> Result<Vec<DirEntry>, CliError> {
     Ok(files)
 }
 
-// pub fn compile_hql_to_source(files: &Vec<DirEntry>) -> Result<Source, CliError> {
-//     let contents: String = files
-//         .iter()
-//         .map(|file| -> String {
-//             match fs::read_to_string(file.path()) {
-//                 Ok(contents) => contents,
-//                 Err(e) => {
-//                     panic!("{}", e); // TODO: something better here instead of panic
-//                 }
-//             }
-//         })
-//         .fold(String::new(), |acc, contents| acc + &contents);
-
-//     let source = match HelixParser::parse_source(&contents) {
-//         Ok(source) => source,
-//         Err(e) => {
-//             return Err(CliError::from(format!("{}", e)));
-//         }
-//     };
-
-//     Ok(source)
-// }
-
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut prev_is_uppercase = false;
@@ -303,3 +282,82 @@ pub fn generate(files: &Vec<DirEntry>) -> Result<Content, CliError> {
         .push_str(&generator.generate_source(&analyzed_source));
     Ok(content)
 }
+
+pub fn print_instnace(instance: &InstanceInfo) {
+    let rg: bool = instance.running;
+    println!(
+        "{} {}{}",
+        if rg { "Instance ID:".green().bold() } else { "Instance ID:".yellow().bold() },
+        if rg { instance.id.green().bold() } else { instance.id.yellow().bold() },
+        if rg { " (running)".to_string().green().bold() } else { " (not running)".to_string().yellow().bold() },
+    );
+    println!("└── Label: {}", instance.label.underline());
+    println!("└── Port: {}", instance.port);
+    println!("└── Available endpoints:");
+    instance.available_endpoints
+        .iter()
+        .for_each(|ep|
+            println!("    └── /{}", ep)
+        );
+}
+
+#[allow(dead_code)]
+pub trait StyledString {
+    fn black(&self) -> String;
+    fn red(&self) -> String;
+    fn green(&self) -> String;
+    fn yellow(&self) -> String;
+    fn blue(&self) -> String;
+    fn magenta(&self) -> String;
+    fn cyan(&self) -> String;
+    fn white(&self) -> String;
+    fn bold(&self) -> String;
+    fn underline(&self) -> String;
+}
+
+impl StyledString for str {
+    fn black(&self) -> String {
+        format!("\x1b[30m{}\x1b[0m", self)
+    }
+
+    fn red(&self) -> String {
+        format!("\x1b[31m{}\x1b[0m", self)
+    }
+
+    fn green(&self) -> String {
+        format!("\x1b[32m{}\x1b[0m", self)
+    }
+
+    fn yellow(&self) -> String {
+        format!("\x1b[33m{}\x1b[0m", self)
+    }
+
+    fn blue(&self) -> String {
+        format!("\x1b[34m{}\x1b[0m", self)
+    }
+
+    fn magenta(&self) -> String {
+        format!("\x1b[35m{}\x1b[0m", self)
+    }
+
+    fn cyan(&self) -> String {
+        format!("\x1b[36m{}\x1b[0m", self)
+    }
+
+    fn white(&self) -> String {
+        format!("\x1b[37m{}\x1b[0m", self)
+    }
+
+    fn bold(&self) -> String {
+        format!("\x1b[1m{}\x1b[0m", self)
+    }
+
+    fn underline(&self) -> String {
+        format!("\x1b[4m{}\x1b[0m", self)
+    }
+}
+
+// TODO:
+// Spinner::new
+// Spinner::stop_with_message
+// Dots9 style

@@ -1,5 +1,5 @@
-[workspace] 
-members = ["helixdb", "helix-container", "get_routes", "helix-cli", "hbuild"] 
+[workspace]
+members = ["helixdb", "helix-container", "get_routes", "helix-cli", "hbuild"]
 resolver="2"
 
 

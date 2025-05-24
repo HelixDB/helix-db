@@ -2008,7 +2008,6 @@ version = "1.0.68"
 dependencies = [
  "chrono",
  "clap",
- "colored",
  "dirs 6.0.0",
  "helixdb",
  "indicatif",
