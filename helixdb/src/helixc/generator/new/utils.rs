@@ -103,10 +103,14 @@ impl From<IdType> for GenRef<String> {
         match value {
             IdType::Literal { value: s, loc } => GenRef::Literal(s),
             IdType::Identifier { value: s, loc } => GenRef::Id(s),
+            IdType::ByIndex { index, value, loc } => GenRef::Id(format!(
+                "{{ {} : {} }}",
+                String::from(*index),
+                String::from(*value)
+            )),
         }
     }
 }
-
 
 #[derive(Clone)]
 pub enum Order {
@@ -129,11 +133,11 @@ pub fn write_properties(properties: &Vec<(String, GeneratedValue)>) -> String {
         false => format!(
             "Some(props! {{ {} }})",
             properties
-            .iter()
+                .iter()
                 .map(|(name, value)| format!("\"{}\" => {}", name, value))
                 .collect::<Vec<String>>()
                 .join(", ")
-        )
+        ),
     }
 }
 
@@ -293,6 +297,7 @@ use helixdb::{
             n::NAdapter,
             n_from_id::NFromIdAdapter,
             n_from_type::NFromTypeAdapter,
+            n_from_index::NFromIndexAdapter,
         },
         tr_val::{Traversable, TraversalVal},
         util::{

@@ -16,6 +16,7 @@ pub enum SourceStep {
     AddV(AddV),
     SearchV(SearchV),
     NFromID(NFromID),
+    NFromIndex(NFromIndex),
     NFromType(NFromType),
     EFromID(EFromID),
     EFromType(EFromType),
@@ -70,7 +71,11 @@ pub struct AddV {
 impl Display for AddV {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let properties = write_properties(&self.properties);
-        write!(f, "insert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})", self.vec, self.label, properties)
+        write!(
+            f,
+            "insert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})",
+            self.vec, self.label, properties
+        )
     }
 }
 
@@ -150,6 +155,7 @@ impl Display for SourceStep {
             SourceStep::AddV(add_v) => write!(f, "{}", add_v),
             SourceStep::SearchV(search_v) => write!(f, "{}", search_v),
             SourceStep::NFromID(n_from_id) => write!(f, "{}", n_from_id),
+            SourceStep::NFromIndex(n_from_index) => write!(f, "{}", n_from_index),
             SourceStep::NFromType(n_from_type) => write!(f, "{}", n_from_type),
             SourceStep::EFromID(e_from_id) => write!(f, "{}", e_from_id),
             SourceStep::EFromType(e_from_type) => write!(f, "{}", e_from_type),
@@ -187,5 +193,17 @@ impl Display for SearchVector {
                 self.vec, self.k
             ),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct NFromIndex {
+    pub index: GenRef<String>,
+    pub key: GenRef<String>,
+}
+
+impl Display for NFromIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "n_from_index({}, {})", self.index, self.key)
     }
 }

@@ -515,8 +515,19 @@ pub struct EdgeConnection {
 
 #[derive(Debug, Clone)]
 pub enum IdType {
-    Literal { value: String, loc: Loc },
-    Identifier { value: String, loc: Loc },
+    Literal {
+        value: String,
+        loc: Loc,
+    },
+    Identifier {
+        value: String,
+        loc: Loc,
+    },
+    ByIndex {
+        index: Box<IdType>,
+        value: Box<IdType>,
+        loc: Loc,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -575,6 +586,9 @@ impl From<IdType> for String {
                 value
             }
             IdType::Identifier { value, loc } => value,
+            IdType::ByIndex { index, value, loc } => {
+                format!("{{ {} : {} }}", String::from(*index), String::from(*value))
+            }
         }
     }
 }
@@ -1661,6 +1675,56 @@ impl HelixParser {
                                     })
                                     .collect::<Vec<_>>(),
                             );
+                        }
+                        Rule::by_index => {
+                            ids = Some({
+
+                                    let mut pairs: Pairs<'_, Rule> = p.clone().into_inner();
+                                    println!("pairs: {:?}", pairs);
+                                    let index = match pairs.next().unwrap().clone().into_inner().next() {
+                                        Some(id) => match id.as_rule() {
+                                            Rule::identifier => IdType::Identifier {
+                                                value: id.as_str().to_string(),
+                                                loc: id.loc(),
+                                            },
+                                            Rule::string_literal => IdType::Literal {
+                                                value: id.as_str().to_string(),
+                                                loc: id.loc(),
+                                            },
+                                            other => {
+                                                panic!(
+                                                    "Should be identifier or string literal: {:?}",
+                                                    other
+                                                )
+                                            }
+                                        },
+                                        None => return Err(ParserError::from("Missing index")),
+                                    };
+                                    println!("index: {:?}", index); 
+                                    println!("pairs: {:?}", pairs);
+                                    let value = match pairs.next().unwrap().into_inner().next() {
+                                        Some(val) => match val.as_rule() {
+                                            Rule::identifier => IdType::Identifier {
+                                                value: val.as_str().to_string(),
+                                                loc: val.loc(),
+                                            },
+                                            Rule::string_literal => IdType::Literal {
+                                                value: val.as_str().to_string(),
+                                                loc: val.loc(),
+                                            },
+                                            other => {
+                                                panic!("Should be identifier or string literal")
+                                            }
+                                        },
+                                        _ => unreachable!(),
+                                    };
+                                    vec![IdType::ByIndex {
+                                        index: Box::new(index),
+                                        value: Box::new(value),
+                                        loc: p.loc(),
+                                    }]
+                                
+                            })
                         }
                         _ => unreachable!(),
                     }

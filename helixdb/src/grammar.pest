@@ -115,10 +115,10 @@ AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~
 // ---------------------------------------------------------------------
 // Source steps
 // ---------------------------------------------------------------------
-start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-
+start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+by_index = { "{" ~ id_arg ~ ":" ~ id_arg ~ "}" }
 // ---------------------------------------------------------------------
 // Traversal steps
 // ---------------------------------------------------------------------
