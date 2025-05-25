@@ -1107,27 +1107,14 @@ impl<'a> Ctx<'a> {
                                 NFromIndex {
                                     index: GenRef::Literal(match *index {
                                         IdType::Identifier { value: i, loc } => {
-                                            if self.is_valid_identifier(q, loc.clone(), i.as_str())
-                                            {
-                                                if !scope.contains_key(i.as_str()) {
-                                                    self.push_query_err(
-                                                        q,
-                                                        loc,
-                                                        format!("variable named `{}` is not in scope", i),
-                                                        format!(
-                                                            "declare {} in the current scope or fix the typo",
-                                                            i
-                                                        ),
-                                                    );
-                                                }
-                                            }
+                                            self.is_valid_identifier(q, loc.clone(), i.as_str());
                                             i
                                         }
                                         IdType::Literal { value: s, loc } => s,
                                         _ => unreachable!(),
                                     }),
                                     key: GenRef::Ref(match *value {
-                                        IdType::Identifier { value: i, loc } => {
+                                        ValueType::Identifier { value: i, loc } => {
                                             if self.is_valid_identifier(q, loc.clone(), i.as_str())
                                             {
                                                 if !scope.contains_key(i.as_str()) {
@@ -1144,7 +1131,22 @@ impl<'a> Ctx<'a> {
                                             }
                                             format!("data.{}", i)
                                         }
-                                        IdType::Literal { value: s, loc } => s,
+                                        ValueType::Literal { value, loc } => match value {
+                                            Value::String(s) => s,
+                                            Value::I8(i) => i.to_string(),
+                                            Value::I16(i) => i.to_string(),
+                                            Value::I32(i) => i.to_string(),
+                                            Value::I64(i) => i.to_string(),
+                                            Value::U8(i) => i.to_string(),
+                                            Value::U16(i) => i.to_string(),
+                                            Value::U32(i) => i.to_string(),
+                                            Value::U64(i) => i.to_string(),
+                                            Value::U128(i) => i.to_string(),
+                                            Value::F32(i) => i.to_string(),
+                                            Value::F64(i) => i.to_string(),
+                                            Value::Boolean(b) => b.to_string(),
+                                            _ => unreachable!(),
+                                        },
                                         _ => unreachable!(),
                                     }),
                                 },

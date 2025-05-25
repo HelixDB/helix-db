@@ -1,6 +1,7 @@
 use std::{iter::Once, sync::Arc};
 
 use heed3::{RoTxn, RwTxn};
+use serde::Serialize;
 
 use crate::{
     helix_engine::{
@@ -8,20 +9,23 @@ use crate::{
         storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
-    protocol::items::Node,
+    protocol::{items::Node, value::Value},
 };
 
 use super::super::tr_val::TraversalVal;
 
-pub struct NFromIndex<'a, T> {
+pub struct NFromIndex<'a, T, K: Into<Value> + Serialize> {
     iter: Once<Result<TraversalVal, GraphError>>, // Use Once instead of Empty so we get exactly one item
     storage: Arc<HelixGraphStorage>,
     txn: &'a T,
     index: &'a str,
-    key: &'a str,
+    key: &'a K,
 }
 
-impl<'a> Iterator for NFromIndex<'a, RoTxn<'a>> {
+impl<'a, K> Iterator for NFromIndex<'a, RoTxn<'a>, K>
+where
+    K: Into<Value> + Serialize,
+{
     type Item = Result<TraversalVal, GraphError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -47,7 +51,10 @@ impl<'a> Iterator for NFromIndex<'a, RoTxn<'a>> {
     }
 }
 
-impl<'a> Iterator for NFromIndex<'a, RwTxn<'a>> {
+impl<'a, K> Iterator for NFromIndex<'a, RwTxn<'a>, K>
+where
+    K: Into<Value> + Serialize,
+{
     type Item = Result<TraversalVal, GraphError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -73,18 +80,25 @@ impl<'a> Iterator for NFromIndex<'a, RwTxn<'a>> {
     }
 }
 
-pub trait NFromIndexAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
+pub trait NFromIndexAdapter<'a, K: Into<Value> + Serialize>:
+    Iterator<Item = Result<TraversalVal, GraphError>> + Sized
+{
     type OutputIter: Iterator<Item = Result<TraversalVal, GraphError>>;
 
-    fn n_from_index(self, index: &'a str, key: &'a str) -> Self::OutputIter;
+    fn n_from_index(self, index: &'a str, key: &'a K) -> Self::OutputIter
+    where
+        K: Into<Value> + Serialize;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>> NFromIndexAdapter<'a>
-    for RoTraversalIterator<'a, I>
+impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>, K: Into<Value> + Serialize + 'a>
+    NFromIndexAdapter<'a, K> for RoTraversalIterator<'a, I>
 {
-    type OutputIter = RoTraversalIterator<'a, NFromIndex<'a, RoTxn<'a>>>;
+    type OutputIter = RoTraversalIterator<'a, NFromIndex<'a, RoTxn<'a>, K>>;
 
-    fn n_from_index(self, index: &'a str, key: &'a str) -> Self::OutputIter {
+    fn n_from_index(self, index: &'a str, key: &'a K) -> Self::OutputIter
+    where
+        K: Into<Value> + Serialize,
+    {
         let n_from_index = NFromIndex {
             iter: std::iter::once(Ok(TraversalVal::Empty)),
             storage: Arc::clone(&self.storage),

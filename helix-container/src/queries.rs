@@ -39,6 +39,7 @@ use helixdb::{
     },
 };
 use sonic_rs::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,7 +61,8 @@ pub fn file9(input: &HandlerInput, response: &mut Response) -> Result<(), GraphE
         Err(err) => return Err(GraphError::from(err)),
     };
 
-    let mut remapping_vals: HashMap<u128, ResponseRemapping> = HashMap::new();
+    let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> =
+        RefCell::new(HashMap::new());
     let db = Arc::clone(&input.graph.storage);
     let txn = db.graph_env.read_txn().unwrap();
     let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
@@ -71,21 +73,24 @@ pub fn file9(input: &HandlerInput, response: &mut Response) -> Result<(), GraphE
         .n_from_index("name", &data.name)
         .collect_to::<Vec<_>>();
     let node_by_name = G::new(Arc::clone(&db), &txn)
-        .n_from_index("name", &"george")
+        .n_from_index("age", &20)
         .collect_to::<Vec<_>>();
     return_vals.insert(
         "user".to_string(),
-        ReturnValue::from_traversal_value_array_with_mixin(user, remapping_vals),
+        ReturnValue::from_traversal_value_array_with_mixin(user, remapping_vals.borrow_mut()),
     );
 
     return_vals.insert(
         "node".to_string(),
-        ReturnValue::from_traversal_value_array_with_mixin(node, remapping_vals),
+        ReturnValue::from_traversal_value_array_with_mixin(node, remapping_vals.borrow_mut()),
     );
 
     return_vals.insert(
         "node_by_name".to_string(),
-        ReturnValue::from_traversal_value_array_with_mixin(node_by_name, remapping_vals),
+        ReturnValue::from_traversal_value_array_with_mixin(
+            node_by_name,
+            remapping_vals.borrow_mut(),
+        ),
     );
 
     response.body = sonic_rs::to_vec(&return_vals).unwrap();

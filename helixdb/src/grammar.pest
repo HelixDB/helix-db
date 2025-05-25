@@ -118,7 +118,7 @@ AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~
 start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
 start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
 start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
-by_index = { "{" ~ id_arg ~ ":" ~ id_arg ~ "}" }
+by_index = { "{" ~ id_arg ~ ":" ~ evaluates_to_anything ~ "}" }
 // ---------------------------------------------------------------------
 // Traversal steps
 // ---------------------------------------------------------------------

@@ -103,11 +103,7 @@ impl From<IdType> for GenRef<String> {
         match value {
             IdType::Literal { value: s, loc } => GenRef::Literal(s),
             IdType::Identifier { value: s, loc } => GenRef::Id(s),
-            IdType::ByIndex { index, value, loc } => GenRef::Id(format!(
-                "{{ {} : {} }}",
-                String::from(*index),
-                String::from(*value)
-            )),
+            _ => panic!("Cannot convert to string: {:?}", value),
         }
     }
 }
@@ -276,9 +272,7 @@ impl<T: Display> Separator<T> {
 }
 pub fn write_headers() -> String {
     r#"
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Instant;
+
 use heed3::RoTxn;
 use get_routes::handler;
 use helixdb::{field_remapping, identifier_remapping, traversal_remapping, exclude_field};
@@ -319,6 +313,10 @@ use helixdb::{
     },
 };
 use sonic_rs::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Instant;
+use std::cell::RefCell;
     "#
     .to_string()
 }

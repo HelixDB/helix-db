@@ -525,7 +525,7 @@ pub enum IdType {
     },
     ByIndex {
         index: Box<IdType>,
-        value: Box<IdType>,
+        value: Box<ValueType>,
         loc: Loc,
     },
 }
@@ -586,9 +586,7 @@ impl From<IdType> for String {
                 value
             }
             IdType::Identifier { value, loc } => value,
-            IdType::ByIndex { index, value, loc } => {
-                format!("{{ {} : {} }}", String::from(*index), String::from(*value))
-            }
+            _ => unreachable!(),
         }
     }
 }
@@ -1678,52 +1676,69 @@ impl HelixParser {
                         }
                         Rule::by_index => {
                             ids = Some({
-
-                                    let mut pairs: Pairs<'_, Rule> = p.clone().into_inner();
-                                    println!("pairs: {:?}", pairs);
-                                    let index = match pairs.next().unwrap().clone().into_inner().next() {
-                                        Some(id) => match id.as_rule() {
-                                            Rule::identifier => IdType::Identifier {
-                                                value: id.as_str().to_string(),
-                                                loc: id.loc(),
-                                            },
-                                            Rule::string_literal => IdType::Literal {
-                                                value: id.as_str().to_string(),
-                                                loc: id.loc(),
-                                            },
-                                            other => {
-                                                panic!(
-                                                    "Should be identifier or string literal: {:?}",
-                                                    other
-                                                )
-                                            }
+                                let mut pairs: Pairs<'_, Rule> = p.clone().into_inner();
+                                println!("pairs: {:?}", pairs);
+                                let index = match pairs.next().unwrap().clone().into_inner().next()
+                                {
+                                    Some(id) => match id.as_rule() {
+                                        Rule::identifier => IdType::Identifier {
+                                            value: id.as_str().to_string(),
+                                            loc: id.loc(),
                                         },
-                                        None => return Err(ParserError::from("Missing index")),
-                                    };
-                                    println!("index: {:?}", index); 
-                                    println!("pairs: {:?}", pairs);
-                                    let value = match pairs.next().unwrap().into_inner().next() {
-                                        Some(val) => match val.as_rule() {
-                                            Rule::identifier => IdType::Identifier {
-                                                value: val.as_str().to_string(),
-                                                loc: val.loc(),
-                                            },
-                                            Rule::string_literal => IdType::Literal {
-                                                value: val.as_str().to_string(),
-                                                loc: val.loc(),
-                                            },
-                                            other => {
-                                                panic!("Should be identifier or string literal")
-                                            }
+                                        Rule::string_literal => IdType::Literal {
+                                            value: id.as_str().to_string(),
+                                            loc: id.loc(),
                                         },
-                                        _ => unreachable!(),
-                                    };
-                                    vec![IdType::ByIndex {
-                                        index: Box::new(index),
-                                        value: Box::new(value),
-                                        loc: p.loc(),
-                                    }]
-                                
+                                        other => {
+                                            panic!(
+                                                "Should be identifier or string literal: {:?}",
+                                                other
+                                            )
+                                        }
+                                    },
+                                    None => return Err(ParserError::from("Missing index")),
+                                };
+                                println!("index: {:?}", index);
+                                println!("pairs: {:?}", pairs);
+                                let value = match pairs.next().unwrap().into_inner().next() {
+                                    Some(val) => match val.as_rule() {
+                                        Rule::identifier => ValueType::Identifier {
+                                            value: val.as_str().to_string(),
+                                            loc: val.loc(),
+                                        },
+                                        Rule::string_literal => ValueType::Literal {
+                                            value: Value::from(val.as_str()),
+                                            loc: val.loc(),
+                                        },
+                                        Rule::integer => ValueType::Literal {
+                                            value: Value::from(
+                                                val.as_str().parse::<i64>().unwrap(),
+                                            ),
+                                            loc: val.loc(),
+                                        },
+                                        Rule::float => ValueType::Literal {
+                                            value: Value::from(
+                                                val.as_str().parse::<f64>().unwrap(),
+                                            ),
+                                            loc: val.loc(),
+                                        },
+                                        Rule::boolean => ValueType::Literal {
+                                            value: Value::from(
+                                                val.as_str().parse::<bool>().unwrap(),
+                                            ),
+                                            loc: val.loc(),
+                                        },
+                                        other => {
+                                            panic!("Should be identifier or string literal")
+                                        }
+                                    },
+                                    _ => unreachable!(),
+                                };
+                                vec![IdType::ByIndex {
+                                    index: Box::new(index),
+                                    value: Box::new(value),
+                                    loc: p.loc(),
+                                }]
                             })
                         }
                         _ => unreachable!(),

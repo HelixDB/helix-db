@@ -205,7 +205,7 @@ impl ReturnValue {
     #[inline]
     pub fn from_traversal_value_array_with_mixin(
         traversal_value: Vec<TraversalVal>,
-        mut mixin: HashMap<u128, ResponseRemapping>,
+        mut mixin: RefMut<HashMap<u128, ResponseRemapping>>,
     ) -> Self {
         ReturnValue::Array(
             traversal_value
