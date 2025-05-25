@@ -217,6 +217,37 @@ impl Display for FieldType {
     }
 }
 
+impl PartialEq<Value> for FieldType {
+    fn eq(&self, other: &Value) -> bool {
+        match (self, other) {
+            (FieldType::String, Value::String(_)) => true,
+            (FieldType::F32, Value::F32(_)) => true,
+            (FieldType::F64, Value::F64(_)) => true,
+            (FieldType::I8, Value::I8(_)) => true,
+            (FieldType::I16, Value::I16(_)) => true,
+            (FieldType::I32, Value::I32(_)) => true,
+            (FieldType::I64, Value::I64(_)) => true,
+            (FieldType::U8, Value::U8(_)) => true,
+            (FieldType::U16, Value::U16(_)) => true,
+            (FieldType::U32, Value::U32(_)) => true,
+            (FieldType::U64, Value::U64(_)) => true,
+            (FieldType::U128, Value::U128(_)) => true,
+            (FieldType::Boolean, Value::Boolean(_)) => true,
+            (FieldType::Array(inner_type), Value::Array(values)) => {
+                values.iter().all(|v| inner_type.as_ref().eq(v))
+            }
+            (FieldType::Object(fields), Value::Object(values)) => {
+                fields.len() == values.len()
+                    && fields.iter().all(|(k, field_type)| match values.get(k) {
+                        Some(value) => field_type.eq(value),
+                        None => false,
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Query {
     pub original_query: String,
@@ -568,6 +599,7 @@ pub enum ValueType {
     },
 }
 
+
 impl From<Value> for ValueType {
     fn from(value: Value) -> ValueType {
         match value {
@@ -608,7 +640,7 @@ impl From<IdType> for String {
                 value
             }
             IdType::Identifier { value, loc } => value,
-            _ => unreachable!(),
+            IdType::ByIndex { index, value, loc } => String::from(*index),
         }
     }
 }

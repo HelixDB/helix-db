@@ -1100,30 +1100,37 @@ impl<'a> Ctx<'a> {
                     // check id exists in scope
                     match ids[0].clone() {
                         IdType::ByIndex { index, value, loc } => {
+                            self.is_valid_identifier(q, loc.clone(), index.to_string().as_str());
+                            let corresponding_field =
+                                self.node_fields.get(node_type.as_str()).cloned();
+                            match corresponding_field {
+                                Some(node_fields) => {
+                                    match node_fields
+                                        .iter()
+                                        .find(|(name, _)| name.to_string() == *index.to_string())
+                                    {
+                                        Some((_, field)) => {
+                                            if !field.is_indexed() {
+                                                self.push_query_err(q, loc.clone(), format!("field `{}` has not been indexed for node type `{}`", index, node_type), format!("use a field that has been indexed with `INDEX` in the schema for node type `{}`", node_type));
+                                            } else {
+                                                if let ValueType::Literal { ref value, ref loc } =
+                                                    *value
+                                                {
+                                                    if !field.field_type.eq(value) {
+                                                        self.push_query_err(q, loc.clone(), format!("value `{}` is of type `{}`, expected `{}`", value.to_string(), value, field.field_type), format!("use a value of type `{}`", field.field_type ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        None => unreachable!(),
+                                    }
+                                }
+                                None => unreachable!(),
+                            };
                             gen_traversal.source_step = Separator::Period(SourceStep::NFromIndex(
                                 NFromIndex {
                                     index: GenRef::Literal(match *index {
-                                        IdType::Identifier { value: i, loc } => {
-                                            self.is_valid_identifier(q, loc.clone(), i.as_str());
-                                            match self.node_fields.get(node_type.as_str()) {
-                                                Some(node_fields) => {
-                                                    match node_fields
-                                                        .iter()
-                                                        .find(|(name, _)| name.to_string() == i)
-                                                    {
-                                                        Some((name, field)) => {
-                                                            if !field.is_indexed() {
-                                                                self.push_query_err(q, loc.clone(), format!("field `{}` has not been indexed for node type `{}`", i, node_type), format!("use a field that has been indexed with `INDEX` instead on node type `{}`", node_type));
-                                                            }
-                                                        }
-                                                        None => unreachable!(),
-                                                    }
-                                                }
-                                                None => unreachable!(),
-                                            }
-
-                                            i
-                                        }
+                                        IdType::Identifier { value, loc: _ } => value,
                                         _ => {
                                             self.push_query_err(
                                                 q,

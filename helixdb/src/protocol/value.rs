@@ -54,7 +54,28 @@ impl Value {
         }
     }
 }
-
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::String(_) => write!(f, "String"),
+            Value::F32(_) => write!(f, "F32"),
+            Value::F64(_) => write!(f, "F64"),
+            Value::I8(_) => write!(f, "I8"),
+            Value::I16(_) => write!(f, "I16"),
+            Value::I32(_) => write!(f, "I32"),
+            Value::I64(_) => write!(f, "I64"),
+            Value::U8(_) => write!(f, "U8"),
+            Value::U16(_) => write!(f, "U16"),
+            Value::U32(_) => write!(f, "U32"),
+            Value::U64(_) => write!(f, "U64"),
+            Value::U128(_) => write!(f, "U128"),
+            Value::Boolean(_) => write!(f, "Boolean"),
+            Value::Array(_) => write!(f, "Array"),
+            Value::Object(_) => write!(f, "Object"),
+            Value::Empty => write!(f, "Empty"),
+        }
+    }
+}
 impl PartialEq<i32> for Value {
     fn eq(&self, other: &i32) -> bool {
         match self {
