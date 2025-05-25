@@ -98,6 +98,11 @@ pub struct Field {
     pub field_type: FieldType,
     pub loc: Loc,
 }
+impl Field {
+    pub fn is_indexed(&self) -> bool {
+        self.prefix.is_indexed()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum DefaultValue {
@@ -122,6 +127,14 @@ pub enum FieldPrefix {
     Index,
     Optional,
     Empty,
+}
+impl FieldPrefix {
+    pub fn is_indexed(&self) -> bool {
+        match self {
+            FieldPrefix::Index => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -528,6 +541,15 @@ pub enum IdType {
         value: Box<ValueType>,
         loc: Loc,
     },
+}
+impl Display for IdType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IdType::Literal { value, loc } => write!(f, "{}", value),
+            IdType::Identifier { value, loc } => write!(f, "{}", value),
+            IdType::ByIndex { index, value, loc } => write!(f, "{}", index),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

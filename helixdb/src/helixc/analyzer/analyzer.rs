@@ -103,9 +103,9 @@ struct Ctx<'a> {
     node_set: HashSet<&'a str>,
     vector_set: HashSet<&'a str>,
     edge_map: HashMap<&'a str, &'a EdgeSchema>,
-    node_fields: HashMap<&'a str, HashMap<&'a str, &'a FieldType>>,
-    edge_fields: HashMap<&'a str, HashMap<&'a str, &'a FieldType>>,
-    vector_fields: HashMap<&'a str, HashMap<&'a str, &'a FieldType>>,
+    node_fields: HashMap<&'a str, HashMap<&'a str, &'a Field>>,
+    edge_fields: HashMap<&'a str, HashMap<&'a str, &'a Field>>,
+    vector_fields: HashMap<&'a str, HashMap<&'a str, &'a Field>>,
     diagnostics: Vec<Diagnostic>,
     output: GeneratedSource,
 }
@@ -121,8 +121,8 @@ impl<'a> Ctx<'a> {
                     n.name.1.as_str(),
                     n.fields
                         .iter()
-                        .map(|f| (f.name.as_str(), &f.field_type))
-                        .collect(),
+                        .map(|f| (f.name.as_str(), f))
+                        .collect::<HashMap<&str, &Field>>(),
                 )
             })
             .collect();
@@ -135,7 +135,7 @@ impl<'a> Ctx<'a> {
                     e.name.1.as_str(),
                     e.properties
                         .as_ref()
-                        .map(|v| v.iter().map(|f| (f.name.as_str(), &f.field_type)).collect())
+                        .map(|v| v.iter().map(|f| (f.name.as_str(), f)).collect())
                         .unwrap_or_else(HashMap::new),
                 )
             })
@@ -147,10 +147,7 @@ impl<'a> Ctx<'a> {
             .map(|v| {
                 (
                     v.name.as_str(),
-                    v.fields
-                        .iter()
-                        .map(|f| (f.name.as_str(), &f.field_type))
-                        .collect(),
+                    v.fields.iter().map(|f| (f.name.as_str(), f)).collect(),
                 )
             })
             .collect();
@@ -1108,10 +1105,34 @@ impl<'a> Ctx<'a> {
                                     index: GenRef::Literal(match *index {
                                         IdType::Identifier { value: i, loc } => {
                                             self.is_valid_identifier(q, loc.clone(), i.as_str());
+                                            match self.node_fields.get(node_type.as_str()) {
+                                                Some(node_fields) => {
+                                                    match node_fields
+                                                        .iter()
+                                                        .find(|(name, _)| name.to_string() == i)
+                                                    {
+                                                        Some((name, field)) => {
+                                                            if !field.is_indexed() {
+                                                                self.push_query_err(q, loc.clone(), format!("field `{}` has not been indexed for node type `{}`", i, node_type), format!("use a field that has been indexed with `INDEX` instead on node type `{}`", node_type));
+                                                            }
+                                                        }
+                                                        None => unreachable!(),
+                                                    }
+                                                }
+                                                None => unreachable!(),
+                                            }
+
                                             i
                                         }
-                                        IdType::Literal { value: s, loc } => s,
-                                        _ => unreachable!(),
+                                        _ => {
+                                            self.push_query_err(
+                                                q,
+                                                loc.clone(),
+                                                "index type must be an identifier, got literal".to_string(),
+                                                "use an existing identifier from the shema that has been indexed with `INDEX` instead".to_string(),
+                                            );
+                                            String::new()
+                                        }
                                     }),
                                     key: GenRef::Ref(match *value {
                                         ValueType::Identifier { value: i, loc } => {
@@ -1438,11 +1459,11 @@ impl<'a> Ctx<'a> {
                                 if let Some(field_set) = field_set {
                                     match field_set.get(field_name.as_str()) {
                                         Some(field) => {
-                                            if field != &&property_type {
+                                            if field.field_type != property_type {
                                                 self.push_query_err(
                                                     q,
                                                     b_op.loc.clone(),
-                                                    format!("property `{field_name}` is of type `{field}` (from node type `{node_ty}::{{{field_name}}}`), which does not match type of compared value `{property_type}`"),
+                                                    format!("property `{field_name}` is of type `{}` (from node type `{node_ty}::{{{field_name}}}`), which does not match type of compared value `{}`", field.field_type, property_type),
                                                     "make sure comparison value is of the same type as the property".to_string(),
                                                 );
                                             }
@@ -1466,11 +1487,11 @@ impl<'a> Ctx<'a> {
                                 if let Some(field_set) = field_set {
                                     match field_set.get(field_name.as_str()) {
                                         Some(field) => {
-                                            if field != &&property_type {
+                                            if field.field_type != property_type {
                                                 self.push_query_err(
                                                     q,
                                                     b_op.loc.clone(),
-                                                    format!("property `{field_name}` is of type `{field}` (from edge type `{edge_ty}::{{{field_name}}}`), which does not match type of compared value `{property_type}`"),
+                                                    format!("property `{field_name}` is of type `{}` (from edge type `{edge_ty}::{{{field_name}}}`), which does not match type of compared value `{}`", field.field_type, property_type),
                                                     "make sure comparison value is of the same type as the property".to_string(),
                                                 );
                                             }
@@ -1494,11 +1515,11 @@ impl<'a> Ctx<'a> {
                                 if let Some(field_set) = field_set {
                                     match field_set.get(field_name.as_str()) {
                                         Some(field) => {
-                                            if field != &&property_type {
+                                            if field.field_type != property_type {
                                                 self.push_query_err(
                                                     q,
                                                     b_op.loc.clone(),
-                                                    format!("property `{field_name}` is of type `{field}` (from vector type `{sv}::{{{field_name}}}`), which does not match type of compared value `{property_type}`"),
+                                                    format!("property `{field_name}` is of type `{}` (from vector type `{sv}::{{{field_name}}}`), which does not match type of compared value `{}`", field.field_type, property_type),
                                                     "make sure comparison value is of the same type as the property".to_string(),
                                                 );
                                             }
@@ -1906,7 +1927,7 @@ impl<'a> Ctx<'a> {
     fn validate_exclude_fields(
         &mut self,
         ex: &Exclude,
-        field_set: &HashMap<&str, &FieldType>,
+        field_set: &HashMap<&str, &Field>,
         excluded: &HashMap<&str, Loc>,
         q: &'a Query,
         type_name: &str,
@@ -2413,7 +2434,7 @@ impl<'a> Ctx<'a> {
     fn validate_object_fields(
         &mut self,
         obj: &Object,
-        field_set: &HashMap<&str, &FieldType>,
+        field_set: &HashMap<&str, &Field>,
         excluded: &HashMap<&str, Loc>,
         q: &'a Query,
         type_name: &str,
