@@ -814,7 +814,6 @@ fn test_e_from_id_chain_operations() {
     assert_eq!(nodes[0].label(), "person");
 }
 
-/*
 #[test]
 fn test_filter_nodes() {
     let (storage, _temp_dir) = setup_test_db();

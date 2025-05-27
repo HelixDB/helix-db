@@ -481,6 +481,7 @@ impl HNSW for VectorCore {
         }
     }
 
+
     fn search<F>(
         &self,
         txn: &RoTxn,
@@ -613,27 +614,6 @@ impl HNSW for VectorCore {
         }
         Ok(query)
     }
-    #[inline(always)]
-    fn get_vector(
-        &self,
-        txn: &RoTxn,
-        id: u128,
-        level: usize,
-        with_data: bool,
-    ) -> Result<HVector, VectorError> {
-        let key = Self::vector_key(id, level);
-        match self.vectors_db.get(txn, key.as_ref())? {
-            Some(bytes) => {
-                let vector = match with_data {
-                    true => HVector::from_bytes(id, level, &bytes),
-                    false => Ok(HVector::from_slice(id, level, vec![])),
-                }?;
-                Ok(vector)
-            }
-            None if level > 0 => self.get_vector(txn, id, 0, with_data),
-            None => Err(VectorError::VectorNotFound(id.to_string())),
-        }
-    }
 
     fn get_all_vectors(
         &self,
@@ -650,9 +630,6 @@ impl HNSW for VectorCore {
             .filter_ok(|vector: &HVector| level.map_or(true, |l| vector.level == l))
             .collect()
     }
-}
-
-
 
     fn load<F>(&self, txn: &mut RwTxn, data: Vec<&[f64]>) -> Result<(), VectorError>
     where

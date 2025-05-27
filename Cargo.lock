@@ -1960,8 +1960,6 @@ dependencies = [
  "bincode",
  "chrono",
  "colored",
- "criterion",
- "csv",
  "dirs 6.0.0",
  "flume",
  "heed3",
