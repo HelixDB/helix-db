@@ -36,31 +36,8 @@ pub trait StorageMethods {
     /// Gets a edge object for a given edge id
     fn get_edge(&self, txn: &RoTxn, id: &u128) -> Result<Edge, GraphError>;
 
-    fn get_node_by_secondary_index(
-        &self,
-        txn: &RoTxn,
-        index: &str,
-        value: &Value,
-    ) -> Result<Node, GraphError>;
-
     fn drop_node(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError>;
     fn drop_edge(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError>;
-    fn create_edge(
-        &self,
-        txn: &mut RwTxn,
-        label: &str,
-        from_node: &u128,
-        to_node: &u128,
-        properties: impl IntoIterator<Item = (String, Value)>,
-    ) -> Result<Edge, GraphError>;
-    fn create_node(
-        &self,
-        txn: &mut RwTxn,
-        label: &str,
-        properties: impl IntoIterator<Item = (String, Value)>,
-        secondary_indices: Option<&[String]>,
-        id: Option<u128>,
-    ) -> Result<Node, GraphError>;
 }
 
 pub trait SearchMethods {

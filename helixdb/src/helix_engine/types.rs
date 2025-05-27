@@ -19,6 +19,7 @@ pub enum GraphError {
     StorageError(String),
     TraversalError(String),
     ConversionError(String),
+    DecodeError(String),
     EdgeNotFound,
     NodeNotFound,
     LabelNotFound,
@@ -31,6 +32,7 @@ pub enum GraphError {
     InvalidNode,
     ConfigFileNotFound,
     SliceLengthError,
+    ShortestPathNotFound
 }
 
 impl fmt::Display for GraphError {
@@ -46,6 +48,7 @@ impl fmt::Display for GraphError {
             GraphError::TraversalError(msg) => write!(f, "Traversal error: {}", msg),
             GraphError::StorageError(msg) => write!(f, "Storage error: {}", msg),
             GraphError::ConversionError(msg ) => write!(f, "Conversion error: {}", msg),
+            GraphError::DecodeError(msg) => write!(f, "Decode error: {}", msg),
             GraphError::EdgeNotFound => write!(f, "Edge not found"),
             GraphError::NodeNotFound => write!(f, "Node not found"),
             GraphError::LabelNotFound => write!(f, "Label not found"),
@@ -58,6 +61,7 @@ impl fmt::Display for GraphError {
             GraphError::ConfigFileNotFound => write!(f, "Config file not found"),
             GraphError::SliceLengthError => write!(f, "Slice length error"),
             GraphError::VectorError(msg) => write!(f, "Vector error: {}", msg),
+            GraphError::ShortestPathNotFound => write!(f, "Shortest path not found"),
         }
     }
 }

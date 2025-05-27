@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Check if Rust is installed
 if ! command -v rustc &> /dev/null
@@ -17,4 +17,4 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Continue with build process
-cargo build --release --offline && cargo install --path .
+cargo build --release && cargo install --path .

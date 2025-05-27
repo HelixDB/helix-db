@@ -16,6 +16,7 @@ pub enum TraversalVal {
     Vector(HVector),
     Count(Count),
     Path((Vec<Node>, Vec<Edge>)),
+    Value(Value),
     // Lazy(Lazy<'a, Bytes>),
     Empty,
 }
@@ -95,18 +96,32 @@ impl Traversable for TraversalVal {
 
 impl Traversable for Vec<TraversalVal> {
     fn id(&self) -> u128 {
+        if self.is_empty() {
+            return 0;
+        }
         self[0].id()
     }
 
     fn label(&self) -> String {
+        if self.is_empty() {
+            return "".to_string();
+        }
         self[0].label()
     }
 
     fn check_property(&self, prop: &str) -> Result<&Value, GraphError> {
+        if self.is_empty() {
+            return Err(GraphError::ConversionError(format!(
+                "Invalid traversal value"
+            )));
+        }
         self[0].check_property(prop)
     }
 
     fn uuid(&self) -> String {
+        if self.is_empty() {
+            return "".to_string();
+        }
         self[0].uuid()
     }
 }

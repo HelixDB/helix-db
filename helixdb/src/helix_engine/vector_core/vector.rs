@@ -17,7 +17,8 @@ pub struct HVector {
     pub level: usize,
     pub distance: Option<f64>,
     data: Vec<f64>,
-    pub properties: HashMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, Value>>,
 }
 
 impl Eq for HVector {}
@@ -56,7 +57,7 @@ impl HVector {
             level: 0,
             data,
             distance: None,
-            properties: HashMap::new(),
+            properties: None,
         }
     }
 
@@ -69,7 +70,7 @@ impl HVector {
             level,
             data,
             distance: None,
-            properties: HashMap::new(),
+            properties: None,
         }
     }
 
@@ -119,7 +120,7 @@ impl HVector {
             level,
             data,
             distance: None,
-            properties: HashMap::new(),
+            properties: None,
         })
     }
 
@@ -315,26 +316,37 @@ impl Filterable for HVector {
         unreachable!()
     }
 
-    fn properties(self) -> HashMap<String, Value> {
+    fn properties(self) -> Option<HashMap<String, Value>> {
         let mut properties = HashMap::new();
         properties.insert(
             "data".to_string(),
             Value::Array(self.data.iter().map(|f| Value::F64(*f)).collect()),
         );
-        properties
+        Some(properties)
     }
 
-    fn properties_mut(&mut self) -> &mut HashMap<String, Value> {
-        unreachable!()
+    fn properties_mut(&mut self) -> &mut Option<HashMap<String, Value>> {
+        &mut self.properties
     }
 
-    fn properties_ref(&self) -> &HashMap<String, Value> {
-        unreachable!()
+    fn properties_ref(&self) -> &Option<HashMap<String, Value>> {
+        &self.properties
     }
 
     // TODO: Implement this
-    fn check_property(&self, _key: &str) -> Result<&Value, GraphError> {
-        unreachable!()
+    fn check_property(&self, key: &str) -> Result<&Value, GraphError> {
+        match &self.properties {
+            Some(properties) => properties
+                .get(key)
+                .ok_or(GraphError::ConversionError(format!(
+                    "Property {} not found",
+                    key
+                ))),
+            None => Err(GraphError::ConversionError(format!(
+                "Property {} not found",
+                key
+            ))),
+        }
     }
 
     fn find_property(

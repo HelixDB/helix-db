@@ -1,17 +1,19 @@
-use std::sync::Arc;
-
-use heed3::{types::Bytes, RoTxn, RwTxn};
-
 use crate::{
     helix_engine::{
-        graph_core::traversal_iter::RoTraversalIterator,
+        graph_core::{
+            ops::{
+                source::add_e::EdgeType,
+                tr_val::{Traversable, TraversalVal},
+            },
+            traversal_iter::RoTraversalIterator,
+        },
         storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
     protocol::label_hash::hash_label,
 };
-
-use super::super::tr_val::{Traversable, TraversalVal};
+use heed3::{types::Bytes, RoTxn};
+use std::sync::Arc;
 
 pub struct InNodesIterator<'a, T> {
     iter: heed3::RoIter<
@@ -22,56 +24,69 @@ pub struct InNodesIterator<'a, T> {
     >,
     storage: Arc<HelixGraphStorage>,
     txn: &'a T,
-    length: usize,
+    edge_type: &'a EdgeType,
 }
 
-// implementing iterator for OutIterator
 impl<'a> Iterator for InNodesIterator<'a, RoTxn<'a>> {
     type Item = Result<TraversalVal, GraphError>;
 
-    /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(Ok((_, data))) = self.iter.next() {
-            let (node_id, _) =
-                HelixGraphStorage::unpack_adj_edge_data(&data.decode().unwrap()).unwrap();
-            if let Ok(node) = self.storage.get_node(self.txn, &node_id) {
-                return Some(Ok(TraversalVal::Node(node)));
+            match data.decode() {
+                Ok(data) => {
+                    let (node_id, _) = match HelixGraphStorage::unpack_adj_edge_data(&data) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            println!("Error unpacking edge data: {:?}", e);
+                            return Some(Err(e));
+                        }
+                    };
+                    match self.edge_type {
+                        EdgeType::Node => {
+                            if let Ok(node) = self.storage.get_node(self.txn, &node_id) {
+                                return Some(Ok(TraversalVal::Node(node)));
+                            }
+                        }
+                        EdgeType::Vec => {
+                            if let Ok(vector) = self.storage.get_vector(self.txn, &node_id) {
+                                return Some(Ok(TraversalVal::Vector(vector)));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error decoding edge data: {:?}", e);
+                    return Some(Err(GraphError::DecodeError(e.to_string())));
+                }
             }
         }
         None
     }
 }
-impl<'a> Iterator for InNodesIterator<'a, RwTxn<'a>> {
-    type Item = Result<TraversalVal, GraphError>;
 
-    /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(Ok((_, data))) = self.iter.next() {
-            let (node_id, _) =
-                HelixGraphStorage::unpack_adj_edge_data(&data.decode().unwrap()).unwrap();
-            if let Ok(node) = self.storage.get_node(self.txn, &node_id) {
-                return Some(Ok(TraversalVal::Node(node)));
-            }
-        }
-        None
-    }
-}
-
-pub trait InAdapter<'a, T>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
+pub trait InAdapter<'a, T>: Iterator<Item = Result<TraversalVal, GraphError>> {
+    /// Returns an iterator containing the nodes that have an incoming edge with the given label.
+    ///
+    /// Note that the `edge_label` cannot be empty and must be a valid, existing edge label.
+    ///
+    /// To provide safety, you cannot get all incoming nodes as it would be ambiguous as to what
+    /// type that resulting node would be.
     fn in_(
         self,
         edge_label: &'a str,
+        edge_type: &'a EdgeType,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>;
 }
 
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> InAdapter<'a, RoTxn<'a>>
     for RoTraversalIterator<'a, I>
 {
+    #[inline]
     fn in_(
         self,
         edge_label: &'a str,
+        edge_type: &'a EdgeType,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>> {
-        // iterate through the iterator and create a new iterator on the out edges
         let db = Arc::clone(&self.storage);
         let storage = Arc::clone(&self.storage);
         let txn = self.txn;
@@ -79,7 +94,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> InAdapter<'a
             .inner
             .filter_map(move |item| {
                 let edge_label_hash = hash_label(edge_label, None);
-                let prefix = HelixGraphStorage::out_edge_key(&item.unwrap().id(), &edge_label_hash);
+                let prefix = HelixGraphStorage::in_edge_key(&item.unwrap().id(), &edge_label_hash);
                 match db
                     .in_edges_db
                     .lazily_decode_data()
@@ -89,11 +104,11 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> InAdapter<'a
                         iter,
                         storage: Arc::clone(&db),
                         txn,
-                        length: prefix.len(),
+                        edge_type,
                     }),
                     Ok(None) => None,
                     Err(e) => {
-                        println!("Error getting out edges: {:?}", e);
+                        println!("Error getting in edges: {:?}", e);
                         // return Err(e);
                         None
                     }
@@ -108,42 +123,3 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> InAdapter<'a
         }
     }
 }
-
-// impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> InAdapter<'a, RwTxn<'a>>
-//     for RwTraversalIterator<'a, I>
-// {
-//     fn in_(
-//         self,
-//         edge_label: &'a str,
-//     ) -> InNodes<
-//         'a,
-//         Self,
-//         impl FnMut(Result<TraversalVal, GraphError>) -> InNodesIterator<'a, RwTxn<'a>>,
-//         RwTxn<'a>,
-//     > {
-//         {
-//             // iterate through the iterator and create a new iterator on the out edges
-//             let db = Arc::clone(&self.storage);
-//             let storage = Arc::clone(&self.storage);
-//             let txn = self.txn;
-//             let iter = self
-//                 .map(move |item| {
-//                     let prefix = HelixGraphStorage::out_edge_key(item.unwrap().id(), "");
-//                     let iter = db
-//                         .in_edges_db
-//                         .lazily_decode_data()
-//                         .prefix_iter(txn, &prefix)
-//                         .unwrap();
-
-//                     InNodesIterator {
-//                         iter,
-//                         storage: Arc::clone(&storage),
-//                         txn,
-//                         edge_label,
-//                     }
-//                 })
-//                 .flatten();
-//             InNodes { iter }
-//         }
-//     }
-// }

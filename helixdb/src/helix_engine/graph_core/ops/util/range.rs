@@ -1,17 +1,8 @@
 use std::sync::Arc;
 
-use heed3::{RoTxn, RwTxn};
-
-use crate::{
-    helix_engine::{
-        graph_core::{ops::tr_val::TraversalVal, traversal_iter::RoTraversalIterator},
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
-        types::GraphError,
-    },
-    protocol::{
-        filterable::{Filterable, FilterableType},
-        items::{Edge, Node},
-    },
+use crate::helix_engine::{
+    graph_core::{ops::tr_val::TraversalVal, traversal_iter::RoTraversalIterator},
+    types::GraphError,
 };
 
 pub struct Range<I> {
@@ -55,6 +46,17 @@ where
 
 pub trait RangeAdapter<'a>: Iterator {
     /// Range returns a slice of the current step between two points
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The starting index
+    /// * `end` - The ending index
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let traversal = G::new(storage, &txn).range(0, 10);
+    /// ```
     fn range(
         self,
         start: usize,
@@ -67,7 +69,8 @@ pub trait RangeAdapter<'a>: Iterator {
 
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> RangeAdapter<'a>
     for RoTraversalIterator<'a, I>
-{
+{   
+    #[inline(always)]
     fn range(
         self,
         start: usize,

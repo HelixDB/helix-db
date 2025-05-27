@@ -16,8 +16,8 @@ use colored::*;
 /// Render a single diagnostic plus a code snippet.
 ///
 /// * `src` – the entire text parsed by `HelixParser::parse_source`.
-/// * `filename` – label in the left gutter (e.g. `"query.hx"`).
-pub fn render(diag: &Diagnostic, src: &str, filename: &str) -> String {
+/// * `filepath` – label in the left gutter (e.g. `"query.hx"`).
+pub fn render(diag: &Diagnostic, src: &str, filepath: &str) -> String {
     // 1-based → 0-based index
 
     let line_idx = diag.location.start.line.saturating_sub(1);
@@ -52,8 +52,8 @@ pub fn render(diag: &Diagnostic, src: &str, filename: &str) -> String {
             "",
             "┌─".red(),
             format!(
-                "{filename}:{line}:{col}",
-                filename = filename,
+                "{filepath}:{line}:{col}",
+                filepath = filepath,
                 line = diag.location.start.line,
                 col = diag.location.start.column
             )
@@ -64,8 +64,8 @@ pub fn render(diag: &Diagnostic, src: &str, filename: &str) -> String {
             "",
             "┌─".yellow(),
             format!(
-                "{filename}:{line}:{col}",
-                filename = filename,
+                "{filepath}:{line}:{col}",
+                filepath = filepath,
                 line = diag.location.start.line,
                 col = diag.location.start.column
             )
@@ -76,8 +76,8 @@ pub fn render(diag: &Diagnostic, src: &str, filename: &str) -> String {
             "",
             "┌─".normal(),
             format!(
-                "{filename}:{line}:{col}",
-                filename = filename,
+                "{filepath}:{line}:{col}",
+                filepath = filepath,
                 line = diag.location.start.line,
                 col = diag.location.start.column
             )

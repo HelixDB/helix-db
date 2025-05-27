@@ -1,13 +1,14 @@
-use crate::args::*;
-use colored::*;
+use crate::{
+    args::*,
+    instance_manager::InstanceInfo,
+    styled_string::StyledString,
+};
 use helixdb::helixc::{
     analyzer::analyzer::analyze,
-    generator::new::generator_types::Source as GeneratedSource,
+    generator::generator_types::Source as GeneratedSource,
     parser::helix_parser::{Content, HelixParser, HxFile, Source},
 };
-use indicatif::{ProgressBar, ProgressStyle};
 use std::{
-    fmt::Write,
     fs,
     fs::DirEntry,
     io::ErrorKind,
@@ -210,29 +211,6 @@ pub fn check_and_read_files(path: &str) -> Result<Vec<DirEntry>, CliError> {
     Ok(files)
 }
 
-// pub fn compile_hql_to_source(files: &Vec<DirEntry>) -> Result<Source, CliError> {
-//     let contents: String = files
-//         .iter()
-//         .map(|file| -> String {
-//             match fs::read_to_string(file.path()) {
-//                 Ok(contents) => contents,
-//                 Err(e) => {
-//                     panic!("{}", e); // TODO: something better here instead of panic
-//                 }
-//             }
-//         })
-//         .fold(String::new(), |acc, contents| acc + &contents);
-
-//     let source = match HelixParser::parse_source(&contents) {
-//         Ok(source) => source,
-//         Err(e) => {
-//             return Err(CliError::from(format!("{}", e)));
-//         }
-//     };
-
-//     Ok(source)
-// }
-
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut prev_is_uppercase = false;
@@ -256,7 +234,7 @@ fn generate_content(files: &Vec<DirEntry>) -> Result<Content, CliError> {
     let files = files
         .iter()
         .map(|file| {
-            let name = file.file_name().to_string_lossy().into_owned();
+            let name = file.path().to_string_lossy().into_owned();
             let content = fs::read_to_string(file.path()).unwrap();
             HxFile { name, content }
         })
@@ -286,7 +264,8 @@ fn analyze_source(source: Source) -> Result<GeneratedSource, CliError> {
     let (diagnostics, source) = analyze(&source);
     if !diagnostics.is_empty() {
         for diag in diagnostics {
-            println!("{}", diag.render(&source.src, "queries.hx"));
+            let filepath = diag.filepath.clone().unwrap_or("queries.hx".to_string());
+            println!("{}", diag.render(&source.src, &filepath));
         }
         return Err(CliError::CompileFailed);
     }
@@ -301,67 +280,25 @@ pub fn generate(files: &Vec<DirEntry>) -> Result<(Content, GeneratedSource), Cli
     Ok((content, analyzed_source))
 }
 
-/*
-
-pub fn update_cli(spinner: &ProgressBar) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("curl")
-        .args(&["-sSL", "https://install.helix-db.com"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            finish_spinner_with_message(&spinner, false, "Failed to start curl");
-            e
-        })?
-        .stdout
-        .ok_or_else(|| {
-            finish_spinner_with_message(&spinner, false, "Failed to capture curl output");
-            "Failed to capture curl output"
-        })?;
-
-    let status = Command::new("bash").stdin(status).status().map_err(|e| {
-        finish_spinner_with_message(&spinner, false, "Failed to execute install script");
-        e
-    })?;
-
-    if status.success() {
-        finish_spinner_with_message(&spinner, true, "Successfully updated Helix CLI");
-        Ok(())
-    } else {
-        finish_spinner_with_message(&spinner, false, "Update script failed");
-        Err(format!("Exit code: {}", status).into())
-    }
+pub fn print_instnace(instance: &InstanceInfo) {
+    let rg: bool = instance.running;
+    println!(
+        "{} {}{}",
+        if rg { "Instance ID:".green().bold() } else { "Instance ID:".yellow().bold() },
+        if rg { instance.id.green().bold() } else { instance.id.yellow().bold() },
+        if rg { " (running)".to_string().green().bold() } else { " (not running)".to_string().yellow().bold() },
+    );
+    println!("└── Label: {}", instance.label.underline());
+    println!("└── Port: {}", instance.port);
+    println!("└── Available endpoints:");
+    instance.available_endpoints
+        .iter()
+        .for_each(|ep|
+            println!("    └── /{}", ep)
+        );
 }
 
-pub fn check_is_dir(path: &str) -> bool {
-    match fs::metadata(&path) {
-        Ok(metadata) => metadata.is_dir(),
-        Err(e) => {
-            println!("{}", CliError::Io(e));
-            return false;
-        }
-    }
-}
-
-pub fn format_rust_file(file_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("rustfmt").arg(file_path).status()?;
-
-    if !status.success() {
-        return Err(format!("rustfmt failed with exit code: {}", status).into());
-    }
-
-    Ok(())
-}
-
-pub fn check_hql_files(files: &Vec<DirEntry>) -> Result<(), CliError> {
-    for file in files {
-        let contents = fs::read_to_string(file.path()).unwrap();
-        match HelixParser::parse_source(&contents) {
-            Ok(_) => (),
-            Err(e) => {
-                return Err(CliError::from(format!("{}\n", e)));
-            }
-        }
-    }
-    Ok(())
-}
-*/
+// TODO:
+// Spinner::new
+// Spinner::stop_with_message
+// Dots9 style

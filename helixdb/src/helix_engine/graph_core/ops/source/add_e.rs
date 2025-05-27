@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use super::super::tr_val::TraversalVal;
 use crate::{
     helix_engine::{
@@ -5,7 +7,7 @@ use crate::{
         storage_core::storage_core::HelixGraphStorage, types::GraphError, vector_core::hnsw::HNSW,
     },
     protocol::{
-        items::{v6_uuid, Edge, SerializedEdge},
+        items::{v6_uuid, Edge},
         label_hash::hash_label,
         value::Value,
     },
@@ -14,7 +16,15 @@ use heed3::PutFlags;
 
 pub enum EdgeType {
     Vec,
-    Std,
+    Node,
+}
+impl Display for EdgeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EdgeType::Vec => write!(f, "EdgeType::Vec"),
+            EdgeType::Node => write!(f, "EdgeType::Node"),
+        }
+    }
 }
 pub struct AddE {
     inner: std::iter::Once<Result<TraversalVal, GraphError>>,
@@ -28,12 +38,11 @@ impl Iterator for AddE {
     }
 }
 
-pub trait AddEAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
+pub trait AddEAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>>  {
     fn add_e(
         self,
         label: &'a str,
-        properties: Vec<(String, Value)>,
-        id: Option<u128>,
+        properties: Option<Vec<(String, Value)>>,
         from_node: u128,
         to_node: u128,
         should_check: bool,
@@ -49,34 +58,33 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddEAdapter<'
     fn add_e(
         self,
         label: &'a str,
-        properties: Vec<(String, Value)>,
-        id: Option<u128>,
+        properties: Option<Vec<(String, Value)>>,
         from_node: u128,
         to_node: u128,
         should_check: bool,
         edge_type: EdgeType,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>> {
         let edge = Edge {
-            id: id.unwrap_or(v6_uuid()),
+            id: v6_uuid(),
             label: label.to_string(),
-            properties: properties.into_iter().collect(),
+            properties: properties.map(|props| props.into_iter().collect()),
             from_node,
             to_node,
         };
 
         let mut result: Result<TraversalVal, GraphError> = Ok(TraversalVal::Empty);
 
-        if let EdgeType::Std = edge_type {
-            if should_check {
-                if !(self.node_vec_exists(&from_node, EdgeType::Std)
-                    && self.node_vec_exists(&to_node, EdgeType::Std))
-                {
-                    result = Err(GraphError::NodeNotFound);
-                }
-            }
-        }
+        // if let EdgeType::Node = edge_type {
+        //     if should_check {
+        //         if !(self.node_vec_exists(&from_node, EdgeType::Node)
+        //             && self.node_vec_exists(&to_node, EdgeType::Node))
+        //         {
+        //             result = Err(GraphError::NodeNotFound);
+        //         }
+        //     }
+        // }
 
-        match SerializedEdge::encode_edge(&edge) {
+        match edge.encode_edge() {
             Ok(bytes) => {
                 if let Err(e) = self.storage.edges_db.put_with_flags(
                     self.txn,
@@ -130,7 +138,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddEAdapter<'
 
     fn node_vec_exists(&self, node_vec_id: &u128, edge_type: EdgeType) -> bool {
         let exists = match edge_type {
-            EdgeType::Std => self
+            EdgeType::Node => self
                 .storage
                 .nodes_db
                 .get(self.txn, &HelixGraphStorage::node_key(&node_vec_id))

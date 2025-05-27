@@ -1,4 +1,4 @@
-use crate::{helix_engine::types::GraphError, helixc::generator::new::utils::GenRef};
+use crate::{helix_engine::types::GraphError, helixc::generator::utils::GenRef};
 use serde::{
     de::{DeserializeSeed, VariantAccess, Visitor},
     Deserializer, Serializer,
@@ -10,6 +10,8 @@ use std::{
     collections::HashMap,
     fmt::{self, Display},
 };
+
+use super::id::ID;
 
 /// A flexible value type that can represent various property values in nodes and edges.
 /// Handles both JSON and binary serialisation formats via custom implementaions of the Serialize and Deserialize traits.
@@ -32,7 +34,48 @@ pub enum Value {
     Object(HashMap<String, Value>),
     Empty,
 }
-
+impl Value {
+    pub fn to_string(&self) -> String {
+        match self {
+            Value::String(s) => s.to_string(),
+            Value::F32(f) => f.to_string(),
+            Value::F64(f) => f.to_string(),
+            Value::I8(i) => i.to_string(),
+            Value::I16(i) => i.to_string(),
+            Value::I32(i) => i.to_string(),
+            Value::I64(i) => i.to_string(),
+            Value::U8(u) => u.to_string(),
+            Value::U16(u) => u.to_string(),
+            Value::U32(u) => u.to_string(),
+            Value::U64(u) => u.to_string(),
+            Value::U128(u) => u.to_string(),
+            Value::Boolean(b) => b.to_string(),
+            _ => panic!("Not primitive"),
+        }
+    }
+}
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::String(_) => write!(f, "String"),
+            Value::F32(_) => write!(f, "F32"),
+            Value::F64(_) => write!(f, "F64"),
+            Value::I8(_) => write!(f, "I8"),
+            Value::I16(_) => write!(f, "I16"),
+            Value::I32(_) => write!(f, "I32"),
+            Value::I64(_) => write!(f, "I64"),
+            Value::U8(_) => write!(f, "U8"),
+            Value::U16(_) => write!(f, "U16"),
+            Value::U32(_) => write!(f, "U32"),
+            Value::U64(_) => write!(f, "U64"),
+            Value::U128(_) => write!(f, "U128"),
+            Value::Boolean(_) => write!(f, "Boolean"),
+            Value::Array(_) => write!(f, "Array"),
+            Value::Object(_) => write!(f, "Object"),
+            Value::Empty => write!(f, "Empty"),
+        }
+    }
+}
 impl PartialEq<i32> for Value {
     fn eq(&self, other: &i32) -> bool {
         match self {
@@ -61,6 +104,33 @@ impl PartialEq<f64> for Value {
 
 impl PartialEq<String> for Value {
     fn eq(&self, other: &String) -> bool {
+        match self {
+            Value::String(s) => s == other,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<bool> for Value {
+    fn eq(&self, other: &bool) -> bool {
+        match self {
+            Value::Boolean(b) => b == other,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<f32> for Value {
+    fn eq(&self, other: &f32) -> bool {
+        match self {
+            Value::F32(f) => f == other,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<&str> for Value {
+    fn eq(&self, other: &&str) -> bool {
         match self {
             Value::String(s) => s == other,
             _ => false,
@@ -403,26 +473,34 @@ pub mod properties_format {
 
     #[inline]
     pub fn serialize<S>(
-        properties: &HashMap<String, Value>,
+        properties: &Option<HashMap<String, Value>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(properties.len()))?;
-        for (k, v) in properties {
-            map.serialize_entry(k, v)?;
+        match properties {
+            Some(properties) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(properties.len()))?;
+                for (k, v) in properties {
+                    map.serialize_entry(k, v)?;
+                }
+                map.end()
+            }
+            None => serializer.serialize_none(),
         }
-        map.end()
     }
 
     #[inline]
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<String, Value>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<HashMap<String, Value>>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        HashMap::deserialize(deserializer)
+        match Option::<HashMap<String, Value>>::deserialize(deserializer) {
+            Ok(properties) => Ok(properties),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -574,6 +652,13 @@ impl From<JsonValue> for Value {
     }
 }
 
+impl From<ID> for Value {
+    #[inline]
+    fn from(id: ID) -> Self {
+        Value::String(id.to_string())
+    }
+}
+
 pub trait Encodings {
     fn decode_properties(bytes: &[u8]) -> Result<HashMap<String, Value>, GraphError>;
     fn encode_properties(&self) -> Result<Vec<u8>, GraphError>;
@@ -605,18 +690,18 @@ impl From<Value> for GenRef<String> {
     fn from(v: Value) -> Self {
         match v {
             Value::String(s) => GenRef::Literal(s),
-            Value::I8(i) => GenRef::Literal(i.to_string()),
-            Value::I16(i) => GenRef::Literal(i.to_string()),
-            Value::I32(i) => GenRef::Literal(i.to_string()),
-            Value::I64(i) => GenRef::Literal(i.to_string()),
-            Value::F32(f) => GenRef::Literal(f.to_string()),
-            Value::F64(f) => GenRef::Literal(f.to_string()),
-            Value::Boolean(b) => GenRef::Literal(b.to_string()),
-            Value::U8(u) => GenRef::Literal(u.to_string()),
-            Value::U16(u) => GenRef::Literal(u.to_string()),
-            Value::U32(u) => GenRef::Literal(u.to_string()),
-            Value::U64(u) => GenRef::Literal(u.to_string()),
-            Value::U128(u) => GenRef::Literal(u.to_string()),
+            Value::I8(i) => GenRef::Std(format!("{}", i)),
+            Value::I16(i) => GenRef::Std(format!("{}", i)),
+            Value::I32(i) => GenRef::Std(format!("{}", i)),
+            Value::I64(i) => GenRef::Std(format!("{}", i)),
+            Value::F32(f) => GenRef::Std(format!("{:?}", f)), // {:?} forces decimal point
+            Value::F64(f) => GenRef::Std(format!("{:?}", f)),
+            Value::Boolean(b) => GenRef::Std(format!("{}", b)),
+            Value::U8(u) => GenRef::Std(format!("{}", u)),
+            Value::U16(u) => GenRef::Std(format!("{}", u)),
+            Value::U32(u) => GenRef::Std(format!("{}", u)),
+            Value::U64(u) => GenRef::Std(format!("{}", u)),
+            Value::U128(u) => GenRef::Std(format!("{}", u)),
             Value::Array(a) => unimplemented!(),
             Value::Object(o) => unimplemented!(),
             Value::Empty => GenRef::Literal("".to_string()),

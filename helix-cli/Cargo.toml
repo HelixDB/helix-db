@@ -1,6 +1,6 @@
 [package]
 name = "helix-cli"
-version = "1.0.70"
+version = "1.0.77"
 edition = "2021"
 
 [dependencies]
@@ -15,7 +15,6 @@ chrono = "0.4"
 libc = "0.2.172"
 tokio = { version = "1.45.0", features = ["full"] }
 open = "5.0.1"
-colored = "3.0.0"
 spinners = "4"
 indicatif = "0.17.11"
 

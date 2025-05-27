@@ -1,21 +1,12 @@
-use heed3::PutFlags;
-use itertools::Itertools;
-use std::collections::HashMap;
-use uuid::Uuid;
-
 use crate::{
     helix_engine::{
-        graph_core::traversal_iter::RwTraversalIterator,
-        storage_core::storage_core::HelixGraphStorage, types::GraphError,
+        graph_core::{ops::tr_val::TraversalVal, traversal_iter::RwTraversalIterator},
+        storage_core::storage_core::HelixGraphStorage,
+        types::GraphError,
     },
-    protocol::{
-        items::{Edge, SerializedEdge},
-        label_hash::hash_label,
-        value::Value,
-    },
+    protocol::{items::Edge, label_hash::hash_label},
 };
-
-use super::super::tr_val::TraversalVal;
+use heed3::PutFlags;
 
 pub struct BulkAddE {
     inner: std::iter::Once<Result<TraversalVal, GraphError>>,
@@ -29,9 +20,9 @@ impl Iterator for BulkAddE {
     }
 }
 
-pub trait BulkAddEAdapter<'a, 'b>:
-    Iterator<Item = Result<TraversalVal, GraphError>> + Sized
-{
+pub trait BulkAddEAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> {
+    ///
+    #[deprecated(note = "only used for testing when larger than ram use for loop of addE instead")]
     fn bulk_add_e(
         self,
         edges: Vec<(u128, u128, u128)>,
@@ -71,13 +62,16 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
             {
                 result = Err(GraphError::NodeNotFound);
             }
-            match SerializedEdge::encode_edge(&Edge {
-                id: *e_id,
-                label: "knows".to_string(),
-                properties: HashMap::new(),
-                from_node: *e_from,
-                to_node: *e_to,
-            }) {
+            match {
+                Edge {
+                    id: *e_id,
+                    label: "knows".to_string(),
+                    properties: None,
+                    from_node: *e_from,
+                    to_node: *e_to,
+                }
+                .encode_edge()
+            } {
                 Ok(bytes) => {
                     if let Err(e) = self.storage.edges_db.put_with_flags(
                         self.txn,
@@ -145,13 +139,15 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
         count = 0;
         println!("Adding in edges");
         // IN EDGES
-        edges.sort_unstable_by(|(from, to, id), (from_, to_, id_)| {
-            if to == to_ {
-                id.cmp(id_)
-            } else {
-                to.cmp(to_)
-            }
-        });
+        edges.sort_unstable_by(
+            |(from, to, id), (from_, to_, id_)| {
+                if to == to_ {
+                    id.cmp(id_)
+                } else {
+                    to.cmp(to_)
+                }
+            },
+        );
         let mut prev_in = None;
         for in_ in edges.iter() {
             // IN EDGES

@@ -3,7 +3,7 @@ use crate::helix_engine::{
     storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
     types::GraphError,
 };
-use heed3::{RoTxn, RwTxn};
+use heed3::RoTxn;
 use std::sync::Arc;
 
 pub struct FromNIterator<'a, I, T> {
@@ -12,20 +12,24 @@ pub struct FromNIterator<'a, I, T> {
     txn: &'a T,
 }
 
-// implementing iterator for OutIterator
 impl<'a, I> Iterator for FromNIterator<'a, I, RoTxn<'a>>
 where
     I: Iterator<Item = Result<TraversalVal, GraphError>>,
 {
     type Item = Result<TraversalVal, GraphError>;
 
-    /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
     fn next(&mut self) -> Option<Self::Item> {
         match self.iter.next() {
             Some(item) => match item {
                 Ok(TraversalVal::Edge(item)) => Some(Ok(TraversalVal::Node(
-                    self.storage.get_node(self.txn, &item.from_node).unwrap(),
-                ))), // TODO: handle unwrap
+                    match self.storage.get_node(self.txn, &item.from_node) {
+                        Ok(node) => node,
+                        Err(e) => {
+                            println!("Error getting node: {:?}", e);
+                            return Some(Err(e));
+                        }
+                    },
+                ))),
                 _ => return None,
             },
             None => None,
@@ -33,26 +37,8 @@ where
     }
 }
 
-impl<'a, I> Iterator for FromNIterator<'a, I, RwTxn<'a>>
-where
-    I: Iterator<Item = Result<TraversalVal, GraphError>>,
-{
-    type Item = Result<TraversalVal, GraphError>;
-
-    /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(item) => match item {
-                Ok(TraversalVal::Edge(item)) => Some(Ok(TraversalVal::Node(
-                    self.storage.get_node(self.txn, &item.from_node).unwrap(),
-                ))), // TODO: handle unwrap
-                _ => return None,
-            },
-            None => None,
-        }
-    }
-}
-pub trait FromNAdapter<'a, T>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
+pub trait FromNAdapter<'a, T>: Iterator<Item = Result<TraversalVal, GraphError>> {
+    /// Returns an iterator containing the nodes that the edges in `self.inner` originate from.
     fn from_n(
         self,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>;
@@ -61,6 +47,7 @@ pub trait FromNAdapter<'a, T>: Iterator<Item = Result<TraversalVal, GraphError>>
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> FromNAdapter<'a, RoTxn<'a>>
     for RoTraversalIterator<'a, I>
 {
+    #[inline(always)]
     fn from_n(
         self,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>> {
@@ -76,19 +63,3 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> FromNAdapter
         }
     }
 }
-
-// impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> OutNAdapter<'a, RwTxn<'a>>
-//     for RwTraversalIterator<'a, I>
-// {
-//     fn out_n(
-//         self,
-//         db: Arc<HelixGraphStorage>,
-//         txn: &'a RwTxn<'a>,
-//     ) -> OutVIterator<'a, Self, RwTxn<'a>> {
-//         OutVIterator {
-//             iter: self,
-//             storage: db,
-//             txn,
-//         }
-//     }
-// }

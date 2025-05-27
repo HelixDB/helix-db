@@ -1,9 +1,8 @@
 use crate::helix_engine::vector_core::vector::HVector;
 
-use super::{count::Count, items::Edge, filterable::Filterable, items::Node, value::Value};
+use super::{count::Count, items::Edge, items::Node, value::Value};
 use serde::Serializer;
 use sonic_rs::{Deserialize, Serialize};
-use std::borrow::Cow;
 
 #[derive(Deserialize, Clone, PartialEq)]
 #[serde(untagged)]

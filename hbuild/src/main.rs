@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio::time::timeout;
 
 // Constants for timeouts
-const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+//const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn process_query_files(

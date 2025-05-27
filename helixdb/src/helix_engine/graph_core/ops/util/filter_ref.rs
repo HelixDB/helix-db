@@ -9,7 +9,6 @@ pub struct FilterRef<'a, I, F> {
     f: F,
 }
 
-// implementing iterator for filter ref
 impl<'a, I, F> Iterator for FilterRef<'a, I, F>
 where
     I: Iterator<Item = Result<TraversalVal, GraphError>>,
@@ -34,7 +33,7 @@ where
     }
 }
 
-pub trait FilterRefAdapter<'a>: Iterator + Sized {
+pub trait FilterRefAdapter<'a>: Iterator {
     /// FilterRef filters the iterator by taking a reference
     /// to each item and a transaction.
     fn filter_ref<F>(
@@ -47,7 +46,8 @@ pub trait FilterRefAdapter<'a>: Iterator + Sized {
 
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>> FilterRefAdapter<'a>
     for RoTraversalIterator<'a, I>
-{
+{   
+    #[inline]
     fn filter_ref<F>(
         self,
         f: F,

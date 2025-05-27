@@ -31,7 +31,7 @@ pub enum QueryInput {
     BooleanValue { value: bool },
 }
 
-pub struct HelixGraphEngine {
+pub struct HelixGraphEngine { // TODO: is there a reason for this?
     pub storage: Arc<HelixGraphStorage>,
 }
 

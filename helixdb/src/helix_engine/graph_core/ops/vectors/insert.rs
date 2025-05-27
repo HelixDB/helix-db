@@ -1,3 +1,5 @@
+use heed3::RoTxn;
+
 use super::super::tr_val::TraversalVal;
 use crate::{
     helix_engine::{
@@ -7,7 +9,7 @@ use crate::{
     },
     protocol::value::Value,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 pub struct InsertVIterator {
     inner: std::iter::Once<Result<TraversalVal, GraphError>>,
@@ -21,25 +23,23 @@ impl Iterator for InsertVIterator {
     }
 }
 
-pub trait InsertVAdapter<'a, 'b>:
-    Iterator<Item = Result<TraversalVal, GraphError>> + Sized
-{
+pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> {
     fn insert_v<F>(
         self,
         vec: &Vec<f64>,
         label: &str,
-        fields: Option<HashMap<String, Value>>,
+        fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&HVector) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool;
 
     fn insert_vs<F>(
         self,
         vecs: &Vec<Vec<f64>>,
-        fields: Option<HashMap<String, Value>>,
+        fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&HVector) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool;
 }
 
 impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapter<'a, 'b>
@@ -49,10 +49,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
         self,
         query: &Vec<f64>,
         label: &str,
-        fields: Option<HashMap<String, Value>>,
+        fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let vector = self
             .storage
@@ -64,6 +64,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
             Err(e) => Err(GraphError::from(e)),
         };
 
+
         RwTraversalIterator {
             inner: std::iter::once(result),
             storage: self.storage,
@@ -74,10 +75,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
     fn insert_vs<F>(
         self,
         vecs: &Vec<Vec<f64>>,
-        fields: Option<HashMap<String, Value>>,
+        fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let txn = self.txn;
         let storage = Arc::clone(&self.storage);

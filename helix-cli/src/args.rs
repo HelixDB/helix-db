@@ -20,6 +20,9 @@ pub enum CommandType {
     /// Deploy a Helix project
     Deploy(DeployCommand),
 
+    /// Re-deploy a Helix project with new queries
+    Redeploy(RedeployCommand),
+
     /// Compile a Helix project
     Compile(CompileCommand),
 
@@ -46,6 +49,15 @@ pub enum CommandType {
 
     /// Ingest data into Helix
     Ingest(IngestCommand),
+
+    /// Give an instance a short description
+    Label(LabelCommand),
+
+    /// Save an instnaces data.mdb file
+    Save(SaveCommand),
+
+    /// Delete an instance and all its data
+    Delete(DeleteCommand),
 }
 
 #[derive(Debug, Args)]
@@ -57,11 +69,18 @@ pub struct DeployCommand {
     #[clap(short, long, help = "The output path")]
     pub output: Option<String>,
 
-    #[clap(short, long, help = "Should build for local machine")]
-    pub local: bool,
-
     #[clap(short, long, help = "Port to run the instance on")]
     pub port: Option<u16>,
+}
+
+#[derive(Debug, Args)]
+#[clap(name = "redeploy", about = "Re-deploy a Helix project with new queries")]
+pub struct RedeployCommand {
+    #[clap(help = "Existing helix instance ID")]
+    pub instance: String,
+
+    #[clap(short, long, help = "The path to the project")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -72,9 +91,6 @@ pub struct CompileCommand {
 
     #[clap(short, long, help = "The output path")]
     pub output: Option<String>,
-
-    #[clap(short, long, help = "Should generate python bindings")]
-    pub gen_py: bool,
 
     // #[clap(short, long, help = "The target platform")]
     // pub target: Option<String>,
@@ -102,9 +118,6 @@ pub struct InstallCommand {
 pub struct InitCommand {
     #[clap(short, long, help = "The path to the project")]
     pub path: Option<String>,
-
-    #[clap(short, long, help = "Should initialize for python")]
-    pub py: bool,
 }
 
 #[derive(Debug, Args)]
@@ -128,14 +141,14 @@ pub struct StopCommand {
     pub all: bool,
 
     #[clap(help = "Instance ID to stop")]
-    pub instance_id: Option<String>,
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Args)]
 #[clap(name = "start", about = "Start a stopped Helix instance")]
 pub struct StartCommand {
     #[clap(help = "Instance ID to Start")]
-    pub instance_id: String,
+    pub instance: String,
 }
 
 #[derive(Debug, Args)]
@@ -166,7 +179,33 @@ pub struct IngestCommand {
     pub use_ssl: bool,
 }
 
-// TODO: make this better or don't use a custom CliError thing
+#[derive(Debug, Args)]
+#[clap(name = "label", about = "Give an instance a short description")]
+pub struct LabelCommand {
+    #[clap(help = "Instance ID to label")]
+    pub instance: String,
+
+    #[clap(help = "Short description to label")]
+    pub label: String,
+}
+
+#[derive(Debug, Args)]
+#[clap(name = "save", about = "Save an instances data.mdb file")]
+pub struct SaveCommand {
+    #[clap(help = "Instance ID to save")]
+    pub instance: String,
+
+    #[clap(help = "Where to save the file to")]
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Args)]
+#[clap(name = "delete", about = "Delete an instance and its saved data")]
+pub struct DeleteCommand {
+    #[clap(help = "Instance ID to delete")]
+    pub instance: String,
+}
+
 #[derive(Debug)]
 pub enum CliError {
     Io(std::io::Error),
@@ -209,3 +248,4 @@ impl From<sonic_rs::Error> for CliError {
         CliError::New(e.to_string())
     }
 }
+

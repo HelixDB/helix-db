@@ -4,7 +4,7 @@ use crate::helix_engine::{
 };
 
 use super::super::tr_val::TraversalVal;
-use heed3::{RoTxn, RwTxn};
+use heed3::RoTxn;
 
 pub struct Map<'a, I, F> {
     iter: I,
@@ -16,38 +16,54 @@ pub struct Map<'a, I, F> {
 impl<'a, I, F> Iterator for Map<'a, I, F>
 where
     I: Iterator<Item = Result<TraversalVal, GraphError>>,
-    F: Fn(I::Item, &RoTxn<'a>) -> Result<TraversalVal, GraphError>,
+    F: FnMut(TraversalVal, &RoTxn<'a>) -> Result<TraversalVal, GraphError>,
 {
     type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(item) = self.iter.next() {
-            return Some((self.f)(item, &self.txn));
+            return match item {
+                Ok(item) => Some((self.f)(item, &self.txn)),
+                Err(e) => return Some(Err(e)),
+            };
         }
         None
     }
 }
 
-pub trait MapAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
-    /// FilterRef filters the iterator by taking a reference
+pub trait MapAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>> {
+    /// MapTraversal maps the iterator by taking a reference
     /// to each item and a transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - A function to map the iterator
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let traversal = G::new(storage, &txn).map_traversal(|item, txn| {
+    ///     Ok(item)
+    /// });
+    /// ```
     fn map_traversal<F>(
         self,
         f: F,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(Result<TraversalVal, GraphError>, &RoTxn<'a>) -> Result<TraversalVal, GraphError>;
+        F: FnMut(TraversalVal, &RoTxn<'a>) -> Result<TraversalVal, GraphError>;
 }
 
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>> MapAdapter<'a>
     for RoTraversalIterator<'a, I>
 {
+    #[inline]
     fn map_traversal<F>(
         self,
         f: F,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(I::Item, &RoTxn<'a>) -> Result<TraversalVal, GraphError>,
+        F: FnMut(TraversalVal, &RoTxn<'a>) -> Result<TraversalVal, GraphError>,
     {
         RoTraversalIterator {
             inner: Map {
@@ -81,23 +97,29 @@ where
         None
     }
 }
-pub trait MapAdapterMut<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
+pub trait MapAdapterMut<'scope, 'env>: Iterator<Item = Result<TraversalVal, GraphError>> {
+    /// MapTraversalMut maps the iterator by taking a mutable
+    /// reference to each item and a transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - A function to map the iterator
     fn map_traversal_mut<F>(
         self,
         f: F,
-    ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
+    ) -> RwTraversalIterator<'scope, 'env, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(Result<TraversalVal, GraphError>) -> Result<TraversalVal, GraphError>,
-        'b: 'a;
+        F: Fn(Result<TraversalVal, GraphError>) -> Result<TraversalVal, GraphError>;
 }
 
-impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> MapAdapterMut<'a, 'b>
-    for RwTraversalIterator<'a, 'b, I>
+impl<'scope, 'env, I: Iterator<Item = Result<TraversalVal, GraphError>>> MapAdapterMut<'scope, 'env>
+    for RwTraversalIterator<'scope, 'env, I>
 {
+    #[inline]
     fn map_traversal_mut<F>(
         self,
         f: F,
-    ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
+    ) -> RwTraversalIterator<'scope, 'env, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
         F: Fn(I::Item) -> Result<TraversalVal, GraphError>,
     {

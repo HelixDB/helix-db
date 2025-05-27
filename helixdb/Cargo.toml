@@ -73,4 +73,3 @@ default = ["full"]
 strip = "debuginfo"
 lto = true
 opt-level = "z"
-

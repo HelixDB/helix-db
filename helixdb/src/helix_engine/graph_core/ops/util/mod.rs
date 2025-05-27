@@ -4,5 +4,6 @@ pub mod filter_mut;
 pub mod filter_ref;
 pub mod map;
 pub mod paths;
+pub mod props;
 pub mod range;
 pub mod update;

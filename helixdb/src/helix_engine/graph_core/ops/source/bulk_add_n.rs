@@ -1,20 +1,8 @@
-use heed3::PutFlags;
-use std::{collections::HashMap, time::Instant};
-use uuid::Uuid;
-
 use crate::{
-    helix_engine::{
-        graph_core::traversal_iter::RwTraversalIterator,
-        storage_core::storage_core::HelixGraphStorage, types::GraphError,
-    },
-    protocol::{
-        filterable::Filterable,
-        items::{Node, SerializedNode},
-        label_hash::hash_label,
-        value::Value,
-    },
+    helix_engine::{graph_core::traversal_iter::RwTraversalIterator, types::GraphError},
+    protocol::items::Node,
 };
-
+use heed3::PutFlags;
 use super::super::tr_val::TraversalVal;
 
 pub struct BulkAddN {
@@ -29,9 +17,9 @@ impl Iterator for BulkAddN {
     }
 }
 
-pub trait BulkAddNAdapter<'a, 'b>:
-    Iterator<Item = Result<TraversalVal, GraphError>> + Sized
-{
+pub trait BulkAddNAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> {
+    ///
+    #[deprecated(note = "only used for testing when larger than ram use for loop of addN instead")]
     fn bulk_add_n(
         self,
         nodes: &mut [u128],
@@ -59,13 +47,13 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddNAdapt
                 let node = Node {
                     id: *node,
                     label: "user".to_string(),
-                    properties: HashMap::new(),
+                    properties: None,
                 };
 
                 let id = node.id;
                 // insert node
 
-                match SerializedNode::encode_node(&node) {
+                match node.encode_node() {
                     Ok(bytes) => {
                         if let Err(e) = self.storage.nodes_db.put_with_flags(
                             self.txn,
@@ -116,7 +104,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddNAdapt
                 //     }
                 // }
             }
-            
+
             if count % 1000000 == 0 {
                 println!("processed: {:?}", count);
             }

@@ -7,22 +7,26 @@ source = { SOI ~ (node_def | edge_def | vector_def | query_def)* ~ EOI }
 // ---------------------------------------------------------------------
 // Schema definitions
 // ---------------------------------------------------------------------
-vector_def = { "V::" ~ identifier_upper ~ node_body }
-node_def   = { "N::" ~ identifier_upper ~ node_body }
+vector_def = { "V::" ~ identifier_upper ~ node_body? }
+node_def   = { "N::" ~ identifier_upper ~ node_body? }
 edge_def   = { "E::" ~ identifier_upper ~ edge_body }
 
 node_body  = { "{" ~ field_defs ~ "}" }
-edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ "To:" ~ identifier_upper ~ "," ~ properties ~ "}" }
-field_def  = { index? ~ identifier ~ ":" ~ param_type }
+edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ ("To:" ~ identifier_upper ~ "," ~ properties ~ "}" | "To:" ~ identifier_upper ~ ","? ~ "}") }
 field_defs = { (field_def ~ ",")* ~ (field_def ~ ","?)? }
+field_def  = { index? ~ identifier ~ ":" ~ param_type ~ (default)? }
 index= { "INDEX" }
+default = { "DEFAULT" ~  (float | integer | boolean | string_literal | none) } 
+// optional = { "OPTIONAL" }
+
+
 properties = { "Properties" ~ ":" ~ "{" ~ field_defs? ~ "}" }
 
 
 // ---------------------------------------------------------------------
 // Query definitions
 // ---------------------------------------------------------------------
-query_def    = { "QUERY" ~ identifier ~ query_params ~ "=>" ~ query_body ~ return_stmt }
+query_def    = { "QUERY" ~ identifier ~ query_params ~ "=>" ~ query_body ~ return_stmt } // TODO: possible optional return stmt
 query_params = { "(" ~ (param_def ~ ("," ~ param_def)*)? ~ ")" }
 param_def    = { identifier ~ ":" ~ param_type }
 query_body   = { (get_stmt | AddN | AddV | BatchAddV | AddE | drop | for_loop)* }
@@ -34,12 +38,13 @@ query_body   = { (get_stmt | AddN | AddV | BatchAddV | AddE | drop | for_loop)* 
 get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | start_vector ) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
-anonymous_traversal = { "_" ~ ((step+ ~ last_step?) | last_step) }
+anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
 step                = { "::" ~ (graph_step | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE) }
 last_step           = { "::" ~ (bool_operations | update) }
 // change this for loop to be able to take traversals etc in the future. 
 for_loop            = { "FOR" ~ for_argument ~ "IN" ~ identifier ~ "{" ~ query_body ~ "}" }
-for_argument        = { identifier | object_destructuring }
+for_argument        = { object_access | object_destructuring | identifier }
+object_access       = { identifier ~ "." ~ identifier }
 object_destructuring = { "{" ~ identifier ~ ("," ~ identifier)* ~ "}" }
 
 // ---------------------------------------------------------------------
@@ -55,13 +60,13 @@ evaluates_to_anything = {
   | none
   | traversal
   | id_traversal
-  | identifier
   | string_literal
   | float
   | integer
   | boolean
   | and
   | or
+  | identifier
 }
 
 // ---------------------------------------------------------------------
@@ -102,7 +107,7 @@ to_from       = { to ~ from? | from ~ to? }
 to            = { "::" ~ "To" ~ "(" ~ id_arg ~ ")" }
 from          = { "::" ~ "From" ~ "(" ~ id_arg ~ ")" }
 vec_literal   = { "[" ~ (float) ~ ("," ~ (float))* ~ "]" }
-vector_data = { identifier | vec_literal }
+vector_data = { (identifier | vec_literal) }
 AddN          = { "AddN" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? }
 AddE          = { "AddE" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? ~ to_from }
 AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~ ("," ~ create_field)* ~ ")") }
@@ -110,21 +115,30 @@ AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~
 // ---------------------------------------------------------------------
 // Source steps
 // ---------------------------------------------------------------------
-start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ id_args ~ ")")? }
-
+start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+by_index = { "{" ~ id_arg ~ ":" ~ evaluates_to_anything ~ "}" }
 // ---------------------------------------------------------------------
 // Traversal steps
 // ---------------------------------------------------------------------
-graph_step   = {
-    "OutE" ~ ("<" ~ type_args ~ ">")?
-  | "InE" ~ ("<" ~ type_args ~ ">")?
-  | "FromN" ~ ("<" ~ type_args ~ ">")?
-  | "ToN" ~ ("<" ~ type_args ~ ">")?
-  | "Out" ~ ("<" ~ type_args ~ ">")?
-  | "In" ~ ("<" ~ type_args ~ ">")?
+graph_step = {
+  out_e
+  | in_e
+  | from_n
+  | to_n
+  | out
+  | in_nodes
+  | shortest_path
 }
+out_e ={  "OutE" ~ ("<" ~ type_args ~ ">")?}
+in_e ={ "InE" ~ ("<" ~ type_args ~ ">")?}
+from_n ={ "FromN"}
+to_n ={ "ToN"}
+out ={ "Out" ~ ("<" ~ type_args ~ ">")?}
+in_nodes ={ "In" ~ ("<" ~ type_args ~ ">")?}
+shortest_path ={ "ShortestPath" ~ ("<" ~ type_args ~ ">")? ~ to_from}
+
 
 // ---------------------------------------------------------------------
 // Util steps
@@ -142,7 +156,8 @@ drop = { "DROP" ~ (traversal | id_traversal | identifier)? }
 // ---------------------------------------------------------------------
 // Vector steps
 // ---------------------------------------------------------------------
-search_vector = { "SearchV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ vector_data ~ "," ~ evaluates_to_number ~ ")" }
+search_vector = { "SearchV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ vector_data ~ "," ~ (integer | identifier) ~ ")" }// ~ ("::" ~ pre_filter)? }
+pre_filter = { "PREFILTER" ~ "(" ~ (evaluates_to_bool | anonymous_traversal) ~ ")" }
 BatchAddV = { "BatchAddV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ identifier ~ ")" }
 
 // ---------------------------------------------------------------------

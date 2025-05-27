@@ -1059,15 +1059,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "colored"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
-dependencies = [
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "comfy-table"
 version = "7.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1926,11 +1917,10 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "1.0.70"
+version = "1.0.77"
 dependencies = [
  "chrono",
  "clap",
- "colored 3.0.0",
  "dirs 6.0.0",
  "helixdb",
  "indicatif",
@@ -1952,6 +1942,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "get_routes",
+ "heed3",
  "helixdb",
  "inventory",
  "rand 0.9.1",
@@ -1968,7 +1959,9 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "chrono",
- "colored 2.2.0",
+ "colored",
+ "criterion",
+ "csv",
  "dirs 6.0.0",
  "flume",
  "heed3",

@@ -1,17 +1,18 @@
 use crate::helix_engine::{
     types::VectorError,
-    vector_core::{
-        vector::HVector,
-        hnsw::HNSW,
-    },
+    vector_core::{hnsw::HNSW, vector::HVector},
 };
+use crate::protocol::value::Value;
+use heed3::{
+    types::{Bytes, Unit},
+    Database, Env, RoTxn, RwTxn,
+};
+use itertools::Itertools;
+use rand::prelude::Rng;
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{
-        BinaryHeap,
-        HashSet,
-        HashMap,
-    },
+    collections::{BinaryHeap, HashMap, HashSet},
 };
 use heed3::{
     types::{Bytes, Unit},
@@ -95,10 +96,10 @@ pub trait HeapOps<T> {
     where
         T: Ord;
 
-    fn to_vec_with_filter<F>(&mut self, k: usize, filter: Option<&[F]>) -> Vec<T>
+    fn to_vec_with_filter<F>(&mut self, k: usize, filter: Option<&[F]>, txn: &RoTxn) -> Vec<T>
     where
         T: Ord,
-        F: Fn(&T) -> bool;
+        F: Fn(&T, &RoTxn) -> bool;
 }
 
 impl<T> HeapOps<T> for BinaryHeap<T> {
@@ -154,16 +155,16 @@ impl<T> HeapOps<T> for BinaryHeap<T> {
     }
 
     #[inline(always)]
-    fn to_vec_with_filter<F>(&mut self, k: usize, filter: Option<&[F]>) -> Vec<T>
+    fn to_vec_with_filter<F>(&mut self, k: usize, filter: Option<&[F]>, txn: &RoTxn) -> Vec<T>
     where
         T: Ord,
-        F: Fn(&T) -> bool,
+        F: Fn(&T, &RoTxn) -> bool,
     {
         let mut result = Vec::with_capacity(k);
         for _ in 0..k {
             // while pop check filters and pop until one passes
             while let Some(item) = self.pop() {
-                if filter.is_none() || filter.unwrap().iter().all(|f| f(&item)) {
+                if filter.is_none() || filter.unwrap().iter().all(|f| f(&item, txn)) {
                     result.push(item);
                     break;
                 }
@@ -279,7 +280,7 @@ impl VectorCore {
         filter: Option<&[F]>,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let out_key = Self::out_edges_key(id, level, None);
         let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(512)); // TODO: why 512?
@@ -292,16 +293,17 @@ impl VectorCore {
         let prefix_len = out_key.len();
 
         for result in iter {
-            if let Ok((key, _)) = result { // TODO: fix here because not working at all
+            if let Ok((key, _)) = result {
+                // TODO: fix here because not working at all
                 let mut arr = [0u8; 16];
                 let len = std::cmp::min(key.len(), 16);
-                arr[..len].copy_from_slice(&key[prefix_len..(prefix_len+len)]);
+                arr[..len].copy_from_slice(&key[prefix_len..(prefix_len + len)]);
                 let neighbor_id = u128::from_be_bytes(arr);
 
                 if neighbor_id != id {
                     if let Ok(vector) = self.get_vector(txn, neighbor_id, level, true) {
                         // TODO: look at implementing a macro that actually just runs each function rather than iterating through
-                        if filter.is_none() || filter.unwrap().iter().all(|f| f(&vector)) {
+                        if filter.is_none() || filter.unwrap().iter().all(|f| f(&vector, txn)) {
                             neighbors.push(vector);
                         }
                     }
@@ -364,7 +366,7 @@ impl VectorCore {
         filter: Option<&[F]>,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let m: usize = if level == 0 {
             self.config.m
@@ -378,7 +380,7 @@ impl VectorCore {
                 for mut neighbor in self.get_neighbors(txn, candidate.get_id(), level, filter)? {
                     if visited.insert(neighbor.get_id().to_string()) { // TODO: NOT TO_STRING()
                         neighbor.set_distance(neighbor.distance_to(query)?);
-                        if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor)) {
+                        if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, txn)) {
                             result.push(neighbor);
                         }
                     }
@@ -401,7 +403,7 @@ impl VectorCore {
         filter: Option<&[F]>,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
@@ -470,7 +472,7 @@ impl HNSW for VectorCore {
             Some(bytes) => {
                 let vector = match with_data {
                     true => HVector::from_bytes(id, level, &bytes),
-                    false => Ok(HVector::from_slice(level, vec![])),
+                    false => Ok(HVector::from_slice(id, level, vec![])),
                 }?;
                 Ok(vector)
             }
@@ -488,7 +490,7 @@ impl HNSW for VectorCore {
         should_trickle: bool,
     ) -> Result<Vec<HVector>, VectorError>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let query = HVector::from_slice(0, query.to_vec());
 
@@ -526,17 +528,17 @@ impl HNSW for VectorCore {
             },
         )?;
 
-        Ok(candidates.to_vec_with_filter(k, filter))
+        Ok(candidates.to_vec_with_filter(k, filter, txn))
     }
 
     fn insert<F>(
         &self,
         txn: &mut RwTxn,
         data: &[f64],
-        fields: Option<HashMap<String, Value>>,
+        fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let new_level = self.get_new_level();
 
@@ -611,20 +613,57 @@ impl HNSW for VectorCore {
         }
         Ok(query)
     }
+    #[inline(always)]
+    fn get_vector(
+        &self,
+        txn: &RoTxn,
+        id: u128,
+        level: usize,
+        with_data: bool,
+    ) -> Result<HVector, VectorError> {
+        let key = Self::vector_key(id, level);
+        match self.vectors_db.get(txn, key.as_ref())? {
+            Some(bytes) => {
+                let vector = match with_data {
+                    true => HVector::from_bytes(id, level, &bytes),
+                    false => Ok(HVector::from_slice(id, level, vec![])),
+                }?;
+                Ok(vector)
+            }
+            None if level > 0 => self.get_vector(txn, id, 0, with_data),
+            None => Err(VectorError::VectorNotFound(id.to_string())),
+        }
+    }
 
-    // TODO: unused used
-    fn get_all_vectors(&self, txn: &RoTxn, level: Option<usize>) -> Result<Vec<HVector>, VectorError> {
+    fn get_all_vectors(
+        &self,
+        txn: &RoTxn,
+        level: Option<usize>,
+    ) -> Result<Vec<HVector>, VectorError> {
         self.vectors_db
             .prefix_iter(txn, VECTOR_PREFIX)?
             .map(|result| {
-                result.map_err(VectorError::from)
-                    .and_then(|(_, value)| {
-                        bincode::deserialize(&value)
-                            .map_err(VectorError::from)
-                    })
+                result
+                    .map_err(VectorError::from)
+                    .and_then(|(_, value)| bincode::deserialize(&value).map_err(VectorError::from))
             })
             .filter_ok(|vector: &HVector| level.map_or(true, |l| vector.level == l))
             .collect()
     }
 }
 
+
+
+    fn load<F>(&self, txn: &mut RwTxn, data: Vec<&[f64]>) -> Result<(), VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        for v in data.iter() {
+            let _ = self.insert::<F>(txn, v, None, None);
+        }
+
+        // NOTE: need to txn.commit() outside of call
+
+        Ok(())
+    }
+}

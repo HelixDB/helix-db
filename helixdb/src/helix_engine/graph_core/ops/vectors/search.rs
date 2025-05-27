@@ -1,3 +1,5 @@
+use heed3::RoTxn;
+
 use super::super::tr_val::TraversalVal;
 use crate::helix_engine::{
     graph_core::traversal_iter::RoTraversalIterator,
@@ -19,7 +21,7 @@ impl<I: Iterator<Item = Result<TraversalVal, GraphError>>> Iterator for SearchV<
     }
 }
 
-pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>> + Sized {
+pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>>  {
     fn search_v<F>(
         self,
         query: &Vec<f64>,
@@ -27,7 +29,7 @@ pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>> 
         filter: Option<&[F]>,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&HVector) -> bool;
+        F: Fn(&HVector, &RoTxn) -> bool;
 }
 
 impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapter<'a>
@@ -40,7 +42,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
         filter: Option<&[F]>,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
-        F: Fn(&HVector) -> bool,
+        F: Fn(&HVector, &RoTxn) -> bool,
     {
         let vectors = self
             .storage
@@ -76,7 +78,12 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
             Err(VectorError::InvalidVectorLength) => {
                 let error = GraphError::VectorError("invalid vector dimensions!".to_string());
                 once(Err(error)).collect::<Vec<_>>().into_iter()
-            },
+            }
+            Err(_) => once(Err(GraphError::VectorError(
+                "a vector error has occured!".to_string(),
+            )))
+            .collect::<Vec<_>>()
+            .into_iter(),
         };
 
         let iter = SearchV { iter };
