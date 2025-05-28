@@ -12,17 +12,8 @@ use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashMap, HashSet},
+    collections::{BinaryHeap, HashSet},
 };
-use heed3::{
-    types::{Bytes, Unit},
-    Database, Env, RoTxn, RwTxn,
-};
-use crate::protocol::value::Value;
-use itertools::Itertools;
-use rand::prelude::Rng;
-use serde::{Deserialize, Serialize};
-//use rayon::prelude::*;
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
@@ -472,7 +463,7 @@ impl HNSW for VectorCore {
             Some(bytes) => {
                 let vector = match with_data {
                     true => HVector::from_bytes(id, level, &bytes),
-                    false => Ok(HVector::from_slice(id, level, vec![])),
+                    false => Ok(HVector::from_slice(level, vec![])),
                 }?;
                 Ok(vector)
             }
@@ -629,18 +620,5 @@ impl HNSW for VectorCore {
             })
             .filter_ok(|vector: &HVector| level.map_or(true, |l| vector.level == l))
             .collect()
-    }
-
-    fn load<F>(&self, txn: &mut RwTxn, data: Vec<&[f64]>) -> Result<(), VectorError>
-    where
-        F: Fn(&HVector, &RoTxn) -> bool,
-    {
-        for v in data.iter() {
-            let _ = self.insert::<F>(txn, v, None, None);
-        }
-
-        // NOTE: need to txn.commit() outside of call
-
-        Ok(())
     }
 }

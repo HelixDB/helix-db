@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use heed3::RwTxn;
+use heed3::{RwTxn, RoTxn};
 use rand::seq::SliceRandom;
 use polars::prelude::*;
 use kdam::tqdm;
@@ -24,7 +24,7 @@ use rayon::prelude::*;
 
 // make sure to test with cargo test --release <test_name> -- --nocapture
 
-type Filter = fn(&HVector) -> bool;
+type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_db() -> HelixGraphStorage {
     let config = Config::new(16, 128, 768, 10);

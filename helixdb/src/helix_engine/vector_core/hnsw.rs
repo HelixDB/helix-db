@@ -47,21 +47,6 @@ pub trait HNSW
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 
-    /// Load a full hnsw index with all vectors at once
-    ///
-    /// # Arguments
-    ///
-    /// * `txn` - The transaction to use
-    /// * `id` - The id of the vector
-    /// * `data` - A Vec of all the vectors to insert
-    ///
-    /// # Returns
-    ///
-    /// An emtpy tuple
-    fn load<F>(&self, txn: &mut RwTxn, data: Vec<&[f64]>) -> Result<(), VectorError>
-    where
-        F: Fn(&HVector, &RoTxn) -> bool;
-
     /// Get all vectors from the index at a specific level
     ///
     /// # Arguments
