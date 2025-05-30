@@ -267,7 +267,7 @@ fn main() {
             println!("helix-cli version: {}, helix-db version: {}, remote helix version: {}",
                 local_cli_version, local_db_version, remote_helix_version);
 
-            if local_db_version < remote_helix_version {
+            if local_db_version < remote_helix_version || local_cli_version < remote_helix_version {
                 let mut runner = Command::new("git");
                 runner.arg("reset");
                 runner.arg("--hard");
