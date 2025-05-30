@@ -1,16 +1,11 @@
-use crate::{
-    args::*,
-    instance_manager::InstanceInfo,
-    styled_string::StyledString,
-};
+use crate::{args::*, instance_manager::InstanceInfo, styled_string::StyledString};
 use helixdb::helixc::{
     analyzer::analyzer::analyze,
-    generator::generator_types::Source as GeneratedSource,
+    generator::{generator_types::Source as GeneratedSource, tsdisplay::ToTypeScript},
     parser::helix_parser::{Content, HelixParser, HxFile, Source},
 };
 use std::{
-    fs,
-    fs::DirEntry,
+    fs::{self, DirEntry, File},
     io::ErrorKind,
     net::{SocketAddr, TcpListener},
     path::PathBuf,
@@ -284,21 +279,48 @@ pub fn print_instnace(instance: &InstanceInfo) {
     let rg: bool = instance.running;
     println!(
         "{} {}{}",
-        if rg { "Instance ID:".green().bold() } else { "Instance ID:".yellow().bold() },
-        if rg { instance.id.green().bold() } else { instance.id.yellow().bold() },
-        if rg { " (running)".to_string().green().bold() } else { " (not running)".to_string().yellow().bold() },
+        if rg {
+            "Instance ID:".green().bold()
+        } else {
+            "Instance ID:".yellow().bold()
+        },
+        if rg {
+            instance.id.green().bold()
+        } else {
+            instance.id.yellow().bold()
+        },
+        if rg {
+            " (running)".to_string().green().bold()
+        } else {
+            " (not running)".to_string().yellow().bold()
+        },
     );
     println!("└── Label: {}", instance.label.underline());
     println!("└── Port: {}", instance.port);
     println!("└── Available endpoints:");
-    instance.available_endpoints
+    instance
+        .available_endpoints
         .iter()
-        .for_each(|ep|
-            println!("    └── /{}", ep)
-        );
+        .for_each(|ep| println!("    └── /{}", ep));
 }
 
 // TODO:
 // Spinner::new
 // Spinner::stop_with_message
 // Dots9 style
+use std::io::Write;
+pub fn gen_typescript(source: &GeneratedSource, output_path: &str) -> Result<(), CliError> {
+    let mut file = File::create(PathBuf::from(output_path).join("interface.d.ts"))?;
+
+    for node in &source.nodes {
+        write!(file, "{}", node.to_typescript())?;
+    }
+    for edge in &source.edges {
+        write!(file, "{}", edge.to_typescript())?;
+    }
+    for vector in &source.vectors {
+        write!(file, "{}", vector.to_typescript())?;
+    }
+
+    Ok(())
+}

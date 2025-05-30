@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use crate::{
-    helix_engine::graph_core::ops::source::n_from_type::NFromTypeAdapter,
+    helix_engine::graph_core::ops::source::{n_from_index::NFromIndexAdapter, n_from_type::NFromTypeAdapter},
     protocol::{
         filterable::Filterable,
         id::ID,
@@ -1434,4 +1434,66 @@ fn test_with_id_type() {
 
     assert_eq!(traversal.len(), 1);
     assert_eq!(traversal[0].id(), input.id.inner());
+}
+
+#[test]
+fn test_add_e_with_dup_flag() {
+    let (storage, _temp_dir) = setup_test_db();
+
+    let mut txn = storage.graph_env.write_txn().unwrap();
+    let mut nodes = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        let node1 = G::new_mut(Arc::clone(&storage), &mut txn)
+            .add_n("person", Some(props!()), None)
+            .collect_to_val();
+        nodes.push(node1);
+    }
+    txn.commit().unwrap();
+    let random_nodes = {
+        let mut n = Vec::with_capacity(10000000);
+        for _ in 0..1000000 {
+            let pair = (
+                &nodes[rand::rng().random_range(0..nodes.len())],
+                &nodes[rand::rng().random_range(0..nodes.len())],
+            );
+            n.push(pair);
+        }
+        n
+    };
+
+    let now = Instant::now();
+    for chunk in random_nodes.chunks(100000) {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        for (random_node1, random_node2) in chunk {
+            let edge = G::new_mut(Arc::clone(&storage), &mut txn)
+                .add_e(
+                    "knows",
+                    None,
+                    random_node1.id(),
+                    random_node2.id(),
+                    false,
+                    EdgeType::Node,
+                )
+                .collect_to_val();
+        }
+        txn.commit().unwrap();
+    }
+    let end = now.elapsed();
+    println!("10 mill took {:?}", end);
+    let txn = storage.graph_env.read_txn().unwrap();
+    let traversal = G::new(Arc::clone(&storage), &txn)
+        .e_from_type("knows")
+        .count();
+    println!("{:?}", traversal);
+
+    let traversal = G::new(Arc::clone(&storage), &txn)
+        .n_from_type("person")
+        .out_e("knows")
+        .count();
+    println!("{:?}", traversal);
+
+
+    assert_eq!(traversal, 10000);
+
+    assert!(false)
 }

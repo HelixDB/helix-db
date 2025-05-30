@@ -1,6 +1,8 @@
-use std::fmt::{self, Debug, Display};
+use std::{fmt::{self, Debug, Display}, io::{self, Write}};
 
 use crate::helixc::parser::helix_parser::IdType;
+
+use super::tsdisplay::ToTypeScript;
 
 #[derive(Clone)]
 pub enum GenRef<T>
@@ -235,8 +237,30 @@ impl Display for RustType {
             RustType::F64 => write!(f, "f64"),
             RustType::Bool => write!(f, "bool"),
             RustType::Uuid => write!(f, "ID"), // TODO: Change this for actual UUID
-            RustType::Date => unimplemented!(),
+            RustType::Date => write!(f, "DateTime<Utc>"),
         }
+    }
+}
+impl RustType {
+    pub fn to_ts(&self) -> String {
+        let s = match self {
+            RustType::String =>  "string",
+            RustType::I8 =>  "number",
+            RustType::I16 =>  "number",
+            RustType::I32 =>  "number",
+            RustType::I64 =>  "number",
+            RustType::U8 =>  "number",
+            RustType::U16 =>  "number",
+            RustType::U32 =>  "number",
+            RustType::U64 =>  "number",
+            RustType::U128 =>  "number",
+            RustType::F32 =>  "number",
+            RustType::F64 =>  "number",
+            RustType::Bool =>  "boolean",
+            RustType::Uuid =>  "string", // do thee
+            RustType::Date =>  "Date",   // do thee
+        };
+        s.to_string()
     }
 }
 
@@ -315,6 +339,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use std::cell::RefCell;
+use chrono::{DateTime, Utc};
     "#
     .to_string()
 }

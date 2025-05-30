@@ -123,18 +123,6 @@ impl GeneratedParameter {
     }
 }
 
-impl GeneratedStatement {
-    // pub fn unwrap_assignment(assignment: Assignment, statements: &mut Vec<GeneratedStatement>) {
-    //     let generated_assignment = GeneratedStatement::Assignment(GeneratedAssignment {
-    //         variable: assignment.variable.clone(),
-    //         value: assignment.value.into(),
-    //     });
-    //     statements.push(generated_assignment);
-    // }
-
-    fn unwrap_traversal(traversal: GeneratedTraversal, statements: &mut Vec<GeneratedStatement>) {}
-}
-
 fn unwrap_object(
     name: String,
     obj: &HashMap<String, FieldType>,
@@ -229,6 +217,9 @@ impl From<DefaultValue> for GeneratedValue {
             DefaultValue::U64(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
             DefaultValue::U128(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
             DefaultValue::Boolean(b) => GeneratedValue::Primitive(GenRef::Std(b.to_string())),
+            DefaultValue::Now => GeneratedValue::Primitive(GenRef::Std(
+                "chrono::Utc::now().to_rfc3339()".to_string(),
+            )),
             DefaultValue::Empty => GeneratedValue::Unknown,
         }
     }

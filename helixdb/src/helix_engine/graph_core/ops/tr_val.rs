@@ -61,7 +61,10 @@ impl Traversable for TraversalVal {
             TraversalVal::Node(node) => node.id,
             TraversalVal::Edge(edge) => edge.id,
             TraversalVal::Vector(vector) => vector.id,
-            _ => panic!("Invalid traversal value"),
+            t => {
+                println!("invalid traversal value {:?}", t);
+                panic!("Invalid traversal value")
+            }
         }
     }
 

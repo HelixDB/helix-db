@@ -9,7 +9,7 @@ get_routes = { path = "../get_routes" }
 inventory = "0.3.16"
 rand = "0.9.1"
 dirs = "5.0.1"
-chrono = "0.4.19"
+chrono = { version = "0.4.41", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 sonic-rs = "0.5.0"
 tokio = { version = "1.44.2", features = ["full"] }

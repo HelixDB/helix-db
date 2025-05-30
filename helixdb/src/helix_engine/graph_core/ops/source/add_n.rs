@@ -72,8 +72,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
                             continue;
                         }
                     };
+                    // look into if there is a way to serialize to a slice 
                     match bincode::serialize(&key) {
                         Ok(serialized) => {
+                            // possibly append dup
                             if let Err(e) = db.put(self.txn, &serialized, &node.id.to_be_bytes()) {
                                 result = Err(GraphError::from(e));
                             }
