@@ -20,6 +20,9 @@ pub enum CommandType {
     /// Deploy a Helix project
     Deploy(DeployCommand),
 
+    /// Update the helix-cli and helix-db repo
+    Update(UpdateCommand),
+
     /// Re-deploy a Helix project with new queries
     Redeploy(RedeployCommand),
 
@@ -58,6 +61,9 @@ pub enum CommandType {
 
     /// Delete an instance and all its data
     Delete(DeleteCommand),
+
+    /// Get the current version of the cli and db
+    Version(VersionCommand),
 }
 
 #[derive(Debug, Args)]
@@ -72,6 +78,14 @@ pub struct DeployCommand {
     #[clap(short, long, help = "Port to run the instance on")]
     pub port: Option<u16>,
 }
+
+#[derive(Debug, Args)]
+#[clap(name = "update", about = "Update helix-cli and helix-db")]
+pub struct UpdateCommand {}
+
+#[derive(Debug, Args)]
+#[clap(name = "version", about = "Get the installed verison of helix-cli and helix-db")]
+pub struct VersionCommand {}
 
 #[derive(Debug, Args)]
 #[clap(
@@ -113,10 +127,7 @@ pub struct LintCommand {
 
 #[derive(Debug, Args)]
 #[clap(name = "install", about = "Install the Helix repo")]
-pub struct InstallCommand {
-    #[clap(short, long, help = "The path to the project")]
-    pub path: Option<String>,
-}
+pub struct InstallCommand {}
 
 #[derive(Debug, Args)]
 #[clap(name = "init", about = "Initialise a new Helix project")]
@@ -225,49 +236,6 @@ pub struct DeleteCommand {
     pub instance: String,
 }
 
-#[derive(Debug)]
-pub enum CliError {
-    Io(std::io::Error),
-    New(String),
-    ConfigFileNotFound,
-    CompileFailed,
-}
-
-impl std::fmt::Display for CliError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CliError::Io(e) => write!(f, "IO error: {}", e),
-            CliError::New(msg) => write!(f, "{}", msg),
-            CliError::ConfigFileNotFound => write!(f, "Config file not found"),
-            CliError::CompileFailed => write!(f, "Failed to compile queries"),
-        }
-    }
-}
-
-impl From<std::io::Error> for CliError {
-    fn from(e: std::io::Error) -> Self {
-        CliError::Io(e)
-    }
-}
-
-impl From<&'static str> for CliError {
-    fn from(e: &'static str) -> Self {
-        CliError::New(e.to_string())
-    }
-}
-
-impl From<String> for CliError {
-    fn from(e: String) -> Self {
-        CliError::New(e)
-    }
-}
-
-impl From<sonic_rs::Error> for CliError {
-    fn from(e: sonic_rs::Error) -> Self {
-        CliError::New(e.to_string())
-    }
-}
-
 #[derive(Debug, Subcommand, Clone, ValueEnum)]
 #[clap(name = "output")]
 pub enum OutputLanguage {
@@ -286,3 +254,4 @@ impl PartialEq for OutputLanguage {
         }
     }
 }
+

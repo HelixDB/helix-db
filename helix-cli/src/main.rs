@@ -3,14 +3,12 @@ use crate::{
     instance_manager::InstanceManager,
     styled_string::StyledString,
     utils::*,
+    types::*,
 };
-use args::OutputLanguage;
-use clap::Parser;
 use helixdb::{
     helix_engine::graph_core::config::Config,
     ingestion_engine::{postgres_ingestion::PostgresIngestor, sql_ingestion::SqliteIngestor},
 };
-use spinners::{Spinner, Spinners};
 use std::{
     fmt::Write,
     fs,
@@ -18,11 +16,15 @@ use std::{
     process::{Command, Stdio},
     io::Write as iWrite,
 };
+use spinners::{Spinner, Spinners};
+use args::OutputLanguage;
+use clap::Parser;
 
 pub mod args;
 mod instance_manager;
 mod styled_string;
 mod utils;
+mod types;
 
 fn main() {
     let args = HelixCLI::parse();
@@ -235,6 +237,116 @@ fn main() {
                     return;
                 }
             }
+        }
+
+        CommandType::Update(_) => {
+            match check_helix_installation() {
+                Ok(_) => {}
+                Err(_) => {
+                    println!("{}",
+                        "Helix is not installed. Please run `helix install` first.".red().bold()
+                    );
+                    return;
+                }
+            };
+
+            let repo_path = {
+                let home_dir = match dirs::home_dir() {
+                    Some(dir) => dir,
+                    None => {
+                        println!("{}", "Could not determine home directory".red().bold());
+                        return;
+                    }
+                };
+                home_dir.join(".helix/repo/helix-db/helixdb")
+            };
+
+            let local_cli_version = Version::parse(&format!("v{}", env!("CARGO_PKG_VERSION"))).unwrap();
+            let local_db_version = Version::parse(&format!("v{}", get_crate_version(&repo_path).unwrap())).unwrap();
+            let remote_helix_version = get_remote_helix_version().unwrap();
+            println!("helix-cli version: {}, helix-db version: {}, remote helix version: {}",
+                local_cli_version, local_db_version, remote_helix_version);
+
+            if local_db_version < remote_helix_version {
+                let mut runner = Command::new("git");
+                runner.arg("reset");
+                runner.arg("--hard");
+                runner.current_dir(&repo_path);
+                match runner.output() {
+                    Ok(_) => {}
+                    Err(e) => {
+                        println!(
+                            "{} {}",
+                            "Error while reseting installed helix-db version:".red().bold(),
+                            e
+                        );
+                        return;
+                    }
+                }
+
+                let mut runner = Command::new("git");
+                runner.arg("pull");
+                runner.current_dir(&repo_path);
+                match runner.output() {
+                    Ok(_) => println!("{}", "New helix-db version successfully pulled!".green().bold()),
+                    Err(e) => {
+                        println!(
+                            "{} {}",
+                            "Error while pulling new helix-db version:".red().bold(),
+                            e
+                        );
+                        return;
+                    }
+                }
+
+                let mut runner = Command::new("curl");
+                runner.arg("-sSL");
+                runner.arg("'https://install.helix-db.com'");
+                runner.arg("|");
+                runner.arg("bash");
+                match runner.output() {
+                    Ok(_) => println!("{}", "New helix-cli version successfully installed!".green().bold()),
+                    Err(e) => {
+                        println!(
+                            "{} {}",
+                            "Error while installing new helix-cli version:".red().bold(),
+                            e
+                        );
+                        return;
+                    }
+                }
+            } else {
+                println!("{}", "HelixDB is up to date!".green().bold());
+                return;
+            }
+        }
+
+        CommandType::Version(_) => {
+            let repo_path = {
+                let home_dir = match dirs::home_dir() {
+                    Some(dir) => dir,
+                    None => {
+                        println!("{}", "Could not determine home directory".red().bold());
+                        return;
+                    }
+                };
+                home_dir.join(".helix/repo/helix-db/helixdb")
+            };
+
+            let local_cli_version = Version::parse(
+                &format!("v{}", env!("CARGO_PKG_VERSION"))
+            ).unwrap();
+            let local_db_version = Version::parse(
+                &format!("v{}", get_crate_version(repo_path).unwrap())
+            ).unwrap();
+
+            println!(
+                "{} {}, {} {}",
+                "helix-cli version:",
+                local_cli_version,
+                "helix-db version:",
+                local_db_version
+            );
         }
 
         CommandType::Redeploy(command) => {
@@ -693,7 +805,7 @@ fn main() {
             ));
         }
 
-        CommandType::Install(command) => {
+        CommandType::Install(_) => {
             match Command::new("cargo").output() {
                 Ok(_) => {}
                 Err(_) => {
@@ -710,30 +822,16 @@ fn main() {
                 }
             }
 
-            let repo_path = match command.path {
-                Some(path) => {
-                    let path = PathBuf::from(path);
-                    if !path.is_dir() {
-                        println!("{}", "Path is not a directory".red().bold());
+            let repo_path = {
+                // check if helix repo exists
+                let home_dir = match dirs::home_dir() {
+                    Some(dir) => dir,
+                    None => {
+                        println!("{}", "Could not determine home directory".red().bold());
                         return;
                     }
-                    if !path.exists() {
-                        println!("{}", "Path does not exist".red().bold());
-                        return;
-                    }
-                    path
-                }
-                None => {
-                    // check if helix repo exists
-                    let home_dir = match dirs::home_dir() {
-                        Some(dir) => dir,
-                        None => {
-                            println!("{}", "Could not determine home directory".red().bold());
-                            return;
-                        }
-                    };
-                    home_dir.join(".helix/repo")
-                }
+                };
+                home_dir.join(".helix/repo")
             };
 
             if repo_path.clone().join("helix-db").exists()

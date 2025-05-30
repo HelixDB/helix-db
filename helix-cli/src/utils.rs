@@ -1,4 +1,8 @@
-use crate::{args::*, instance_manager::InstanceInfo, styled_string::StyledString};
+use crate::{
+    instance_manager::InstanceInfo,
+    styled_string::StyledString,
+    types::*,
+};
 use helixdb::helixc::{
     analyzer::analyzer::analyze,
     generator::{generator_types::Source as GeneratedSource, tsdisplay::ToTypeScript},
@@ -6,10 +10,14 @@ use helixdb::helixc::{
 };
 use std::{
     fs::{self, DirEntry, File},
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     net::{SocketAddr, TcpListener},
-    path::PathBuf,
+    path::{PathBuf, Path},
+    error::Error,
 };
+use toml::Value;
+use reqwest::blocking::Client;
+use serde_json::Value as JsonValue;
 
 pub const DB_DIR: &str = "helixdb-cfg/";
 
@@ -304,11 +312,6 @@ pub fn print_instnace(instance: &InstanceInfo) {
         .for_each(|ep| println!("    └── /{}", ep));
 }
 
-// TODO:
-// Spinner::new
-// Spinner::stop_with_message
-// Dots9 style
-use std::io::Write;
 pub fn gen_typescript(source: &GeneratedSource, output_path: &str) -> Result<(), CliError> {
     let mut file = File::create(PathBuf::from(output_path).join("interface.d.ts"))?;
 
@@ -324,3 +327,54 @@ pub fn gen_typescript(source: &GeneratedSource, output_path: &str) -> Result<(),
 
     Ok(())
 }
+
+pub fn get_crate_version<P: AsRef<Path>>(path: P) -> Result<Version, String> {
+    let cargo_toml_path = path.as_ref().join("Cargo.toml");
+    if !cargo_toml_path.exists() {
+        return Err("Not a Rust crate: Cargo.toml not found".to_string());
+    }
+
+    let contents = fs::read_to_string(&cargo_toml_path)
+        .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
+
+    let parsed_toml = contents
+        .parse::<Value>()
+        .map_err(|e| format!("Failed to parse Cargo.toml: {}", e))?;
+
+    let version = parsed_toml
+        .get("package")
+        .and_then(|pkg| pkg.get("version"))
+        .and_then(|v| v.as_str())
+        .ok_or("Version field not found in [package] section")?;
+
+    let vers = Version::parse(version)?;
+    Ok(vers)
+}
+
+pub fn get_remote_helix_version() -> Result<Version, Box<dyn Error>> {
+    let client = Client::new();
+
+    let url = "https://api.github.com/repos/HelixDB/helix-db/releases/latest";
+
+    let response = client
+        .get(url)
+        .header("User-Agent", "rust")
+        .header("Accept", "application/vnd.github+json")
+        .send()?
+        .text()?;
+
+    let json: JsonValue = serde_json::from_str(&response)?;
+    let tag_name = json
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or("Failed to find tag_name in response")?
+        .to_string();
+
+    Ok(Version::parse(&tag_name)?)
+}
+
+// TODO:
+// Spinner::new
+// Spinner::stop_with_message
+// Dots9 style
+
