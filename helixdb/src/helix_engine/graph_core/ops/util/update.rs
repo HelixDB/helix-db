@@ -64,7 +64,7 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalVal, GraphError>>> UpdateA
                                             if let Err(e) = db.put(
                                                 self.txn,
                                                 &serialized,
-                                                &node.id.to_be_bytes(),
+                                                &node.id,
                                             ) {
                                                 vec.push(Err(GraphError::from(e)));
                                             }

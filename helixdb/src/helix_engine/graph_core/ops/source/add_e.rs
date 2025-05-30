@@ -54,7 +54,8 @@ pub trait AddEAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>>
 
 impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddEAdapter<'a, 'b>
     for RwTraversalIterator<'a, 'b, I>
-{
+{   
+    #[inline(always)]
     fn add_e(
         self,
         label: &'a str,

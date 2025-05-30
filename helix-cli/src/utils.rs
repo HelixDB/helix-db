@@ -55,6 +55,10 @@ pub const DEFAULT_SCHEMA: &str = r#"// Start building your schema here.
 // For more information on how to write queries,
 // see the documentation at https://docs.helix-db.com
 // or checkout our GitHub at https://github.com/HelixDB/helix-db
+
+V::Embedding {
+    vec: [F64]
+}
 "#;
 
 pub const DEFAULT_QUERIES: &str = r#"// Start writing your queries here.
@@ -77,31 +81,12 @@ pub const DEFAULT_QUERIES: &str = r#"// Start writing your queries here.
 // or checkout our GitHub at https://github.com/HelixDB/helix-db
 
 QUERY hnswinsert(vector: [Float]) =>
-    AddV<Vector>(vector)
+    AddV<Embedding>(vector)
     RETURN "Success"
 
-QUERY hnswload(vectors: [[Float]]) =>
-    res <- BatchAddV<Type>(vectors)
-    RETURN res::{ID}
-
-QUERY hnswsearch(query: [Float], k: Integer) =>
-    res <- SearchV<Type>(query, k)
+QUERY hnswsearch(query: [Float], k: I32) =>
+    res <- SearchV<Embedding>(query, k)
     RETURN res
-
-QUERY ragloaddocs(docs: [{ doc: String, vecs: [[F64]] }]) =>
-    FOR {doc, vec} IN docs {
-        doc_node <- AddN<Type>({ content: doc })
-        vectors <- BatchAddV<Doc>(vecs)
-        FOR vec IN vectors {
-            AddE<Contains>::From(doc_node)::To(vec)
-        }
-    }
-    RETURN "Success"
-
-QUERY ragsearchdocs(query: [F64], k: I32) =>
-    vec <- SearchV<Vector>(query, k)
-    doc_node <- vec::In<Contains>
-    RETURN doc_node::{content}
 "#;
 
 pub fn check_helix_installation() -> Result<PathBuf, String> {

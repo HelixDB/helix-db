@@ -3,7 +3,7 @@ use crate::{
     helix_engine::{graph_core::traversal_iter::RwTraversalIterator, types::GraphError},
     protocol::{
         filterable::Filterable,
-        items::{v6_uuid, Node, SerializedNode},
+        items::{v6_uuid, Node},
         value::Value,
     },
 };
@@ -21,7 +21,7 @@ impl Iterator for AddNIterator {
     }
 }
 
-pub trait AddNAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>>  {
+pub trait AddNAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> {
     fn add_n(
         self,
         label: &'a str,
@@ -48,7 +48,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
         let secondary_indices = secondary_indices.unwrap_or(&[]).to_vec();
         let mut result: Result<TraversalVal, GraphError> = Ok(TraversalVal::Empty);
 
-        match SerializedNode::encode_node(&node) {
+        match node.encode_node() {
             Ok(bytes) => {
                 if let Err(e) = self.storage.nodes_db.put_with_flags(
                     self.txn,
@@ -72,11 +72,11 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
                             continue;
                         }
                     };
-                    // look into if there is a way to serialize to a slice 
+                    // look into if there is a way to serialize to a slice
                     match bincode::serialize(&key) {
                         Ok(serialized) => {
                             // possibly append dup
-                            if let Err(e) = db.put(self.txn, &serialized, &node.id.to_be_bytes()) {
+                            if let Err(e) = db.put(self.txn, &serialized, &node.id) {
                                 result = Err(GraphError::from(e));
                             }
                         }

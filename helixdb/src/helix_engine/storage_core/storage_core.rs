@@ -1,9 +1,14 @@
 use crate::{
     helix_engine::{
+        bm25::bm25::{HBM25Config, BM25},
         graph_core::config::Config,
         storage_core::storage_methods::StorageMethods,
         types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector, vector_core::{HNSWConfig, VectorCore}},
+        vector_core::{
+            hnsw::HNSW,
+            vector::HVector,
+            vector_core::{HNSWConfig, VectorCore},
+        },
     },
     protocol::{
         filterable::Filterable,
@@ -35,8 +40,9 @@ pub struct HelixGraphStorage { // TODO: maybe make not public?
     pub edges_db: Database<U128<BE>, Bytes>,
     pub out_edges_db: Database<Bytes, Bytes>,
     pub in_edges_db: Database<Bytes, Bytes>,
-    pub secondary_indices: HashMap<String, Database<Bytes, Bytes>>,
+    pub secondary_indices: HashMap<String, Database<Bytes, U128<BE>>>,
     pub vectors: VectorCore,
+    pub bm25: HBM25Config,
 }
 
 impl HelixGraphStorage {
@@ -107,6 +113,7 @@ impl HelixGraphStorage {
                 config.vector_config.ef_search,
             ),
         )?;
+        let bm25 = HBM25Config::new(&graph_env, &mut wtxn)?;
 
         wtxn.commit()?;
         Ok(Self {
@@ -117,6 +124,7 @@ impl HelixGraphStorage {
             in_edges_db,
             secondary_indices,
             vectors,
+            bm25,
         })
     }
 
@@ -222,6 +230,23 @@ impl HelixGraphStorage {
     pub fn get_vector(&self, txn: &RoTxn, id: &u128) -> Result<HVector, GraphError> {
         let vector = self.vectors.get_vector(txn, *id, 0, true)?;
         Ok(vector)
+    }
+
+    fn get_document_text(&self, txn: &RoTxn, doc_id: u128) -> Result<String, GraphError> {
+        let node = self.get_node(txn, &doc_id)?;
+        let mut text = node.label.clone();
+
+        // Include properties in the text for indexing
+        if let Some(properties) = node.properties {
+            for (key, value) in properties {
+                text.push(' ');
+                text.push_str(&key);
+                text.push(' ');
+                text.push_str(&value.to_string());
+            }
+        }
+
+        Ok(text)
     }
 }
 

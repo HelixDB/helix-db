@@ -1,7 +1,7 @@
 <div align="center">
 
 <picture>
-  <img src="/docs/icon-1.png" alt="HelixDB Logo" width="200" height="200">
+  <img src="/docs/full_logo.png" alt="HelixDB Logo">
 </picture>
 
 <b>HelixDB</b>: an open-source graph-vector database written in Rust built for RAG and AI applications.
@@ -58,7 +58,7 @@ The Helix CLI tool can be used to check, compile and deploy Helix locally.
    Open your newly created `.hx` files and start writing your schema and queries.
    Head over to [our docs](https://docs.helix-db.com/introduction/cookbook/basic) for more information about writing queries
    ```js
-   QUERY addUser(name: String, age: Integer) =>
+   QUERY addUser(name: String, age: I64) =>
       user <- AddN<User({name: name, age: age})
       RETURN user
 
@@ -78,7 +78,7 @@ The Helix CLI tool can be used to check, compile and deploy Helix locally.
 
    ```bash
    # in ./<path-to-project>
-   helix deploy --local
+   helix deploy
    ```
 8. Start calling them using our [TypeScript SDK](https://github.com/HelixDB/helix-ts) or [Python SDK](https://github.com/HelixDB/helix-py). For example:
    ```typescript
@@ -113,7 +113,6 @@ Other commands:
 Our current focus areas include:
 
 - Expanding vector data type capabilities for RAG applications
-- Enhancing the query language with more robust type checking
 - Implementing a test suite to enable end-to-end testing of queries before deployment
 - Building a Deterministic Simulation Testing engine enabling us to robustly iterate faster
 - Binary quantisation for even better performance

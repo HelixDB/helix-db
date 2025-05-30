@@ -37,8 +37,6 @@ where
             let node_id = db
                 .get(self.txn, &bincode::serialize(self.key)?)?
                 .ok_or(GraphError::NodeNotFound)?;
-            let node_id =
-                u128::from_be_bytes(node_id.try_into().expect("Invalid byte array length"));
 
             self.storage
                 .get_node(self.txn, &node_id)

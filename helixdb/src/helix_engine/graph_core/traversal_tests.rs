@@ -1,7 +1,15 @@
 use std::{sync::Arc, time::Instant};
 
 use crate::{
-    helix_engine::graph_core::ops::source::{n_from_index::NFromIndexAdapter, n_from_type::NFromTypeAdapter},
+    helix_engine::graph_core::ops::source::{
+        bulk_add_e::BulkAddEAdapter, e_from_type::EFromTypeAdapter,
+    },
+    props,
+};
+use crate::{
+    helix_engine::graph_core::ops::source::{
+        n_from_index::NFromIndexAdapter, n_from_type::NFromTypeAdapter,
+    },
     protocol::{
         filterable::Filterable,
         id::ID,
@@ -9,12 +17,6 @@ use crate::{
         traversal_value::TraversalValue,
         value::Value,
     },
-};
-use crate::{
-    helix_engine::graph_core::ops::source::{
-        bulk_add_e::BulkAddEAdapter, e_from_type::EFromTypeAdapter,
-    },
-    props,
 };
 use crate::{
     helix_engine::{
@@ -1442,30 +1444,34 @@ fn test_add_e_with_dup_flag() {
 
     let mut txn = storage.graph_env.write_txn().unwrap();
     let mut nodes = Vec::with_capacity(1000);
-    for _ in 0..1000 {
+    for _ in 0..100000 {
         let node1 = G::new_mut(Arc::clone(&storage), &mut txn)
-            .add_n("person", Some(props!()), None)
+            .add_n(
+                "person",
+                Some(props!( "age" => rand::rng().random_range(0..10000) )),
+                None,
+            )
             .collect_to_val();
         nodes.push(node1);
     }
     txn.commit().unwrap();
+    let start_node = &nodes[0];
+    println!("start_node: {:?}", start_node);
     let random_nodes = {
         let mut n = Vec::with_capacity(10000000);
-        for _ in 0..1000000 {
-            let pair = (
-                &nodes[rand::rng().random_range(0..nodes.len())],
-                &nodes[rand::rng().random_range(0..nodes.len())],
-            );
+        for _ in 0..100_000 {
+            let pair: (&TraversalVal, &TraversalVal) =
+                (start_node, &nodes[rand::rng().random_range(0..nodes.len())]);
             n.push(pair);
         }
         n
     };
 
     let now = Instant::now();
+    let mut txn = storage.graph_env.write_txn().unwrap();
     for chunk in random_nodes.chunks(100000) {
-        let mut txn = storage.graph_env.write_txn().unwrap();
         for (random_node1, random_node2) in chunk {
-            let edge = G::new_mut(Arc::clone(&storage), &mut txn)
+            let _ = G::new_mut(Arc::clone(&storage), &mut txn)
                 .add_e(
                     "knows",
                     None,
@@ -1474,26 +1480,82 @@ fn test_add_e_with_dup_flag() {
                     false,
                     EdgeType::Node,
                 )
-                .collect_to_val();
+                .count();
         }
-        txn.commit().unwrap();
     }
+    txn.commit().unwrap();
     let end = now.elapsed();
     println!("10 mill took {:?}", end);
+    let start = Instant::now();
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
         .e_from_type("knows")
-        .count();
-    println!("{:?}", traversal);
+        .collect_to::<Vec<_>>();
+    println!("time taken to count edges: {:?}", start.elapsed());
+    txn.commit().unwrap();
 
+    let count = traversal.len();
+    let start = Instant::now();
+    let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
-        .n_from_type("person")
-        .out_e("knows")
-        .count();
-    println!("{:?}", traversal);
+        .n_from_id(&start_node.id())
+        .out("knows", &EdgeType::Node)
+        .filter_ref(|val, _| {
+            if let Ok(TraversalVal::Node(node)) = val {
+                node.check_property("age").map(|value| {
+                    if let Value::I32(age) = value {
+                        *age < 1000
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                Ok(false)
+            }
+        })
+        .range(0, 1000)
+        .collect_to::<Vec<_>>();
+    println!("time taken to count out edges: {:?}", start.elapsed());
+    println!("traversal: {:?}", traversal.len());
 
-
-    assert_eq!(traversal, 10000);
+    assert_eq!(count, 10000);
 
     assert!(false)
 }
+
+#[test]
+fn test_add_n_parallel() {
+    let (storage, _temp_dir) = setup_test_db();
+    let n = 100_000_000;
+    let chunks = n / 10000000;
+    let k = n / chunks;
+    let start = Instant::now();
+
+    let mut txn = storage.graph_env.write_txn().unwrap();
+    for _ in 0..n {
+        let _ = G::new_mut(Arc::clone(&storage), &mut txn)
+            .add_n("person", None, None)
+            .count();
+    }
+    txn.commit().unwrap();
+
+    println!("time taken to add {} nodes: {:?}", n, start.elapsed());
+    println!(
+        "size of mdb file on disk: {:?}",
+        storage.graph_env.real_disk_size()
+    );
+
+    let start = Instant::now();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let count = G::new(Arc::clone(&storage), &txn)
+        .n_from_type("person")
+        .collect_to::<Vec<_>>();
+
+    println!("time taken to collect nodes: {:?}", start.elapsed());
+    println!("count: {:?}", count.len());
+
+    assert!(false);
+}
+
+// 3 614 375 936
+// 3 411 509 248

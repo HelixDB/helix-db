@@ -60,7 +60,10 @@ impl Traversable for TraversalVal {
         match self {
             TraversalVal::Node(node) => node.id,
             TraversalVal::Edge(edge) => edge.id,
+
             TraversalVal::Vector(vector) => vector.id,
+            TraversalVal::Value(value) => unreachable!(),
+            TraversalVal::Empty => 0,
             t => {
                 println!("invalid traversal value {:?}", t);
                 panic!("Invalid traversal value")

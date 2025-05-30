@@ -34,11 +34,7 @@ impl Node {
     pub const NUM_PROPERTIES: usize = 2;
 
     pub fn decode_node(bytes: &[u8], id: u128) -> Result<Node, GraphError> {
-        let cfg = bincode::DefaultOptions::new()
-            // .with_fixint_encoding()
-            .with_big_endian();
-
-        match cfg.deserialize::<Node>(bytes) {
+        match bincode::deserialize::<Node>(bytes) {
             Ok(node) => {
                 let node = Node {
                     id,
@@ -54,59 +50,12 @@ impl Node {
         }
     }
 
-    pub fn encode_node(self) -> Result<Vec<u8>, GraphError> {
-        let cfg = bincode::DefaultOptions::new()
-            // .with_fixint_encoding()
-            .with_big_endian();
-
-        cfg.serialize(&self)
+    pub fn encode_node(&self) -> Result<Vec<u8>, GraphError> {
+        bincode::serialize(&self)
             .map_err(|e| GraphError::ConversionError(format!("Error serializing node: {}", e)))
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct SerializedNode {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub properties: Option<HashMap<String, Value>>,
-}
-
-impl SerializedNode {
-    pub fn decode_node(bytes: &[u8], id: u128) -> Result<Node, GraphError> {
-        let cfg = bincode::DefaultOptions::new()
-            // .with_fixint_encoding()
-            .with_big_endian();
-
-        match cfg.deserialize::<SerializedNode>(bytes) {
-            Ok(node) => {
-                let node = Node {
-                    id,
-                    label: node.label,
-                    properties: node.properties,
-                };
-                Ok(node) // ERROR REACHING END OF FILE EARLs
-            }
-            Err(e) => Err(GraphError::ConversionError(format!(
-                "Error deserializing node: {}",
-                e
-            ))),
-        }
-    }
-
-    pub fn encode_node(node: &Node) -> Result<Vec<u8>, GraphError> {
-        let node = SerializedNode {
-            label: node.label.clone(),
-            properties: node.properties.clone(),
-        };
-
-        let cfg = bincode::DefaultOptions::new()
-            // .with_fixint_encoding()
-            .with_big_endian();
-
-        cfg.serialize(&node)
-            .map_err(|e| GraphError::ConversionError(format!("Error serializing node: {}", e)))
-    }
-}
 impl std::fmt::Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -162,11 +111,7 @@ impl Edge {
     pub const NUM_PROPERTIES: usize = 4;
 
     pub fn decode_edge(bytes: &[u8], id: u128) -> Result<Edge, GraphError> {
-        let cfg = bincode::DefaultOptions::new()
-            // .with_fixint_encoding()
-            .with_big_endian();
-
-        match cfg.deserialize::<Edge>(bytes) {
+        match bincode::deserialize::<Edge>(bytes) {
             Ok(edge) => {
                 let edge = Edge {
                     id,
@@ -185,11 +130,7 @@ impl Edge {
     }
 
     pub fn encode_edge(&self) -> Result<Vec<u8>, GraphError> {
-        let cfg = bincode::DefaultOptions::new()
-            // .with_fixint_encoding()
-            .with_big_endian();
-
-        cfg.serialize(self)
+        bincode::serialize(self)
             .map_err(|e| GraphError::ConversionError(format!("Error serializing edge: {}", e)))
     }
 }
