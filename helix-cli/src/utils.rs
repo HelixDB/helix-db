@@ -9,11 +9,12 @@ use helixdb::helixc::{
     parser::helix_parser::{Content, HelixParser, HxFile, Source},
 };
 use std::{
+    error::Error,
     fs::{self, DirEntry, File},
     io::{ErrorKind, Write},
     net::{SocketAddr, TcpListener},
-    path::{PathBuf, Path},
-    error::Error,
+    path::{Path, PathBuf},
+    process::{Stdio, Command},
 };
 use toml::Value;
 use reqwest::blocking::Client;
@@ -356,6 +357,29 @@ pub fn get_remote_helix_version() -> Result<Version, Box<dyn Error>> {
         .to_string();
 
     Ok(Version::parse(&tag_name)?)
+}
+
+pub fn get_n_helix_cli() -> Result<(), Box<dyn Error>> {
+    // TODO: running this through rust doesn't identify GLIBC so has to compile from source
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("curl -sSL 'https://install.helix-db.com' | bash")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                std::env::var("HOME").map(|h| format!("{}/.cargo/bin", h)).unwrap_or_default(),
+                std::env::var("PATH").unwrap_or_default()
+            ))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("Command failed with status: {}", status).into());
+    }
+
+    Ok(())
 }
 
 // TODO:

@@ -267,7 +267,9 @@ fn main() {
             println!("helix-cli version: {}, helix-db version: {}, remote helix version: {}",
                 local_cli_version, local_db_version, remote_helix_version);
 
-            if local_db_version < remote_helix_version || local_cli_version < remote_helix_version {
+            if local_db_version < remote_helix_version
+               || local_cli_version < remote_helix_version
+            {
                 let mut runner = Command::new("git");
                 runner.arg("reset");
                 runner.arg("--hard");
@@ -299,12 +301,8 @@ fn main() {
                     }
                 }
 
-                let mut runner = Command::new("curl");
-                runner.arg("-sSL");
-                runner.arg("'https://install.helix-db.com'");
-                runner.arg("|");
-                runner.arg("bash");
-                match runner.output() {
+
+                match get_n_helix_cli() {
                     Ok(_) => println!("{}", "New helix-cli version successfully installed!".green().bold()),
                     Err(e) => {
                         println!(
@@ -322,6 +320,19 @@ fn main() {
         }
 
         CommandType::Version(_) => {
+            match check_helix_installation() {
+                Ok(_) => {}
+                Err(_) => {
+                    println!(
+                        "{}",
+                        "Helix is not installed. Please run `helix install` first."
+                            .red()
+                            .bold()
+                    );
+                    return;
+                }
+            };
+
             let repo_path = {
                 let home_dir = match dirs::home_dir() {
                     Some(dir) => dir,

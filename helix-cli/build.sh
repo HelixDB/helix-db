@@ -17,4 +17,11 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Continue with build process
-cargo build --release && cargo install --path .
+cargo build --release && cargo install --path . --root ~/.local
+
+if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
