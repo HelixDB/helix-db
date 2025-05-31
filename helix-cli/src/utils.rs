@@ -81,11 +81,11 @@ pub const DEFAULT_QUERIES: &str = r#"// Start writing your queries here.
 // see the documentation at https://docs.helix-db.com
 // or checkout our GitHub at https://github.com/HelixDB/helix-db
 
-QUERY hnswinsert(vector: [Float]) =>
+QUERY hnswinsert(vector: [F64]) =>
     AddV<Embedding>(vector)
     RETURN "Success"
 
-QUERY hnswsearch(query: [Float], k: I32) =>
+QUERY hnswsearch(query: [F64], k: I32) =>
     res <- SearchV<Embedding>(query, k)
     RETURN res
 "#;

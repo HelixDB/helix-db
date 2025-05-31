@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "1.0.54"
+version = "1.0.85"
 dependencies = [
  "chrono",
  "clap",
@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "helixdb"
-version = "0.1.0"
+version = "1.0.84"
 dependencies = [
  "bincode",
  "chrono",
