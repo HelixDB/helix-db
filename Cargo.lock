@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "helixdb"
-version = "1.0.84"
+version = "1.0.85"
 dependencies = [
  "bincode",
  "chrono",
