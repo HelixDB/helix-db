@@ -254,7 +254,7 @@ impl Display for Query {
             "let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());"
         )?;
 
-        writeln!(f, "let db = Arc::clone(&input.graph.storage);")?;
+        writeln!(f, "let db = Arc::clone(&input.graph);")?;
         // if mut then get write txn
         // if not then get read txn
         if self.is_mut {

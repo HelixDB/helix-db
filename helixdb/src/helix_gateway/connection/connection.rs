@@ -1,7 +1,13 @@
-use crate::helix_engine::graph_core::graph_core::HelixGraphEngine;
-use crate::helix_engine::types::GraphError;
-use chrono::{DateTime, Utc};
-use uuid::Uuid;
+use crate::{
+    helix_engine::{
+        storage_core::storage_core::HelixGraphStorage,
+        types::GraphError,
+    },
+    helix_gateway::{
+        router::router::HelixRouter,
+        thread_pool::thread_pool::ThreadPool
+    },
+};
 use std::{
     net::SocketAddr,
     collections::HashMap,
@@ -11,8 +17,8 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
-
-use crate::helix_gateway::{router::router::HelixRouter, thread_pool::thread_pool::ThreadPool};
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 pub struct ConnectionHandler {
     pub address: String,
@@ -29,7 +35,7 @@ pub struct ClientConnection {
 impl ConnectionHandler {
     pub fn new(
         address: &str,
-        graph: Arc<HelixGraphEngine>,
+        graph: Arc<HelixGraphStorage>,
         size: usize,
         router: HelixRouter,
     ) -> Result<Self, GraphError> {
@@ -51,8 +57,7 @@ impl ConnectionHandler {
 
         let active_connections = Arc::clone(&self.active_connections);
         let thread_pool_sender = self.thread_pool.sender.clone();
-        let address = self.address.clone();
-
+        let _address = self.address.clone(); // TODO: not needed
 
         let handle = tokio::spawn(async move {
 
@@ -98,3 +103,4 @@ impl ConnectionHandler {
         Ok(handle)
     }
 }
+

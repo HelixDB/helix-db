@@ -44,47 +44,17 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
-        let vectors = self
+        let iter = match self
             .storage
             .vectors
-            .search(self.txn, &query, k, filter, false);
-
-        let iter = match vectors {
-            Ok(vectors) => vectors
-                .into_iter()
-                .map(|vector| Ok::<TraversalVal, GraphError>(TraversalVal::Vector(vector)))
-                .collect::<Vec<_>>()
-                .into_iter(),
-            Err(VectorError::VectorNotFound(id)) => {
-                let error = GraphError::VectorError(format!("vector not found for id {}", id));
-                once(Err(error)).collect::<Vec<_>>().into_iter()
-            },
-            Err(VectorError::InvalidVectorData) => {
-                let error = GraphError::VectorError("invalid vector data".to_string());
-                once(Err(error)).collect::<Vec<_>>().into_iter()
-            },
-            Err(VectorError::EntryPointNotFound) => {
-                let error = GraphError::VectorError("no entry point found for hnsw index".to_string());
-                once(Err(error)).collect::<Vec<_>>().into_iter()
-            },
-            Err(VectorError::ConversionError(e)) => {
-                let error = GraphError::VectorError(format!("conversion error: {}", e));
-                once(Err(error)).collect::<Vec<_>>().into_iter()
-            },
-            Err(VectorError::VectorCoreError(e)) => {
-                let error = GraphError::VectorError(format!("vector core error: {}", e));
-                once(Err(error)).collect::<Vec<_>>().into_iter()
-            },
-            Err(VectorError::InvalidVectorLength) => {
-                let error = GraphError::VectorError("invalid vector dimensions!".to_string());
-                once(Err(error)).collect::<Vec<_>>().into_iter()
-            }
-            Err(_) => once(Err(GraphError::VectorError(
-                "a vector error has occured!".to_string(),
-            )))
-            .collect::<Vec<_>>()
-            .into_iter(),
-        };
+            .search(self.txn, &query, k, filter, false) {
+                Ok(vectors) => vectors
+                    .into_iter()
+                    .map(|vector| Ok::<TraversalVal, GraphError>(TraversalVal::Vector(vector)))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                Err(e) => once(Err(GraphError::from(e))).collect::<Vec<_>>().into_iter()
+            };
 
         let iter = SearchV { iter };
 
@@ -95,3 +65,4 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
         }
     }
 }
+

@@ -1,8 +1,12 @@
-use helixdb::helix_engine::graph_core::config::Config;
-use helixdb::helix_engine::graph_core::graph_core::{HelixGraphEngine, HelixGraphEngineOpts};
-use helixdb::helix_gateway::{
-    gateway::{GatewayOpts, HelixGateway},
-    router::router::{HandlerFn, HandlerSubmission},
+use helixdb::{
+    helix_engine::{
+        graph_core::config::Config,
+        storage_core::storage_core::HelixGraphStorage,
+    },
+    helix_gateway::{
+        gateway::{GatewayOpts, HelixGateway},
+        router::router::{HandlerFn, HandlerSubmission},
+    },
 };
 use inventory;
 use std::{collections::HashMap, sync::Arc};
@@ -38,12 +42,10 @@ async fn main() {
     println!("\tconfig: {:?}", config);
     println!("\tpath: {}", path.display());
     println!("\tport: {}", port);
+
     let path_str = path.to_str().expect("Could not convert path to string");
-    let opts = HelixGraphEngineOpts {
-        path: path_str.to_string(),
-        config,
-    };
-    let graph = Arc::new(HelixGraphEngine::new(opts).unwrap());
+    let graph = Arc::new(HelixGraphStorage::new(path_str, config).unwrap()); // TODO: handle this
+                                                                             // unwrap better
 
     // generates routes from handler proc macro
     println!("Starting route collection...");

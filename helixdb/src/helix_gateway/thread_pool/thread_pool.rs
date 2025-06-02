@@ -1,12 +1,12 @@
-use crate::helix_engine::graph_core::graph_core::HelixGraphEngine;
+use crate::{
+    helix_engine::storage_core::storage_core::HelixGraphStorage,
+    helix_gateway::router::router::{HelixRouter, RouterError},
+    protocol::{request::Request, response::Response},
+};
+
 use flume::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
-
-use crate::helix_gateway::router::router::{HelixRouter, RouterError};
-use crate::protocol::request::Request;
-use crate::protocol::response::Response;
-
 
 extern crate tokio;
 
@@ -20,7 +20,7 @@ pub struct Worker {
 impl Worker {
     fn new(
         id: usize,
-        graph_access: Arc<HelixGraphEngine>,
+        graph_access: Arc<HelixGraphStorage>,
         router: Arc<HelixRouter>,
         rx: Receiver<TcpStream>,
     ) -> Worker {
@@ -80,7 +80,7 @@ pub struct ThreadPool {
 impl ThreadPool {
     pub fn new(
         size: usize,
-        graph: Arc<HelixGraphEngine>,
+        graph: Arc<HelixGraphStorage>,
         router: Arc<HelixRouter>,
     ) -> Result<ThreadPool, RouterError> {
         assert!(

@@ -8,14 +8,15 @@ use sonic_rs::Error as SonicError;
 use std::{
     net::AddrParseError,
     str::Utf8Error,
-    string::FromUtf8Error
+    string::FromUtf8Error,
+    io::Error,
 };
 
 #[derive(Debug)]
 pub enum GraphError {
-    Io(std::io::Error),
-    GraphConnectionError(String, std::io::Error),
-    StorageConnectionError(String, std::io::Error),
+    Io(Error),
+    GraphConnectionError(String, Error),
+    StorageConnectionError(String, Error),
     StorageError(String),
     TraversalError(String),
     ConversionError(String),
@@ -66,20 +67,14 @@ impl fmt::Display for GraphError {
     }
 }
 
-// impl From<rocksdb::Error> for GraphError {
-//     fn from(error: rocksdb::Error) -> Self {
-//         GraphError::New(error.into_string())
-//     }
-// }
-
 impl From<HeedError> for GraphError {
     fn from(error: HeedError) -> Self {
         GraphError::StorageError(error.to_string())
     }
 }
 
-impl From<std::io::Error> for GraphError {
-    fn from(error: std::io::Error) -> Self {
+impl From<Error> for GraphError {
+    fn from(error: Error) -> Self {
         GraphError::Io(error)
     }
 }

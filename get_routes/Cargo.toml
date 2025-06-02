@@ -1,6 +1,7 @@
 [package]
 name = "get_routes"
 version = "0.1.0"
+edition = "2021"
 
 [lib]
 proc-macro = true
@@ -9,3 +10,4 @@ proc-macro = true
 syn = { version = "2.0.91", features = ["full"] }
 quote = "1.0.38"
 proc-macro2 = "1.0"
+

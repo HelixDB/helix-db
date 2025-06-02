@@ -1,6 +1,6 @@
 [package]
 name = "helixdb"
-version = "1.0.85"
+version = "1.0.88"
 edition = "2021"
 description = "HelixDB is a multi-model database built for performance and simplicity."
 license = "GPL-3.0"
@@ -69,7 +69,3 @@ build = ["compiler"]
 full = ["build", "compiler", "ingestion", "cosine"]
 default = ["full"]
 
-[profile.release]
-strip = "debuginfo"
-lto = true
-opt-level = "z"

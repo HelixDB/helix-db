@@ -7,15 +7,19 @@
 
 // returns response
 
+use crate::{
+    helix_engine::{
+        storage_core::storage_core::HelixGraphStorage,
+        types::GraphError
+    },
+    protocol::{request::Request, response::Response},
+};
 use core::fmt;
-use crate::helix_engine::{graph_core::graph_core::HelixGraphEngine, types::GraphError};
 use std::{collections::HashMap, sync::Arc};
-
-use crate::protocol::{request::Request, response::Response};
 
 pub struct HandlerInput {
     pub request: Request,
-    pub graph: Arc<HelixGraphEngine>,
+    pub graph: Arc<HelixGraphStorage>,
 }
 
 // basic type for function pointer
@@ -77,7 +81,7 @@ impl HelixRouter {
     /// * `Err(RouterError)` if there was an error handling the request
     pub fn handle(
         &self,
-        graph_access: Arc<HelixGraphEngine>,
+        graph_access: Arc<HelixGraphStorage>,
         request: Request,
         response: &mut Response,
     ) -> Result<(), GraphError> {
