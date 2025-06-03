@@ -703,7 +703,7 @@ fn main() {
                 None => ".".to_string(),
             };
 
-            let mut sp = Spinner::new(Spinners::Dots9, "Compiling Helix queries".into());
+            let mut sp = Spinner::new(Spinners::Dots9, "Transpiling Helix queries".into());
             let files = match check_and_read_files(&path) {
                 Ok(files) => files,
                 Err(e) => {
@@ -743,25 +743,25 @@ fn main() {
             let file_path = PathBuf::from(&output).join("queries.rs");
             let mut generated_rust_code = String::new();
             match write!(&mut generated_rust_code, "{}", analyzed_source) {
-                Ok(_) => {
-                    println!("{}", "Successfully transpiled queries".green().bold());
-                }
+                Ok(_) =>
+                    sp.stop_with_message("Successfully transpiled queries".green().bold()),
                 Err(e) => {
-                    println!("{}", "Failed to transpile queries".red().bold());
+                    sp.stop_with_message("Failed to transpile queries".red().bold());
                     println!("└── {} {}", "Error:".red().bold(), e);
                     return;
                 }
             }
+            let mut sp = Spinner::new(Spinners::Dots9, "Compiling Helix queries".into());
             match fs::write(file_path, generated_rust_code) {
                 Ok(_) => {
-                    println!(
+                    sp.stop_with_message(format!(
                         "{} {}",
                         "Successfully compiled queries to".green().bold(),
                         output
-                    );
+                    ));
                 }
                 Err(e) => {
-                    println!("{} {}", "Failed to write queries file".red().bold(), e);
+                    sp.stop_with_message("Failed to write queries file".red().bold());
                     println!("└── {} {}", "Error:".red().bold(), e);
                     return;
                 }
