@@ -1456,7 +1456,11 @@ impl<'a> Ctx<'a> {
     ) -> Type {
         let mut previous_step = None;
         let mut cur_ty = match &tr.start {
-            StartNode::Node { node_type, ids } => {
+            StartNode::Node {
+                node_type,
+                ids,
+                variable,
+            } => {
                 if !self.node_set.contains(node_type.as_str()) {
                     self.push_query_err(
                         q,
@@ -1588,7 +1592,11 @@ impl<'a> Ctx<'a> {
                 gen_traversal.traversal_type = TraversalType::Ref;
                 Type::Nodes(Some(node_type.to_string()))
             }
-            StartNode::Edge { edge_type, ids } => {
+            StartNode::Edge {
+                edge_type,
+                ids,
+                variable,
+            } => {
                 if !self.edge_map.contains_key(edge_type.as_str()) {
                     self.push_query_err(
                         q,
@@ -1632,35 +1640,37 @@ impl<'a> Ctx<'a> {
                 Type::Edges(Some(edge_type.to_string()))
             }
 
-            StartNode::Identifier(identifier) => {
-                match self.is_valid_identifier(q, tr.loc.clone(), identifier.as_str()) {
-                    true => scope.get(identifier.as_str()).cloned().map_or_else(
-                        || {
-                            self.push_query_err(
-                                q,
-                                tr.loc.clone(),
-                                format!("variable named `{}` is not in scope", identifier),
-                                format!(
-                                    "declare {} in the current scope or fix the typo",
-                                    identifier
-                                ),
-                            );
-                            Type::Unknown
-                        },
-                        |var_type| {
-                            gen_traversal.traversal_type =
-                                TraversalType::FromVar(GenRef::Std(identifier.clone()));
-                            gen_traversal.source_step = Separator::Empty(SourceStep::Identifier(
-                                GenRef::Std(identifier.clone()),
-                            ));
-                            var_type.clone()
-                        },
-                    ),
-                    false => Type::Unknown,
-                }
-            }
+            StartNode::Identifier {
+                name: identifier,
+                loc,
+                variable,
+            } => match self.is_valid_identifier(q, tr.loc.clone(), identifier.as_str()) {
+                true => scope.get(identifier.as_str()).cloned().map_or_else(
+                    || {
+                        self.push_query_err(
+                            q,
+                            tr.loc.clone(),
+                            format!("variable named `{}` is not in scope", identifier),
+                            format!(
+                                "declare {} in the current scope or fix the typo",
+                                identifier
+                            ),
+                        );
+                        Type::Unknown
+                    },
+                    |var_type| {
+                        gen_traversal.traversal_type =
+                            TraversalType::FromVar(GenRef::Std(identifier.clone()));
+                        gen_traversal.source_step = Separator::Empty(SourceStep::Identifier(
+                            GenRef::Std(identifier.clone()),
+                        ));
+                        var_type.clone()
+                    },
+                ),
+                false => Type::Unknown,
+            },
             // anonymous will be the traversal type rather than the start type
-            StartNode::Anonymous => {
+            StartNode::Anonymous { loc, variable } => {
                 let parent = parent_ty.unwrap();
                 gen_traversal.traversal_type =
                     TraversalType::Nested(GenRef::Std("val".to_string())); // TODO: ensure this default is stable
@@ -2587,31 +2597,38 @@ impl<'a> Ctx<'a> {
         use GraphStepType::*;
         match (&gs.step, cur_ty.base()) {
             // Node‑to‑Edge
-            (OutE(label), Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label))) => {
+            (
+                OutE {
+                    edge_type,
+                    variable,
+                    loc,
+                },
+                Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label)),
+            ) => {
                 traversal
                     .steps
                     .push(Separator::Period(GeneratedStep::OutE(GeneratedOutE {
-                        label: GenRef::Literal(label.clone()),
+                        label: GenRef::Literal(edge_type.clone()),
                     })));
-                let edge = self.edge_map.get(label.as_str());
+                let edge = self.edge_map.get(edge_type.as_str());
                 if edge.is_none() {
                     self.push_query_err(
                         q,
                         gs.loc.clone(),
-                        format!("Edge of type `{}` does not exist", label),
+                        format!("Edge of type `{}` does not exist", edge_type),
                         "check the schema for valid edge types",
                     );
                     return None;
                 }
                 match edge.unwrap().from.1 == node_label.clone() {
-                    true => Some(Type::Edges(Some(label.to_string()))),
+                    true => Some(Type::Edges(Some(edge_type.to_string()))),
                     false => {
                         self.push_query_err(
                             q,
                             gs.loc.clone(),
                             format!(
                                 "Edge of type `{}` exists but it is not a valid outgoing edge type for node of type `{}`",
-                                label, node_label
+                                edge_type, node_label
                             ),
                             "check the schema for valid edge types",
                         );
@@ -2619,30 +2636,37 @@ impl<'a> Ctx<'a> {
                     }
                 }
             }
-            (InE(label), Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label))) => {
+            (
+                InE {
+                    edge_type,
+                    variable,
+                    loc,
+                },
+                Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label)),
+            ) => {
                 traversal
                     .steps
                     .push(Separator::Period(GeneratedStep::InE(GeneratedInE {
-                        label: GenRef::Literal(label.clone()),
+                        label: GenRef::Literal(edge_type.clone()),
                     })));
-                let edge = self.edge_map.get(label.as_str());
+                let edge = self.edge_map.get(edge_type.as_str());
                 if edge.is_none() {
                     self.push_query_err(
                         q,
                         gs.loc.clone(),
-                        format!("Edge of type `{}` does not exist", label),
+                        format!("Edge of type `{}` does not exist", edge_type),
                         "check the schema for valid edge types",
                     );
                     return None;
                 }
 
                 match edge.unwrap().to.1 == node_label.clone() {
-                    true => Some(Type::Edges(Some(label.to_string()))),
+                    true => Some(Type::Edges(Some(edge_type.to_string()))),
                     false => {
                         self.push_query_err(
                             q,
                             gs.loc.clone(),
-                            format!("Edge of type `{}` does not exist", label),
+                            format!("Edge of type `{}` does not exist", edge_type),
                             "check the schema for valid edge types",
                         );
                         None
@@ -2651,15 +2675,22 @@ impl<'a> Ctx<'a> {
             }
 
             // Node‑to‑Node
-            (Out(label), Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label))) => {
-                let edge_type = match self.edge_map.get(label.as_str()) {
-                    Some(ref edge) => {
+            (
+                Out {
+                    edge_type,
+                    variable,
+                    loc,
+                },
+                Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label)),
+            ) => {
+                let schema_edge_type = match self.edge_map.get(edge_type.as_str()) {
+                    Some(edge) => {
                         if self.node_set.contains(edge.to.1.as_str()) {
                             EdgeType::Node
                         } else if self.vector_set.contains(edge.to.1.as_str()) {
                             EdgeType::Vec
                         } else {
-                            panic!("Edge of type `{}` does not exist", label);
+                            panic!("Edge of type `{}` does not exist", edge_type);
                         }
                     }
                     None => {
@@ -2669,16 +2700,16 @@ impl<'a> Ctx<'a> {
                 traversal
                     .steps
                     .push(Separator::Period(GeneratedStep::Out(GeneratedOut {
-                        edge_type: GenRef::Ref(edge_type.to_string()),
-                        label: GenRef::Literal(label.clone()),
+                        edge_type: GenRef::Ref(schema_edge_type.to_string()),
+                        label: GenRef::Literal(edge_type.clone()),
                     })));
-                let edge = self.edge_map.get(label.as_str());
+                let edge = self.edge_map.get(edge_type.as_str());
                 // assert!(edge.is_some()); // make sure is caught
                 if edge.is_none() {
                     self.push_query_err(
                         q,
                         gs.loc.clone(),
-                        format!("Edge of type `{}` does not exist", label),
+                        format!("Edge of type `{}` does not exist", edge_type),
                         "check the schema for valid edge types",
                     );
                     return None;
@@ -2691,7 +2722,7 @@ impl<'a> Ctx<'a> {
                             gs.loc.clone(),
                             format!(
                                 "Edge of type `{}` exists but it is not a valid outgoing edge type for node of type `{}`",
-                                label, node_label
+                                edge_type, node_label
                             ),
                             "check the schema for valid edge types",
                         );
@@ -2700,15 +2731,22 @@ impl<'a> Ctx<'a> {
                 }
             }
 
-            (In(label), Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label))) => {
-                let edge_type = match self.edge_map.get(label.as_str()) {
-                    Some(ref edge) => {
+            (
+                In {
+                    edge_type,
+                    variable,
+                    loc,
+                },
+                Type::Nodes(Some(node_label)) | Type::Vector(Some(node_label)),
+            ) => {
+                let schema_edge_type = match self.edge_map.get(edge_type.as_str()) {
+                    Some(edge) => {
                         if self.node_set.contains(edge.from.1.as_str()) {
                             EdgeType::Node
                         } else if self.vector_set.contains(edge.from.1.as_str()) {
                             EdgeType::Vec
                         } else {
-                            panic!("Edge of type `{}` does not exist", label);
+                            panic!("Edge of type `{}` does not exist", edge_type);
                         }
                     }
                     None => {
@@ -2719,16 +2757,16 @@ impl<'a> Ctx<'a> {
                 traversal
                     .steps
                     .push(Separator::Period(GeneratedStep::In(GeneratedIn {
-                        edge_type: GenRef::Ref(edge_type.to_string()),
-                        label: GenRef::Literal(label.clone()),
+                        edge_type: GenRef::Ref(schema_edge_type.to_string()),
+                        label: GenRef::Literal(edge_type.clone()),
                     })));
-                let edge = self.edge_map.get(label.as_str());
+                let edge = self.edge_map.get(edge_type.as_str());
                 // assert!(edge.is_some());
                 if edge.is_none() {
                     self.push_query_err(
                         q,
                         gs.loc.clone(),
-                        format!("Edge of type `{}` does not exist", label),
+                        format!("Edge of type `{}` does not exist", edge_type),
                         "check the schema for valid edge types",
                     );
                     return None;
@@ -2742,7 +2780,7 @@ impl<'a> Ctx<'a> {
                             gs.loc.clone(),
                             format!(
                                 "Edge of type `{}` exists but it is not a valid incoming edge type for node of type `{}`",
-                                label, node_label
+                                edge_type, node_label
                             ),
                             "check the schema for valid edge types",
                         );
@@ -2752,7 +2790,7 @@ impl<'a> Ctx<'a> {
             }
 
             // Edge‑to‑Node
-            (FromN, Type::Edges(_)) => {
+            (FromN { variable, loc }, Type::Edges(_)) => {
                 traversal
                     .steps
                     .push(Separator::Period(GeneratedStep::FromN));
@@ -2763,7 +2801,7 @@ impl<'a> Ctx<'a> {
                         .to_string(),
                 )))
             }
-            (ToN, Type::Edges(_)) => {
+            (ToN { variable, loc }, Type::Edges(_)) => {
                 traversal.steps.push(Separator::Period(GeneratedStep::ToN));
                 Some(Type::Nodes(Some(
                     gs.loc
@@ -2831,7 +2869,7 @@ impl<'a> Ctx<'a> {
         match (current_step, next_step) {
             (
                 Type::Nodes(Some(span)) | Type::Vector(Some(span)),
-                GraphStepType::ToN | GraphStepType::FromN,
+                GraphStepType::ToN { variable, loc } | GraphStepType::FromN { variable, loc },
             ) => {
                 format!(
                     "\n{}\n{}",
@@ -2845,10 +2883,34 @@ impl<'a> Ctx<'a> {
                     ),
                 )
             }
-            (Type::Edges(Some(span)), GraphStepType::OutE(_) | GraphStepType::InE(_)) => {
+            (
+                Type::Edges(Some(span)),
+                GraphStepType::OutE {
+                    edge_type,
+                    variable,
+                    loc,
+                }
+                | GraphStepType::InE {
+                    edge_type,
+                    variable,
+                    loc,
+                },
+            ) => {
                 format!("use `FromN` or `ToN` to traverse nodes from `{}`", span)
             }
-            (Type::Edges(Some(span)), GraphStepType::Out(_) | GraphStepType::In(_)) => {
+            (
+                Type::Edges(Some(span)),
+                GraphStepType::Out {
+                    edge_type,
+                    variable,
+                    loc,
+                }
+                | GraphStepType::In {
+                    edge_type,
+                    variable,
+                    loc,
+                },
+            ) => {
                 format!("use `FromN` or `ToN` to traverse nodes from `{}`", span)
             }
 
@@ -2936,7 +2998,7 @@ impl<'a> Ctx<'a> {
                             None,
                         );
                         match &traversal.start {
-                            StartNode::Identifier(name) => {
+                            StartNode::Identifier { name, variable, loc } => {
                                 if name.to_string() == var_name {
                                     inner_traversal.traversal_type = TraversalType::NestedFrom(
                                         GenRef::Std(var_name.to_string()),
@@ -2977,7 +3039,7 @@ impl<'a> Ctx<'a> {
                                     None,
                                 );
                                 match &traversal.start {
-                                    StartNode::Identifier(name) => {
+                                    StartNode::Identifier { name, variable, loc } => {
                                         if name.to_string() == var_name {
                                             inner_traversal.traversal_type =
                                                 TraversalType::NestedFrom(GenRef::Std(

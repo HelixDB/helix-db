@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------
 // Main rules
 // ---------------------
-source = { SOI ~ (node_def | edge_def | vector_def | query_def)* ~ EOI }
+source = { SOI ~ (node_def | edge_def | vector_def | enum_def | query_def)* ~ EOI }
 
 
 // ---------------------------------------------------------------------
@@ -10,6 +10,7 @@ source = { SOI ~ (node_def | edge_def | vector_def | query_def)* ~ EOI }
 vector_def = { "V::" ~ identifier_upper ~ node_body? }
 node_def   = { "N::" ~ identifier_upper ~ node_body? }
 edge_def   = { "E::" ~ identifier_upper ~ edge_body }
+enum_def   = { "Enum::" ~ identifier_upper ~ enum_body }
 
 node_body  = { "{" ~ field_defs ~ "}" }
 edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ ("To:" ~ identifier_upper ~ "," ~ properties ~ "}" | "To:" ~ identifier_upper ~ ","? ~ "}") }
@@ -18,6 +19,9 @@ field_def  = { index? ~ identifier ~ ":" ~ param_type ~ (default)? }
 index= { "INDEX" }
 default = { "DEFAULT" ~  (now | float | integer | boolean | string_literal | none) } 
 // optional = { "OPTIONAL" }
+enum_body = { "{" ~ enum_fields ~ "}" }
+enum_fields = { (enum_field ~ ",")* ~ (enum_field ~ ","?)? }
+enum_field = { identifier_upper ~ ("(" ~ identifier_upper ~ ")")? }
 
 
 properties = { "Properties" ~ ":" ~ "{" ~ field_defs? ~ "}" }
@@ -39,7 +43,7 @@ get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | start_vector ) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
 anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
-step                = { "::" ~ (graph_step | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE) }
+step                = { "::" ~ (graph_step | where_step | match_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE) }
 last_step           = { "::" ~ (bool_operations | update) }
 // change this for loop to be able to take traversals etc in the future. 
 for_loop            = { "FOR" ~ for_argument ~ "IN" ~ identifier ~ "{" ~ query_body ~ "}" }
@@ -116,10 +120,11 @@ AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~
 // ---------------------------------------------------------------------
 // Source steps
 // ---------------------------------------------------------------------
-start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
-start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
-start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? }
+start_node = { "N" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? ~ variable_declaration? }
+start_edge = { "E" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? ~ variable_declaration? }
+start_vector = { "V" ~ ("<" ~ type_args ~ ">")? ~ ("(" ~ (id_args | by_index) ~ ")")? ~ variable_declaration? }
 by_index = { "{" ~ id_arg ~ ":" ~ evaluates_to_anything ~ "}" }
+
 // ---------------------------------------------------------------------
 // Traversal steps
 // ---------------------------------------------------------------------
@@ -132,13 +137,13 @@ graph_step = {
   | in_nodes
   | shortest_path
 }
-out_e ={  "OutE" ~ ("<" ~ type_args ~ ">")?}
-in_e ={ "InE" ~ ("<" ~ type_args ~ ">")?}
-from_n ={ "FromN"}
-to_n ={ "ToN"}
-out ={ "Out" ~ ("<" ~ type_args ~ ">")?}
-in_nodes ={ "In" ~ ("<" ~ type_args ~ ">")?}
-shortest_path ={ "ShortestPath" ~ ("<" ~ type_args ~ ">")? ~ to_from}
+out_e ={  "OutE" ~ ("<" ~ type_args ~ ">")? ~ variable_declaration?}
+in_e ={ "InE" ~ ("<" ~ type_args ~ ">")? ~ variable_declaration?}
+from_n ={ "FromN" ~ variable_declaration?}
+to_n ={ "ToN" ~ variable_declaration?}
+out ={ "Out" ~ ("<" ~ type_args ~ ">")? ~ variable_declaration?}
+in_nodes ={ "In" ~ ("<" ~ type_args ~ ">")? ~ variable_declaration?}
+shortest_path ={ "ShortestPath" ~ ("<" ~ type_args ~ ">")? ~ to_from ~ variable_declaration?}
 
 
 // ---------------------------------------------------------------------
@@ -153,6 +158,17 @@ ID           = { "ID" }
 update_field = { identifier ~ ":" ~ (evaluates_to_anything | anonymous_traversal) }
 update       = { "UPDATE" ~ "(" ~ "{" ~ update_field ~ ("," ~ update_field)* ~ "}" ~ ")" }
 drop = { "DROP" ~ (traversal | id_traversal | identifier)? }
+
+// ---------------------------------------------------------------------
+// Match steps
+// ---------------------------------------------------------------------
+match_step = { "MATCH" ~ match_variable? ~ "{" ~ match_statements ~ "}" }
+match_variable = { "|" ~ (identifier | traversal | "_") ~ "|" }
+match_statements = { (match_statement ~ ",")* ~ match_statement ~ ","? }
+match_statement = { match_type ~ "=>" ~ match_value }
+match_type = { identifier_upper ~ "::" ~ identifier_upper  ~ ("(" ~ identifier ~ ")")?}
+match_value = { "{" ~ query_body ~ "}" | traversal | id_traversal | anonymous_traversal | none | identifier  }
+
 
 // ---------------------------------------------------------------------
 // Vector steps
@@ -185,7 +201,7 @@ exclude_field = { "!" ~ "{" ~ identifier ~ ("," ~ identifier)* ~ ("," ~ spread_o
 closure_step  = { "|" ~ identifier ~ "|" ~ object_step }
 spread_object = { ".." ~ ","?}
 mapping_field = { (identifier ~ (":" ~ (anonymous_traversal | evaluates_to_anything | object_step))) | identifier }
-
+variable_declaration = { "|" ~ identifier ~ "|" }
 
 // ---------------------------------------------------------------------
 // Types

@@ -386,13 +386,22 @@ pub enum StartNode {
     Node {
         node_type: String,
         ids: Option<Vec<IdType>>,
+        variable: Option<VariableDeclaration>,
     },
     Edge {
         edge_type: String,
         ids: Option<Vec<IdType>>,
+        variable: Option<VariableDeclaration>,
     },
-    Identifier(String),
-    Anonymous,
+    Identifier {
+        name: String,
+        loc: Loc,
+        variable: Option<VariableDeclaration>,
+    },
+    Anonymous {
+        loc: Loc,
+        variable: Option<VariableDeclaration>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -466,24 +475,62 @@ pub struct GraphStep {
 
 #[derive(Debug, Clone)]
 pub enum GraphStepType {
-    Out(String),
-    In(String),
+    Out {
+        edge_type: String,
+        variable: Option<VariableDeclaration>,
+        loc: Loc,
+    },
+    In {
+        edge_type: String,
+        variable: Option<VariableDeclaration>,
+        loc: Loc,
+    },
 
-    FromN,
-    ToN,
+    FromN {
+        variable: Option<VariableDeclaration>,
+        loc: Loc,
+    },
+    ToN {
+        variable: Option<VariableDeclaration>,
+        loc: Loc,
+    },
 
-    OutE(String),
-    InE(String),
+    OutE {
+        edge_type: String,
+        variable: Option<VariableDeclaration>,
+        loc: Loc,
+    },
+    InE {
+        edge_type: String,
+        variable: Option<VariableDeclaration>,
+        loc: Loc,
+    },
 
     ShortestPath(ShortestPath),
 }
 impl GraphStep {
     pub fn get_item_type(&self) -> Option<String> {
         match &self.step {
-            GraphStepType::Out(s) => Some(s.clone()),
-            GraphStepType::In(s) => Some(s.clone()),
-            GraphStepType::OutE(s) => Some(s.clone()),
-            GraphStepType::InE(s) => Some(s.clone()),
+            GraphStepType::Out {
+                edge_type,
+                variable: _,
+                loc: _,
+            } => Some(edge_type.clone()),
+            GraphStepType::In {
+                edge_type,
+                variable: _,
+                loc: _,
+            } => Some(edge_type.clone()),
+            GraphStepType::OutE {
+                edge_type,
+                variable: _,
+                loc: _,
+            } => Some(edge_type.clone()),
+            GraphStepType::InE {
+                edge_type,
+                variable: _,
+                loc: _,
+            } => Some(edge_type.clone()),
             _ => None,
         }
     }
@@ -717,6 +764,58 @@ pub struct Exclude {
 pub struct Closure {
     pub identifier: String,
     pub object: Object,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableDeclaration {
+    pub loc: Loc,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchStep {
+    pub loc: Loc,
+    pub match_variable: Option<VariableDeclaration>,
+    pub match_statements: Vec<MatchStatement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchStatement {
+    pub loc: Loc,
+    pub match_type: MatchType,
+    pub match_value: Statement,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchType {
+    Enum(EnumAccess),
+    Identifier(String),
+    Literal(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumAccess {
+    pub enum_name: EnumName,
+    pub enum_values: EnumValue,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct Enum {
+    pub enum_name: EnumName,
+    pub enum_values: Vec<EnumValue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumName {
+    pub enum_name: String,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumValue {
+    pub enum_value: String,
     pub loc: Loc,
 }
 
@@ -1777,7 +1876,10 @@ impl HelixParser {
 
     fn parse_anon_traversal(&self, pair: Pair<Rule>) -> Result<Traversal, ParserError> {
         let pairs = pair.clone().into_inner();
-        let start = StartNode::Anonymous;
+        let start = StartNode::Anonymous {
+            loc: pair.loc(),
+            variable: None,
+        };
         let steps = pairs
             .map(|p| self.parse_step(p))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1795,11 +1897,18 @@ impl HelixParser {
                 let pairs = pair.into_inner();
                 let mut node_type = String::new();
                 let mut ids = None;
+                let mut variable = None;
                 for p in pairs {
                     match p.as_rule() {
                         Rule::type_args => {
                             node_type = p.into_inner().next().unwrap().as_str().to_string();
                             // WATCH
+                        }
+                        Rule::variable_declaration => {
+                            variable = Some(VariableDeclaration {
+                                loc: p.loc(),
+                                identifier: p.into_inner().next().unwrap().as_str().to_string(),
+                            });
                         }
                         Rule::id_args => {
                             ids = Some(
@@ -1890,16 +1999,27 @@ impl HelixParser {
                         _ => unreachable!(),
                     }
                 }
-                Ok(StartNode::Node { node_type, ids })
+                Ok(StartNode::Node {
+                    node_type,
+                    ids,
+                    variable,
+                })
             }
             Rule::start_edge => {
                 let pairs = pair.into_inner();
                 let mut edge_type = String::new();
                 let mut ids = None;
+                let mut variable = None;
                 for p in pairs {
                     match p.as_rule() {
                         Rule::type_args => {
                             edge_type = p.into_inner().next().unwrap().as_str().to_string();
+                        }
+                        Rule::variable_declaration => {
+                            variable = Some(VariableDeclaration {
+                                loc: p.loc(),
+                                identifier: p.into_inner().next().unwrap().as_str().to_string(),
+                            });
                         }
                         Rule::id_args => {
                             ids = Some(
@@ -1927,10 +2047,39 @@ impl HelixParser {
                         _ => unreachable!(),
                     }
                 }
-                Ok(StartNode::Edge { edge_type, ids })
+                Ok(StartNode::Edge {
+                    edge_type,
+                    ids,
+                    variable,
+                })
             }
-            Rule::identifier => Ok(StartNode::Identifier(pair.as_str().to_string())),
-            _ => Ok(StartNode::Anonymous),
+            Rule::identifier => {
+                let mut variable = None;
+                if let Some(p) = pair.clone().into_inner().next() {
+                    variable = Some(VariableDeclaration {
+                        loc: p.loc(),
+                        identifier: p.as_str().to_string(),
+                    });
+                }
+                Ok(StartNode::Identifier {
+                    loc: pair.loc(),
+                    name: pair.as_str().to_string(),
+                    variable,
+                })
+            }
+            _ => {
+                let mut variable = None;
+                if let Some(p) = pair.clone().into_inner().next() {
+                    variable = Some(VariableDeclaration {
+                        loc: p.loc(),
+                        identifier: p.as_str().to_string(),
+                    });
+                }
+                Ok(StartNode::Anonymous {
+                    loc: pair.loc(),
+                    variable,
+                })
+            }
         }
     }
 
@@ -2021,9 +2170,19 @@ impl HelixParser {
                 .into_inner()
                 .next()
                 .map(|p| p.as_str().to_string())
-                .ok_or_else(|| ParserError::from("Expected type".to_string()))
+                .ok_or_else(|| ParserError::from("Expected variable".to_string()))
                 .unwrap()
         }; // TODO: change to error
+
+        let variable = |pair: &Pair<Rule>| {
+            pair.clone()
+                .into_inner()
+                .nth(1) // skips type_args
+                .map(|p| VariableDeclaration {
+                    loc: p.loc(),
+                    identifier: p.as_str().to_string(),
+                })
+        };
         let pair = pair.into_inner().next().unwrap(); // TODO: change to error
         match pair.as_rule() {
             // s if s.starts_with("OutE") => GraphStep {
@@ -2056,38 +2215,70 @@ impl HelixParser {
             // }
             Rule::out_e => {
                 let types = types(&pair);
+                let variable = variable(&pair);
                 GraphStep {
                     loc: pair.loc(),
-                    step: GraphStepType::OutE(types),
+                    step: GraphStepType::OutE {
+                        edge_type: types,
+                        variable,
+                        loc: pair.loc(),
+                    },
                 }
             }
             Rule::in_e => {
                 let types = types(&pair);
+                let variable = variable(&pair);
                 GraphStep {
                     loc: pair.loc(),
-                    step: GraphStepType::InE(types),
+                    step: GraphStepType::InE {
+                        edge_type: types,
+                        variable,
+                        loc: pair.loc(),
+                    },
                 }
             }
-            Rule::from_n => GraphStep {
-                loc: pair.loc(),
-                step: GraphStepType::FromN,
-            },
-            Rule::to_n => GraphStep {
-                loc: pair.loc(),
-                step: GraphStepType::ToN,
-            },
-            Rule::out => {
-                let types = types(&pair);
+            Rule::from_n => {
+                let variable = variable(&pair);
                 GraphStep {
                     loc: pair.loc(),
-                    step: GraphStepType::Out(types),
+                    step: GraphStepType::FromN {
+                        variable,
+                        loc: pair.loc(),
+                    },
+                }
+            }
+            Rule::to_n => {
+                let variable = variable(&pair);
+                GraphStep {
+                    loc: pair.loc(),
+                    step: GraphStepType::ToN {
+                        variable,
+                        loc: pair.loc(),
+                    },
+                }
+            }
+            Rule::out => {
+                let types = types(&pair);
+                let variable = variable(&pair);
+                GraphStep {
+                    loc: pair.loc(),
+                    step: GraphStepType::Out {
+                        edge_type: types,
+                        variable,
+                        loc: pair.loc(),
+                    },
                 }
             }
             Rule::in_nodes => {
                 let types = types(&pair);
+                let variable = variable(&pair);
                 GraphStep {
                     loc: pair.loc(),
-                    step: GraphStepType::In(types),
+                    step: GraphStepType::In {
+                        edge_type: types,
+                        variable,
+                        loc: pair.loc(),
+                    },
                 }
             }
             Rule::shortest_path => {
