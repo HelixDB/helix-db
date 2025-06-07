@@ -3,6 +3,9 @@ name = "hbuild"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 socket2 = "0.5"
 helixdb = { path = "../helixdb", features = ["build"] }

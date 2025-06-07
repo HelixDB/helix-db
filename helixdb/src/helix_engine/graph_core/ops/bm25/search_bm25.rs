@@ -5,10 +5,9 @@ use crate::helix_engine::{
     bm25::bm25::BM25,
     graph_core::traversal_iter::RoTraversalIterator,
     storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
-    types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+    types::GraphError,
 };
-use std::{iter::once, sync::Arc};
+use std::sync::Arc;
 
 pub struct SearchBM25<'scope, 'inner> {
     txn: &'scope RoTxn<'scope>,

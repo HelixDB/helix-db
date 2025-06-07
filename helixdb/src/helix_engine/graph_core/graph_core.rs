@@ -1,25 +1,8 @@
 use crate::helix_engine::storage_core::storage_core::HelixGraphStorage;
-use crate::helix_engine::storage_core::storage_methods::StorageMethods;
 use crate::helix_engine::types::GraphError;
-use crate::props;
-use crate::protocol::filterable::{Filterable, FilterableType};
-use crate::protocol::remapping::{Remapping, ResponseRemapping};
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::str;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use super::config::VectorConfig;
-use crate::helixc::parser::helix_parser::{
-    BooleanOp, Expression, GraphStep, HelixParser, IdType, Source, StartNode, Statement, Step,
-    Traversal,
-};
-use crate::protocol::traversal_value::TraversalValue;
-use crate::protocol::{
-    items::{Edge, Node},
-    return_values::ReturnValue,
-    value::Value,
-};
+
 
 use crate::helix_engine::graph_core::config::Config;
 
@@ -94,7 +77,7 @@ impl HelixGraphEngine {
     //     json_string
     // }
 
-    pub fn query(&self, query: String, params: Vec<QueryInput>) -> Result<String, GraphError> {
+    pub fn query(&self, _query: String, _params: Vec<QueryInput>) -> Result<String, GraphError> {
         Ok(String::new())
     }
     //     let ast: Source = match HelixParser::parse_source(query.as_str()) {

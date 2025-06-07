@@ -51,7 +51,6 @@ impl ConnectionHandler {
 
         let active_connections = Arc::clone(&self.active_connections);
         let thread_pool_sender = self.thread_pool.sender.clone();
-        let address = self.address.clone();
 
 
         let handle = tokio::spawn(async move {

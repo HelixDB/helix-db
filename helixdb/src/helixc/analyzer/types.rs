@@ -3,15 +3,14 @@ use std::collections::HashMap;
 use crate::helixc::{
     generator::{
         generator_types::{
-            Assignment as GeneratedAssignment, EdgeSchema as GeneratedEdgeSchema,
+            EdgeSchema as GeneratedEdgeSchema,
             NodeSchema as GeneratedNodeSchema, Parameter as GeneratedParameter, SchemaProperty,
-            Statement as GeneratedStatement, VectorSchema as GeneratedVectorSchema,
+            VectorSchema as GeneratedVectorSchema,
         },
-        traversal_steps::Traversal as GeneratedTraversal,
         utils::{GenRef, GeneratedType, GeneratedValue, RustType as GeneratedRustType},
     },
     parser::helix_parser::{
-        Assignment, DefaultValue, EdgeSchema, FieldPrefix, FieldType, NodeSchema, Parameter,
+        DefaultValue, EdgeSchema, FieldType, NodeSchema, Parameter,
         VectorSchema,
     },
 };

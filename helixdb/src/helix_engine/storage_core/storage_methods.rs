@@ -1,7 +1,6 @@
 use crate::helix_engine::types::GraphError;
 use crate::protocol::{
     items::{Edge, Node},
-    value::Value,
 };
 use heed3::{RoTxn, RwTxn};
 

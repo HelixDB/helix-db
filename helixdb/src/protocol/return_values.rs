@@ -248,7 +248,6 @@ impl ReturnValue {
                         );
                         ReturnValue::Object(properties)
                     }
-                    _ => unreachable!(),
                 })
                 .collect(),
         )

@@ -3,13 +3,12 @@ use crate::helixc::generator::utils::write_properties;
 use super::{
     bool_op::BoolOp,
     generator_types::BoExp,
-    object_remapping_generation::{ClosureFieldRemapping, ExcludeField, FieldRemapping, Remapping},
+    object_remapping_generation::Remapping,
     source_steps::SourceStep,
     utils::{GenRef, GeneratedValue, Order, Separator},
 };
 use core::fmt;
 use std::{
-    clone,
     fmt::{Debug, Display},
 };
 
@@ -213,16 +212,16 @@ impl Debug for Step {
             Step::ToN => write!(f, "ToN"),
             Step::PropertyFetch(property) => write!(f, "check_property({})", property),
 
-            Step::Out(out) => write!(f, "Out"),
-            Step::In(in_) => write!(f, "In"),
-            Step::OutE(out_e) => write!(f, "OutE"),
-            Step::InE(in_e) => write!(f, "InE"),
-            Step::Where(where_) => write!(f, "Where"),
-            Step::Range(range) => write!(f, "Range"),
-            Step::OrderBy(order_by) => write!(f, "OrderBy"),
-            Step::BoolOp(bool_op) => write!(f, "Bool"),
-            Step::Remapping(remapping) => write!(f, "Remapping"),
-            Step::ShortestPath(shortest_path) => write!(f, "ShortestPath"),
+            Step::Out(_out) => write!(f, "Out"),
+            Step::In(_in_) => write!(f, "In"),
+            Step::OutE(_out_e) => write!(f, "OutE"),
+            Step::InE(_in_e) => write!(f, "InE"),
+            Step::Where(_where_) => write!(f, "Where"),
+            Step::Range(_range) => write!(f, "Range"),
+            Step::OrderBy(_order_by) => write!(f, "OrderBy"),
+            Step::BoolOp(_bool_op) => write!(f, "Bool"),
+            Step::Remapping(_remapping) => write!(f, "Remapping"),
+            Step::ShortestPath(_shortest_path) => write!(f, "ShortestPath"),
         }
     }
 }
@@ -329,7 +328,7 @@ pub struct WhereMut {
     pub expr: BoExp,
 }
 impl Display for WhereMut {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         unimplemented!();
     }
 }

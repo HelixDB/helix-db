@@ -2,8 +2,7 @@ use core::fmt;
 use std::ops::Deref;
 
 use serde::{
-    de::{DeserializeSeed, VariantAccess, Visitor},
-    ser::Error,
+    de::Visitor,
     Deserializer, Serializer,
 };
 use sonic_rs::{Deserialize, Serialize};

@@ -7,6 +7,9 @@ license = "GPL-3.0"
 authors = ["HelixDB Team"]
 repository = "https://github.com/HelixDB/helix-db"
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { version = "1.44.2", features = ["full"] }
 serde = { version = "1.0.217", features = ["derive"] }
@@ -69,7 +72,3 @@ build = ["compiler"]
 full = ["build", "compiler", "ingestion", "cosine"]
 default = ["full"]
 
-[profile.release]
-strip = "debuginfo"
-lto = true
-opt-level = "z"

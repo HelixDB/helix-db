@@ -461,7 +461,7 @@ impl HNSW for VectorCore {
         with_data: bool,
     ) -> Result<HVector, VectorError> {
         let key = Self::vector_key(id, level);
-        let mut vector = match self.vectors_db.get(txn, key.as_ref())? {
+        let vector = match self.vectors_db.get(txn, key.as_ref())? {
             Some(bytes) => {
                 let vector = match with_data {
                     true => HVector::from_bytes(id, level, &bytes),
