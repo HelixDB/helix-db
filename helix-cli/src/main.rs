@@ -7,7 +7,7 @@ use crate::{
 };
 use helixdb::{
     helix_engine::graph_core::config::Config,
-    ingestion_engine::{postgres_ingestion::PostgresIngestor, sql_ingestion::SqliteIngestor},
+    ingestion_engine::postgres_ingestion::PostgresIngestor,
 };
 use std::{
     fmt::Write,
@@ -179,8 +179,7 @@ fn main() {
             runner
                 .arg("build")
                 .arg("--release")
-                .current_dir(PathBuf::from(&output))
-                .env("RUSTFLAGS", "-Awarnings");
+                .current_dir(PathBuf::from(&output));
 
             match runner.output() {
                 Ok(output) => {
@@ -494,8 +493,7 @@ fn main() {
             runner
                 .arg("build")
                 .arg("--release")
-                .current_dir(PathBuf::from(&output))
-                .env("RUSTFLAGS", "-Awarnings");
+                .current_dir(PathBuf::from(&output));
 
             match runner.output() {
                 Ok(output) => {
@@ -917,7 +915,7 @@ fn main() {
             };
             let path_str = path.to_str().unwrap();
 
-            let _ = match check_and_read_files(path_str) {
+            match check_and_read_files(path_str) {
                 Ok(files) if !files.is_empty() => {
                     println!(
                         "{} {}",
@@ -1020,12 +1018,11 @@ fn main() {
                 Err(e) => println!("{} {}", "Error while stopping instance".red().bold(), e),
             }
 
-            let mut del_prompt: bool = false;
             print!("Are you sure you want to delete the instance and its data? (y/n): ");
             std::io::stdout().flush().unwrap();
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap();
-            del_prompt = input.trim().to_lowercase() == "y";
+            let del_prompt = input.trim().to_lowercase() == "y";
 
             if del_prompt {
                 match instance_manager.delete_instance(iid) {
@@ -1119,8 +1116,8 @@ fn main() {
                         }
                     }
 
-                    let _ingestor = SqliteIngestor::new(&path_str, None, 5).unwrap();
                     // TODO: Add ingestion logic
+                    // SqliteIngestor::new(&path_str, None, 5).unwrap();
                 }
                 "pg" | "postgres" => {
                     let mut sp = Spinner::new(
@@ -1142,7 +1139,7 @@ fn main() {
 
                     // Run the PostgreSQL ingestion
                     let rt = tokio::runtime::Runtime::new().unwrap();
-                    let _result = rt.block_on(async {
+                    rt.block_on(async {
                         let ingestor = PostgresIngestor::new(&command.db_url, Some(command.instance.clone()), command.batch_size, command.use_ssl).await;
 
                         match ingestor {

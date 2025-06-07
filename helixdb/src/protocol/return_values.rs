@@ -171,18 +171,6 @@ impl Default for ReturnValue {
 }
 
 impl ReturnValue {
-    #[inline]
-    #[allow(unused_attributes)]
-    #[ignore = "No use for this function yet, however, I believe it may be useful in the future so I'm keeping it here"]
-    pub fn from_properties(properties: HashMap<String, Value>) -> Self {
-        ReturnValue::Object(
-            properties
-                .into_iter()
-                .map(|(k, v)| (k, ReturnValue::Value(v)))
-                .collect(),
-        )
-    }
-
     #[inline(always)]
     fn process_items_with_mixin<T>(
         item: T,
@@ -248,23 +236,9 @@ impl ReturnValue {
                         );
                         ReturnValue::Object(properties)
                     }
-                    _ => unreachable!(),
                 })
                 .collect(),
         )
-    }
-
-    #[inline(always)]
-    #[allow(unused_attributes)]
-    #[ignore = "No use for this function yet, however, I believe it may be useful in the future so I'm keeping it here"]
-    pub fn mixin(self, other: ReturnValue) -> Self {
-        match (self, other) {
-            (ReturnValue::Object(mut a), ReturnValue::Object(b)) => {
-                a.extend(b);
-                ReturnValue::Object(a)
-            }
-            _ => unreachable!(),
-        }
     }
 
     /// Mixin a remapping to a return value.
@@ -308,7 +282,7 @@ impl ReturnValue {
                 remappings.into_iter().for_each(|(k, v)| {
                     println!("k: {:?}, new_name: {:?}", k, v.new_name);
                     if v.exclude {
-                        let _ = a.remove(k);
+                        a.remove(k);
                     } else if let Some(new_name) = &v.new_name {
                         if let Some(value) = a.remove(k) {
                             a.insert(new_name.clone(), value);
@@ -325,30 +299,5 @@ impl ReturnValue {
             }
             _ => unreachable!(),
         }
-    }
-
-    #[inline(always)]
-    #[allow(unused_attributes)]
-    #[ignore = "No use for this function yet, however, I believe it may be useful in the future so I'm keeping it here"]
-    pub fn mixin_other<I>(&self, item: I, mut secondary_properties: ResponseRemapping) -> Self
-    where
-        I: Filterable + Clone,
-    {
-        let mut return_val = ReturnValue::default();
-        if !secondary_properties.should_spread {
-            match item.type_name() {
-                FilterableType::Node => {
-                    return_val = ReturnValue::from(item);
-                }
-                FilterableType::Edge => {
-                    return_val = ReturnValue::from(item);
-                }
-                FilterableType::Vector => {
-                    return_val = ReturnValue::from(item);
-                }
-            }
-        }
-        return_val = return_val.mixin_remapping(&mut secondary_properties.remappings);
-        return_val
     }
 }

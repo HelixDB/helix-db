@@ -216,7 +216,7 @@ fn create_temp_dir() -> tempfile::TempDir {
 async fn test_postgres_custom_ingestion() {
     // just to make sure insertion into db actually works
     match create_mock_postgres_db().await {
-        Ok((mut client, _config)) => {
+        Ok((mut client, _)) => {
             let row = client
                 .query_one("SELECT COUNT(*) FROM parents", &[])
                 .await

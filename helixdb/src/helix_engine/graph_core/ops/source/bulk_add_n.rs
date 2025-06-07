@@ -23,7 +23,6 @@ pub trait BulkAddNAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphErr
     fn bulk_add_n(
         self,
         nodes: &mut [u128],
-        secondary_indices: Option<&[String]>,
         chunk_size: usize,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>;
 }
@@ -34,13 +33,11 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddNAdapt
     fn bulk_add_n(
         self,
         nodes: &mut [u128],
-        secondary_indices: Option<&[String]>,
         chunk_size: usize,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>> {
         let mut result: Result<TraversalVal, GraphError> = Ok(TraversalVal::Empty);
         nodes.sort_unstable_by_key(|node| *node);
         let chunks = nodes.chunks_mut(chunk_size);
-        let secondary_indices = secondary_indices.unwrap_or(&[]).to_vec();
         let mut count = 0;
         for chunk in chunks {
             for node in chunk {

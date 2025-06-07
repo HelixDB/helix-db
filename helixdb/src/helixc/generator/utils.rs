@@ -1,8 +1,6 @@
-use std::{fmt::{self, Debug, Display}, io::{self, Write}};
+use std::{fmt::{self, Debug, Display}};
 
 use crate::helixc::parser::helix_parser::IdType;
-
-use super::tsdisplay::ToTypeScript;
 
 #[derive(Clone)]
 pub enum GenRef<T>
@@ -62,7 +60,7 @@ where
             GenRef::RefLiteral(t) => t,
             GenRef::Unknown => panic!("Cannot get inner of unknown"),
             GenRef::Std(t) => t,
-            GenRef::Id(t) => panic!("Cannot get inner of unknown"),
+            GenRef::Id(_t) => panic!("Cannot get inner of unknown"),
         }
     }
 }
@@ -103,8 +101,8 @@ impl From<GenRef<String>> for String {
 impl From<IdType> for GenRef<String> {
     fn from(value: IdType) -> Self {
         match value {
-            IdType::Literal { value: s, loc } => GenRef::Literal(s),
-            IdType::Identifier { value: s, loc } => GenRef::Id(s),
+            IdType::Literal { value: s, loc: _ } => GenRef::Literal(s),
+            IdType::Identifier { value: s, loc: _ } => GenRef::Id(s),
             _ => panic!("Cannot convert to string: {:?}", value),
         }
     }

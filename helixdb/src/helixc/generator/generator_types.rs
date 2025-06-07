@@ -1,16 +1,14 @@
 use core::fmt;
 use std::{
-    collections::HashMap,
     fmt::Display,
-    io::{self, Write},
 };
 
-use crate::{helixc::parser::helix_parser::FieldPrefix, protocol::value::Value};
+use crate::helixc::parser::helix_parser::FieldPrefix;
 
 use super::{
-    traversal_steps::{ShouldCollect, Traversal},
+    traversal_steps::Traversal,
     tsdisplay::ToTypeScript,
-    utils::{write_headers, write_properties, GenRef, GeneratedType, GeneratedValue},
+    utils::{write_headers, GenRef, GeneratedType, GeneratedValue},
 };
 
 pub struct Source {
@@ -367,7 +365,7 @@ pub struct ForEach {
 impl Display for ForEach {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.for_variables {
-            ForVariable::ObjectDestructure(variables) => {
+            ForVariable::ObjectDestructure(_variables) => {
                 write!(
                     f,
                     "for data in data.{}",
@@ -380,7 +378,7 @@ impl Display for ForEach {
                     self.in_variable
                 )?;
             }
-            ForVariable::Identifier(variable) => {
+            ForVariable::Identifier(_variable) => {
                 write!(f, "for data in {}", self.in_variable)?;
             }
             ForVariable::Empty => {

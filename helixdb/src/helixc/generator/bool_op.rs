@@ -22,7 +22,7 @@ impl Display for BoolOp {
             BoolOp::Lte(lte) => format!("{}", lte),
             BoolOp::Eq(eq) => format!("{}", eq),
             BoolOp::Neq(neq) => format!("{}", neq),
-            BoolOp::Contains(cont) => unimplemented!(),
+            BoolOp::Contains(_cont) => unimplemented!(),
         };
         write!(f, "map_or(false, |v| *v{})", s)
     }

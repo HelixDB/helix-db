@@ -38,7 +38,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
         self,
         mut edges: Vec<(u128, u128, u128)>,
         should_check_nodes: bool,
-        chunk_size: usize,
+        _chunk_size: usize,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>> {
         let mut result: Result<TraversalVal, GraphError> = Ok(TraversalVal::Empty);
         // sort by id
@@ -100,7 +100,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
         // OUT EDGES
         let mut prev_out = None;
 
-        edges.sort_unstable_by(|(from, to, id), (from_, to_, id_)| {
+        edges.sort_unstable_by(|(from, _, id), (from_, _, id_)| {
             if from == from_ {
                 id.cmp(id_)
             } else {
@@ -108,9 +108,8 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
             }
         });
 
-        for out in edges.iter() {
+        for (from_node, to_node, id) in edges.iter() {
             // OUT EDGES
-            let (from_node, to_node, id) = out;
             let out_flag = if Some(from_node) == prev_out {
                 PutFlags::APPEND_DUP
             } else {
@@ -140,7 +139,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
         println!("Adding in edges");
         // IN EDGES
         edges.sort_unstable_by(
-            |(from, to, id), (from_, to_, id_)| {
+            |(_, to, id), (_, to_, id_)| {
                 if to == to_ {
                     id.cmp(id_)
                 } else {
@@ -149,9 +148,8 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> BulkAddEAdapt
             },
         );
         let mut prev_in = None;
-        for in_ in edges.iter() {
+        for (from_node, to_node, id) in edges.iter() {
             // IN EDGES
-            let (from_node, to_node, id) = in_;
             let in_flag = if Some(to_node) == prev_in {
                 PutFlags::APPEND_DUP
             } else {

@@ -2,21 +2,19 @@ use std::{sync::Arc, time::Instant};
 
 use crate::{
     helix_engine::graph_core::ops::{
-        source::{bulk_add_e::BulkAddEAdapter, e_from_type::EFromTypeAdapter},
+        source::e_from_type::EFromTypeAdapter,
         util::drop::Drop,
     },
     props,
 };
 use crate::{
     helix_engine::graph_core::ops::{
-        source::{n_from_index::NFromIndexAdapter, n_from_type::NFromTypeAdapter},
+        source::n_from_type::NFromTypeAdapter,
         util::paths::ShortestPathAdapter,
     },
     protocol::{
         filterable::Filterable,
         id::ID,
-        items::{Edge, Node},
-        traversal_value::TraversalValue,
         value::Value,
     },
 };
@@ -27,16 +25,15 @@ use crate::{
             in_::{in_e::InEdgesAdapter, to_n::ToNAdapter},
             out::{from_n::FromNAdapter, out::OutAdapter},
             source::{
-                add_n::AddNAdapter, bulk_add_n::BulkAddNAdapter, e_from_id::EFromIdAdapter,
+                add_n::AddNAdapter, e_from_id::EFromIdAdapter,
                 n_from_id::NFromIdAdapter,
             },
             tr_val::{Traversable, TraversalVal},
             util::{dedup::DedupAdapter, range::RangeAdapter},
         },
-        storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::storage_core::HelixGraphStorage,
         types::GraphError,
     },
-    protocol::items::v6_uuid,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -169,7 +166,7 @@ fn test_out() {
         .collect_to::<Vec<_>>();
 
     txn.commit().unwrap();
-    let mut txn = storage.graph_env.write_txn().unwrap();
+    let txn = storage.graph_env.read_txn().unwrap();
 
     // let nodes = VFromId::new(&storage, &txn, person1.id.as_str())
     //     .out("knows")
@@ -217,8 +214,7 @@ fn test_out_e() {
             false,
             EdgeType::Node,
         )
-        .filter_map(|edge| edge.ok())
-        .collect::<Vec<_>>();
+        .collect_to::<Vec<_>>();
     let edge = edge.first().unwrap();
     // println!("traversal edge: {:?}", edge);
 
@@ -425,13 +421,13 @@ fn test_count_single_node() {
 fn test_count_node_array() {
     let (storage, _temp_dir) = setup_test_db();
     let mut txn = storage.graph_env.write_txn().unwrap();
-    let _ = G::new_mut(Arc::clone(&storage), &mut txn)
+    G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!()), None)
         .collect_to::<Vec<_>>();
-    let _ = G::new_mut(Arc::clone(&storage), &mut txn)
+    G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!()), None)
         .collect_to::<Vec<_>>();
-    let _ = G::new_mut(Arc::clone(&storage), &mut txn)
+    G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!()), None)
         .collect_to::<Vec<_>>();
 
@@ -726,9 +722,6 @@ fn test_n_from_id_chain_operations() {
         .add_n("person", Some(props!()), None)
         .collect_to::<Vec<_>>();
     let person2 = G::new_mut(Arc::clone(&storage), &mut txn)
-        .add_n("person", Some(props!()), None)
-        .collect_to::<Vec<_>>();
-    let person3 = G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!()), None)
         .collect_to::<Vec<_>>();
     let person3 = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -1172,7 +1165,7 @@ fn test_edge_properties() {
         .add_n("person", Some(props!()), None)
         .collect_to_val();
     let props = Some(props! { "since" => 2020, "date" => 1744965900, "name" => "hello"});
-    let edge = G::new_mut(Arc::clone(&storage), &mut txn)
+    G::new_mut(Arc::clone(&storage), &mut txn)
         .add_e(
             "knows",
             props.clone(),
@@ -1225,7 +1218,7 @@ fn test_drop_node() {
     let node2 = G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!("name" => "test2")), None)
         .collect_to_val();
-    let edge = G::new_mut(Arc::clone(&storage), &mut txn)
+    G::new_mut(Arc::clone(&storage), &mut txn)
         .add_e(
             "knows",
             Some(props!()),
@@ -1315,28 +1308,28 @@ fn test_update_node() {
     let node = G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!("name" => "test")), None)
         .collect_to_val();
-    let node2 = G::new_mut(Arc::clone(&storage), &mut txn)
+    let _node2 = G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", Some(props!("name" => "test2")), None)
         .collect_to_val();
 
     txn.commit().unwrap();
     let mut txn = storage.graph_env.write_txn().unwrap();
-    let updatedUsers = {
+    {
         let update_tr = G::new(Arc::clone(&storage), &txn)
             .n_from_id(&node.id())
             .collect_to::<Vec<_>>();
         G::new_mut_from(Arc::clone(&storage), &mut txn, update_tr)
             .update(Some(props! { "name" => "john"}))
-            .collect_to::<Vec<_>>()
-    };
+            .collect_to::<Vec<_>>();
+    }
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
-    let updatedUsers = G::new(Arc::clone(&storage), &txn)
+    let updated_users = G::new(Arc::clone(&storage), &txn)
         .n_from_id(&node.id())
         .collect_to::<Vec<_>>();
-    assert_eq!(updatedUsers.len(), 1);
+    assert_eq!(updated_users.len(), 1);
     assert_eq!(
-        updatedUsers[0].check_property("name").unwrap().to_string(),
+        updated_users[0].check_property("name").unwrap().to_string(),
         "john"
     );
 }
@@ -1421,73 +1414,14 @@ fn test_shortest_path() {
         }
     }
 }
-// #[test]
-// fn test_shortest_mutual_path() {
-//     let (storage, _temp_dir) = setup_test_db();
-//     let mut txn = storage.graph_env.write_txn().unwrap();
-
-//     // Create a complex network of mutual and one-way connections
-//     // Mutual: Alice <-> Bob <-> Charlie <-> David
-//     // One-way: Alice -> Eve -> David
-//     let users: Vec<Node> = vec!["alice", "bob", "charlie", "dave", "eve"]
-//         .iter()
-//         .map(|name| {
-//             storage
-//                 .create_node(&mut txn, "person", Some(props! ){ "name" => *name }, None, None)
-//                 .unwrap()
-//         })
-//         .collect();
-
-//     for (i, j) in [(0, 1), (1, 2), (2, 3)].iter() {
-//         storage
-//             .create_edge(&mut txn, "knows", &users[*i].id, &users[*j].id, Some(props!()))
-//             .unwrap();
-//         storage
-//             .create_edge(&mut txn, "knows", &users[*j].id, &users[*i].id, Some(props!()))
-//             .unwrap();
-//     }
-
-//     storage
-//         .create_edge(&mut txn, "knows", &users[0].id, &users[4].id, Some(props!()))
-//         .unwrap();
-//     storage
-//         .create_edge(&mut txn, "knows", &users[4].id, &users[3].id, Some(props!()))
-//         .unwrap();
-
-//     txn.commit().unwrap();
-
-//     let txn = storage.graph_env.read_txn().unwrap();
-//     let mut tr =
-//         TraversalBuilder::new(Arc::clone(&storage), TraversalValue::from(users[0].clone()));
-//     tr.shortest_mutual_path_to(&txn, &users[3].id);
-
-//     let result = tr.result(txn);
-//     let paths = match result.unwrap() {
-//         TraversalValue::Paths(paths) => paths,
-//         _ => {
-//             panic!("Expected PathArray value")
-//         }
-//     };
-
-//     assert_eq!(paths.len(), 1);
-//     let (nodes, edges) = &paths[0];
-
-//     assert_eq!(nodes.len(), 4);
-//     assert_eq!(edges.len(), 3);
-//     assert_eq!(nodes[0].id, users[3].id); // David
-//     assert_eq!(nodes[1].id, users[2].id); // Charlie
-//     assert_eq!(nodes[2].id, users[1].id); // Bob
-//     assert_eq!(nodes[3].id, users[0].id); // Alice
-// }
 
 #[test]
 fn huge_traversal() {
     let (storage, _temp_dir) = setup_test_db();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
-    let mut start = Instant::now();
     let mut nodes = Vec::with_capacity(1000_000);
-    for i in 0..1000_000 {
+    for _i in 0..1000_000 {
         let id = G::new_mut(Arc::clone(&storage), &mut txn)
             .add_n("user", None, None)
             .collect_to_val();
@@ -1528,24 +1462,6 @@ fn huge_traversal() {
         .out_e("knows")
         .to_n()
         .out("knows", &EdgeType::Node)
-        // .filter_ref(|val, _| {
-        //     if let Ok(TraversalVal::Node(node)) = val {
-        //         if let Some(value) = node.check_property("name") {
-        //             match value {
-        //                 Value::I32(name) => return *name < 700000,
-        //                 _ => return false,
-        //             }
-        //         } else {
-        //             return false;
-        //         }
-        //     } else {
-        //         return false;
-        //     }
-        // })
-        .out("knows", &EdgeType::Node)
-        // .out("knows", &EdgeType::Node)
-        // .out("knows", &EdgeType::Node)
-        // .out("knows", &EdgeType::Node)
         .dedup()
         .range(0, 10000)
         .count();
@@ -1557,50 +1473,6 @@ fn huge_traversal() {
     );
     txn.commit().unwrap();
 
-    // let txn = storage.graph_env.read_txn().unwrap();
-    // let now = Instant::now();
-    // let mut tr = TraversalBuilder::new(Arc::clone(&storage), TraversalValue::Empty);
-    // tr.v(&txn)
-    //     .out_e(&txn, "knows")
-    //     .in_v(&txn)
-    //     .out(&txn, "knows")
-    //     .filter_nodes(&txn, |val| {
-    //         if let Some(value) = val.check_property("name") {
-    //             match value {
-    //                 Value::I32(name) => return Ok(*name < 1000),
-    //                 _ => return Err(GraphError::Default),
-    //             }
-    //         } else {
-    //             return Err(GraphError::Default);
-    //         }
-    //     })
-    //     .out(&txn, "knows")
-    //     .out(&txn, "knows")
-    //     .out(&txn, "knows")
-    //     .out(&txn, "knows")
-    //     .range(0, 100);
-
-    // let result = tr.finish();
-    // println!("original version time: {:?}", now.elapsed());
-    // println!(
-    //     "traversal: {:?}",
-    //     match result {
-    //         Ok(TraversalValue::NodeArray(nodes)) => nodes.len(),
-    //         Err(e) => {
-    //             println!("error: {:?}", e);
-    //             0
-    //         }
-    //         _ => {
-    //             println!("error: {:?}", result);
-    //             0
-    //         }
-    //     }
-    // );
-    // // print size of mdb file on disk
-    // println!(
-    //     "size of mdb file on disk: {:?}",
-    //     storage.graph_env.real_disk_size()
-    // );
     assert!(false);
 }
 
@@ -1725,8 +1597,6 @@ fn test_add_e_with_dup_flag() {
 fn test_add_n_parallel() {
     let (storage, _temp_dir) = setup_test_db();
     let n = 100_000_000;
-    let chunks = n / 10000000;
-    let k = n / chunks;
     let start = Instant::now();
 
     let mut txn = storage.graph_env.write_txn().unwrap();

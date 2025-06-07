@@ -88,15 +88,14 @@ fn load_dbpedia_vectors(limit: usize) -> Result<Vec<Vec<f64>>, PolarsError> {
 
 // TODO: doesn't work correctly
 fn clear_dbs(txn: &mut RwTxn, db: &Arc<HelixGraphStorage>) {
-    let _ = db.nodes_db.clear(txn);
-    let _ = db.edges_db.clear(txn);
-    let _ = db.out_edges_db.clear(txn);
-    let _ = db.in_edges_db.clear(txn);
-    let _ = db.in_edges_db.clear(txn);
+    db.nodes_db.clear(txn).unwrap();
+    db.edges_db.clear(txn).unwrap();
+    db.out_edges_db.clear(txn).unwrap();
+    db.in_edges_db.clear(txn).unwrap();
 
-    let _ = db.vectors.vectors_db.clear(txn);
-    let _ = db.vectors.vector_data_db.clear(txn);
-    let _ = db.vectors.out_edges_db.clear(txn);
+    db.vectors.vectors_db.clear(txn).unwrap();
+    db.vectors.vector_data_db.clear(txn).unwrap();
+    db.vectors.out_edges_db.clear(txn).unwrap();
 }
 
 fn calc_ground_truths(
@@ -265,7 +264,6 @@ fn bench_hnsw_precision() {
     let mut rng = rand::rng();
     let mut shuffled_vectors: Vec<HVector> = all_vectors.clone();
     shuffled_vectors.shuffle(&mut rng);
-    let _base_vectors = &shuffled_vectors[..n_vecs - n_query];
     let query_vectors = &shuffled_vectors[n_vecs - n_query..];
 
     let ground_truths = calc_ground_truths(all_vectors, query_vectors.to_vec(), k);

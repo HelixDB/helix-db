@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::helix_engine::bm25::bm25::{BM25, HBM25Config, HybridSearch, BM25Metadata, PostingListEntry};
+    use crate::helix_engine::bm25::bm25::{BM25, HBM25Config, HybridSearch, BM25Metadata};
     use crate::helix_engine::{
         storage_core::storage_core::HelixGraphStorage,
         graph_core::config::Config,

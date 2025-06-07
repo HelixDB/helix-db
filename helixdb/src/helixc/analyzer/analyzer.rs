@@ -9,12 +9,12 @@ use crate::{
             bool_op::{BoolOp, Eq, Gt, Gte, Lt, Lte, Neq},
             generator_types::{
                 Assignment as GeneratedAssignment, BoExp, Drop as GeneratedDrop,
-                ForEach as GeneratedForEach, ForLoopInVariable, ForVariable, IdentifierType,
+                ForEach as GeneratedForEach, ForLoopInVariable, ForVariable,
                 Parameter as GeneratedParameter, Query as GeneratedQuery, ReturnValue,
                 ReturnValueExpr, Source as GeneratedSource, Statement as GeneratedStatement,
             },
             object_remapping_generation::{
-                ExcludeField, FieldRemapping, IdentifierRemapping, ObjectRemapping, Remapping,
+                ExcludeField, IdentifierRemapping, ObjectRemapping, Remapping,
                 RemappingType, TraversalRemapping, ValueRemapping,
             },
             source_steps::{
@@ -27,21 +27,18 @@ use crate::{
                 Traversal as GeneratedTraversal, TraversalType, Where, WhereExists, WhereRef,
             },
             utils::{
-                GenRef, GeneratedType, GeneratedValue, RustType as GeneratedRustType, Separator,
+                GenRef, GeneratedValue, Separator,
             },
         },
         parser::{
-            helix_parser::{ShortestPath, *},
+            helix_parser::*,
             location::Loc,
         },
     },
     protocol::{date::Date, value::Value},
 };
 
-use std::{
-    collections::{HashMap, HashSet},
-    ops::{ControlFlow, Deref},
-};
+use std::collections::{HashMap, HashSet};
 
 use super::{fix::Fix, pretty};
 
@@ -837,7 +834,7 @@ impl<'a> Ctx<'a> {
                                 self.is_valid_identifier(q, loc.clone(), value.as_str());
                                 GenRef::Std(format!("data.{}", value.clone()))
                             }
-                            IdType::Literal { value, loc } => GenRef::Literal(value.clone()),
+                            IdType::Literal { value, loc: _ } => GenRef::Literal(value.clone()),
                             _ => unreachable!(),
                         },
                         _ => {
@@ -856,7 +853,7 @@ impl<'a> Ctx<'a> {
                                 self.is_valid_identifier(q, loc.clone(), value.as_str());
                                 GenRef::Std(format!("data.{}.clone()", value.clone()))
                             }
-                            IdType::Literal { value, loc } => GenRef::Literal(value.clone()),
+                            IdType::Literal { value, loc: _ } => GenRef::Literal(value.clone()),
                             _ => unreachable!(),
                         },
                         _ => {
@@ -1324,10 +1321,10 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 let vec = match &bm25_search.data {
-                    Some(ValueType::Literal { value, loc }) => {
+                    Some(ValueType::Literal { value, loc: _ }) => {
                         GeneratedValue::Literal(GenRef::Std(value.to_string()))
                     }
-                    Some(ValueType::Identifier { value: i, loc }) => {
+                    Some(ValueType::Identifier { value: i, loc: _ }) => {
                         self.is_valid_identifier(q, bm25_search.loc.clone(), i.as_str());
                         // if is in params then use data.
                         if let Some(_) = q.parameters.iter().find(|p| p.name.1 == *i) {
@@ -1529,7 +1526,7 @@ impl<'a> Ctx<'a> {
                                             }
                                             format!("data.{}", i)
                                         }
-                                        ValueType::Literal { value, loc } => match value {
+                                        ValueType::Literal { value, loc: _ } => match value {
                                             Value::String(s) => s,
                                             Value::I8(i) => i.to_string(),
                                             Value::I16(i) => i.to_string(),
@@ -1570,7 +1567,7 @@ impl<'a> Ctx<'a> {
                                     label: GenRef::Literal(node_type.clone()),
                                 }));
                         }
-                        IdType::Literal { value: s, loc } => {
+                        IdType::Literal { value: s, loc: _ } => {
                             gen_traversal.source_step =
                                 Separator::Period(SourceStep::NFromID(NFromID {
                                     id: GenRef::Ref(s),
@@ -1617,7 +1614,7 @@ impl<'a> Ctx<'a> {
                                 }
                                 GenRef::Std(format!("data.{}", i))
                             }
-                            IdType::Literal { value: s, loc } => GenRef::Std(s),
+                            IdType::Literal { value: s, loc: _ } => GenRef::Std(s),
                             _ => unreachable!(),
                         },
                         label: GenRef::Literal(edge_type.clone()),
@@ -2055,7 +2052,7 @@ impl<'a> Ctx<'a> {
                                 let node_ty = gs.get_item_type().unwrap();
                                 let field_set = self.node_fields.get(node_ty.as_str()).cloned();
                                 if let Some(field_set) = field_set {
-                                    for FieldAddition { key, value, loc } in &update.fields {
+                                    for FieldAddition { key, value: _, loc } in &update.fields {
                                         if !field_set.contains_key(key.as_str()) {
                                             self.push_query_err(
                                                 q,
@@ -2075,7 +2072,7 @@ impl<'a> Ctx<'a> {
                                 let edge_ty = gs.get_item_type().unwrap();
                                 let field_set = self.edge_fields.get(edge_ty.as_str()).cloned();
                                 if let Some(field_set) = field_set {
-                                    for FieldAddition { key, value, loc } in &update.fields {
+                                    for FieldAddition { key, value: _, loc } in &update.fields {
                                         if !field_set.contains_key(key.as_str()) {
                                             self.push_query_err(
                                                 q,
@@ -2105,7 +2102,7 @@ impl<'a> Ctx<'a> {
                                 let node_ty = node_type.as_str();
                                 let field_set = self.node_fields.get(node_ty).cloned();
                                 if let Some(field_set) = field_set {
-                                    for FieldAddition { key, value, loc } in &update.fields {
+                                    for FieldAddition { key, value: _, loc } in &update.fields {
                                         if !field_set.contains_key(key.as_str()) {
                                             self.push_query_err(
                                                 q,
@@ -2124,7 +2121,7 @@ impl<'a> Ctx<'a> {
                                 let edge_ty = edge_type.as_str();
                                 let field_set = self.edge_fields.get(edge_ty).cloned();
                                 if let Some(field_set) = field_set {
-                                    for FieldAddition { key, value, loc } in &update.fields {
+                                    for FieldAddition { key, value: _, loc } in &update.fields {
                                         if !field_set.contains_key(key.as_str()) {
                                             self.push_query_err(
                                                 q,
@@ -2379,9 +2376,7 @@ impl<'a> Ctx<'a> {
                     );
                 }
             }
-            Type::Anonymous(ty) => {
-                self.validate_exclude(ty, tr, ex, excluded, q);
-            }
+
             _ => {
                 self.push_query_err(
                     q,
@@ -2401,13 +2396,13 @@ impl<'a> Ctx<'a> {
         excluded: &HashMap<&str, Loc>,
         q: &'a Query,
         gen_traversal: &mut GeneratedTraversal,
-        gen_query: Option<&mut GeneratedQuery>,
+        _gen_query: Option<&mut GeneratedQuery>,
         scope: &mut HashMap<&'a str, Type>,
         var_name: Option<&str>,
     ) {
         match &cur_ty {
             Type::Nodes(Some(node_ty)) => {
-                if let Some(field_set) = self.node_fields.get(node_ty.as_str()).cloned() {
+                if let Some(_field_set) = self.node_fields.get(node_ty.as_str()).cloned() {
                     // if there is only one field then it is a property access
                     if obj.fields.len() == 1
                         && matches!(obj.fields[0].value.value, FieldValueType::Identifier(_))
@@ -2478,7 +2473,7 @@ impl<'a> Ctx<'a> {
             }
             Type::Edges(Some(edge_ty)) => {
                 // for (key, val) in &obj.fields {
-                if let Some(field_set) = self.edge_fields.get(edge_ty.as_str()).cloned() {
+                if let Some(_field_set) = self.edge_fields.get(edge_ty.as_str()).cloned() {
                     // if there is only one field then it is a property access
                     if obj.fields.len() == 1
                         && matches!(obj.fields[0].value.value, FieldValueType::Identifier(_))
@@ -2551,19 +2546,7 @@ impl<'a> Ctx<'a> {
                     );
                 }
             }
-            Type::Anonymous(ty) => {
-                self.validate_object(
-                    ty,
-                    tr,
-                    obj,
-                    excluded,
-                    q,
-                    gen_traversal,
-                    gen_query,
-                    scope,
-                    var_name,
-                );
-            }
+
             _ => {
                 self.push_query_err(
                     q,
@@ -3007,7 +2990,7 @@ impl<'a> Ctx<'a> {
                                     new_value: inner_traversal,
                                 })
                             }
-                            ExpressionType::Exists(exists) => {
+                            ExpressionType::Exists(_exists) => {
                                 todo!()
                             }
                             ExpressionType::BooleanLiteral(bo_lit) => {
@@ -3582,7 +3565,7 @@ impl<'a> Ctx<'a> {
                                 self.is_valid_identifier(q, loc.clone(), value.as_str());
                                 GenRef::Std(format!("{}.id()", value.clone()))
                             }
-                            IdType::Literal { value, loc } => GenRef::Literal(value.clone()),
+                            IdType::Literal { value, loc: _ } => GenRef::Literal(value.clone()),
                             _ => unreachable!(),
                         },
                         _ => {
@@ -3601,7 +3584,7 @@ impl<'a> Ctx<'a> {
                                 self.is_valid_identifier(q, loc.clone(), value.as_str());
                                 GenRef::Std(format!("{}.id()", value.clone()))
                             }
-                            IdType::Literal { value, loc } => GenRef::Literal(value.clone()),
+                            IdType::Literal { value, loc: _ } => GenRef::Literal(value.clone()),
                             _ => unreachable!(),
                         },
                         _ => {
@@ -4062,7 +4045,7 @@ impl<'a> Ctx<'a> {
                         //     ForVariable::ObjectDestructure(vec![GenRef::Std(name.clone())]);
                         unreachable!()
                     }
-                    ForLoopVars::ObjectDestructuring { fields, loc } => {
+                    ForLoopVars::ObjectDestructuring { fields, loc: _ } => {
                         // TODO: check if fields are valid
                         match &param {
                             Some(p) => {
@@ -4194,7 +4177,6 @@ enum Type {
     Edges(Option<String>),
     Vector(Option<String>),
     Scalar(FieldType),
-    Anonymous(Box<Type>),
     Boolean,
     Unknown,
 }
@@ -4208,25 +4190,16 @@ impl Type {
             Type::Scalar(_) => "scalar",
             Type::Boolean => "boolean",
             Type::Unknown => "unknown",
-            Type::Anonymous(ty) => ty.kind_str(),
+
         }
     }
 
-    /// Recursively strip <code>Anonymous</code> layers and return the base type.
+    /// Return the base type.
     fn base(&self) -> &Type {
-        match self {
-            Type::Anonymous(inner) => inner.base(),
-            _ => self,
-        }
+        self
     }
 
-    /// Same, but returns an owned clone for convenience.
-    fn cloned_base(&self) -> Type {
-        match self {
-            Type::Anonymous(inner) => inner.cloned_base(),
-            _ => self.clone(),
-        }
-    }
+
 }
 
 impl<'a> From<&'a FieldType> for Type {
