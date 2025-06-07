@@ -7,7 +7,6 @@ use std::{
 pub enum CliError {
     Io(std::io::Error),
     New(String),
-    ConfigFileNotFound,
     CompileFailed,
 }
 
@@ -16,7 +15,6 @@ impl std::fmt::Display for CliError {
         match self {
             CliError::Io(e) => write!(f, "IO error: {}", e),
             CliError::New(msg) => write!(f, "{}", msg),
-            CliError::ConfigFileNotFound => write!(f, "Config file not found"),
             CliError::CompileFailed => write!(f, "Failed to compile queries"),
         }
     }

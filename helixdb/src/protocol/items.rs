@@ -1,6 +1,5 @@
-use super::value::{properties_format, Value};
+use super::value::Value;
 use crate::helix_engine::types::GraphError;
-use bincode::Options;
 use sonic_rs::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap};
 use uuid::Uuid;

@@ -165,7 +165,7 @@ impl Display for SearchBM25 {
 impl Display for SourceStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SourceStep::Identifier(identifier) => write!(f, ""),
+            SourceStep::Identifier(_identifier) => write!(f, ""),
             SourceStep::AddN(add_n) => write!(f, "{}", add_n),
             SourceStep::AddE(add_e) => write!(f, "{}", add_e),
             SourceStep::AddV(add_v) => write!(f, "{}", add_v),

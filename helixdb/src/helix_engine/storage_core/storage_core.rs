@@ -1,6 +1,6 @@
 use crate::{
     helix_engine::{
-        bm25::bm25::{HBM25Config, BM25},
+        bm25::bm25::HBM25Config,
         graph_core::config::Config,
         storage_core::storage_methods::StorageMethods,
         types::GraphError,
@@ -11,10 +11,8 @@ use crate::{
         },
     },
     protocol::{
-        filterable::Filterable,
         items::{Edge, Node},
         label_hash::hash_label,
-        value::Value,
     },
 };
 
@@ -234,22 +232,7 @@ impl HelixGraphStorage {
         Ok(vector)
     }
 
-    fn get_document_text(&self, txn: &RoTxn, doc_id: u128) -> Result<String, GraphError> {
-        let node = self.get_node(txn, &doc_id)?;
-        let mut text = node.label.clone();
 
-        // Include properties in the text for indexing
-        if let Some(properties) = node.properties {
-            for (key, value) in properties {
-                text.push(' ');
-                text.push_str(&key);
-                text.push(' ');
-                text.push_str(&value.to_string());
-            }
-        }
-
-        Ok(text)
-    }
 }
 
 impl DBMethods for HelixGraphStorage {

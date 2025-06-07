@@ -79,11 +79,6 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
                 let error = GraphError::VectorError("invalid vector dimensions!".to_string());
                 once(Err(error)).collect::<Vec<_>>().into_iter()
             }
-            Err(_) => once(Err(GraphError::VectorError(
-                "a vector error has occured!".to_string(),
-            )))
-            .collect::<Vec<_>>()
-            .into_iter(),
         };
 
         let iter = SearchV { iter };

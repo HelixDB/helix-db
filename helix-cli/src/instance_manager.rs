@@ -102,7 +102,7 @@ impl InstanceManager {
 
         let mut instances = self.list_instances()?;
         instances.push(instance.clone());
-        let _ = self.save_instances(&instances);
+        self.save_instances(&instances).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
         Ok(instance)
     }
@@ -210,7 +210,7 @@ impl InstanceManager {
                     unsafe { TerminateProcess(handle, 0) };
                 }
             }
-            let _ = self.save_instances(&instances)?;
+            self.save_instances(&instances)?;
             return Ok(true);
         }
         Ok(false)

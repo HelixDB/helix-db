@@ -367,11 +367,11 @@ fn test_dump_to_json_basic() {
     // Verify that each line is valid JSON
     for line in &nodes_lines {
         //println!("node line: {}", line);
-        let _: JsonValue = serde_json::from_str(line).expect("Failed to parse JSON line");
+        serde_json::from_str::<JsonValue>(line).expect("Failed to parse JSON line");
     }
     for line in &edges_lines {
         //println!("edge line: {}", line);
-        let _: JsonValue = serde_json::from_str(line).expect("Failed to parse JSON line");
+        serde_json::from_str::<JsonValue>(line).expect("Failed to parse JSON line");
     }
 
 }

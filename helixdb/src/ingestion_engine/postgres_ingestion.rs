@@ -4,7 +4,6 @@ use crate::helix_engine::{
 };
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
-use rand::Rng;
 use reqwest::blocking::Client;
 use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1122,7 +1121,7 @@ impl PostgresIngestor {
     }
 
     pub async fn ingest(&mut self, output_dir: &str) -> Result<(), IngestionError> {
-        let schemas = self.extract_schema().await?;
+        self.extract_schema().await?;
 
         // for schema in &schemas {
         //     self.ingest_table(schema).await?;
