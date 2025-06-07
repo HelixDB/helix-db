@@ -1,7 +1,7 @@
 use crate::helix_engine::graph_core::graph_core::HelixGraphEngine;
 use flume::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use tokio::task::JoinHandle;
+use crate::helix_runtime::AsyncRuntime;
 
 use crate::helix_gateway::router::router::{HelixRouter, RouterError};
 use crate::protocol::request::Request;
@@ -12,19 +12,21 @@ extern crate tokio;
 
 use tokio::net::TcpStream;
 
-pub struct Worker {
+pub struct Worker<R: AsyncRuntime + Clone + Send + Sync + 'static> {
     pub id: usize,
-    pub handle: JoinHandle<()>,
+    pub handle: <R as AsyncRuntime>::JoinHandle<()>,
+    pub runtime: R,
 }
 
-impl Worker {
+impl<R: AsyncRuntime + Clone + Send + Sync + 'static> Worker<R> {
     fn new(
         id: usize,
         graph_access: Arc<HelixGraphEngine>,
         router: Arc<HelixRouter>,
         rx: Receiver<TcpStream>,
-    ) -> Worker {
-        let handle = tokio::spawn(async move {
+        runtime: R,
+    ) -> Worker<R> {
+        let handle = runtime.spawn(async move {
             loop {
                 let mut conn = match rx.recv_async().await {
                     Ok(stream) => stream,
@@ -66,23 +68,24 @@ impl Worker {
             }
         });
 
-        Worker { id, handle }
+        Worker { id, handle, runtime }
     }
 }
 
-pub struct ThreadPool {
+pub struct ThreadPool<R: AsyncRuntime + Clone + Send + Sync + 'static> {
     pub sender: Sender<TcpStream>,
     pub num_unused_workers: Mutex<usize>,
     pub num_used_workers: Mutex<usize>,
-    pub workers: Vec<Worker>,
+    pub workers: Vec<Worker<R>>,
+    pub runtime: R,
 }
-
-impl ThreadPool {
+impl<R: AsyncRuntime + Clone + Send + Sync + 'static> ThreadPool<R> {
     pub fn new(
         size: usize,
         graph: Arc<HelixGraphEngine>,
         router: Arc<HelixRouter>,
-    ) -> Result<ThreadPool, RouterError> {
+        runtime: R,
+    ) -> Result<ThreadPool<R>, RouterError> {
         assert!(
             size > 0,
             "Expected number of threads in thread pool to be more than 0, got {}",
@@ -92,7 +95,7 @@ impl ThreadPool {
         let (tx, rx) = flume::bounded::<TcpStream>(1000);
         let mut workers = Vec::with_capacity(size);
         for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&graph), Arc::clone(&router), rx.clone()));
+            workers.push(Worker::new(id, Arc::clone(&graph), Arc::clone(&router), rx.clone(), runtime.clone()));
         }
         println!("Thread pool initialized with {} workers", workers.len());
 
@@ -101,6 +104,7 @@ impl ThreadPool {
             sender: tx,
             num_unused_workers: Mutex::new(size),
             num_used_workers: Mutex::new(0),
+            runtime: runtime,
             workers,
         })
     }

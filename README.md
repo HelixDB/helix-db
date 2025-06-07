@@ -114,7 +114,7 @@ Our current focus areas include:
 
 - Expanding vector data type capabilities for RAG applications
 - Implementing a test suite to enable end-to-end testing of queries before deployment
-- Building a Deterministic Simulation Testing engine enabling us to robustly iterate faster
+- [Building a Deterministic Simulation Testing engine](docs/simulation-testing.md) enabling us to robustly iterate faster
 - Binary quantisation for even better performance
 
 Long term projects:

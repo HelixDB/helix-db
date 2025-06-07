@@ -4,6 +4,7 @@ use helixdb::helix_gateway::{
     gateway::{GatewayOpts, HelixGateway},
     router::router::{HandlerFn, HandlerSubmission},
 };
+use helixdb::helix_runtime::tokio_runtime::TokioRuntime;
 use inventory;
 use std::{collections::HashMap, sync::Arc};
 
@@ -76,12 +77,12 @@ async fn main() {
         graph,
         GatewayOpts::DEFAULT_POOL_SIZE,
         Some(routes),
+        TokioRuntime::default(),
     ).await;
-
     // start server
     println!("Starting server...");
-    let a = gateway.connection_handler.accept_conns().await.unwrap();
-    let b = a.await.unwrap();
+    let handle = gateway.connection_handler.accept_conns().await.unwrap();
+    handle.await;
 
 }
 

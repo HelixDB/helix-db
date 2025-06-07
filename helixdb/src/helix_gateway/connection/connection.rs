@@ -7,17 +7,16 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use tokio::{
-    net::TcpListener,
-    task::JoinHandle,
-};
+use tokio::net::TcpListener;
+use crate::helix_runtime::AsyncRuntime;
 
 use crate::helix_gateway::{router::router::HelixRouter, thread_pool::thread_pool::ThreadPool};
 
-pub struct ConnectionHandler {
+pub struct ConnectionHandler<R: AsyncRuntime + Clone + Send + Sync + 'static> {
     pub address: String,
     pub active_connections: Arc<Mutex<HashMap<String, ClientConnection>>>,
-    pub thread_pool: ThreadPool,
+    pub thread_pool: ThreadPool<R>,
+    pub runtime: R,
 }
 
 pub struct ClientConnection {
@@ -26,21 +25,23 @@ pub struct ClientConnection {
     pub addr: SocketAddr,
 }
 
-impl ConnectionHandler {
+impl<R: AsyncRuntime + Clone + Send + Sync + 'static> ConnectionHandler<R> {
     pub fn new(
         address: &str,
         graph: Arc<HelixGraphEngine>,
         size: usize,
         router: HelixRouter,
+        runtime: R,
     ) -> Result<Self, GraphError> {
         Ok(Self {
             address: address.to_string(),
             active_connections: Arc::new(Mutex::new(HashMap::new())),
-            thread_pool: ThreadPool::new(size, graph, Arc::new(router))?,
+            thread_pool: ThreadPool::new(size, graph, Arc::new(router), runtime.clone())?,
+            runtime,
         })
     }
 
-    pub async fn accept_conns(&self) -> Result<JoinHandle<()>, GraphError> {
+    pub async fn accept_conns(&self) -> Result<<R as AsyncRuntime>::JoinHandle<()>, GraphError> {
         // Create a new TcpListener for each accept_conns call
         let listener = TcpListener::bind(&self.address).await.map_err(|e| {
             eprintln!("Failed to bind to address {}: {}", self.address, e);
@@ -54,7 +55,8 @@ impl ConnectionHandler {
         let address = self.address.clone();
 
 
-        let handle = tokio::spawn(async move {
+        let runtime = self.runtime.clone();
+        let handle = runtime.spawn(async move {
 
             loop {
                 match listener.accept().await {
