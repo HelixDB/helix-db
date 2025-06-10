@@ -230,6 +230,9 @@ fn bench_hnsw_precision() {
     for (i, data) in tqdm!(vectors.iter().enumerate()) {
         let start_time = Instant::now();
 
+        // sleep for 1ms
+        // std::thread::sleep(Duration::from_millis(1));
+
         let mut tr = G::new_mut(Arc::clone(&db), &mut txn)
             .insert_v::<Filter>(&data, "vector", None);
         let vec = match tr.next() {

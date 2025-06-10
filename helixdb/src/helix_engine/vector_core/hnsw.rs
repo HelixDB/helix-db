@@ -60,7 +60,7 @@ pub trait HNSW
     fn get_all_vectors(
         &self,
         txn: &RoTxn,
-        level: Option<usize>,
+        level: Option<u8>,
     ) -> Result<Vec<HVector>, VectorError>;
 
     /// Get specific vector based on id and level
@@ -79,7 +79,7 @@ pub trait HNSW
         &self,
         txn: &RoTxn,
         id: u128,
-        level: usize,
+        level: u8,
         with_data: bool,
     ) -> Result<HVector, VectorError>;
 }

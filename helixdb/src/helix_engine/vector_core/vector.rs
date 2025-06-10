@@ -1,9 +1,7 @@
 use crate::{
     helix_engine::types::{GraphError, VectorError},
     protocol::{
-        filterable::{Filterable, FilterableType},
-        return_values::ReturnValue,
-        value::Value,
+        filterable::{Filterable, FilterableType}, items::v6_uuid, return_values::ReturnValue, value::Value
     },
 };
 use serde::{Deserialize, Serialize};
@@ -17,7 +15,7 @@ use std::{cmp::Ordering, collections::HashMap};
 pub struct HVector {
     pub id: u128,
     pub is_deleted: bool,
-    pub level: usize,
+    pub level: u8,
     pub distance: Option<f64>,
     data: Vec<f64>,
     pub properties: Option<HashMap<String, Value>>,
@@ -52,7 +50,7 @@ impl DistanceCalc for HVector {
 impl HVector {
     #[inline(always)]
     pub fn new(data: Vec<f64>) -> Self {
-        let id = uuid::Uuid::new_v4().as_u128();
+        let id = v6_uuid();
         HVector {
             id,
             is_deleted: false,
@@ -64,8 +62,8 @@ impl HVector {
     }
 
     #[inline(always)]
-    pub fn from_slice(level: usize, data: Vec<f64>) -> Self {
-        let id = uuid::Uuid::new_v4().as_u128();
+    pub fn from_slice(level: u8, data: Vec<f64>) -> Self {
+        let id = v6_uuid();
         HVector {
             id,
             is_deleted: false,
@@ -87,7 +85,7 @@ impl HVector {
     }
 
     #[inline(always)]
-    pub fn get_level(&self) -> usize {
+    pub fn get_level(&self) -> u8 {
         self.level
     }
 
@@ -104,7 +102,7 @@ impl HVector {
 
     // will make to use const param for type of encoding (f32, f64, etc)
     /// Converts a byte array into a HVector by chunking the bytes into f64 values
-    pub fn from_bytes(id: u128, level: usize, bytes: &[u8]) -> Result<Self, VectorError> {
+    pub fn from_bytes(id: u128, level: u8, bytes: &[u8]) -> Result<Self, VectorError> {
         if bytes.len() % std::mem::size_of::<f64>() != 0 {
             return Err(VectorError::InvalidVectorData);
         }

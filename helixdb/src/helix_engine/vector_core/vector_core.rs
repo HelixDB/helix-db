@@ -5,10 +5,11 @@ use crate::helix_engine::{
 use crate::protocol::value::Value;
 use heed3::{
     types::{Bytes, Unit},
-    Database, Env, RoTxn, RwTxn,
+    Database, DatabaseFlags, Env, PutFlags, RoTxn, RwTxn,
 };
 use itertools::Itertools;
 use rand::prelude::Rng;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -17,6 +18,7 @@ use std::{
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
+const DB_ENTRY_POINT: &str = "entry_point"; // for entry point
 
 const DB_HNSW_OUT_EDGES: &str = "hnsw_out_nodes"; // for hnsw out node data
 const VECTOR_PREFIX: &[u8] = b"v:";
@@ -168,6 +170,7 @@ impl<T> HeapOps<T> for BinaryHeap<T> {
 pub struct VectorCore {
     pub vectors_db: Database<Bytes, Bytes>,
     pub vector_data_db: Database<Bytes, Bytes>,
+    pub entry_point_db: Database<Bytes, Bytes>,
     pub out_edges_db: Database<Bytes, Unit>,
     pub config: HNSWConfig,
 }
@@ -176,61 +179,87 @@ impl VectorCore {
     pub fn new(env: &Env, txn: &mut RwTxn, config: HNSWConfig) -> Result<Self, VectorError> {
         let vectors_db = env.create_database(txn, Some(DB_VECTORS))?;
         let vector_data_db = env.create_database(txn, Some(DB_VECTOR_DATA))?;
-        let out_edges_db = env.create_database(txn, Some(DB_HNSW_OUT_EDGES))?;
+        let entry_point_db = env.create_database(txn, Some(DB_ENTRY_POINT))?;
+        let out_edges_db = env
+            .database_options()
+            .types::<Bytes, Unit>()
+            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED) // TODO: remove as well?
+            .name(DB_HNSW_OUT_EDGES)
+            .create(txn)?;
 
         Ok(Self {
             vectors_db,
             vector_data_db,
+            entry_point_db,
             out_edges_db,
             config,
         })
     }
 
     #[inline(always)]
-    fn vector_key(id: u128, level: usize) -> Vec<u8> {
-        [VECTOR_PREFIX, &id.to_be_bytes(), &level.to_be_bytes()].concat()
+    fn vector_key(id: u128, level: u8) -> [u8; 17] {
+        let mut key = [0u8; 17];
+        key[0..16].copy_from_slice(&id.to_be_bytes());
+        key[16] = level as u8;
+        key
     }
 
     #[inline(always)]
-    fn out_edges_key(source_id: u128, level: usize, sink_id: Option<u128>) -> Vec<u8> {
-        match sink_id {
-            Some(sink_id) => [
-                source_id.to_be_bytes().as_slice(),
-                level.to_be_bytes().as_slice(),
-                sink_id.to_be_bytes().as_slice(),
-            ]
-            .concat()
-            .to_vec(),
-            None => [
-                source_id.to_be_bytes().as_slice(),
-                level.to_be_bytes().as_slice(),
-            ]
-            .concat()
-            .to_vec(),
-        }
+    fn out_edges_key_with_sink(
+        source_id: u128,
+        level: u8,
+        sink_id: u128,
+        sink_level: u8,
+    ) -> [u8; 34] {
+        let mut key = [0u8; 34];
+        key[0..16].copy_from_slice(&source_id.to_be_bytes());
+        key[16] = level as u8;
+        key[17..33].copy_from_slice(&sink_id.to_be_bytes());
+        key[33] = sink_level as u8;
+        key
+    }
+
+    #[inline(always)]
+    fn out_edges_key(source_id: u128, level: u8) -> [u8; 17] {
+        let mut key = [0u8; 17];
+        key[0..16].copy_from_slice(&source_id.to_be_bytes());
+        key[16] = level as u8;
+        key
+    }
+
+    #[inline(always)]
+    fn unpack_neighbour_from_out_edges_key(key: &[u8]) -> (u128, u8) {
+        let id = u128::from_be_bytes(key[17..33].try_into().unwrap());
+        let level = key[33];
+        (id, level)
+    }
+
+    #[inline(always)]
+    fn unpack_vector_key(key: &[u8]) -> (u8, u128) {
+        let id = u128::from_be_bytes(key[0..16].try_into().unwrap());
+        let level = key[16];
+        (level, id)
     }
 
     #[inline]
-    fn get_new_level(&self) -> usize {
+    fn get_new_level(&self) -> u8 {
         // TODO: look at using the XOR shift algorithm for random number generation
         // Storing global rng will not be threadsafe or possible as thread rng needs to be mutable
         // Should instead using an atomic mutable seed and the XOR shift algorithm
         let mut rng = rand::rng();
         let r: f64 = rng.random::<f64>();
-        let level = (-r.ln() * self.config.m_l).floor() as usize;
+        let level = (-r.ln() * self.config.m_l).floor().to_u8().unwrap();
         level
     }
 
     #[inline]
     fn get_entry_point(&self, txn: &RoTxn) -> Result<HVector, VectorError> {
-        let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY.as_bytes())?;
+        let ep_id = self.entry_point_db.get(txn, ENTRY_POINT_KEY.as_bytes())?;
         if let Some(ep_id) = ep_id {
-            let mut arr = [0u8; 16];
-            let len = std::cmp::min(ep_id.len(), 16);
-            arr[..len].copy_from_slice(&ep_id[..len]);
+            let (level, id) = Self::unpack_vector_key(ep_id.as_ref());
 
             let ep = self
-                .get_vector(txn, u128::from_be_bytes(arr), 0, true)
+                .get_vector(txn, id, level, true)
                 .map_err(|_| VectorError::EntryPointNotFound)?;
             Ok(ep)
         } else {
@@ -239,10 +268,16 @@ impl VectorCore {
     }
 
     #[inline]
-    fn set_entry_point(&self, txn: &mut RwTxn, entry: &HVector) -> Result<(), VectorError> {
+    fn set_entry_point(
+        &self,
+        txn: &mut RwTxn,
+        entry: &HVector,
+        level: u8,
+    ) -> Result<(), VectorError> {
         let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
-        self.vectors_db
-            .put(txn, &entry_key, &entry.get_id().to_be_bytes())
+        let entry_value = Self::vector_key(entry.get_id(), level);
+        self.entry_point_db
+            .put(txn, &entry_key, &entry_value)
             .map_err(VectorError::from)?;
 
         Ok(())
@@ -251,14 +286,22 @@ impl VectorCore {
     // #[inline(always)]
     // fn get_vector_(&self, txn: &RoTxn, id: u128) -> Result<Vec<f64>, VectorError> {
     #[inline(always)]
-    fn put_vector(&self, txn: &mut RwTxn, vector: &HVector) -> Result<(), VectorError> {
+    fn put_vector(&self, txn: &mut RwTxn, vector: &HVector, level: u8) -> Result<(), VectorError> {
         self.vectors_db
-            .put(
+            .put_with_flags(
                 txn,
-                &Self::vector_key(vector.get_id(), vector.get_level()),
+                PutFlags::APPEND,
+                &Self::vector_key(vector.get_id(), level),
                 vector.to_bytes().as_ref(),
             )
-            .map_err(VectorError::from)?;
+            .map_err(|e| {
+                VectorError::VectorNotFound(format!(
+                    "Could not append new vec for level:{:?}\nputting vector {} for level {}",
+                    e,
+                    vector.get_id(),
+                    level
+                ))
+            })?;
         Ok(())
     }
 
@@ -267,29 +310,27 @@ impl VectorCore {
         &self,
         txn: &RoTxn,
         id: u128,
-        level: usize,
+        level: u8,
         filter: Option<&[F]>,
     ) -> Result<Vec<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
-        let out_key = Self::out_edges_key(id, level, None);
-        let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(512)); // TODO: why 512?
+        let out_key = Self::out_edges_key(id, level);
+        let mut neighbors = Vec::with_capacity(if level == 0 {
+            self.config.m_max_0
+        } else {
+            self.config.m
+        });
 
-        let iter = self
-            .out_edges_db
-            .lazily_decode_data()
-            .prefix_iter(txn, &out_key)?;
-
-        let prefix_len = out_key.len();
+        let iter = match self.out_edges_db.prefix_iter(txn, &out_key) {
+            Ok(iter) => iter,
+            Err(_) => panic!("No neighbors found for id: {} at level: {}", id, level),
+        };
 
         for result in iter {
             if let Ok((key, _)) = result {
-                // TODO: fix here because not working at all
-                let mut arr = [0u8; 16];
-                let len = std::cmp::min(key.len(), 16);
-                arr[..len].copy_from_slice(&key[prefix_len..(prefix_len + len)]);
-                let neighbor_id = u128::from_be_bytes(arr);
+                let (neighbor_id, level) = Self::unpack_neighbour_from_out_edges_key(key.as_ref());
 
                 if neighbor_id != id {
                     if let Ok(vector) = self.get_vector(txn, neighbor_id, level, true) {
@@ -312,13 +353,13 @@ impl VectorCore {
         txn: &mut RwTxn,
         id: u128,
         neighbors: &'a BinaryHeap<HVector>,
-        level: usize,
+        level: u8,
     ) -> Result<(), VectorError> {
-        let prefix = Self::out_edges_key(id, level, None);
+        let out_key = Self::out_edges_key(id, level);
 
         let mut keys_to_delete: HashSet<Vec<u8>> = self
             .out_edges_db
-            .prefix_iter(txn, prefix.as_ref())?
+            .prefix_iter(txn, out_key.as_ref())?
             .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
             .collect();
 
@@ -329,13 +370,14 @@ impl VectorCore {
                 if neighbor_id == id {
                     return Ok(());
                 }
-                let out_key = Self::out_edges_key(id, level, Some(neighbor_id));
-                keys_to_delete.remove(&out_key);
+                let out_key = Self::out_edges_key_with_sink(id, level, neighbor_id, level);
+                keys_to_delete.remove(&out_key.to_vec());
                 self.out_edges_db.put(txn, &out_key, &())?;
-
-                let in_key = Self::out_edges_key(neighbor_id, level, Some(id));
-                keys_to_delete.remove(&in_key);
-                self.out_edges_db.put(txn, &in_key, &())?;
+                self.out_edges_db.put(
+                    txn,
+                    &Self::out_edges_key_with_sink(neighbor_id, level, id, level),
+                    &(),
+                )?;
 
                 Ok(())
             })?;
@@ -352,7 +394,7 @@ impl VectorCore {
         txn: &RoTxn,
         query: &'a HVector,
         mut cands: BinaryHeap<HVector>,
-        level: usize,
+        level: u8,
         should_extend: bool,
         filter: Option<&[F]>,
     ) -> Result<BinaryHeap<HVector>, VectorError>
@@ -391,7 +433,7 @@ impl VectorCore {
         query: &'a HVector,
         entry_point: &'a mut HVector,
         ef: usize,
-        level: usize,
+        level: u8,
         filter: Option<&[F]>,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
@@ -457,7 +499,7 @@ impl HNSW for VectorCore {
         &self,
         txn: &RoTxn,
         id: u128,
-        level: usize,
+        level: u8,
         with_data: bool,
     ) -> Result<HVector, VectorError> {
         let key = Self::vector_key(id, level);
@@ -549,18 +591,18 @@ impl HNSW for VectorCore {
     {
         let new_level = self.get_new_level();
 
-        let mut query = HVector::from_slice(0, data.to_vec());
-        self.put_vector(txn, &query)?;
+        let mut query = HVector::from_slice(new_level, data.to_vec());
 
-        query.level = new_level;
+        self.put_vector(txn, &query, 0)?;
+
         if new_level > 0 {
-            self.put_vector(txn, &query)?;
+            self.put_vector(txn, &query, new_level)?; // TODO: this is not correct
         }
 
         let entry_point = match self.get_entry_point(txn) {
             Ok(ep) => ep,
             Err(_) => {
-                self.set_entry_point(txn, &query)?;
+                self.set_entry_point(txn, &query, new_level)?;
                 query.set_distance(0.0);
                 return Ok(query);
             }
@@ -608,7 +650,7 @@ impl HNSW for VectorCore {
         }
 
         if new_level > l {
-            self.set_entry_point(txn, &query)?;
+            self.set_entry_point(txn, &query, new_level)?;
         }
 
         if let Some(fields) = fields {
@@ -621,11 +663,7 @@ impl HNSW for VectorCore {
         Ok(query)
     }
 
-    fn get_all_vectors(
-        &self,
-        txn: &RoTxn,
-        level: Option<usize>,
-    ) -> Result<Vec<HVector>, VectorError> {
+    fn get_all_vectors(&self, txn: &RoTxn, level: Option<u8>) -> Result<Vec<HVector>, VectorError> {
         self.vectors_db
             .prefix_iter(txn, VECTOR_PREFIX)?
             .map(|result| {
