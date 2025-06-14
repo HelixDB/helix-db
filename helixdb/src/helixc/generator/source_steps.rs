@@ -224,3 +224,4 @@ impl Display for NFromIndex {
         write!(f, "n_from_index({}, {})", self.index, self.key)
     }
 }
+

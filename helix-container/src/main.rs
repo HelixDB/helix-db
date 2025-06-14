@@ -12,10 +12,10 @@ mod queries;
 
 #[tokio::main]
 async fn main() {
-    // read from config.hx.json
     let home = dirs::home_dir().expect("Could not retrieve home directory");
     let config_path = home.join(".helix/repo/helix-db/helix-container/src/config.hx.json");
-    let config = match Config::from_config_file(config_path) {
+    let schema_path = home.join(".helix/repo/helix-db/helix-container/src/schema.hx");
+    let config = match Config::from_files(config_path, schema_path) {
         Ok(config) => config,
         Err(e) => {
             println!("Error loading config: {}", e);
@@ -31,14 +31,17 @@ async fn main() {
             home.join(".helix/user")
         }
     };
+
     let port = match std::env::var("HELIX_PORT") {
         Ok(val) => val.parse::<u16>().unwrap(),
         Err(_) => 6969,
     };
+
     println!("Running with the following setup:");
     println!("\tconfig: {:?}", config);
     println!("\tpath: {}", path.display());
     println!("\tport: {}", port);
+
     let path_str = path.to_str().expect("Could not convert path to string");
     let opts = HelixGraphEngineOpts {
         path: path_str.to_string(),
@@ -108,3 +111,4 @@ async fn main() {
     let a = gateway.connection_handler.accept_conns().await.unwrap();
     let b = a.await.unwrap();
 }
+

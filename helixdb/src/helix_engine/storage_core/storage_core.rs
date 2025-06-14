@@ -1,6 +1,6 @@
 use crate::{
     helix_engine::{
-        bm25::bm25::{HBM25Config, BM25},
+        bm25::bm25::HBM25Config,
         graph_core::config::Config,
         storage_core::storage_methods::StorageMethods,
         types::GraphError,
@@ -11,10 +11,8 @@ use crate::{
         },
     },
     protocol::{
-        filterable::Filterable,
         items::{Edge, Node},
         label_hash::hash_label,
-        value::Value,
     },
 };
 
@@ -44,6 +42,7 @@ pub struct HelixGraphStorage {
     pub secondary_indices: HashMap<String, Database<Bytes, U128<BE>>>,
     pub vectors: VectorCore,
     pub bm25: HBM25Config,
+    pub schema: Option<String>,
 }
 
 impl HelixGraphStorage {
@@ -56,21 +55,16 @@ impl HelixGraphStorage {
             config.db_max_size_gb.unwrap_or(100)
         };
 
-        // Configure and open LMDB environment
         let graph_env = unsafe {
             EnvOpenOptions::new()
                 .map_size(db_size * 1024 * 1024 * 1024) // GB
                 .max_dbs(20)
                 .max_readers(200)
-                // .flags(EnvFlags::NO_META_SYNC)
-                // .flags(EnvFlags::MAP_ASYNC)
-                // .flags(EnvFlags::NO_SYNC)
                 .open(Path::new(path))?
         };
 
         let mut wtxn = graph_env.write_txn()?;
 
-        // Create/open all necessary databases
         let nodes_db = graph_env
             .database_options()
             .types::<U128<BE>, Bytes>()
@@ -94,7 +88,6 @@ impl HelixGraphStorage {
             .name(DB_IN_EDGES)
             .create(&mut wtxn)?;
 
-        // Create secondary indices
         let mut secondary_indices = HashMap::new();
         if let Some(indexes) = config.graph_config.secondary_indices {
             for index in indexes {
@@ -131,6 +124,7 @@ impl HelixGraphStorage {
             secondary_indices,
             vectors,
             bm25,
+            schema: config.schema,
         })
     }
 
@@ -243,7 +237,6 @@ impl HelixGraphStorage {
         let node = self.get_node(txn, &doc_id)?;
         let mut text = node.label.clone();
 
-        // Include properties in the text for indexing
         if let Some(properties) = node.properties {
             for (key, value) in properties {
                 text.push(' ');
@@ -438,3 +431,4 @@ impl StorageMethods for HelixGraphStorage {
         Ok(())
     }
 }
+

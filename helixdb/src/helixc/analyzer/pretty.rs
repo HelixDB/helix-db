@@ -1,5 +1,4 @@
 //! Lightweight pretty-printer for `Diagnostic`.
-//
 //! Produces "rustc-style" output, e.g.
 //! ```text
 //! error: unknown node type `Post`
@@ -9,9 +8,8 @@
 //!    │       ^^^^ declare `N::Post` above
 //! ```
 
-use super::analyzer::Diagnostic;
-use super::analyzer::DiagnosticSeverity;
-use colored::*;
+use super::analyzer::{Diagnostic, DiagnosticSeverity};
+use crate::utils::styled_string::StyledString;
 
 /// Render a single diagnostic plus a code snippet.
 ///
@@ -178,3 +176,4 @@ pub fn render(diag: &Diagnostic, src: &str, filepath: &str) -> String {
 
     out
 }
+

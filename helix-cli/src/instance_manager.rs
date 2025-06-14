@@ -1,8 +1,8 @@
 use super::{
     utils::find_available_port,
-    styled_string::StyledString,
     types::CliError,
 };
+use helixdb::utils::styled_string::StyledString;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -271,3 +271,4 @@ impl InstanceManager {
         }
     }
 }
+

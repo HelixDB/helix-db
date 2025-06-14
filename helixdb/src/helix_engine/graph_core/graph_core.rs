@@ -1,28 +1,12 @@
-use crate::helix_engine::storage_core::storage_core::HelixGraphStorage;
-use crate::helix_engine::storage_core::storage_methods::StorageMethods;
-use crate::helix_engine::types::GraphError;
-use crate::helix_gateway::mcp::mcp::{McpBackend, McpConnections};
-use crate::props;
-use crate::protocol::filterable::{Filterable, FilterableType};
-use crate::protocol::remapping::{Remapping, ResponseRemapping};
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::str;
-use std::sync::{Arc, Mutex, RwLock};
-
-use super::config::VectorConfig;
-use crate::helixc::parser::helix_parser::{
-    BooleanOp, Expression, GraphStep, HelixParser, IdType, Source, StartNode, Statement, Step,
-    Traversal,
+use crate::{
+    helix_engine::{
+        storage_core::storage_core::HelixGraphStorage,
+        types::GraphError,
+        graph_core::config::Config,
+    },
+    helix_gateway::mcp::mcp::{McpBackend, McpConnections},
 };
-use crate::protocol::traversal_value::TraversalValue;
-use crate::protocol::{
-    items::{Edge, Node},
-    return_values::ReturnValue,
-    value::Value,
-};
-
-use crate::helix_engine::graph_core::config::Config;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum QueryInput {
@@ -33,7 +17,6 @@ pub enum QueryInput {
 }
 
 pub struct HelixGraphEngine {
-    // TODO: is there a reason for this?
     pub storage: Arc<HelixGraphStorage>,
     pub mcp_backend: Option<Arc<McpBackend>>,
     pub mcp_connections: Option<Arc<Mutex<McpConnections>>>,
@@ -51,12 +34,6 @@ impl HelixGraphEngineOpts {
             config: Config::default(),
         }
     }
-    pub fn with_path(path: String) -> Self {
-        Self {
-            path,
-            config: Config::default(),
-        }
-    }
 }
 
 impl HelixGraphEngine {
@@ -66,6 +43,7 @@ impl HelixGraphEngine {
             Ok(db) => Arc::new(db),
             Err(err) => return Err(err),
         };
+
         let (mcp_backend, mcp_connections) = if should_use_mcp {
             let mcp_backend = Arc::new(McpBackend::new(storage.clone()));
             let mcp_connections = Arc::new(Mutex::new(McpConnections::new()));
@@ -73,6 +51,7 @@ impl HelixGraphEngine {
         } else {
             (None, None)
         };
+
         Ok(Self {
             storage,
             mcp_backend,
@@ -80,36 +59,6 @@ impl HelixGraphEngine {
         })
     }
 
-    // pub fn print_result_as_json(&self, traversal: &TraversalBuilder<dyn Transaction>) {
-    //     let current_step = &traversal.current_step;
-    //     let json_result = json!(current_step);
-    //     println!("{}", json_result.to_string());
-    // }
-
-    // pub fn print_result_as_pretty_json(&self, traversal: &TraversalBuilder<dyn Transaction>) {
-    //     let current_step = &traversal.current_step;
-    //     let json_result = json!(current_step);
-    //     println!("{}", serde_json::to_string_pretty(&json_result).unwrap());
-    // }
-
-    // /// implement error for this function
-    // pub fn result_to_json(&self, traversal: &TraversalBuilder<dyn Transaction>) -> Vec<u8> {
-    //     let current_step = &traversal.current_step;
-    //     let mut json_string = serde_json::to_string(current_step).unwrap();
-    //     json_string.push_str("\n");
-    //     json_string.into_bytes()
-    // }
-
-    // pub fn result_to_json_string(&self, traversal: &TraversalBuilder<dyn Transaction>) -> String {
-    //     let current_step = &traversal.current_step;
-    //     let mut json_string = serde_json::to_string(current_step).unwrap();
-    //     json_string.push_str("\n");
-    //     json_string
-    // }
-
-    pub fn query(&self, query: String, params: Vec<QueryInput>) -> Result<String, GraphError> {
-        Ok(String::new())
-    }
     //     let ast: Source = match HelixParser::parse_source(query.as_str()) {
     //         Ok(src) => src,
     //         Err(err) => return Err(GraphError::from(err)),
@@ -720,3 +669,4 @@ impl HelixGraphEngine {
     //     }
     // }
 }
+

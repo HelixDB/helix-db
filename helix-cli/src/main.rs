@@ -1,17 +1,14 @@
 use crate::{
-    args::{CommandType, HelixCLI},
+    args::{CommandType, HelixCLI, OutputLanguage},
     instance_manager::InstanceManager,
-    styled_string::StyledString,
     types::*,
     utils::*,
 };
-use args::OutputLanguage;
-use clap::Parser;
 use helixdb::{
     helix_engine::graph_core::config::Config,
     ingestion_engine::{postgres_ingestion::PostgresIngestor, sql_ingestion::SqliteIngestor},
+    utils::styled_string::StyledString,
 };
-use spinners::{Spinner, Spinners};
 use std::{
     fmt::Write,
     fs,
@@ -19,10 +16,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use clap::Parser;
+use spinners::{Spinner, Spinners};
 
 pub mod args;
 mod instance_manager;
-mod styled_string;
 mod types;
 mod utils;
 
@@ -278,6 +276,7 @@ fi
 
             let file_path = PathBuf::from(&output).join("src/queries.rs");
             let mut generated_rust_code = String::new();
+
             match write!(&mut generated_rust_code, "{}", analyzed_source) {
                 Ok(_) => {
                     println!("{}", "Successfully transpiled queries".green().bold());
@@ -288,6 +287,7 @@ fi
                     return;
                 }
             }
+
             match fs::write(file_path, generated_rust_code) {
                 Ok(_) => {
                     println!("{}", "Successfully wrote queries file".green().bold());
@@ -301,11 +301,11 @@ fi
 
             let mut sp = Spinner::new(Spinners::Dots9, "Building Helix".into());
 
-            // copy config.hx.json to ~/.helix/repo/helix-db/helix-container/config.hx.json
             let config_path = PathBuf::from(&output).join("src/config.hx.json");
-            fs::copy(PathBuf::from(path + "/config.hx.json"), config_path).unwrap();
+            fs::copy(PathBuf::from(path.clone() + "/config.hx.json"), config_path).unwrap();
+            let schema_path = PathBuf::from(&output).join("src/schema.hx");
+            fs::copy(PathBuf::from(path.clone() + "/schema.hx"), schema_path).unwrap();
 
-            // check rust code
             let mut runner = Command::new("cargo");
             runner
                 .arg("check")
@@ -1168,14 +1168,14 @@ fi
                 Err(e) => println!("{} {}", "Error while stopping instance".red().bold(), e),
             }
 
-            let mut del_prompt: bool = false;
+            let mut _del_prompt: bool = false;
             print!("Are you sure you want to delete the instance and its data? (y/n): ");
             std::io::stdout().flush().unwrap();
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap();
-            del_prompt = input.trim().to_lowercase() == "y";
+            _del_prompt = input.trim().to_lowercase() == "y";
 
-            if del_prompt {
+            if _del_prompt {
                 match instance_manager.delete_instance(iid) {
                     Ok(_) => println!("{}", "Deleted Helix instance".green().bold()),
                     Err(e) => println!("{} {}", "Error while deleting instance".red().bold(), e),
@@ -1358,3 +1358,4 @@ fi
         }
     }
 }
+

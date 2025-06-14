@@ -25,14 +25,14 @@ export PATH="$INSTALL_DIR:$PATH"
 # Ensure that $HOME/.local/bin is in the PATH permanently
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     echo "Adding $HOME/.local/bin to PATH permanently"
-    
+
     # Determine shell config file
     if [[ "$SHELL" == *"bash"* ]]; then
         SHELL_CONFIG="$HOME/.bashrc"
     elif [[ "$SHELL" == *"zsh"* ]]; then
         SHELL_CONFIG="$HOME/.zshrc"
     fi
-    
+
     # Add to shell config if not already present
     if [[ -f "$SHELL_CONFIG" ]]; then
         if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$SHELL_CONFIG"; then
@@ -70,7 +70,7 @@ fi
 if ! "$INSTALL_DIR/helix" --version &> /dev/null; then
     echo "Binary incompatible with system GLIBC version. Falling back to building from source..."
     rm "$INSTALL_DIR/helix"
-    
+
     # Ensure Rust is installed
     if ! command -v cargo &> /dev/null; then
         echo "Installing Rust first..."

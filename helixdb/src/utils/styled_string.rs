@@ -10,6 +10,8 @@ pub trait StyledString {
     fn white(&self) -> String;
     fn bold(&self) -> String;
     fn underline(&self) -> String;
+    fn normal(&self) -> String;
+    fn bright_red(&self) -> String;
 }
 
 impl StyledString for str {
@@ -52,4 +54,13 @@ impl StyledString for str {
     fn underline(&self) -> String {
         format!("\x1b[4m{}\x1b[0m", self)
     }
+
+    fn normal(&self) -> String {
+        format!("\x1b[0m{}\x1b[0m", self)
+    }
+
+    fn bright_red(&self) -> String {
+        format!("\x1b[91m{}\x1b[0m", self)
+    }
 }
+

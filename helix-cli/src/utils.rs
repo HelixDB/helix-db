@@ -1,12 +1,14 @@
 use crate::{
     instance_manager::InstanceInfo,
-    styled_string::StyledString,
     types::*,
 };
-use helixdb::helixc::{
-    analyzer::analyzer::analyze,
-    generator::{generator_types::Source as GeneratedSource, tsdisplay::ToTypeScript},
-    parser::helix_parser::{Content, HelixParser, HxFile, Source},
+use helixdb::{
+    helixc::{
+        analyzer::analyzer::analyze,
+        generator::{generator_types::Source as GeneratedSource, tsdisplay::ToTypeScript},
+        parser::helix_parser::{Content, HelixParser, HxFile, Source},
+    },
+    utils::styled_string::StyledString,
 };
 use std::{
     error::Error,

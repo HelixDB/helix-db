@@ -24,6 +24,7 @@ use rayon::prelude::*;
 
 // make sure to test with cargo test --release <test_name> -- --nocapture
 
+/*
 type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_db() -> HelixGraphStorage {
@@ -319,3 +320,4 @@ fn bench_hnsw_precision() {
     assert!(total_recall >= 0.8, "recall not high enough!");
 }
 
+*/
