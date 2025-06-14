@@ -6,13 +6,13 @@ use crate::{
     },
     protocol::{items::Node, value::Value},
 };
-use heed3::{byteorder::BE, types::Bytes, RoTxn};
+use crate::helix_storage::heed3::{byteorder::BE, types::Bytes, RoTxn};
 use serde::Serialize;
 use std::{iter::Once, sync::Arc};
 
 pub struct NFromIndex<'a> {
     iter:
-        heed3::RoPrefix<'a, heed3::types::Bytes, heed3::types::LazyDecode<heed3::types::U128<BE>>>,
+        crate::helix_storage::heed3::RoPrefix<'a, crate::helix_storage::heed3::types::Bytes, crate::helix_storage::heed3::types::LazyDecode<crate::helix_storage::heed3::types::U128<BE>>>,
     txn: &'a RoTxn<'a>,
     storage: Arc<HelixGraphStorage>,
 }

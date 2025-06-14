@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use heed3::{RwTxn, RoTxn};
+use crate::helix_storage::heed3::{RwTxn, RoTxn};
 use rand::seq::SliceRandom;
 use polars::prelude::*;
 use kdam::tqdm;

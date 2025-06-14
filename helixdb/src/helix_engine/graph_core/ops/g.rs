@@ -4,7 +4,7 @@ use crate::helix_engine::{
     storage_core::storage_core::HelixGraphStorage,
     types::GraphError,
 };
-use heed3::{RoTxn, RwTxn};
+use crate::helix_storage::heed3::{RoTxn, RwTxn};
 use std::sync::Arc;
 
 pub struct G {}

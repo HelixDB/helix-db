@@ -5,13 +5,13 @@ use crate::{
     },
     protocol::items::Edge,
 };
-use heed3::{
+use crate::helix_storage::heed3::{
     byteorder::BE,
     types::{Bytes, U128},
 };
 
 pub struct EFromType<'a> {
-    pub iter: heed3::RoIter<'a, U128<BE>, heed3::types::LazyDecode<Bytes>>,
+    pub iter: crate::helix_storage::heed3::RoIter<'a, U128<BE>, crate::helix_storage::heed3::types::LazyDecode<Bytes>>,
     pub label: &'a str,
 }
 

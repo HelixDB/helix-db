@@ -1,4 +1,4 @@
-use heed3::RwTxn;
+use crate::helix_storage::heed3::RwTxn;
 
 use crate::helix_engine::{
     graph_core::ops::tr_val::TraversalVal,

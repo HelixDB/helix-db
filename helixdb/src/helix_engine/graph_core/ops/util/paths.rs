@@ -6,7 +6,7 @@ use crate::{
     },
     protocol::{items::Edge, label_hash::hash_label},
 };
-use heed3::RoTxn;
+use crate::helix_storage::heed3::RoTxn;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,

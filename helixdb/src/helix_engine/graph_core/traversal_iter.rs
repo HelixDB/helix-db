@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use heed3::{RoTxn, RwTxn, WithTls};
+use crate::helix_storage::heed3::{RoTxn, RwTxn, WithTls};
 
 use super::ops::tr_val::TraversalVal;
 use crate::{

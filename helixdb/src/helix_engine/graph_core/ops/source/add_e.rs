@@ -12,7 +12,7 @@ use crate::{
         value::Value,
     },
 };
-use heed3::PutFlags;
+use crate::helix_storage::heed3::PutFlags;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]

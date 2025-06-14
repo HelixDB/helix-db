@@ -10,7 +10,7 @@ use std::{
 };
 
 use get_routes::{local_handler, mcp_handler};
-use heed3::{AnyTls, RoTxn};
+use crate::helix_storage::heed3::{AnyTls, RoTxn};
 use serde::Deserialize;
 
 use crate::{

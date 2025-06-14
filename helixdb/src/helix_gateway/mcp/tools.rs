@@ -14,7 +14,7 @@ use crate::helix_gateway::router::router::HandlerInput;
 use crate::protocol::label_hash::hash_label;
 use crate::protocol::response::Response;
 use get_routes::local_handler;
-use heed3::RoTxn;
+use crate::helix_storage::heed3::RoTxn;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::sync::Arc;

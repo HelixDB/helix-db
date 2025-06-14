@@ -9,15 +9,15 @@ use crate::{
     },
     protocol::label_hash::hash_label,
 };
-use heed3::{types::Bytes, RoTxn};
+use crate::helix_storage::heed3::{types::Bytes, RoTxn};
 use std::sync::Arc;
 
 pub struct InEdgesIterator<'a, T> {
-    pub iter: heed3::RoIter<
+    pub iter: crate::helix_storage::heed3::RoIter<
         'a,
         Bytes,
-        heed3::types::LazyDecode<Bytes>,
-        heed3::iteration_method::MoveOnCurrentKeyDuplicates,
+        crate::helix_storage::heed3::types::LazyDecode<Bytes>,
+        crate::helix_storage::heed3::iteration_method::MoveOnCurrentKeyDuplicates,
     >,
     pub storage: Arc<HelixGraphStorage>,
     pub txn: &'a T,

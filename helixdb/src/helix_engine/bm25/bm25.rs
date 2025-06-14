@@ -1,4 +1,4 @@
-use heed3::{types::*, Database, Env, RoTxn, RwTxn};
+use crate::helix_storage::heed3::{types::*, Database, Env, RoTxn, RwTxn};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 

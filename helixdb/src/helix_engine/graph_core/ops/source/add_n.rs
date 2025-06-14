@@ -11,7 +11,7 @@ use crate::{
         value::Value,
     },
 };
-use heed3::PutFlags;
+use crate::helix_storage::heed3::PutFlags;
 
 pub struct AddNIterator {
     inner: std::iter::Once<Result<TraversalVal, GraphError>>,

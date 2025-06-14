@@ -3,7 +3,7 @@ use crate::{
     protocol::traversal_value::TraversalValueError,
 };
 use core::fmt;
-use heed3::Error as HeedError;
+use crate::helix_storage::heed3::Error as HeedError;
 use sonic_rs::Error as SonicError;
 use std::{
     net::AddrParseError,

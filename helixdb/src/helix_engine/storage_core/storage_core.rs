@@ -18,8 +18,8 @@ use crate::{
     },
 };
 
-use heed3::byteorder::BE;
-use heed3::{types::*, Database, DatabaseFlags, Env, EnvOpenOptions, RoTxn, RwTxn, WithTls};
+use crate::helix_storage::heed3::byteorder::BE;
+use crate::helix_storage::heed3::{types::*, Database, DatabaseFlags, Env, EnvOpenOptions, RoTxn, RwTxn, WithTls};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;

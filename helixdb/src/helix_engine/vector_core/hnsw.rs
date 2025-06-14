@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use crate::helix_engine::vector_core::vector::HVector;
-use heed3::{RoTxn, RwTxn};
+use crate::helix_storage::heed3::{RoTxn, RwTxn};
 
 pub trait HNSW
 {

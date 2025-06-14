@@ -3,7 +3,7 @@ use crate::helix_engine::{
     vector_core::{hnsw::HNSW, vector::HVector},
 };
 use crate::protocol::value::Value;
-use heed3::{
+use crate::helix_storage::heed3::{
     types::{Bytes, Unit},
     Database, Env, RoTxn, RwTxn,
 };

@@ -6,7 +6,7 @@ use crate::{
     },
     protocol::{items::Edge, label_hash::hash_label},
 };
-use heed3::PutFlags;
+use crate::helix_storage::heed3::PutFlags;
 
 pub struct BulkAddE {
     inner: std::iter::Once<Result<TraversalVal, GraphError>>,

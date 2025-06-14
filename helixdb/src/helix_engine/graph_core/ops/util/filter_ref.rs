@@ -1,7 +1,7 @@
 use crate::helix_engine::{graph_core::traversal_iter::RoTraversalIterator, types::GraphError};
 
 use super::super::tr_val::TraversalVal;
-use heed3::RoTxn;
+use crate::helix_storage::heed3::RoTxn;
 
 pub struct FilterRef<'a, I, F> {
     iter: I,

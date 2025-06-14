@@ -3,7 +3,7 @@ use crate::helix_engine::{
     storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
     types::GraphError,
 };
-use heed3::RwTxn;
+use crate::helix_storage::heed3::RwTxn;
 use std::sync::Arc;
 
 pub struct Drop<I> {

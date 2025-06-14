@@ -6,7 +6,7 @@ use crate::{
     },
     protocol::items::Node,
 };
-use heed3::RoTxn;
+use crate::helix_storage::heed3::RoTxn;
 use std::{iter::Once, sync::Arc};
 
 pub struct NFromId<'a, T> {

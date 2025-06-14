@@ -3,7 +3,7 @@ use crate::protocol::{
     items::{Edge, Node},
     value::Value,
 };
-use heed3::{RoTxn, RwTxn};
+use crate::helix_storage::heed3::{RoTxn, RwTxn};
 
 pub trait DBMethods {
     /// Creates a new database with a given name for a secondary index

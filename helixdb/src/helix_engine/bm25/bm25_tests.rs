@@ -5,7 +5,7 @@ mod tests {
         storage_core::storage_core::HelixGraphStorage,
         graph_core::config::Config,
     };
-    use heed3::{EnvOpenOptions, Env};
+    use crate::helix_storage::heed3::{EnvOpenOptions, Env};
     use tempfile::tempdir;
 
     fn setup_test_env() -> (Env, tempfile::TempDir) {

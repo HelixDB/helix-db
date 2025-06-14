@@ -1,4 +1,4 @@
-use heed3::RoTxn;
+use crate::helix_storage::heed3::RoTxn;
 
 use super::super::tr_val::TraversalVal;
 use crate::{

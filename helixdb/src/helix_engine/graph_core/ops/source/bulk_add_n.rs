@@ -2,7 +2,7 @@ use crate::{
     helix_engine::{graph_core::traversal_iter::RwTraversalIterator, types::GraphError},
     protocol::items::Node,
 };
-use heed3::PutFlags;
+use crate::helix_storage::heed3::PutFlags;
 use super::super::tr_val::TraversalVal;
 
 pub struct BulkAddN {
