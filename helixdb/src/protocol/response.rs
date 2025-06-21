@@ -78,13 +78,7 @@ impl Response {
         }
 
         writer
-            .write_all(
-                format!(
-                    "Content-Length: {}\r\n\r\n",
-                    self.body.len() + status_message.len()
-                )
-                .as_bytes(),
-            )
+            .write_all(format!("Content-Length: {}\r\n\r\n", self.body.len()).as_bytes())
             .await?;
 
         // Write body
