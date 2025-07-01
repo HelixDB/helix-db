@@ -1954,6 +1954,7 @@ dependencies = [
 name = "helix-container"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dirs 5.0.1",
  "get_routes",

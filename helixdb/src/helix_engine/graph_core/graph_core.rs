@@ -55,6 +55,8 @@ impl HelixGraphEngine {
         })
     }
 
+    // @xav, delete this?
+
     //     let ast: Source = match HelixParser::parse_source(query.as_str()) {
     //         Ok(src) => src,
     //         Err(err) => return Err(GraphError::from(err)),

@@ -1,10 +1,12 @@
 use heed3::RoTxn;
 
 use super::super::tr_val::TraversalVal;
-use crate::helix_engine::{
-    graph_core::traversal_iter::RoTraversalIterator,
-    types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+use crate::{
+    helix_engine::{
+        graph_core::traversal_iter::RoTraversalIterator,
+        types::{GraphError, VectorError},
+        vector_core::{hnsw::HNSW, vector::HVector},
+    },
 };
 use debug_trace::debug_trace;
 use std::iter::once;
@@ -95,3 +97,4 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
         }
     }
 }
+

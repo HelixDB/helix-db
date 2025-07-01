@@ -202,25 +202,6 @@ pub fn check_and_read_files(path: &str) -> Result<Vec<DirEntry>, CliError> {
     Ok(files)
 }
 
-pub fn to_snake_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut prev_is_uppercase = false;
-
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 && !prev_is_uppercase {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-            prev_is_uppercase = true;
-        } else {
-            result.push(c);
-            prev_is_uppercase = false;
-        }
-    }
-    result
-}
-
 fn generate_content(files: &Vec<DirEntry>) -> Result<Content, CliError> {
     let files = files
         .iter()

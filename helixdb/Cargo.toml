@@ -26,6 +26,7 @@ itertools = "0.14.0"
 get_routes = { version = "0.1.0", path = "../get_routes" }
 tempfile = "3.20.0"
 debug_trace = { version = "0.1.0", path = "../debug_trace" }
+reqwest = { version = "0.12.15", features = [ "json", "blocking"] }
 
 # Compiler
 pest = { version = "2.7", optional = true }
@@ -36,16 +37,11 @@ rust_decimal = { version = "1.34", features = ["tokio-pg"], optional = true }
 native-tls = { version = "0.2.11", optional = true }
 postgres-native-tls = { version = "0.5", optional = true }
 pgvector = { version = "0.4.0", features = ["postgres"], optional = true }
-reqwest = { version = "0.12.15", features = [
-    "json",
-    "blocking",
-], optional = true }
 rusqlite = { version = "0.35.0", features = ["bundled"], optional = true }
 tokio-postgres = { version = "0.7", features = [
     "with-uuid-1",
     "with-chrono-0_4",
 ], optional = true }
-
 
 [dev-dependencies]
 rand = "0.9.0"
@@ -56,19 +52,24 @@ kdam = "0.3"
 [features]
 debug-output = ["debug_trace/debug-output"]
 compiler = ["pest", "pest_derive"]
+
+# vector features
 cosine = []
+embed_local = []
+embed_openai = []
+
 ingestion = [
     "rusqlite",
     "tokio-postgres",
     "pgvector",
     "postgres-native-tls",
-    "reqwest",
     "native-tls",
     "rust_decimal",
-
 ]
 build = ["compiler"]
-server = ["build", "compiler", "cosine"]
-full = ["build", "compiler", "ingestion", "cosine"]
+vectors = ["cosine", "embed_local"]
+server = ["build", "compiler", "vectors"]
+full = ["build", "compiler", "ingestion", "vectors"]
 dev = ["debug-output", "server"]
 default = ["server"]
+

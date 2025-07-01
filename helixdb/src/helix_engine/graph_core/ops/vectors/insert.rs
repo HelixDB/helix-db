@@ -26,7 +26,7 @@ impl Iterator for InsertVIterator {
 pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphError>> {
     fn insert_v<F>(
         self,
-        vec: &Vec<f64>,
+        query: &Vec<f64>,
         label: &str,
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
@@ -35,7 +35,7 @@ pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalVal, GraphErro
 
     fn insert_vs<F>(
         self,
-        vecs: &Vec<Vec<f64>>,
+        queries: &Vec<Vec<f64>>,
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
@@ -60,8 +60,8 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
                 Some(fields)
             }
             None => Some(vec![(
-                String::from("label"),
-                Value::String(label.to_string()),
+                    String::from("label"),
+                    Value::String(label.to_string()),
             )]),
         };
         let vector = self.storage.vectors.insert::<F>(self.txn, &query, fields);
@@ -80,7 +80,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
 
     fn insert_vs<F>(
         self,
-        vecs: &Vec<Vec<f64>>,
+        queries: &Vec<Vec<f64>>,
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
@@ -88,7 +88,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
     {
         let txn = self.txn;
         let storage = Arc::clone(&self.storage);
-        let iter = vecs
+        let iter = queries
             .iter()
             .map(|vec| {
                 let vector = storage.vectors.insert::<F>(txn, &vec, fields.clone()); // TODO: remove clone
@@ -106,3 +106,4 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> InsertVAdapte
         }
     }
 }
+

@@ -16,6 +16,7 @@ tokio = { version = "1.44.2", features = ["full"] }
 serde_json = "1.0.140"
 uuid = { version = "1.12.1", features = ["std", "v4", "v6", "fast-rng"] }
 heed3 = "0.22.0"
+async-trait = "0.1"
 
 [profile.release]
 strip = "debuginfo"
@@ -27,3 +28,4 @@ panic = "abort"
 [features]
 dev = ["helixdb/dev"]
 default = ["helixdb/default"]
+
