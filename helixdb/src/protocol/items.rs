@@ -1,7 +1,7 @@
 //! Node and Edge types for the graph.
-//! 
+//!
 //! Nodes are the main entities in the graph and edges are the connections between them.
-//! 
+//!
 //! Nodes and edges are serialised without enum variant names in JSON format.
 
 use super::value::Value;
@@ -30,7 +30,7 @@ pub struct Node {
 
 impl Node {
     /// The number of properties in a node.
-    ///     
+    ///
     /// This is used as a constant in the return value mixin methods.
     pub const NUM_PROPERTIES: usize = 2;
 
@@ -121,12 +121,12 @@ pub struct Edge {
 
 impl Edge {
     /// The number of properties in an edge.
-    ///     
+    ///
     /// This is used as a constant in the return value mixin methods.
     pub const NUM_PROPERTIES: usize = 4;
 
     /// Decodes an edge from a byte slice.
-    /// 
+    ///
     /// Takes ID as the ID is not serialized when stored as it is the key.
     /// Uses the known ID (either from the query or the key in an LMDB iterator) to construct a new edge.
     pub fn decode_edge(bytes: &[u8], id: u128) -> Result<Edge, GraphError> {
@@ -146,7 +146,7 @@ impl Edge {
     }
 
     /// Encodes an edge into a byte slice
-    /// 
+    ///
     /// This skips the ID and if the properties are None, it skips the properties.
     pub fn encode_edge(&self) -> Result<Vec<u8>, GraphError> {
         bincode::serialize(self)

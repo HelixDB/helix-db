@@ -236,8 +236,11 @@ pub mod macros {
                     )))
                 }
             };
-            let old_value_remapping =
-                Remapping::new(false, Some($field_name.to_string()), Some(ReturnValue::from(value)));
+            let old_value_remapping = Remapping::new(
+                false,
+                Some($field_name.to_string()),
+                Some(ReturnValue::from(value)),
+            );
             $remapping_vals.insert(
                 $var_name.id(),
                 ResponseRemapping::new(
@@ -248,4 +251,18 @@ pub mod macros {
             Ok::<TraversalVal, GraphError>($var_name) // Return the Ok value
         }};
     }
+
+    #[macro_export]
+    /// simply just a debug logging function
+    macro_rules! debug_println {
+        ($($arg:tt)*) => {
+            #[cfg(feature = "debug-output")]
+            {
+                let caller = std::any::type_name_of_val(&|| {});
+                let caller = caller.strip_suffix("::{{closure}}").unwrap_or(caller);
+                println!("{}:{} =>\n\t{}", caller, line!(), format_args!($($arg)*));
+            }
+        };
+    }
 }
+

@@ -5,7 +5,6 @@ use heed3::{RoTxn, RwTxn};
 use super::ops::tr_val::TraversalVal;
 use crate::{
     helix_engine::{storage_core::storage_core::HelixGraphStorage, types::GraphError},
-    helixc::generator::utils::Order,
     protocol::{filterable::Filterable, value::Value},
 };
 use itertools::Itertools;
@@ -37,7 +36,9 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>>> RoTraversalIterat
     }
 
     pub fn collect_to<B: FromIterator<TraversalVal>>(self) -> B {
-        self.inner.filter_map(|item| item.ok()).collect::<B>()
+        self.inner.filter_map(|item| {
+            item.ok()
+        }).collect::<B>()
     }
 
     pub fn collect_dedup<B: FromIterator<TraversalVal>>(self) -> B {

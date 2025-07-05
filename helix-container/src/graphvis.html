@@ -1,0 +1,125 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        <script src="lib/bindings/utils.js"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6" crossorigin="anonymous"/>
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js" integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf" crossorigin="anonymous"></script>
+
+        <title>HelixDB Graphvis</title>
+
+        <style type="text/css">
+            #mynetwork {
+                width: 100vw;
+                height: 100vh;
+                background-color: #181818;
+                position: fixed;
+                top: 0;
+                left: 0;
+                color: #FFFDD0;
+            }
+
+            body {
+                background-color: #181818;
+                color: #FFFDD0;
+                margin: 0;
+                overflow: hidden;
+            }
+
+            h1 {
+                color: #FFFDD0;
+            }
+
+            #overlay {
+                position: fixed;
+                top: 10px;
+                right: 10px;
+                background-color: rgba(0, 0, 0, 0.5);
+                border: 1px solid #FFFDD0;
+                z-index: 1000;
+                padding: 10px; /* Added padding */
+            }
+        </style>
+    </head>
+
+    <body>
+        <center><h1>HelixDB Graphvis</h1></center>
+        <div id="mynetwork"></div>
+        <div id="overlay">
+            <p>nodes: <span id="num-nodes">{NUM_NODES}</span></p>
+            <p>edges: <span id="num-edges">{NUM_EDGES}</span></p>
+            <p>vectors: <span id="num-vectors">{NUM_VECTORS}</span></p>
+        </div>
+
+        <script type="text/javascript">
+            var edges;
+            var nodes;
+            var allNodes;
+            var allEdges;
+            var nodeColors;
+            var originalNodes;
+            var network;
+            var container;
+            var options, data;
+            var filter = {
+                item : '',
+                property : '',
+                value : []
+            };
+
+            function drawGraph() {
+                var container = document.getElementById('mynetwork');
+                nodes = new vis.DataSet({NODES_JSON_DATA});
+                edges = new vis.DataSet({EDGES_JSON_DATA});
+
+                nodeColors = {};
+                allNodes = nodes.get({ returnType: "Object" });
+                for (nodeId in allNodes) {
+                    allNodes[nodeId].font = { color: '#FFFDD0' };
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                }
+                allEdges = edges.get({ returnType: "Object" });
+                data = {nodes: nodes, edges: edges};
+
+                var options = {
+                    "configure": {
+                        "enabled": false
+                    },
+                    "edges": {
+                        "color": {
+                            "color": '#FFFDD0',
+                            "inherit": false
+                        },
+                        "smooth": {
+                            "enabled": true,
+                            "type": "dynamic"
+                        }
+                    },
+                    "interaction": {
+                        "dragNodes": true,
+                        "hideEdgesOnDrag": false,
+                        "hideNodesOnDrag": false
+                    },
+                    "physics": {
+                        "enabled": true,
+                        "stabilization": {
+                            "enabled": true,
+                            "fit": true,
+                            "iterations": 1000,
+                            "onlyDynamicEdges": false,
+                            "updateInterval": 50
+                        }
+                    }
+                };
+
+                network = new vis.Network(container, data, options);
+                return network;
+
+                return network;
+            }
+            drawGraph();
+        </script>
+    </body>
+</html>
+

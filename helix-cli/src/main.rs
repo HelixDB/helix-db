@@ -155,7 +155,7 @@ elif [ "$1" = "6" ]; then
     curl -X POST http://localhost:6969/GetFollowedUsersPosts -H "Content-Type: application/json" -d '{"user_id": "1"}'
 elif [ "$1" = "7" ]; then
     curl -X POST http://localhost:6969/find_user_posts_with_creator_details -H "Content-Type: application/json" -d '{"user_id": "1"}'
-else 
+else
     echo "Please provide argument 1 to create users or 2 to create follow relationship"
     exit 1
 fi
@@ -175,6 +175,7 @@ fi
             // print "to see the results run `sh call.sh`" in all green bold
             println!("{}", "to see the results run `sh call.sh`".green().bold());
         }
+
         CommandType::Deploy(command) => {
             match Command::new("cargo").output() {
                 Ok(_) => {}

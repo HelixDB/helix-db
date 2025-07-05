@@ -55,8 +55,8 @@ impl PartialEq for TraversalVal {
 }
 
 /// A trait for all traversable values in the graph
-/// 
-/// This trait is used to define the common methods for all traversable values in the graph so we don't need to write match statements to access id's and properties every time. 
+///
+/// This trait is used to define the common methods for all traversable values in the graph so we don't need to write match statements to access id's and properties every time.
 pub trait Traversable {
     fn id(&self) -> u128;
     fn label(&self) -> String;
@@ -112,6 +112,7 @@ impl Traversable for TraversalVal {
 impl Traversable for Vec<TraversalVal> {
     fn id(&self) -> u128 {
         if self.is_empty() {
+            println!("retting zero line 118!");
             return 0;
         }
         self[0].id()

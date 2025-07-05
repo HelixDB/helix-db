@@ -1,4 +1,6 @@
+use super::storage_methods::DBMethods;
 use crate::{
+    debug_println,
     helix_engine::{
         bm25::bm25::HBM25Config,
         graph_core::config::Config,
@@ -15,14 +17,10 @@ use crate::{
         label_hash::hash_label,
     },
 };
-
 use heed3::byteorder::BE;
 use heed3::{types::*, Database, DatabaseFlags, Env, EnvOpenOptions, RoTxn, RwTxn, WithTls};
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-
-use super::storage_methods::DBMethods;
+use serde_json::{json, Value};
+use std::{collections::HashMap, fs, path::Path};
 
 // Database names for different stores
 const DB_NODES: &str = "nodes"; // For node data (n:)
@@ -190,6 +188,7 @@ impl HelixGraphStorage {
     /// The generated in edge key will remain the same for the same to_node_id and label.
     /// To save space, the key is only stored once,
     /// with the values being stored in a sorted sub-tree, with this key being the root.
+
     #[inline(always)]
     pub fn in_edge_key(to_node_id: &u128, label: &[u8; 4]) -> [u8; 20] {
         let mut key = [0u8; 20];
@@ -233,6 +232,98 @@ impl HelixGraphStorage {
         // uses level 0 because thats where all vectors are stored
         let vector = self.vectors.get_vector(txn, *id, 0, true)?;
         Ok(vector)
+    }
+
+    /// Returns edges and nodes in a specific json format such that it can be visualized
+    ///     strictly in this format (write you're own parser if you want it in a diff
+    ///     format):
+    /// {
+    ///     "nodes": [ { "id": 1, "label": "Node 1" } ],
+    ///     "edges": [ { "from": 1, "to": 2, "label": Edge from 1 to 2" } ]
+    /// }
+    pub fn get_ne_json(&self) -> Result<String, GraphError> {
+        let txn = self.graph_env.read_txn().unwrap();
+        if self.nodes_db.is_empty(&txn)? || self.edges_db.is_empty(&txn)? {
+            return Err(GraphError::New("edges or nodes db is empty!".to_string()));
+        }
+
+        let (mut missing_nodes, mut missing_edges, mut nodes, mut edges): (
+            usize,
+            usize,
+            Vec<Value>,
+            Vec<Value>,
+        ) = (0, 0, vec![], vec![]);
+
+        for node in self.nodes_db.iter(&txn)? {
+            let (node_id, node_data) = node?;
+            let node = Node::decode_node(node_data, node_id)?;
+
+            let props = match node.properties.clone() {
+                Some(p) => p,
+                None => {
+                    println!("failed to get properties for node {}", node_id);
+                    missing_nodes += 1;
+                    continue;
+                }
+            };
+
+            let json_node = json!({"id": node_id.to_string(), "label": props["entity_name"]});
+            debug_println!("{:?}", json_node);
+            nodes.push(json_node);
+        }
+
+        for edge in self.edges_db.iter(&txn)? {
+            let (edge_id, edge_data) = edge?;
+            let edge = Edge::decode_edge(edge_data, edge_id)?;
+
+            let props = match edge.properties.clone() {
+                Some(p) => p,
+                None => {
+                    println!("failed to get properties for edge {}", edge_id);
+                    missing_edges += 1;
+                    continue;
+                }
+            };
+
+            let json_edge = json!({
+                "from": edge.from_node.to_string(),
+                "to": edge.to_node.to_string(),
+                "label": props["edge_name"],
+            });
+            debug_println!("{:?}", json_edge);
+            edges.push(json_edge);
+        }
+
+        let result = json!({
+            "nodes": nodes,
+            "edges": edges,
+        });
+
+        if missing_edges != 0 || missing_nodes != 0 {
+            println!(
+                "failed to get {} nodes and {} edges",
+                missing_nodes, missing_edges
+            );
+        }
+
+        serde_json::to_string(&result).map_err(|e| GraphError::New(e.to_string()))
+    }
+
+    // TODO: a more genearl one as well for non kg stuff
+    //pub fn get_ne_json(&self) -> Result<String, GraphError> {}
+
+    /// Get number of nodes, edges, and vectors from lmdb
+    pub fn get_db_stats_json(&self) -> Result<String, GraphError> {
+        let txn = self.graph_env.read_txn().unwrap();
+
+        let result = json!({
+            "num_nodes":   self.nodes_db.len(&txn).unwrap_or(0),
+            "num_edges":   self.edges_db.len(&txn).unwrap_or(0),
+            "num_vectors": self.vectors.vectors_db.len(&txn).unwrap_or(0),
+        });
+        debug_println!("db stats json: {:?}", result);
+
+        serde_json::to_string(&result).map_err(|e| GraphError::New(e.to_string()))
     }
 }
 
