@@ -99,7 +99,7 @@ impl Default for Config {
                 ef_search: Some(768),
             },
             graph_config: GraphConfig {
-                secondary_indices: Some(vec!["name".to_string()]),
+                secondary_indices: None,
             },
             db_max_size_gb: Some(10),
             mcp: true,

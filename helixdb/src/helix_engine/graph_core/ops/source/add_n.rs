@@ -48,7 +48,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
             label: label.to_string(), // TODO: just &str or Cow<'a, str>
             properties: properties.map(|props| props.into_iter().collect()),
         };
-
+        println!("node created");
         let secondary_indices = secondary_indices.unwrap_or(&[]).to_vec();
         let mut result: Result<TraversalVal, GraphError> = Ok(TraversalVal::Empty);
 

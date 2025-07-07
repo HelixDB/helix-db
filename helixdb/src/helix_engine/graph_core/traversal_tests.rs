@@ -10,7 +10,7 @@ use crate::helix_engine::{
             n_from_index::NFromIndexAdapter,
         },
         tr_val::{Traversable, TraversalVal},
-        util::{dedup::DedupAdapter, range::RangeAdapter},
+        util::{dedup::DedupAdapter, props::PropsAdapter, range::RangeAdapter},
         vectors::brute_force_search::BruteForceSearchVAdapter,
     },
     storage_core::storage_core::HelixGraphStorage,
@@ -1984,7 +1984,6 @@ fn test_vector_search() {
 
     let mut i = 0;
     let mut inserted_vectors = Vec::with_capacity(10000);
-    
 
     let mut rng = rand::rng();
     for _ in 10..2000 {
@@ -2034,11 +2033,77 @@ fn test_vector_search() {
         .collect_to::<Vec<_>>();
     // traversal.reverse();
 
-
-    for vec in &traversal[0..10] { 
+    for vec in &traversal[0..10] {
         if let TraversalVal::Vector(vec) = vec {
             println!("vec {:?} {}", vec.get_data(), vec.get_distance());
             assert!(vec.get_distance() < 0.1);
         }
+    }
+}
+
+#[test]
+fn test_double_add_and_double_fetch() {
+    let (db, _temp_dir) = setup_test_db();
+    let mut txn = db.graph_env.write_txn().unwrap();
+
+    let original_node1 = G::new_mut(Arc::clone(&db), &mut txn)
+        .add_n("person", Some(props! { "entity_name" => "person1" }), None)
+        .collect_to_val();
+
+    let original_node2 = G::new_mut(Arc::clone(&db), &mut txn)
+        .add_n("person", Some(props! { "entity_name" => "person2" }), None)
+        .collect_to_val();
+
+    txn.commit().unwrap();
+
+    let mut txn = db.graph_env.write_txn().unwrap();
+    let node1 = G::new(Arc::clone(&db), &txn)
+        .n_from_type("person")
+        .filter_ref(|val, txn| {
+            if let Ok(val) = val {
+                Ok(G::new_from(Arc::clone(&db), &txn, val.clone())
+                    .check_property("entity_name")
+                    .map_value_or(false, |v| *v == "person1")?)
+            } else {
+                Ok(false)
+            }
+        })
+        .collect_to::<Vec<_>>();
+
+    let node2 = G::new(Arc::clone(&db), &txn)
+        .n_from_type("person")
+        .filter_ref(|val, txn| {
+            if let Ok(val) = val {
+                Ok(G::new_from(Arc::clone(&db), &txn, val.clone())
+                    .check_property("entity_name")
+                    .map_value_or(false, |v| *v == "person2")?)
+            } else {
+                Ok(false)
+            }
+        })
+        .collect_to::<Vec<_>>();
+
+    assert_eq!(node1.len(), 1);
+    assert_eq!(node1[0].id(), original_node1.id());
+    assert_eq!(node2.len(), 1);
+    assert_eq!(node2[0].id(), original_node2.id());
+
+    let _e = G::new_mut(Arc::clone(&db), &mut txn)
+        .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
+        .collect_to_val();
+
+    txn.commit().unwrap();
+
+    let txn = db.graph_env.read_txn().unwrap();
+    let e = G::new(Arc::clone(&db), &txn)
+        .e_from_type("knows")
+        .collect_to::<Vec<_>>();
+    assert_eq!(e.len(), 1);
+    assert_eq!(e[0].id(), e.id());
+    if let TraversalVal::Edge(e) = &e[0] {
+        assert_eq!(e.from_node(), node1.id());
+        assert_eq!(e.to_node(), node2.id());
+    } else {
+        panic!("e[0] is not an edge");
     }
 }

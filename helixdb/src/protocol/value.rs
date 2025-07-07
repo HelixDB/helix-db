@@ -1,4 +1,5 @@
 use crate::{helix_engine::types::GraphError, helixc::generator::utils::GenRef};
+use chrono::Utc;
 use serde::{
     de::{DeserializeSeed, VariantAccess, Visitor},
     Deserializer, Serializer,
@@ -50,6 +51,16 @@ impl Value {
             Value::U64(u) => u.to_string(),
             Value::U128(u) => u.to_string(),
             Value::Boolean(b) => b.to_string(),
+            Value::Array(arr) => arr
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<String>>()
+                .join(" "),
+            Value::Object(obj) => obj
+                .iter()
+                .map(|(k, v)| format!("{} {}", k, v.to_string()))
+                .collect::<Vec<String>>()
+                .join(" "),
             _ => panic!("Not primitive"),
         }
     }
@@ -802,6 +813,13 @@ where
     #[inline]
     fn from(k: &'a K) -> Self {
         Value::from(k.clone().into())
+    }
+}
+
+impl From<chrono::DateTime<Utc>> for Value {
+    #[inline]
+    fn from(dt: chrono::DateTime<Utc>) -> Self {
+        Value::String(dt.to_rfc3339())
     }
 }
 
