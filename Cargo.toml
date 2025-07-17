@@ -5,7 +5,8 @@ members = [
     "helix-macros",
     "helix-cli",
     "hbuild_redeploy",
-    "hql-tests"
+    "query-container",
+    "hql-tests",
 ]
 resolver = "2"
 

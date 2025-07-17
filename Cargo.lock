@@ -847,9 +847,31 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.17.0"
+version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
+checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
+
+[[package]]
+name = "bytecheck"
+version = "0.6.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23cdc57ce23ac53c931e88a43d06d070a6fd142f2617be5855eb75efc9beb1c2"
+dependencies = [
+ "bytecheck_derive",
+ "ptr_meta 0.1.4",
+ "simdutf8",
+]
+
+[[package]]
+name = "bytecheck_derive"
+version = "0.6.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db406d29fbcd95542e92559bed4d8ad92636d1ca8b3b72ede10b4bcc010e659"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "bytemuck"
@@ -1796,7 +1818,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hbuild_redeploy"
+name = "hbuild_redploy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1922,6 +1944,8 @@ dependencies = [
  "itertools 0.14.0",
  "kdam",
  "lazy_static",
+ "libloading",
+ "native-tls",
  "pest",
  "pest_derive",
  "polars",
@@ -2554,12 +2578,12 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libloading"
-version = "0.8.6"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
+checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.53.0",
 ]
 
 [[package]]
@@ -3825,18 +3849,54 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe9e76f66d3f9606f44e45598d155cb13ecf09f4a28199e48daf8c8fc937ea90"
 dependencies = [
- "ptr_meta_derive",
+ "ptr_meta_derive 0.3.0",
 ]
 
 [[package]]
 name = "ptr_meta_derive"
-version = "0.3.0"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca414edb151b4c8d125c12566ab0d74dc9cdba36fb80eb7b848c15f495fd32d1"
+checksum = "16b845dbfca988fa33db069c0e230574d15a3088f147a87b64c7589eb662c9ac"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.104",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "query-container"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "get_routes",
+ "heed3",
+ "helixdb",
+ "inventory",
+ "rand 0.9.1",
+ "serde",
+ "serde_json",
+ "sonic-rs",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "query-container"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "get_routes",
+ "heed3",
+ "helixdb",
+ "inventory",
+ "rand 0.9.1",
+ "serde",
+ "serde_json",
+ "sonic-rs",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4670,9 +4730,9 @@ dependencies = [
 
 [[package]]
 name = "sonic-rs"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93070f7e7c0d7ec7d08406b1b407234af30420320fd854f304029e3c6db4a899"
+checksum = "7be54789747a46a8b1eb7b2c9cb0879cd7559a5f71bfff950868369f6868b9ad"
 dependencies = [
  "ahash",
  "bumpalo",

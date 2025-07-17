@@ -6,10 +6,7 @@ use crate::{
         generator::{
             bool_op::{BoolOp, Eq, Gt, Gte, Lt, Lte, Neq},
             generator_types::{
-                Assignment as GeneratedAssignment, BoExp, Drop as GeneratedDrop,
-                ForEach as GeneratedForEach, ForLoopInVariable, ForVariable,
-                Parameter as GeneratedParameter, Query as GeneratedQuery, ReturnType, ReturnValue,
-                ReturnValueExpr, Source as GeneratedSource, Statement as GeneratedStatement,
+                Assignment as GeneratedAssignment, BoExp, Drop as GeneratedDrop, ForEach as GeneratedForEach, ForLoopInVariable, ForVariable, Parameter as GeneratedParameter, Query as GeneratedQuery, ReturnType, ReturnValue, ReturnValueExpr, Source as GeneratedSource, Statement as GeneratedStatement
             },
             object_remapping_generation::{
                 ExcludeField, IdentifierRemapping, ObjectRemapping, Remapping, RemappingType,
@@ -33,7 +30,6 @@ use crate::{
     utils::styled_string::StyledString,
 };
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
     convert::Infallible,
 };
@@ -97,9 +93,9 @@ struct Ctx<'a> {
     node_set: HashSet<&'a str>,
     vector_set: HashSet<&'a str>,
     edge_map: HashMap<&'a str, &'a EdgeSchema>,
-    node_fields: HashMap<&'a str, HashMap<&'a str, Cow<'a, Field>>>,
-    edge_fields: HashMap<&'a str, HashMap<&'a str, Cow<'a, Field>>>,
-    vector_fields: HashMap<&'a str, HashMap<&'a str, Cow<'a, Field>>>,
+    node_fields: HashMap<&'a str, HashMap<&'a str, &'a Field>>,
+    edge_fields: HashMap<&'a str, HashMap<&'a str, &'a Field>>,
+    vector_fields: HashMap<&'a str, HashMap<&'a str, &'a Field>>,
     diagnostics: Vec<Diagnostic>,
     output: GeneratedSource,
 }
@@ -111,22 +107,13 @@ impl<'a> Ctx<'a> {
             .node_schemas
             .iter()
             .map(|n| {
-                let mut props = n
-                    .fields
-                    .iter()
-                    .map(|f| (f.name.as_str(), Cow::Borrowed(f)))
-                    .collect::<HashMap<&str, Cow<'a, Field>>>();
-                props.insert(
-                    "id",
-                    Cow::Owned(Field {
-                        prefix: FieldPrefix::Empty,
-                        defaults: None,
-                        name: "id".to_string(),
-                        field_type: FieldType::Uuid,
-                        loc: Loc::empty(),
-                    }),
-                );
-                (n.name.1.as_str(), props)
+                (
+                    n.name.1.as_str(),
+                    n.fields
+                        .iter()
+                        .map(|f| (f.name.as_str(), f))
+                        .collect::<HashMap<&str, &Field>>(),
+                )
             })
             .collect();
 
@@ -134,26 +121,13 @@ impl<'a> Ctx<'a> {
             .edge_schemas
             .iter()
             .map(|e| {
-                let mut props = e
-                    .properties
-                    .as_ref()
-                    .map(|v| {
-                        v.iter()
-                            .map(|f| (f.name.as_str(), Cow::Borrowed(f)))
-                            .collect()
-                    })
-                    .unwrap_or_else(HashMap::new);
-                props.insert(
-                    "id",
-                    Cow::Owned(Field {
-                        prefix: FieldPrefix::Empty,
-                        defaults: None,
-                        name: "id".to_string(),
-                        field_type: FieldType::Uuid,
-                        loc: Loc::empty(),
-                    }),
-                );
-                (e.name.1.as_str(), props)
+                (
+                    e.name.1.as_str(),
+                    e.properties
+                        .as_ref()
+                        .map(|v| v.iter().map(|f| (f.name.as_str(), f)).collect())
+                        .unwrap_or_else(HashMap::new),
+                )
             })
             .collect();
 
@@ -161,26 +135,9 @@ impl<'a> Ctx<'a> {
             .vector_schemas
             .iter()
             .map(|v| {
-                let mut props = v
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        (f.name.as_str(), Cow::Borrowed(f))
-                    })
-                    .collect::<HashMap<&str, Cow<'a, Field>>>();
-                props.insert(
-                    "id",
-                    Cow::Owned(Field {
-                        prefix: FieldPrefix::Empty,
-                        defaults: None,
-                        name: "id".to_string(),
-                        field_type: FieldType::Uuid,
-                        loc: Loc::empty(),
-                    }),
-                );
                 (
                     v.name.as_str(),
-                    props,
+                    v.fields.iter().map(|f| (f.name.as_str(), f)).collect(),
                 )
             })
             .collect();
@@ -435,7 +392,7 @@ impl<'a> Ctx<'a> {
                 );
             } else {
                 // match query.return_values.first().unwrap().return_type {
-
+                    
                 // }
             }
             let return_name = query.return_values.first().unwrap().get_name();
@@ -1059,12 +1016,7 @@ impl<'a> Ctx<'a> {
                                                     loc.clone(),
                                                     value.as_str(),
                                                 );
-                                                self.gen_identifier_or_param(
-                                                    q,
-                                                    value.as_str(),
-                                                    false,
-                                                    true,
-                                                )
+                                                self.gen_identifier_or_param(q, value.as_str(), false, true)
                                             }
                                             v => {
                                                 self.push_query_err(
@@ -1100,9 +1052,9 @@ impl<'a> Ctx<'a> {
                                 VecData::Standard(id)
                             }
                             VectorData::Embed(e) => match &e.value {
-                                EvaluatesToString::Identifier(i) => VecData::Embed(
-                                    self.gen_identifier_or_param(q, i.as_str(), true, false),
-                                ),
+                                EvaluatesToString::Identifier(i) => {
+                                    VecData::Embed(self.gen_identifier_or_param(q, i.as_str(), true, false))
+                                }
                                 EvaluatesToString::StringLiteral(s) => {
                                     VecData::Embed(GeneratedValue::Literal(GenRef::Ref(s.clone())))
                                 }
@@ -1882,6 +1834,7 @@ impl<'a> Ctx<'a> {
                     let stmt = stmt.unwrap();
                     match stmt {
                         GeneratedStatement::Traversal(tr) => {
+                            println!("TRAVERSAL");
                             gen_traversal
                                 .steps
                                 .push(Separator::Period(GeneratedStep::Where(Where::Ref(
@@ -1891,6 +1844,7 @@ impl<'a> Ctx<'a> {
                                 ))));
                         }
                         GeneratedStatement::BoExp(expr) => {
+                            println!("BOEXP");
                             gen_traversal
                                 .steps
                                 .push(Separator::Period(GeneratedStep::Where(match expr {
@@ -2477,7 +2431,7 @@ impl<'a> Ctx<'a> {
     fn validate_exclude_fields(
         &mut self,
         ex: &Exclude,
-        field_set: &HashMap<&str, Cow<'a, Field>>,
+        field_set: &HashMap<&str, &Field>,
         excluded: &HashMap<&str, Loc>,
         q: &'a Query,
         type_name: &str,
@@ -2569,7 +2523,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn validate_object(
-        &mut self,
+        &mut self, 
         cur_ty: &Type,
         tr: &Traversal,
         obj: &'a Object,
@@ -3642,28 +3596,28 @@ impl<'a> Ctx<'a> {
                                 RemappingType::ValueRemapping(ValueRemapping {
                                     variable_name: var_name.to_string(),
                                     field_name: key.clone(),
-                                    value: GenRef::Literal(bo_lit.to_string()), 
+                                    value: GenRef::Literal(bo_lit.to_string()), // TODO: Implement
                                 })
                             }
                             ExpressionType::FloatLiteral(float) => {
                                 RemappingType::ValueRemapping(ValueRemapping {
                                     variable_name: var_name.to_string(),
                                     field_name: key.clone(),
-                                    value: GenRef::Literal(float.to_string()), 
+                                    value: GenRef::Literal(float.to_string()), // TODO: Implement
                                 })
                             }
                             ExpressionType::StringLiteral(string) => {
                                 RemappingType::ValueRemapping(ValueRemapping {
                                     variable_name: var_name.to_string(),
                                     field_name: key.clone(),
-                                    value: GenRef::Literal(string.clone()), 
+                                    value: GenRef::Literal(string.clone()), // TODO: Implement
                                 })
                             }
                             ExpressionType::IntegerLiteral(integer) => {
                                 RemappingType::ValueRemapping(ValueRemapping {
                                     variable_name: var_name.to_string(),
                                     field_name: key.clone(),
-                                    value: GenRef::Literal(integer.to_string()), 
+                                    value: GenRef::Literal(integer.to_string()), // TODO: Implement
                                 })
                             }
                             ExpressionType::Identifier(identifier) => {
@@ -3673,7 +3627,7 @@ impl<'a> Ctx<'a> {
                                         IdentifierRemapping {
                                             variable_name: var_name.to_string(),
                                             field_name: key.clone(),
-                                            identifier_value: identifier.into(),
+                                            identifier_value: identifier.into(), // TODO: Implement
                                         },
                                     );
                                 } else {
@@ -4376,12 +4330,7 @@ impl<'a> Ctx<'a> {
                                                     loc.clone(),
                                                     value.as_str(),
                                                 );
-                                                self.gen_identifier_or_param(
-                                                    q,
-                                                    value.as_str(),
-                                                    false,
-                                                    true,
-                                                )
+                                                self.gen_identifier_or_param(q, value.as_str(), false, true)
                                             }
                                             v => {
                                                 self.push_query_err(

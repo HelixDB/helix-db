@@ -281,19 +281,12 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 .collect();
 
             let struct_name = quote::format_ident!("{}Data", fn_name);
-            let mcp_struct_name = quote::format_ident!("{}McpInput", fn_name);
             let expanded = quote! {
-
-                #[derive(Debug, Deserialize)]
-                pub struct #mcp_struct_name {
-                    #(#struct_fields),*
-                }
-
                 #[derive(Debug, Deserialize)]
                 #[allow(non_camel_case_types)]
-                struct #struct_name {
+                struct #struct_name<'a> {
                     connection_id: String,
-                    data: #mcp_struct_name,
+                    #(#struct_fields),*
                 }
 
                 #[mcp_handler]
@@ -311,11 +304,12 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
                         Some(conn) => conn,
                         None => return Err(GraphError::Default),
                     };
-                    drop(connections);
 
                     let txn = input.mcp_backend.db.graph_env.read_txn()?;
 
-                    let result = input.mcp_backend.#fn_name(&txn, &connection, #(data.data.#field_names),*)?;
+
+
+                    let result = input.mcp_backend.#fn_name(&txn, &connection, #(data.#field_names),*)?;
 
                     let first = result.first().unwrap_or(&TraversalVal::Empty).clone();
 
@@ -418,6 +412,8 @@ pub fn tool_call(args: TokenStream, input: TokenStream) -> TokenStream {
                 None => return Err(GraphError::Default),
             };
             drop(connections);
+
+            let txn = input.mcp_backend.db.graph_env.read_txn()?;
 
             let mut result = #mcp_query_block;
 

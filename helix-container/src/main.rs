@@ -8,8 +8,8 @@ use helix_db::helix_gateway::{
 use inventory;
 use std::{collections::HashMap, sync::Arc};
 
-mod queries;
 mod graphvis;
+mod queries;
 
 #[tokio::main]
 async fn main() {
@@ -58,18 +58,18 @@ async fn main() {
     let post_routes: HashMap<(String, String), HandlerFn> = inventory::iter::<HandlerSubmission>
         .into_iter()
         .map(|submission| {
-            println!("Processing POST submission for handler: {}", submission.0.name);
+            println!(
+                "Processing POST submission for handler: {}",
+                submission.0.name
+            );
             let handler = &submission.0;
-            let func: HandlerFn = Arc::new(move |input, response| (handler.func)(input, response));
+            let func: HandlerFn = Arc::new(handler.func);
             (
-                (
-                    "POST".to_string(),
-                    format!("/{}", handler.name.to_string()),
-                ),
+                ("POST".to_string(), format!("/{}", handler.name.to_string())),
                 func,
             )
         })
-    .collect();
+        .collect();
 
     // collect GET routes
     // let get_routes: HashMap<(String, String), HandlerFn> = inventory::iter::<HandlerSubmission>
@@ -89,7 +89,7 @@ async fn main() {
     // .collect();
 
     let routes: HashMap<(String, String), HandlerFn> = post_routes;
-    
+
     let mcp_submissions: Vec<_> = inventory::iter::<MCPHandlerSubmission>
         .into_iter()
         .collect();
@@ -126,4 +126,3 @@ async fn main() {
     let a = gateway.connection_handler.accept_conns().await.unwrap();
     let _b = a.await.unwrap();
 }
-

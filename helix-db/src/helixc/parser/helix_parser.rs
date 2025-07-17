@@ -1805,11 +1805,7 @@ impl HelixParser {
             }),
             Rule::identifier => Ok(Expression {
                 loc: pair.loc(),
-                // handles ID as a special case
-                expr: ExpressionType::Identifier(match pair.as_str() {
-                    "ID" => "id".to_string(),
-                    _ => pair.as_str().to_string(),
-                }),
+                expr: ExpressionType::Identifier(pair.as_str().to_string()),
             }),
             Rule::string_literal => Ok(Expression {
                 loc: pair.loc(),
@@ -2358,6 +2354,7 @@ impl HelixParser {
         let mut pairs = pair.clone().into_inner();
         let key = pairs.next().unwrap().as_str().to_string();
         let value_pair = pairs.next().unwrap();
+
         let value: FieldValue = match value_pair.as_rule() {
             Rule::evaluates_to_anything => FieldValue {
                 loc: value_pair.loc(),
@@ -2372,6 +2369,7 @@ impl HelixParser {
                 value: FieldValueType::Fields(self.parse_field_additions(value_pair)?),
             },
             Rule::string_literal => {
+                println!("string_literal: {:?}", value_pair);
                 FieldValue {
                     loc: value_pair.loc(),
                     value: FieldValueType::Literal(Value::String(
@@ -2508,7 +2506,7 @@ impl HelixParser {
             let mut pairs = p.clone().into_inner();
             let prop_key = pairs.next().unwrap().as_str().to_string();
             let field_addition = match pairs.next() {
-                Some(p) => {println!("p: {:?}", p); match p.as_rule() {
+                Some(p) => match p.as_rule() {
                     Rule::evaluates_to_anything => FieldValue {
                         loc: p.loc(),
                         value: FieldValueType::Expression(self.parse_expression(p)?),
@@ -2526,7 +2524,7 @@ impl HelixParser {
                         value: FieldValueType::Fields(self.parse_object_step(p.clone())?.fields),
                     },
                     _ => self.parse_new_field_value(p)?,
-                }},
+                },
                 None if prop_key.len() > 0 => FieldValue {
                     loc: p.loc(),
                     value: FieldValueType::Identifier(prop_key.clone()),
