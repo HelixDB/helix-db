@@ -12,18 +12,12 @@ pub(crate) enum ErrorCode {
     E105,
 
     // TYPE ERRORS
-    /// `E201` – `item type not in schema`
-    E201,
     /// `E202` – `field not in schema`
     E202,
-    /// `E203` – `given field is not a valid field for a given item type`
-    E203,
     /// `E204` – `field is a reserved field name`
     E204,
     /// `E205` – `type of value does not match field type in schema for a given item type`
     E205,
-    /// `E206` – `unknown item type`
-    E206,
     /// `E207` – `edge type exists but it is not a valid edge type for the given item type`
     E207,
     /// `E208` - `SearchV must be used on a vector type`

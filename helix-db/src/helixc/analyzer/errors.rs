@@ -65,3 +65,10 @@ pub(crate) fn push_query_warn(
         fix,
     ));
 }
+
+#[macro_export]
+macro_rules! generate_error {
+    () => {
+        
+    };
+}
