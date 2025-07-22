@@ -19,12 +19,12 @@ uuid = { version = "1.12.1", features = ["std", "v4", "v6", "fast-rng"] }
 heed3 = "0.22.0"
 async-trait = "0.1"
 
-[profile.release]
-strip = "debuginfo"
-lto = true
-opt-level = 3
-codegen-units = 1
-panic = "abort"
+# [profile.release]
+# strip = "debuginfo"
+# lto = true
+# opt-level = 3
+# codegen-units = 1
+# panic = "abort"
 
 [features]
 dev = ["helix-db/dev"]

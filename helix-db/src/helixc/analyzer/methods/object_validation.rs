@@ -6,8 +6,8 @@ use crate::helixc::{
         methods::{infer_expr_type::infer_expr_type, traversal_validation::validate_traversal},
         types::Type,
         utils::{
-            FieldLookup, Variable, VariableAccess, gen_property_access, is_valid_identifier,
-            type_in_scope, validate_field_name_existence_for_item_type,
+            gen_property_access, is_valid_identifier, type_in_scope,
+            validate_field_name_existence_for_item_type, FieldLookup, Variable, VariableAccess,
         },
     },
     generator::{

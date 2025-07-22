@@ -7,17 +7,16 @@ use crate::helix_gateway::router::router::{HelixRouter, RouterError};
 use crate::protocol::request::Request;
 use crate::protocol::response::Response;
 
-
 extern crate tokio;
 
 use tokio::net::TcpStream;
 
 /// Worker for handling requests
-/// 
+///
 /// A worker is a thread that handles requests
-/// 
+///
 /// It receives a connection from the thread pool and handles the request
-/// 
+///
 /// It sends the response back to the client
 pub struct Worker {
     pub id: usize,
@@ -26,7 +25,7 @@ pub struct Worker {
 
 impl Worker {
     /// Creates a new worker
-    /// 
+    ///
     /// It receives a connection from the thread pool and handles the request
     /// It sends the response back to the client
     fn new(
@@ -54,7 +53,10 @@ impl Worker {
                 };
 
                 let mut response = Response::new();
-                if let Err(e) = router.handle(Arc::clone(&graph_access), request, &mut response) {
+                if let Err(e) = router
+                    .handle(Arc::clone(&graph_access), request, &mut response)
+                    .await
+                {
                     eprintln!("Error handling request: {:?}", e);
                     response.status = 500;
                     response.body = format!("\n{:?}", e).into_bytes();
@@ -104,10 +106,14 @@ impl ThreadPool {
         let (tx, rx) = flume::bounded::<TcpStream>(1000); // TODO: make this configurable
         let mut workers = Vec::with_capacity(size);
         for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&graph), Arc::clone(&router), rx.clone()));
+            workers.push(Worker::new(
+                id,
+                Arc::clone(&graph),
+                Arc::clone(&router),
+                rx.clone(),
+            ));
         }
         println!("Thread pool initialized with {} workers", workers.len());
-
 
         Ok(ThreadPool {
             sender: tx,

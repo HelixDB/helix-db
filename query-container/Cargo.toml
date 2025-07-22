@@ -1,0 +1,21 @@
+[package]
+name = "query-container"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+helixdb = { path = "../helixdb" }
+get_routes = { path = "../get_routes" }
+inventory = "0.3.16"
+rand = "0.9.1"
+dirs = "5.0.1"
+chrono = { version = "0.4.41", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+sonic-rs = "0.5.0"
+tokio = { version = "1.44.2", features = ["full"] }
+serde_json = "1.0.140"
+uuid = { version = "1.12.1", features = ["std", "v4", "v6", "fast-rng"] }
+heed3 = "0.22.0"

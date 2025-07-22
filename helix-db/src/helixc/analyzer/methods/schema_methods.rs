@@ -19,8 +19,7 @@ pub(crate) fn build_field_lookups<'a>(
         .map(|n| {
             (
                 n.name.1.as_str(),
-                n
-                    .fields
+                n.fields
                     .iter()
                     .map(|f| (f.name.as_str(), Cow::Borrowed(f)))
                     .collect::<HashMap<&str, Cow<'a, Field>>>(),

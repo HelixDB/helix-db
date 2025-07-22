@@ -55,7 +55,7 @@ async fn main() {
                 submission.0.name
             );
             let handler = &submission.0;
-            let func: HandlerFn = Arc::new(move |input, response| (handler.func)(input, response));
+            let func: HandlerFn = Arc::new(handler.func);
             (
                 ("POST".to_string(), format!("/{}", handler.name.to_string())),
                 func,
