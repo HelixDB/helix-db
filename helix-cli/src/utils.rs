@@ -336,17 +336,17 @@ pub fn get_n_helix_cli() -> Result<(), Box<dyn Error>> {
     // TODO: running this through rust doesn't identify GLIBC so has to compile from source
     let status = Command::new("sh")
         .arg("-c")
-        .arg("curl -sSL 'https://install.helix-db.com' | bash")
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                std::env::var("HOME")
-                    .map(|h| format!("{}/.cargo/bin", h))
-                    .unwrap_or_default(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
+        .arg("sudo curl -sSL 'https://install.helix-db.com' | bash")
+        // .env(
+        //     "PATH",
+        //     format!(
+        //         "{}:{}",
+        //         std::env::var("HOME")
+        //             .map(|h| format!("{}/.cargo/bin", h))
+        //             .unwrap_or_default(),
+        //         std::env::var("PATH").unwrap_or_default()
+        //     ),
+        // )
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()?;

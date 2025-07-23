@@ -266,7 +266,11 @@ async fn main() -> Result<(), ()> {
                         return Err(());
                     }
                 }
+            } else {
+                println!("{}", "HelixDB repo is up to date!".green().bold());
+            }
 
+            if local_cli_version < remote_helix_version {
                 match get_n_helix_cli() {
                     Ok(_) => println!(
                         "{}",
@@ -284,7 +288,7 @@ async fn main() -> Result<(), ()> {
                     }
                 }
             } else {
-                println!("{}", "HelixDB is up to date!".green().bold());
+                println!("{}", "Helix CLI is up to date!".green().bold());
             }
         }
 
