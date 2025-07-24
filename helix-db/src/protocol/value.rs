@@ -1,3 +1,4 @@
+use crate::utils::id::ID;
 use crate::{helix_engine::types::GraphError, helixc::generator::utils::GenRef};
 use chrono::Utc;
 use serde::{
@@ -11,8 +12,6 @@ use std::{
     collections::HashMap,
     fmt::{self, Display},
 };
-use crate::utils::id::ID;
-
 
 /// A flexible value type that can represent various property values in nodes and edges.
 /// Handles both JSON and binary serialisation formats via custom implementaions of the Serialize and Deserialize traits.
@@ -910,12 +909,12 @@ impl From<JsonValue> for Value {
         match v {
             JsonValue::String(s) => Value::String(s),
             JsonValue::Number(n) => {
-                if n.is_u64() {
-                    Value::U64(n.as_u64().unwrap())
-                } else if n.is_i64() {
-                    Value::I64(n.as_i64().unwrap())
+                if let Some(u) = n.as_u64() {
+                    Value::U64(u)
+                } else if let Some(i) = n.as_i64() {
+                    Value::I64(i)
                 } else {
-                    Value::F64(n.as_f64().unwrap())
+                    Value::F64(n.as_f64().expect(""))
                 }
             }
             JsonValue::Bool(b) => Value::Boolean(b),
