@@ -562,13 +562,6 @@ pub fn compile_and_build_helix(
         }
     };
 
-    sp.stop_with_message(format!(
-        "{} {} {}",
-        "Successfully compiled".green().bold(),
-        num_files,
-        "query files".green().bold()
-    ));
-
     let cache_dir = PathBuf::from(&output);
     fs::create_dir_all(&cache_dir).unwrap();
 
@@ -576,10 +569,21 @@ pub fn compile_and_build_helix(
     let mut generated_rust_code = String::new();
 
     match write!(&mut generated_rust_code, "{analyzed_source}") {
-        Ok(_) => println!("{}", "Successfully transpiled queries".green().bold()),
+        Ok(_) => sp.stop_with_message(format!(
+                "{} {} {}",
+                "Successfully transpiled".green().bold(),
+                num_files,
+                "query files".green().bold()
+        )),
         Err(e) => {
-            println!("{}", "Failed to transpile queries".red().bold());
-            println!("└── {} {}", "Error:".red().bold(), e);
+            sp.stop_with_message(format!(
+                    "{} {} {} {} {}",
+                    "Failed to  transpile".red().bold(),
+                    num_files,
+                    "query files, ".red().bold(),
+                    "error: ",
+                    e
+            ));
             return Err("Failed to transpile queries".to_string());
         }
     }
