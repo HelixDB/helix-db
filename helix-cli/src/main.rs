@@ -791,7 +791,7 @@ async fn main() -> Result<(), ()> {
                 Ok(Some(instance)) => {
                     println!("{}", "Helix instance found!".green().bold());
                     let port = instance.port;
-                    let url = format!("http://localhost:{port}/get/graphvis");
+                    let url = format!("http://localhost:{port}/graphvis");
 
                     if webbrowser::open(&url).is_ok() {
                     } else {
