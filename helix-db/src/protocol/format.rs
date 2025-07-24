@@ -30,7 +30,9 @@ impl Format {
     /// is compatible with the chosen format to avoid panics.
     pub fn serialize<T: Serialize>(self, val: &T) -> Cow<[u8]> {
         match self {
-            Format::Json => sonic_rs::to_vec(val).unwrap().into(),
+            Format::Json => sonic_rs::to_vec(val)
+                .expect("All Helix types should infallibally convert to Json")
+                .into(),
         }
     }
 

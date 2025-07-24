@@ -4,4 +4,3 @@ pub mod parser_methods;
 
 #[cfg(test)]
 mod parser_tests;
-

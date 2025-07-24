@@ -2,7 +2,7 @@ use super::{
     location::{HasLoc, Loc},
     parser_methods::ParserError,
 };
-use crate::protocol::value::Value;
+use crate::{helix_engine::types::GraphError, protocol::value::Value};
 use chrono::{DateTime, NaiveDate, Utc};
 use pest::{
     Parser as PestParser,
@@ -2576,23 +2576,5 @@ impl HelixParser {
             loc: pair.loc(),
             fields,
         })
-    }
-}
-
-pub fn write_to_temp_file(content: Vec<&str>) -> Content {
-    let mut files = Vec::new();
-    for c in content {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(c.as_bytes()).unwrap();
-        let path = file.path().to_string_lossy().into_owned();
-        files.push(HxFile {
-            name: path,
-            content: c.to_string(),
-        });
-    }
-    Content {
-        content: String::new(),
-        files,
-        source: Source::default(),
     }
 }

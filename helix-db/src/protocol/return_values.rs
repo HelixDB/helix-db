@@ -263,10 +263,10 @@ where
             "label".to_string(),
             ReturnValue::from(item.label().to_string()),
         );
-        if item.properties_ref().is_some() {
+
+        if let Some(item_props) = item.properties() {
             properties.extend(
-                item.properties()
-                    .unwrap()
+                item_props
                     .into_iter()
                     .map(|(k, v)| (k, ReturnValue::from(v))),
             );

@@ -914,7 +914,7 @@ impl From<JsonValue> for Value {
                 } else if let Some(i) = n.as_i64() {
                     Value::I64(i)
                 } else {
-                    Value::F64(n.as_f64().expect(""))
+                    Value::F64(n.as_f64().expect("Number must be either a u64, i64 or f64, the first two have been excluded so it must be an f64"))
                 }
             }
             JsonValue::Bool(b) => Value::Boolean(b),

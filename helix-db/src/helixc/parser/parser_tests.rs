@@ -1,4 +1,10 @@
-use super::helix_parser::{Content, FieldType, HelixParser, Source, write_to_temp_file};
+#![allow(clippy::unwrap_used)]
+
+use std::io::Write;
+
+use crate::helixc::parser::helix_parser::HxFile;
+
+use super::helix_parser::{Content, FieldType, HelixParser, Source};
 
 #[test]
 fn test_parse_node_schema() {
@@ -909,4 +915,22 @@ fn test_search_vector() {
     let result = HelixParser::parse_source(&input).unwrap();
     let query = &result.queries[0];
     assert_eq!(query.return_values.len(), 1);
+}
+
+pub fn write_to_temp_file(content: Vec<&str>) -> Content {
+    let mut files = Vec::new();
+    for c in content {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(c.as_bytes()).unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        files.push(HxFile {
+            name: path,
+            content: c.to_string(),
+        });
+    }
+    Content {
+        content: String::new(),
+        files,
+        source: Source::default(),
+    }
 }
