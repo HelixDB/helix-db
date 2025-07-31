@@ -1,6 +1,6 @@
 [package]
 name = "helix-db"
-version = "1.0.124"
+version = "1.0.125"
 edition = "2024"
 description = "HelixDB is a powerful, open-source, graph-vector database built in Rust for intelligent data storage for RAG and AI."
 license = "AGPL-3.0"

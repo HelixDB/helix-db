@@ -244,8 +244,8 @@ impl Filterable for Edge {
                 ))),
             }
         }
-    }   
-    
+    }
+
     #[inline(always)]
     fn find_property<'a>(
         &'a self,

@@ -5,7 +5,6 @@ use crate::{
         vector::HVector,
         vector_core::{HNSWConfig, VectorCore},
     },
-    debug_println,
 };
 use heed3::{Env, EnvOpenOptions, RoTxn};
 use rand::{
@@ -203,8 +202,8 @@ fn test_hnsw_search() {
         .map(|(i, x)| (i + 1, x.clone()))
         .collect::<Vec<(usize, Vec<f64>)>>();
 
-    debug_println!("num of base vecs: {}", base_vectors.len());
-    debug_println!("num of query vecs: {}", query_vectors.len());
+    println!("num of base vecs: {}", base_vectors.len());
+    println!("num of query vecs: {}", query_vectors.len());
 
     let env = setup_temp_env();
     let mut txn = env.write_txn().unwrap();
@@ -218,10 +217,10 @@ fn test_hnsw_search() {
 
     let txn = env.read_txn().unwrap();
 
-    debug_println!("calculating ground truths");
+    println!("calculating ground truths");
     let ground_truths = calc_ground_truths(base_all_vectors, &query_vectors, k);
 
-    debug_println!("searching and comparing...");
+    println!("searching and comparing...");
 
     let mut total_recall = 0.0;
     let mut total_precision = 0.0;
@@ -240,7 +239,7 @@ fn test_hnsw_search() {
             .into_iter()
             .collect::<HashSet<u128>>();
 
-        debug_println!("gt: {:?}\nresults: {:?}\n", gt_indices, result_indices);
+        println!("gt: {:?}\nresults: {:?}\n", gt_indices, result_indices);
         let true_positives = result_indices.intersection(&gt_indices).count();
 
         let recall: f64 = true_positives as f64 / gt_indices.len() as f64;
@@ -252,7 +251,7 @@ fn test_hnsw_search() {
 
     total_recall = total_recall / n_query as f64;
     total_precision = total_precision / n_query as f64;
-    debug_println!(
+    println!(
         "avg. recall: {:.4?}, avg. precision: {:.4?}",
         total_recall, total_precision
     );

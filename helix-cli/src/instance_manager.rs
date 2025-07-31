@@ -74,7 +74,7 @@ impl InstanceManager {
         let log_file = self.logs_dir.join(format!("instance_{instance_id}.log"));
         let log_file = OpenOptions::new()
             .create(true)
-            
+
             .append(true)
             .open(log_file)?;
         let error_log_file = self
@@ -82,7 +82,7 @@ impl InstanceManager {
             .join(format!("instance_{instance_id}_error.log"));
         let error_log_file = OpenOptions::new()
             .create(true)
-            
+
             .append(true)
             .open(error_log_file)?;
 
@@ -117,7 +117,7 @@ impl InstanceManager {
     }
 
     /// instance_id can either be u16 or uuid here (same for the others)
-    pub fn start_instance(&self, instance_id: &str, endpoints: Option<Vec<String>>, openai_key: Option<String>, release_mode: BuildMode) -> Result<InstanceInfo, String> {
+    pub fn start_instance(&self, instance_id: &str, endpoints: Option<Vec<String>>, openai_key: Option<String>, _release_mode: BuildMode) -> Result<InstanceInfo, String> {
         let instance_id = match instance_id.parse() {
             Ok(n) => match self.id_from_short_id(n) {
                 Ok(n) => n.id,
@@ -150,7 +150,7 @@ impl InstanceManager {
 
         let log_file = self.logs_dir.join(format!("instance_{instance_id}.log"));
         let log_file = OpenOptions::new()
-            
+
             .append(true)
             .create(true)
             .open(log_file)

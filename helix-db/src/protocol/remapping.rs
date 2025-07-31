@@ -93,7 +93,7 @@ impl RemappingMap {
     }
 
     #[inline(always)]
-    pub fn borrow_mut(&self) -> RefMut<HashMap<u128, ResponseRemapping>> {
+    pub fn borrow_mut(&self) -> RefMut<'_, HashMap<u128, ResponseRemapping>> {
         self.remappings.borrow_mut()
     }
 }

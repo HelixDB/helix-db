@@ -2186,7 +2186,8 @@ fn test_delete_vector() {
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            2000, "vector",
+            2000,
+            "vector",
             None,
         )
         .collect_to::<Vec<_>>();
@@ -2201,7 +2202,8 @@ fn test_delete_vector() {
         G::new(Arc::clone(&storage), &txn)
             .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
                 &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                2000, "vector",
+                2000,
+                "vector",
                 None,
             )
             .collect_to::<Vec<_>>(),
@@ -2221,6 +2223,10 @@ fn test_delete_vector() {
             None,
         )
         .collect_to::<Vec<_>>();
+
+    println!();
+    println!("traversal: {:?}", traversal);
+    println!();
 
     assert_eq!(traversal.len(), 0);
 
@@ -2329,7 +2335,7 @@ fn test_drop_vectors_then_add_them_back() {
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             2000,
-            "vector",
+            "Entity_Embedding",
             None,
         )
         .collect_to::<Vec<_>>();
@@ -2407,7 +2413,7 @@ fn test_drop_vectors_then_add_them_back() {
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             2000,
-            "vector",
+            "Entity_Embedding",
             None,
         )
         .collect_to::<Vec<_>>();
