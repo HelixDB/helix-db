@@ -23,35 +23,8 @@ mod tests {
        let mut total_insertion_time = std::time::Duration::from_secs(0);
     */
 
-    fn setup_temp_env() -> Env {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().to_str().unwrap();
-        unsafe {
-            EnvOpenOptions::new()
-                .map_size(1 * 1024 * 1024 * 1024) // 1 GB
-                .max_dbs(10)
-                .open(path)
-                .unwrap()
-        }
-    }
-
-    fn setup_test_environment() -> (MCPBackend, PathBuf, Arc<HelixGraphStorage>) {
-        let temp_dir = env::temp_dir();
-        let config = Config::new(
-            16,   // m
-            128,  // ef_construction
-            768,  // ef_search
-            2,    // db_max_size_gb
-            true, // mcp
-            true, // bm25
-            None, // schema
-            None, // embedding_model
-            None, // graphvis_node_label
-        );
-        let db = Arc::new(HelixGraphStorage::new(&temp_dir.to_string_lossy(), config).unwrap());
-
-        let backend = MCPBackend { db };
-        (backend, temp_dir, db)
+    fn setup_test_environment() -> () {
+        //make a new graph storage
     }
 
     // Helper to create test data

@@ -2216,7 +2216,8 @@ fn test_delete_vector() {
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            2000, "vector",         
+            2000,
+            "vector",
             None,
         )
         .collect_to::<Vec<_>>();

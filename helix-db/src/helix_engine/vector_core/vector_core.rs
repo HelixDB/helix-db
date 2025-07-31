@@ -262,11 +262,7 @@ impl VectorCore {
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
-        let m: usize = if level == 0 {
-            self.config.m
-        } else {
-            self.config.m
-        };
+        let m = self.config.m;
 
         if !should_extend {
             return Ok(cands.take_inord(m));
@@ -448,8 +444,7 @@ impl HNSW for VectorCore {
             },
         )?;
 
-        let mut results = candidates.to_vec_with_filter::<F, true>(k, filter, txn);
-
+        let mut results = candidates.to_vec_with_filter::<F, true>(k, filter, label, txn);
         for result in results.iter_mut() {
             result.properties = match self
                 .vector_data_db

@@ -1,7 +1,7 @@
 use crate::helix_engine::graph_core::config::Config;
 use crate::helix_engine::storage_core::storage_core::HelixGraphStorage;
 use crate::helix_engine::types::GraphError;
-use crate::helix_gateway::mcp::mcp::{McpBackend, McpConnections};
+use crate::helix_gateway::mcp::mcp::{MCPBackend, McpConnections};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -14,7 +14,7 @@ pub enum QueryInput {
 
 pub struct HelixGraphEngine {
     pub storage: Arc<HelixGraphStorage>,
-    pub mcp_backend: Option<Arc<McpBackend>>,
+    pub mcp_backend: Option<Arc<MCPBackend>>,
     pub mcp_connections: Option<Arc<Mutex<McpConnections>>>,
 }
 
@@ -33,7 +33,7 @@ impl HelixGraphEngine {
         };
 
         let (mcp_backend, mcp_connections) = if should_use_mcp.unwrap_or(false) {
-            let mcp_backend = Arc::new(McpBackend::new(storage.clone()));
+            let mcp_backend = Arc::new(MCPBackend::new(storage.clone()));
             let mcp_connections = Arc::new(Mutex::new(McpConnections::new()));
             (Some(mcp_backend), Some(mcp_connections))
         } else {
@@ -47,3 +47,4 @@ impl HelixGraphEngine {
         })
     }
 }
+

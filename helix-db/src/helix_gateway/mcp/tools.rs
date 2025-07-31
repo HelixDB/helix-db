@@ -184,7 +184,7 @@ trait McpTools<'a> {
     ) -> Result<Vec<TraversalVal>, GraphError>;
 }
 
-impl<'a> McpTools<'a> for McpBackend {
+impl<'a> McpTools<'a> for MCPBackend {
     fn out_step(
         &'a self,
         txn: &'a RoTxn,
