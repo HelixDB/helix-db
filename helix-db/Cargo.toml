@@ -32,10 +32,7 @@ pest = { version = "2.7", optional = true }
 pest_derive = { version = "2.7", optional = true }
 
 # Embedding dependencies
-reqwest = { version = "0.12.15", features = [
-    "json",
-    "blocking",
-], optional = true }
+reqwest = { version = "0.12.15", features = ["blocking"], optional = true }
 url = { version = "2.5", optional = true }
 tokio-util = { version = "0.7.15", features = ["compat"] }
 axum = "0.8.4"
