@@ -226,7 +226,8 @@ fn test_hnsw_search() {
     let mut total_recall = 0.0;
     let mut total_precision = 0.0;
     for (qid, query) in query_vectors {
-        let results = index.search::<Filter>(&txn, &query, "label", k, None, false).unwrap();
+        //let results = index.search::<Filter>(&txn, &query, "label", k, None, false).unwrap();
+        let results = index.search::<Filter>(&txn, &query, k, None, false).unwrap();
 
         let result_indices = results
             .into_iter()
@@ -271,4 +272,6 @@ fn test_hnsw_search_filter_ordering() {
 #[test]
 fn test_hnsw_delete() {
 }
+
+// TODO: test, how many duplicate edges does the algo have to look over
 

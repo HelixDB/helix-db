@@ -335,6 +335,8 @@ impl BM25 for HBM25Config {
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 
+        // TODO: POST FILTER BASED ON LABEL HERE
+
         Ok(results)
     }
 }

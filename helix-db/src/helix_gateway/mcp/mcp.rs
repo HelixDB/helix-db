@@ -57,7 +57,7 @@ impl McpConnections {
         self.connections.remove(connection_id)
     }
 }
-pub struct McpBackend {
+pub struct MCPBackend {
     pub db: Arc<HelixGraphStorage>,
 }
 
@@ -74,7 +74,7 @@ pub struct ResourceCallRequest {
     pub connection_id: String,
 }
 
-impl McpBackend {
+impl MCPBackend {
     pub fn new(db: Arc<HelixGraphStorage>) -> Self {
         Self { db }
     }
@@ -96,7 +96,7 @@ impl MCPConnection {
 
 pub struct MCPToolInput {
     pub request: Request,
-    pub mcp_backend: Arc<McpBackend>,
+    pub mcp_backend: Arc<MCPBackend>,
     pub mcp_connections: Arc<Mutex<McpConnections>>,
     pub schema: Option<String>,
 }

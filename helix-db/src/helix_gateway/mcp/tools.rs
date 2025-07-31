@@ -22,7 +22,7 @@ use crate::{
     },
     helix_gateway::{
         embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
-        mcp::mcp::{MCPConnection, MCPHandler, MCPHandlerSubmission, MCPToolInput, McpBackend},
+        mcp::mcp::{MCPConnection, MCPHandler, MCPHandlerSubmission, MCPToolInput, MCPBackend},
     },
     protocol::{response::Response, return_values::ReturnValue, value::Value},
     utils::label_hash::hash_label,

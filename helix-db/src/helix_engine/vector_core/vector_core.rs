@@ -403,7 +403,7 @@ impl HNSW for VectorCore {
         &self,
         txn: &RoTxn,
         query: &[f64],
-        label: &str,
+        //label: &str,
         k: usize,
         filter: Option<&[F]>,
         should_trickle: bool,
@@ -448,7 +448,7 @@ impl HNSW for VectorCore {
             },
         )?;
 
-        let mut results = candidates.to_vec_with_filter::<F, true>(k, filter, label, txn);
+        let mut results = candidates.to_vec_with_filter::<F, true>(k, filter, txn);
 
         for result in results.iter_mut() {
             result.properties = match self
@@ -497,7 +497,7 @@ impl HNSW for VectorCore {
             let nearest = self.search_level::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
             curr_ep = nearest
                 .peek()
-                .ok_or(VectorError::VectorCoreError("emtpy search result".to_string()))?
+                .ok_or(VectorError::VectorCoreError("emtpy peak result".to_string()))?
                 .clone();
         }
 
@@ -510,7 +510,10 @@ impl HNSW for VectorCore {
                 level,
                 None,
             )?;
-            curr_ep = nearest.peek().unwrap().clone();
+            curr_ep = nearest
+                .peek()
+                .ok_or(VectorError::VectorNotFound("empty peak result".to_string()))?
+                .clone();
 
             let neighbors = self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
             self.set_neighbours(txn, query.get_id(), &neighbors, level)?;

@@ -19,7 +19,7 @@ pub trait HNSW
         &self,
         txn: &RoTxn,
         query: &[f64],
-        label: &str,
+        //label: &str,
         k: usize,
         filter: Option<&[F]>,
         should_trickle: bool,
