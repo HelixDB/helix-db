@@ -63,8 +63,13 @@ async fn main() -> ExitCode {
             {
                 let instance_manager = InstanceManager::new().unwrap();
                 let mut sp = Spinner::new(Spinners::Dots9, "Starting Helix instance".into());
-                let openai_key = get_openai_key();  
-                match instance_manager.start_instance(&command.cluster.unwrap(), None, openai_key) {
+                let openai_key = get_openai_key();
+                match instance_manager.start_instance(
+                    &command.cluster.unwrap(),
+                    None,
+                    openai_key,
+                    BuildMode::from_release(command.release),
+                ) {
                     Ok(instance) => {
                         sp.stop_with_message(
                             "Successfully started Helix instance"
@@ -102,7 +107,12 @@ async fn main() -> ExitCode {
             };
 
             if !command.remote {
-                let code = match compile_and_build_helix(path, &output, files, command.release) {
+                let code = match compile_and_build_helix(
+                    path,
+                    &output,
+                    files,
+                    BuildMode::from_release(command.release),
+                ) {
                     Ok(code) => code,
                     Err(_) => return ExitCode::FAILURE,
                 };
@@ -110,7 +120,11 @@ async fn main() -> ExitCode {
                 if command.cluster.is_some()
                     && (command.path.is_some() || Path::new(&format!("./{DB_DIR}")).is_dir())
                 {
-                    match redeploy_helix(command.cluster.unwrap(), code) {
+                    match redeploy_helix(
+                        command.cluster.unwrap(),
+                        code,
+                        BuildMode::from_release(command.release),
+                    ) {
                         Ok(_) => {}
                         Err(_) => return ExitCode::FAILURE,
                     }
@@ -144,7 +158,7 @@ async fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     };
-                    match deploy_helix(port, code, None) {
+                    match deploy_helix(port, code, None, BuildMode::from_release(command.release)) {
                         Ok(_) => {}
                         Err(_) => return ExitCode::FAILURE,
                     }
@@ -544,8 +558,7 @@ async fn main() -> ExitCode {
             fs::write(main_path, DEFAULT_QUERIES).expect("could not write queries");
 
             let config_path = path.join("config.hx.json");
-            fs::write(config_path, Config::init_config())
-                .expect("could not write config");
+            fs::write(config_path, Config::init_config()).expect("could not write config");
 
             println!(
                 "{} {}",

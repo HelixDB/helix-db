@@ -8,8 +8,8 @@ QUERY CreateUserBioEmbedding(userId: String, bioText: String, lastUpdated: Strin
     RETURN embedding
 
 QUERY SearchSimilarUsers(queryText: String, k: I64, dataType: String) =>
-    search_results <- SearchV<UserEmbedding>(Embed(queryText), k)::ORDER<Desc>(_::{createdAt})
-    RETURN search_results::{userId, createdAt}
+    search_results <- SearchV<UserEmbedding>(Embed(queryText), k)
+    RETURN search_results
 
 V::UserEmbedding {
     userId: String,

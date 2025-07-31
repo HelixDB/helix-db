@@ -1,3 +1,5 @@
+use crate::types::BuildMode;
+
 use super::utils::find_available_port;
 use helix_db::utils::styled_string::StyledString;
 use std::{
@@ -115,7 +117,7 @@ impl InstanceManager {
     }
 
     /// instance_id can either be u16 or uuid here (same for the others)
-    pub fn start_instance(&self, instance_id: &str, endpoints: Option<Vec<String>>, openai_key: Option<String>) -> Result<InstanceInfo, String> {
+    pub fn start_instance(&self, instance_id: &str, endpoints: Option<Vec<String>>, openai_key: Option<String>, release_mode: BuildMode) -> Result<InstanceInfo, String> {
         let instance_id = match instance_id.parse() {
             Ok(n) => match self.id_from_short_id(n) {
                 Ok(n) => n.id,

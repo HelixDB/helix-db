@@ -78,3 +78,26 @@ impl PartialEq for OutputLanguage {
         )
     }
 }
+
+
+pub enum BuildMode {
+    Dev,
+    Release,
+}
+
+impl BuildMode {
+    pub fn from_release(release: bool) -> Self {
+        if release {
+            BuildMode::Release
+        } else {
+            BuildMode::Dev
+        }
+    }
+    
+    pub fn to_path(&self) -> &'static str {
+        match self {
+            BuildMode::Dev => "debug",
+            BuildMode::Release => "release",
+        }
+    }
+}

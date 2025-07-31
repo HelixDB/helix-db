@@ -265,7 +265,7 @@ impl VectorCore {
         let m: usize = if level == 0 {
             self.config.m
         } else {
-            self.config.m_max_0
+            self.config.m
         };
 
         if !should_extend {
@@ -403,8 +403,8 @@ impl HNSW for VectorCore {
         &self,
         txn: &RoTxn,
         query: &[f64],
-        //label: &str,
         k: usize,
+        label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
     ) -> Result<Vec<HVector>, VectorError>

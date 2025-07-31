@@ -226,8 +226,7 @@ fn test_hnsw_search() {
     let mut total_recall = 0.0;
     let mut total_precision = 0.0;
     for (qid, query) in query_vectors {
-        //let results = index.search::<Filter>(&txn, &query, "label", k, None, false).unwrap();
-        let results = index.search::<Filter>(&txn, &query, k, None, false).unwrap();
+    let results = index.search::<Filter>(&txn, &query, k, "vector", None, false).unwrap();
 
         let result_indices = results
             .into_iter()

@@ -864,7 +864,12 @@ pub(crate) fn infer_expr_type<'a>(
                     steps: vec![],
                     should_collect: ShouldCollect::ToVec,
                     source_step: Separator::Period(SourceStep::SearchVector(
-                        GeneratedSearchVector { vec, k, pre_filter },
+                        GeneratedSearchVector {
+                            label: GenRef::Literal(sv.vector_type.clone().unwrap()),
+                            vec,
+                            k,
+                            pre_filter,
+                        },
                     )),
                 })),
             )

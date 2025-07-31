@@ -160,6 +160,7 @@ impl Display for SourceStep {
 
 #[derive(Clone)]
 pub struct SearchVector {
+    pub label: GenRef<String>,
     pub vec: VecData,
     pub k: GeneratedValue,
     pub pre_filter: Option<Vec<BoExp>>,
@@ -170,7 +171,8 @@ impl Display for SearchVector {
         match &self.pre_filter {
             Some(pre_filter) => write!(
                 f,
-                "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, Some(&[{}]))",
+                "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, Some(&[{}]))",
+                self.label,
                 self.vec,
                 self.k,
                 pre_filter
@@ -181,8 +183,10 @@ impl Display for SearchVector {
             ),
             None => write!(
                 f,
-                "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, None)",
-                self.vec, self.k
+                "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, None)",
+                self.label,
+                self.vec,
+                self.k
             ),
         }
     }

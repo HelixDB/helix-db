@@ -442,6 +442,7 @@ pub(crate) fn validate_traversal<'a>(
             gen_traversal.traversal_type = TraversalType::Ref;
             gen_traversal.should_collect = ShouldCollect::ToVec;
             gen_traversal.source_step = Separator::Period(SourceStep::SearchVector(SearchVector {
+                label: GenRef::Literal(sv.vector_type.clone().unwrap()),
                 vec,
                 k,
                 pre_filter,

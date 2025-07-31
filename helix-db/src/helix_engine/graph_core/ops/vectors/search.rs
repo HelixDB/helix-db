@@ -28,6 +28,7 @@ pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalVal, GraphError>> 
         self,
         query: &[f64],
         k: K,
+        label: &str,
         filter: Option<&[F]>,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
@@ -43,6 +44,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
         self,
         query: &[f64],
         k: K,
+        label: &str,
         filter: Option<&[F]>,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     where
@@ -53,7 +55,7 @@ impl<'a, I: Iterator<Item = Result<TraversalVal, GraphError>> + 'a> SearchVAdapt
         let vectors =
             self.storage
                 .vectors
-                .search(self.txn, query, k.try_into().unwrap(), filter, false);
+                .search(self.txn, query, k.try_into().unwrap(), label, filter, false);
 
         let iter = match vectors {
             Ok(vectors) => vectors

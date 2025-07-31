@@ -423,7 +423,7 @@ impl<'a> McpTools<'a> for McpBackend {
         let embedding = result?;
 
         let res = G::new(db, txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, 5, None)
+            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, 5, "UserEmbedding", None)
             .collect_to::<Vec<_>>();
 
         debug_println!("result: {res:?}");

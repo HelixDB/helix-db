@@ -549,7 +549,7 @@ pub fn compile_and_build_helix(
     path: String,
     output: &PathBuf,
     files: Vec<DirEntry>,
-    release_mode: bool,
+    release_mode: BuildMode,
 ) -> Result<Content, String> {
     let mut sp = Spinner::new(Spinners::Dots9, "Compiling Helix queries".into());
 
@@ -622,13 +622,13 @@ pub fn compile_and_build_helix(
         }
     }
 
+    println!("building helix at: {}", output.display());
     let mut runner = Command::new("cargo");
     runner
         .arg("build")
-        .args(if release_mode {
-            vec!["--release"]
-        } else {
-            vec!["--profile", "dev"]
+        .args(match release_mode {
+            BuildMode::Dev => vec!["--profile", "dev"],
+            BuildMode::Release => vec!["--release"],
         })
         .current_dir(PathBuf::from(&output))
         .env("RUSTFLAGS", "-Awarnings");
@@ -655,13 +655,18 @@ pub fn compile_and_build_helix(
     }
 }
 
-pub fn deploy_helix(port: u16, code: Content, instance_id: Option<String>) -> Result<(), String> {
+pub fn deploy_helix(
+    port: u16,
+    code: Content,
+    instance_id: Option<String>,
+    release_mode: BuildMode,
+) -> Result<(), String> {
     let mut sp = Spinner::new(Spinners::Dots9, "Starting Helix instance".into());
 
     let instance_manager = InstanceManager::new().unwrap();
 
     let binary_path = dirs::home_dir()
-        .map(|path| path.join(".helix/repo/helix-db/target/release/helix-container"))
+        .map(|path| path.join(format!(".helix/repo/helix-db/target/{}/helix-container", release_mode.to_path())))
         .unwrap();
 
     let endpoints: Vec<String> = code.source.queries.iter().map(|q| q.name.clone()).collect();
@@ -676,7 +681,7 @@ pub fn deploy_helix(port: u16, code: Content, instance_id: Option<String>) -> Re
             }
         }
         let openai_key = get_openai_key();
-        match instance_manager.start_instance(&iid, Some(endpoints), openai_key) {
+        match instance_manager.start_instance(&iid, Some(endpoints), openai_key, release_mode) {
             Ok(instance) => {
                 sp.stop_with_message(
                     "Successfully started Helix instance"
@@ -715,7 +720,11 @@ pub fn deploy_helix(port: u16, code: Content, instance_id: Option<String>) -> Re
     }
 }
 
-pub fn redeploy_helix(instance: String, code: Content) -> Result<(), String> {
+pub fn redeploy_helix(
+    instance: String,
+    code: Content,
+    release_mode: BuildMode,
+) -> Result<(), String> {
     let instance_manager = InstanceManager::new().unwrap();
     let iid = instance;
 
@@ -743,7 +752,7 @@ pub fn redeploy_helix(instance: String, code: Content) -> Result<(), String> {
         }
     }
 
-    match deploy_helix(0, code, Some(iid)) {
+    match deploy_helix(0, code, Some(iid), release_mode) {
         Ok(_) => Ok(()),
         Err(e) => Err(e.to_string()),
     }

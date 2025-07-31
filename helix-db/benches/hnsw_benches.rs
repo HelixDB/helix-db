@@ -352,7 +352,7 @@ mod tests {
         let mut total_search_time = std::time::Duration::from_secs(0);
         for (qid, query) in query_vectors.iter() {
             let start_time = Instant::now();
-            let results = index.search::<Filter>(&txn, query, k, None, false).unwrap();
+            let results = index.search::<Filter>(&txn, query, k, "vector", None, false).unwrap();
             let search_duration = start_time.elapsed();
             total_search_time += search_duration;
 

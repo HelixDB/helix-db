@@ -19,8 +19,8 @@ pub trait HNSW
         &self,
         txn: &RoTxn,
         query: &[f64],
-        //label: &str,
         k: usize,
+        label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
     ) -> Result<Vec<HVector>, VectorError>
