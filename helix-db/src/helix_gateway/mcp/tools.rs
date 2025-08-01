@@ -14,7 +14,7 @@ use crate::{
             },
             source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
             tr_val::{Traversable, TraversalVal},
-            vectors::search::SearchVAdapter,
+            vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter},
         },
         storage_core::storage_core::HelixGraphStorage,
         types::GraphError,
@@ -92,7 +92,7 @@ pub enum Operator {
 
 impl Operator {
     pub fn execute(&self, value1: &Value, value2: &Value) -> bool {
-        debug_println!("operating on value1: {:?}, value2: {:?}", value1, value2);
+        debug_println!("operating on value1: {:?}, value2: {:?}", *value1, *value2);
         match self {
             Operator::Eq => *value1 == *value2,
             Operator::Neq => *value1 != *value2,
@@ -107,7 +107,7 @@ impl Operator {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FilterTraversal {
-    pub properties: Option<Vec<FilterProperties>>,
+    pub properties: Option<Vec<Vec<FilterProperties>>>,
     pub filter_traversals: Option<Vec<ToolArgs>>,
 }
 
@@ -173,6 +173,7 @@ trait McpTools<'a> {
         connection: &'a MCPConnection,
         query: String,
         limit: usize,
+        label: String,
     ) -> Result<Vec<TraversalVal>, GraphError>;
 
     /// HNSW Search with built int embedding model
@@ -181,6 +182,16 @@ trait McpTools<'a> {
         txn: &'a RoTxn,
         connection: &'a MCPConnection,
         query: String,
+        label: String,
+    ) -> Result<Vec<TraversalVal>, GraphError>;
+
+    fn search_vector(
+        &'a self,
+        txn: &'a RoTxn,
+        connection: &'a MCPConnection,
+        vector: Vec<f64>,
+        k: usize,
+        min_score: Option<f64>,
     ) -> Result<Vec<TraversalVal>, GraphError>;
 }
 
@@ -398,16 +409,39 @@ impl<'a> McpTools<'a> for McpBackend {
         _connection: &'a MCPConnection,
         query: String,
         limit: usize,
+        label: String,
     ) -> Result<Vec<TraversalVal>, GraphError> {
         let db = Arc::clone(&self.db);
 
-        let results = G::new(db, txn)
-            .search_bm25("mcp search", &query, limit)?
-            .collect_to::<Vec<_>>();
+//         let items = connection.iter.clone().collect::<Vec<_>>();
 
-        debug_println!("result: {results:?}");
+        // Check if BM25 is enabled and has metadata
+        if let Some(bm25) = &db.bm25 {
+            match bm25.metadata_db.get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY) {
+                Ok(Some(_)) => {
+                    let results = G::new(db, txn)
+                        .search_bm25(&label, &query, limit)?
+                        .collect_to::<Vec<_>>();
 
-        Ok(results)
+                    println!("BM25 search results: {results:?}");
+                    Ok(results)
+                },
+                Ok(None) => {
+                    // BM25 metadata not found - index not initialized yet
+                    debug_println!("BM25 index not initialized yet - returning empty results");
+                    Ok(vec![])
+                },
+                Err(_e) => {
+                    // Error accessing metadata database
+                    debug_println!("Error checking BM25 metadata: {:?} - returning empty results", e);
+                    Ok(vec![])
+                }
+            }
+        } else {
+            // BM25 is not enabled
+            debug_println!("BM25 is not enabled - returning empty results");
+            Ok(vec![])
+        }
     }
 
     fn search_vector_text(
@@ -415,6 +449,7 @@ impl<'a> McpTools<'a> for McpBackend {
         txn: &'a RoTxn,
         _connection: &'a MCPConnection,
         query: String,
+        label: String,
     ) -> Result<Vec<TraversalVal>, GraphError> {
         let db = Arc::clone(&self.db);
 
@@ -423,10 +458,40 @@ impl<'a> McpTools<'a> for McpBackend {
         let embedding = result?;
 
         let res = G::new(db, txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, 5, "UserEmbedding", None)
+            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, 5, &label, None)
             .collect_to::<Vec<_>>();
 
         debug_println!("result: {res:?}");
+        Ok(res)
+    }
+
+    fn search_vector(
+        &'a self,
+        txn: &'a RoTxn,
+        connection: &'a MCPConnection,
+        vector: Vec<f64>,
+        k: usize,
+        min_score: Option<f64>,
+    ) -> Result<Vec<TraversalVal>, GraphError> {
+        let db = Arc::clone(&self.db);
+
+        let items = connection.iter.clone().collect::<Vec<_>>();
+
+        let mut res = G::new_from(db, txn, items)
+            .brute_force_search_v(&vector, k)
+            .collect_to::<Vec<_>>();
+
+        if let Some(min_score) = min_score {
+            res.retain(|item| {
+                if let TraversalVal::Vector(vector) = item {
+                    vector.get_distance() > min_score
+                } else {
+                    false
+                }
+            });
+        }
+
+        println!("result: {res:?}");
         Ok(res)
     }
 }
@@ -449,30 +514,17 @@ pub(super) fn _filter_items(
     let initial_filtered_iter = match &filter.properties {
         Some(properties) => iter
             .filter(move |item| {
-                properties.iter().all(|filter| {
-                    debug_println!("filter: {:?}", filter);
-                    match item.check_property(&filter.key) {
-                        Ok(v) => {
-                            debug_println!("item value for key: {:?} is {:?}", filter.key, v);
-                            match &filter.value {
-                                Value::Array(array) => {
-                                    debug_println!("array: {:?}", array);
-                                    array.iter().any(|value| {
-                                        debug_println!("value in array: {:?}", value);
-                                        match &filter.operator {
-                                            Some(op) => op.execute(&v, value),
-                                            None => v.compare(value, None),
-                                        }
-                                    })
-                                }
-                                _ => match &filter.operator {
-                                    Some(op) => op.execute(&v, &filter.value),
-                                    None => v.compare(&filter.value, None),
-                                },
+                properties.iter().any( |filters| {
+                    filters.iter().all(|filter| {
+                        debug_println!("filter: {:?}", filter);
+                        match item.check_property(&filter.key) {
+                            Ok(v) => {
+                                debug_println!("item value for key: {:?} is {:?}", filter.key, v);
+                                v.compare(&filter.value, filter.operator.clone())
                             }
+                            Err(_) => false,
                         }
-                        Err(_) => false,
-                    }
+                    })
                 })
             })
             .collect::<Vec<_>>(),
@@ -483,9 +535,9 @@ pub(super) fn _filter_items(
 
     let result = initial_filtered_iter
         .into_iter()
-        .map(move |item| match &filter.filter_traversals {
+        .filter_map(move |item| match &filter.filter_traversals {
             Some(filter_traversals) => {
-                filter_traversals.iter().all(|filter| {
+                match filter_traversals.iter().all(|filter| {
                     let result = G::new_from(Arc::clone(&db), txn, vec![item.clone()]);
                     match filter {
                         ToolArgs::OutStep {
@@ -550,11 +602,12 @@ pub(super) fn _filter_items(
                         },
                         _ => false,
                     }
-                });
-
-                item
+                }) {
+                    true => Some(item),
+                    false => None,
+                }
             }
-            None => item,
+            None => Some(item),
         })
         .collect::<Vec<_>>();
 

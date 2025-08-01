@@ -11,8 +11,8 @@ use crate::{
     protocol::value::Value,
 };
 use heed3::{
-    types::{Bytes, Unit},
     Database, Env, RoTxn, RwTxn,
+    types::{Bytes, Unit},
 };
 use itertools::Itertools;
 use rand::prelude::Rng;
@@ -185,7 +185,7 @@ impl VectorCore {
                 continue;
             }
 
-            let vector = self.get_vector(txn, neighbor_id, level, true)?;
+            let vector = self.get_vector(txn, neighbor_id, level, false)?;
 
             let passes_filters = match filter {
                 // TODO: look at implementing a macro that actually just runs each function rather than iterating through
@@ -382,19 +382,27 @@ impl HNSW for VectorCore {
         with_data: bool,
     ) -> Result<HVector, VectorError> {
         let key = Self::vector_key(id, level);
-        let vector = match self.vectors_db.get(txn, key.as_ref())? {
+        match self.vectors_db.get(txn, key.as_ref())? {
             Some(bytes) => {
-                let vector = match with_data {
-                    true => HVector::from_bytes(id, level, bytes),
-                    false => Ok(HVector::from_slice(level, vec![])),
-                }?;
-                Ok(vector)
+                let mut vector = HVector::from_bytes(id, level, bytes)?;
+                match with_data {
+                    true => {
+                        let properties: Option<HashMap<String, Value>> =
+                            match self.vector_data_db.get(txn, &id.to_be_bytes())? {
+                                Some(bytes) => {
+                                    Some(bincode::deserialize(bytes).map_err(VectorError::from)?)
+                                }
+                                None => None,
+                            };
+                        vector.properties = properties;
+                        Ok(vector)
+                    }
+                    false => Ok(vector),
+                }
             }
             None if level > 0 => self.get_vector(txn, id, 0, with_data),
             None => Err(VectorError::VectorNotFound(id.to_string())),
-        }?;
-
-        Ok(vector)
+        }
     }
 
     fn search<F>(
@@ -476,7 +484,14 @@ impl HNSW for VectorCore {
             Err(_) => {
                 self.set_entry_point(txn, &query)?;
                 query.set_distance(0.0);
-                //query.clone()
+
+                if let Some(fields) = fields {
+                    self.vector_data_db.put(
+                        txn,
+                        &query.get_id().to_be_bytes(),
+                        &bincode::serialize(&fields)?,
+                    )?;
+                }
                 return Ok(query);
             }
         };
@@ -487,7 +502,9 @@ impl HNSW for VectorCore {
             let nearest = self.search_level::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
             curr_ep = nearest
                 .peek()
-                .ok_or(VectorError::VectorCoreError("emtpy search result".to_string()))?
+                .ok_or(VectorError::VectorCoreError(
+                    "emtpy search result".to_string(),
+                ))?
                 .clone();
         }
 
@@ -579,4 +596,3 @@ impl HNSW for VectorCore {
             .collect()
     }
 }
-

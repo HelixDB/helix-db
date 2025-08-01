@@ -152,6 +152,32 @@ impl PartialOrd for Value {
 
 impl Eq for Value {}
 
+// impl PartialEq<Value> for Value {
+//     fn eq(&self, other: &Value) -> bool {
+//         match (self, other) {
+//             (Value::String(s), Value::String(o)) => s == o,
+//             (Value::F32(s), Value::F32(o)) => s == o,
+//             (Value::F64(s), Value::F64(o)) => s == o,
+//             (Value::I8(s), Value::I8(o)) => s == o,
+//             (Value::I16(s), Value::I16(o)) => s == o,
+//             (Value::I32(s), Value::I32(o)) => s == o,
+//             (Value::I64(s), Value::I64(o)) => s == o,
+//             (Value::U8(s), Value::U8(o)) => s == o,
+//             (Value::U16(s), Value::U16(o)) => s == o,
+//             (Value::U32(s), Value::U32(o)) => s == o,
+//             (Value::U64(s), Value::U64(o)) => s == o,
+//             (Value::U128(s), Value::U128(o)) => s == o,
+//             (Value::Date(s), Value::Date(o)) => s == o,
+//             (Value::Boolean(s), Value::Boolean(o)) => s == o,
+//             (Value::Array(s), Value::Array(o)) => s == o,
+//             (Value::Empty, Value::Empty) => true,
+//             (Value::Empty, _) => false,
+//             (_, Value::Empty) => false,
+//             (_, _) => false,
+//         }
+//     }
+// }
+
 impl PartialEq<ID> for Value {
     fn eq(&self, other: &ID) -> bool {
         match self {
@@ -1009,6 +1035,7 @@ impl From<Value> for GenRef<String> {
 }
 
 impl FilterValues for Value {
+    #[inline]
     fn compare(&self, value: &Value, operator: Option<Operator>) -> bool {
         debug_println!("comparing value1: {:?}, value2: {:?}", self, value);
         let comparison = match (self, value) {
