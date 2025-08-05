@@ -1,12 +1,11 @@
-use std::collections::HashMap;
-
+use heed3::PutFlags;
 use crate::{
     helix_engine::{
         graph_core::traversal_iter::RwTraversalIterator,
         storage_core::{storage_core::HelixGraphStorage, storage_methods::StorageMethods},
         types::GraphError,
     },
-    protocol::value::Value,
+    protocol::value::{Value},
 };
 
 use super::super::tr_val::TraversalVal;
@@ -54,52 +53,57 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalVal, GraphError>>> UpdateA
             match item {
                 Ok(TraversalVal::Node(node)) => match storage.get_node(self.txn, &node.id) {
                     Ok(mut old_node) => {
-                        if let Some(mut properties) = old_node.properties {
-                            if let Some(ref props) = props {
-                                for (k, v) in props.iter() {
-                                    properties.insert(k.clone(), v.clone());
-                                }
-                            }
-                            for (key, v) in properties.iter() {
+                        let mut properties = old_node.properties.unwrap_or_default();
+
+                        if let Some(ref props) = props {
+                            for (key, _new_value) in props.iter() {
                                 if let Some(db) = storage.secondary_indices.get(key) {
-                                    match bincode::serialize(v) {
-                                        Ok(serialized) => {
-                                            if let Err(e) = db.put(self.txn, &serialized, &node.id)
-                                            {
-                                                vec.push(Err(GraphError::from(e)));
+                                    if let Some(old_value) = properties.get(key) {
+                                        match bincode::serialize(old_value) {
+                                            Ok(old_serialized) => {
+                                                if let Err(e) = db.delete_one_duplicate(self.txn, &old_serialized, &node.id) {
+                                                    vec.push(Err(GraphError::from(e)));
+                                                }
                                             }
+                                            Err(e) => vec.push(Err(GraphError::from(e))),
                                         }
-                                        Err(e) => vec.push(Err(GraphError::from(e))),
                                     }
                                 }
-                            }
-                            old_node.properties = Some(properties);
-                        } else {
-                            let mut properties = HashMap::new();
-                            if let Some(ref props) = props {
-                                for (k, v) in props.iter() {
-                                    properties.insert(k.clone(), v.clone());
-                                }
-                            }
-                            for (key, v) in properties.iter() {
-                                if let Some(db) = storage.secondary_indices.get(key) {
-                                    match bincode::serialize(v) {
-                                        Ok(serialized) => {
-                                            if let Err(e) = db.put(self.txn, &serialized, &node.id)
-                                            {
-                                                vec.push(Err(GraphError::from(e)));
-                                            }
-                                        }
-                                        Err(e) => vec.push(Err(GraphError::from(e))),
-                                    }
-                                }
-                            }
-                            if !properties.is_empty() {
-                                old_node.properties = Some(properties);
-                            } else {
-                                old_node.properties = None;
                             }
                         }
+
+                        if let Some(ref props) = props {
+                            for (k, v) in props.iter() {
+                                properties.insert(k.clone(), v.clone());
+                            }
+                        }
+                        
+                        if let Some(ref props) = props {
+                            for (key, new_value) in props.iter() {
+                                if let Some(db) = storage.secondary_indices.get(key) {
+                                    match bincode::serialize(new_value) {
+                                        Ok(new_serialized) => {
+                                            if let Err(e) = db.put_with_flags(
+                                                self.txn,
+                                                PutFlags::APPEND_DUP,
+                                                &new_serialized,
+                                                &node.id,
+                                            ) {
+                                                vec.push(Err(GraphError::from(e)));
+                                            }
+                                        }
+                                        Err(e) => vec.push(Err(GraphError::from(e))),
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if properties.is_empty() {
+                            old_node.properties = None;
+                        } else {
+                            old_node.properties = Some(properties);
+                        }
+
                         match old_node.encode_node() {
                             Ok(serialized) => {
                                 match storage.nodes_db.put(

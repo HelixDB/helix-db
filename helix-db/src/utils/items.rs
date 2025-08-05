@@ -4,8 +4,8 @@
 //!
 //! Nodes and edges are serialised without enum variant names in JSON format.
 
-use crate::protocol::value::Value;
 use crate::helix_engine::types::GraphError;
+use crate::protocol::value::Value;
 use sonic_rs::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap};
 
@@ -20,6 +20,8 @@ pub struct Node {
     pub id: u128,
     /// The label of the node.
     pub label: String,
+    /// The version of the node.
+    pub version: u8,
     /// The properties of the node.
     ///
     /// Properties are optional and can be None.
@@ -40,11 +42,7 @@ impl Node {
     /// Uses the known ID (either from the query or the key in an LMDB iterator) to construct a new node.
     pub fn decode_node(bytes: &[u8], id: u128) -> Result<Node, GraphError> {
         match bincode::deserialize::<Node>(bytes) {
-            Ok(node) => Ok(Node {
-                id,
-                label: node.label,
-                properties: node.properties,
-            }),
+            Ok(node) => Ok(Node { id, ..node }),
             Err(e) => Err(GraphError::ConversionError(format!(
                 "Error deserializing node: {e}"
             ))),
@@ -106,6 +104,7 @@ pub struct Edge {
     pub id: u128,
     /// The label of the edge.
     pub label: String,
+    pub version: u8,
     /// The ID of the from node.
     pub from_node: u128,
     /// The ID of the to node.
@@ -130,13 +129,7 @@ impl Edge {
     /// Uses the known ID (either from the query or the key in an LMDB iterator) to construct a new edge.
     pub fn decode_edge(bytes: &[u8], id: u128) -> Result<Edge, GraphError> {
         match bincode::deserialize::<Edge>(bytes) {
-            Ok(edge) => Ok(Edge {
-                id,
-                label: edge.label,
-                from_node: edge.from_node,
-                to_node: edge.to_node,
-                properties: edge.properties,
-            }),
+            Ok(edge) => Ok(Edge { id, ..edge }),
             Err(e) => Err(GraphError::ConversionError(format!(
                 "Error deserializing edge: {e}"
             ))),
@@ -151,7 +144,6 @@ impl Edge {
             .map_err(|e| GraphError::ConversionError(format!("Error serializing edge: {e}")))
     }
 }
-
 
 // Core trait implementations for Edge
 impl std::fmt::Display for Edge {
@@ -191,5 +183,3 @@ impl PartialOrd for Edge {
         Some(self.cmp(other))
     }
 }
-
-

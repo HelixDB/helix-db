@@ -30,8 +30,8 @@ pub(super) fn is_valid_identifier(
     }
 }
 
-pub(super) fn is_param(q: &Query, name: &str) -> bool {
-    q.parameters.iter().any(|p| p.name.1 == *name)
+pub(super) fn is_param<'a>(q: &'a Query, name: &str) -> Option<&'a Parameter> {
+    q.parameters.iter().find(|p| p.name.1 == *name)
 }
 
 pub(super) fn gen_identifier_or_param(
@@ -40,22 +40,35 @@ pub(super) fn gen_identifier_or_param(
     should_ref: bool,
     _should_clone: bool,
 ) -> GeneratedValue {
-    if is_param(original_query, name) {
-        if should_ref {
-            GeneratedValue::Parameter(GenRef::Ref(format!("data.{name}")))
-        } else {
-            GeneratedValue::Parameter(GenRef::Std(format!("data.{name}.clone()")))
-        }
-    } else if should_ref {
-        GeneratedValue::Identifier(GenRef::Ref(name.to_string()))
+    if let Some(param) = is_param(original_query, name) {
+        GeneratedValue::Parameter(match (should_ref, param.is_optional) {
+            (true, false) => GenRef::Ref(format!("data.{name}")),
+            // std here because the as_ref returns a reference to the value
+            (true, true) => GenRef::Std(format!(
+                "data.{name}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{name}\"))?"
+            )),
+            (false, false) => GenRef::Std(format!("data.{name}.clone()")),
+            (false, true) => GenRef::Std(format!(
+                "data.{name}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{name}\"))?.clone()"
+            )),
+        })
     } else {
-        GeneratedValue::Identifier(GenRef::Std(format!("{name}.clone()")))
+        GeneratedValue::Identifier(if should_ref {
+            GenRef::Ref(name.to_string())
+        } else {
+            GenRef::Std(format!("{name}.clone()"))
+        })
     }
 }
 
 pub(super) fn gen_id_access_or_param(original_query: &Query, name: &str) -> GeneratedValue {
-    if is_param(original_query, name) {
-        GeneratedValue::Parameter(GenRef::DeRef(format!("data.{name}")))
+    if let Some(param) = is_param(original_query, name) {
+        GeneratedValue::Parameter(match param.is_optional {
+            true => GenRef::DeRef(format!(
+                "data.{name}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{name}\"))?"
+            )),
+            false => GenRef::DeRef(format!("data.{name}")),
+        })
     } else {
         GeneratedValue::Identifier(GenRef::Std(format!("{name}.id()")))
     }

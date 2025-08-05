@@ -7,7 +7,7 @@ use helix_db::{
     helix_engine::graph_core::config::Config,
     helixc::{
         analyzer::analyzer::analyze,
-        generator::{generator_types::Source as GeneratedSource, tsdisplay::ToTypeScript},
+        generator::{Source as GeneratedSource, tsdisplay::ToTypeScript},
         parser::helix_parser::{Content, HelixParser, HxFile, Source},
     },
     utils::styled_string::StyledString,
@@ -829,10 +829,8 @@ pub async fn redeploy_helix_remote(
         "version": "0.1.0",
         "helix_config": config.to_json()
     });
-    println!("{payload:#?}");
     let client = reqwest::Client::new();
-    println!("{user_key}");
-    println!("{}", &cluster);
+
     match client
         .post(
             "http://ec2-184-72-27-116.us-west-1.compute.amazonaws.com:3000/clusters/deploy-queries",

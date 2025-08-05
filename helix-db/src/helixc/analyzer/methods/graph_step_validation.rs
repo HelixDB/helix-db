@@ -18,6 +18,7 @@ use crate::{
                 Step as GeneratedStep, Traversal as GeneratedTraversal,
             },
             utils::{GenRef, GeneratedValue, Separator, VecData},
+            queries::Query as GeneratedQuery,
         },
         parser::helix_parser::*,
     },
@@ -47,6 +48,7 @@ pub(crate) fn apply_graph_step<'a>(
     original_query: &'a Query,
     traversal: &mut GeneratedTraversal,
     scope: &mut HashMap<&'a str, Type>,
+    gen_query: &mut GeneratedQuery,
 ) -> Option<Type> {
     use GraphStepType::*;
     match (&gs.step, cur_ty.base()) {
@@ -380,12 +382,14 @@ pub(crate) fn apply_graph_step<'a>(
                     VecData::Standard(value)
                 }
                 Some(VectorData::Embed(e)) => match &e.value {
-                    EvaluatesToString::Identifier(i) => {
-                        VecData::Embed(gen_identifier_or_param(original_query, i, false, true))
-                    }
-                    EvaluatesToString::StringLiteral(s) => {
-                        VecData::Embed(GeneratedValue::Literal(GenRef::Ref(s.clone())))
-                    }
+                    EvaluatesToString::Identifier(i) => VecData::Embed {
+                        data: gen_identifier_or_param(original_query, i.as_str(), true, false),
+                        model_name: gen_query.embedding_model_to_use.clone(),
+                    },
+                    EvaluatesToString::StringLiteral(s) => VecData::Embed {
+                        data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                        model_name: gen_query.embedding_model_to_use.clone(),
+                    },
                 },
                 _ => {
                     generate_error!(

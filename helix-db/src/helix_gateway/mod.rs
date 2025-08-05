@@ -1,3 +1,4 @@
+pub mod builtin;
 pub mod embedding_providers;
 pub mod gateway;
 mod graphvis;

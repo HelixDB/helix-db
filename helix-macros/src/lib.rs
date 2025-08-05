@@ -5,7 +5,7 @@ extern crate syn;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    Expr, FnArg, Ident, ItemFn, ItemTrait, Pat, Stmt, Token, TraitItem,
+    Expr, FnArg, Ident, ItemFn, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem,
     parse::{Parse, ParseStream},
     parse_macro_input,
 };
@@ -365,4 +365,74 @@ pub fn tool_call(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+// example:
+// #[migration(User, 1 -> 2)]
+// pub fn __migration_User_1_2(props: HashMap<String, Value>) -> HashMap<String, Value> {
+//     field_addition_from_old_field!(props, "username", "username");
+//     props
+// }
+
+impl Parse for MigrationArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(MigrationArgs {
+            item: input.parse()?,
+            _comma: input.parse()?,
+            from_version: input.parse()?,
+            _arrow: input.parse()?,
+            to_version: input.parse()?,
+        })
+    }
+}
+
+
+struct MigrationArgs {
+    item: Ident,
+    _comma: Token![,],
+    from_version: LitInt,
+    _arrow: Token![->],
+    to_version: LitInt,
+}
+
+#[proc_macro_attribute]
+pub fn migration(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as MigrationArgs);
+
+    let input_fn = parse_macro_input!(item as ItemFn);
+    let fn_name = &input_fn.sig.ident;
+    let fn_name_str = fn_name.to_string();
+
+    println!("fn_name_str: {fn_name_str}");
+    // Create a unique static name for each handler
+    let static_name = quote::format_ident!(
+        "_MAIN_HANDLER_REGISTRATION_{}",
+        fn_name.to_string().to_uppercase()
+    );
+    
+    
+    let item = &args.item;
+    let from_version = &args.from_version;
+    let to_version = &args.to_version;
+    
+    let expanded = quote! {
+        #input_fn
+
+
+        #[doc(hidden)]
+        #[used]
+        static #static_name: () = {
+            inventory::submit! {
+                ::helix_db::helix_engine::graph_core::ops::version_info::TransitionSubmission(
+                    ::helix_db::helix_engine::graph_core::ops::version_info::Transition::new(
+                        stringify!(#item),
+                        #from_version,
+                        #to_version,
+                        #fn_name
+                    )
+                )
+            }
+        };
+    };
+    expanded.into()
 }

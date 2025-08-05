@@ -14,7 +14,7 @@ helix-macros = { path = "../helix-macros" }
 # external dependencies
 tokio = { version = "1.44.2", features = ["full"] }
 serde = { version = "1.0.217", features = ["derive"] }
-bincode = "1.3.3" # TODO: Figure out bincode 2 impl with current serde impl
+bincode = "1.3.3"                                                  # TODO: Figure out bincode 2 impl with current serde impl
 sonic-rs = "0.5.0"
 inventory = "0.3.16"
 twox-hash = "2.1.0"
@@ -49,7 +49,7 @@ rand = "0.9.0"
 lazy_static = "1.4.0"
 polars = { version = "0.46.0", features = ["parquet", "lazy", "json"] }
 kdam = "0.3"
-num_cpus = "1.17" # TODO: write ourselves
+num_cpus = "1.17"                                                       # TODO: write ourselves
 
 [features]
 debug-output = ["helix-macros/debug-output"]
@@ -57,12 +57,10 @@ compiler = ["pest", "pest_derive"]
 
 # vector features
 cosine = []
-embed_local = ["reqwest", "url"]
-embed_openai = ["reqwest"]
 
 build = ["compiler"]
-vectors = ["cosine", "embed_openai"]
-server = ["build", "compiler", "vectors"]
+vectors = ["cosine", "url"]
+server = ["build", "compiler", "vectors", "reqwest"]
 full = ["build", "compiler", "vectors"]
 dev = ["debug-output", "server"]
 default = ["server"]
@@ -75,4 +73,3 @@ path = "benches/bm25_benches.rs"
 [[test]]
 name = "hnsw_benches"
 path = "benches/hnsw_benches.rs"
-

@@ -149,6 +149,7 @@ impl Serialize for Date {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DateError {
     ParseError(String),
 }

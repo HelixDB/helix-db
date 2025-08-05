@@ -11,6 +11,8 @@ use tracing::{info, trace, warn};
 
 use super::router::router::{HandlerFn, HelixRouter};
 use crate::helix_engine::graph_core::graph_core::HelixGraphEngineOpts;
+use crate::helix_gateway::builtin::all_nodes_and_edges::nodes_edges_handler;
+use crate::helix_gateway::builtin::nodes_by_label::nodes_by_label_handler;
 use crate::helix_gateway::graphvis;
 use crate::helix_gateway::introspect_schema::introspect_schema_handler;
 use crate::helix_gateway::worker_pool::WorkerPool;
@@ -105,6 +107,8 @@ impl HelixGateway {
             .route("/{*path}", post(post_handler))
             .route("/graphvis", get(graphvis::graphvis_handler))
             .route("/introspect", get(introspect_schema_handler))
+            .route("/nodes-edges", get(nodes_edges_handler))
+            .route("/nodes-by-label", get(nodes_by_label_handler))
             .with_state(Arc::new(AppState {
                 worker_pool,
                 schema_json: self.opts.and_then(|o| o.config.schema),

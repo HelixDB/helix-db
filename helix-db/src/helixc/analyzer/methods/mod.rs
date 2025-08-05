@@ -1,6 +1,7 @@
 pub(super) mod exclude_validation;
 pub(super) mod graph_step_validation;
 pub(super) mod infer_expr_type;
+pub(super) mod migration_validation;
 pub(super) mod object_validation;
 pub(super) mod query_validation;
 pub(super) mod schema_methods;

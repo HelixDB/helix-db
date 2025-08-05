@@ -18,10 +18,11 @@ use crate::{
             },
         },
         generator::{
-            bool_op::{BoolOp, Eq, Gt, Gte, Lt, Lte, Neq},
-            generator_types::{BoExp, Query as GeneratedQuery, Statement as GeneratedStatement},
+            bool_op::{BoExp, BoolOp, Eq, Gt, Gte, Lt, Lte, Neq},
             object_remapping_generation::{ExcludeField, Remapping, RemappingType},
+            queries::Query as GeneratedQuery,
             source_steps::{EFromID, EFromType, NFromID, NFromIndex, NFromType, SourceStep},
+            statements::Statement as GeneratedStatement,
             traversal_steps::{
                 OrderBy, Range, ShouldCollect, Step as GeneratedStep,
                 Traversal as GeneratedTraversal, TraversalType, Where, WhereRef,
@@ -315,16 +316,16 @@ pub(crate) fn validate_traversal<'a>(
                         false,
                     ))
                 }
-                Some(VectorData::Embed(e)) => {
-                    match &e.value {
-                        EvaluatesToString::Identifier(i) => VecData::Embed(
-                            gen_identifier_or_param(original_query, i.as_str(), true, false),
-                        ),
-                        EvaluatesToString::StringLiteral(s) => {
-                            VecData::Embed(GeneratedValue::Literal(GenRef::Ref(s.clone())))
-                        }
-                    }
-                }
+                Some(VectorData::Embed(e)) => match &e.value {
+                    EvaluatesToString::Identifier(i) => VecData::Embed {
+                        data: gen_identifier_or_param(original_query, i.as_str(), true, false),
+                        model_name: gen_query.embedding_model_to_use.clone(),
+                    },
+                    EvaluatesToString::StringLiteral(s) => VecData::Embed {
+                        data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                        model_name: gen_query.embedding_model_to_use.clone(),
+                    },
+                },
                 _ => {
                     generate_error!(
                         ctx,
@@ -465,7 +466,15 @@ pub(crate) fn validate_traversal<'a>(
         let step = &graph_step.step;
         match step {
             StepType::Node(gs) | StepType::Edge(gs) => {
-                match apply_graph_step(ctx, gs, &cur_ty, original_query, gen_traversal, scope) {
+                match apply_graph_step(
+                    ctx,
+                    gs,
+                    &cur_ty,
+                    original_query,
+                    gen_traversal,
+                    scope,
+                    gen_query,
+                ) {
                     Some(new_ty) => {
                         cur_ty = new_ty;
                     }

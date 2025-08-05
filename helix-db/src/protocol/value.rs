@@ -1,6 +1,6 @@
 use crate::debug_println;
 use crate::helix_gateway::mcp::tools::{FilterValues, Operator};
-use crate::protocol::date::Date;
+use crate::protocol::date::{Date, DateError};
 use crate::utils::id::ID;
 use crate::{helix_engine::types::GraphError, helixc::generator::utils::GenRef};
 use chrono::Utc;
@@ -396,6 +396,8 @@ impl PartialOrd<ID> for Value {
     fn partial_cmp(&self, other: &ID) -> Option<Ordering> {
         match self {
             Value::Id(id) => id.partial_cmp(other),
+            Value::String(s) => Some(ID::from(s).partial_cmp(other)?),
+            Value::U128(u) => Some(u.partial_cmp(other)?),
             _ => None,
         }
     }
@@ -1053,5 +1055,369 @@ impl FilterValues for Value {
         };
         debug_println!("comparison: {:?}", comparison);
         comparison
+    }
+}
+
+pub trait CastValue {
+    fn into_i8(self) -> i8;
+    fn into_i16(self) -> i16;
+    fn into_i32(self) -> i32;
+    fn into_i64(self) -> i64;
+    fn into_u8(self) -> u8;
+    fn into_u16(self) -> u16;
+    fn into_u32(self) -> u32;
+    fn into_u64(self) -> u64;
+    fn into_u128(self) -> u128;
+    fn into_date(self) -> Result<Date, DateError>;
+    fn into_boolean(self) -> bool;
+    fn into_id(self) -> ID;
+    fn into_array(self) -> Vec<Value>;
+    fn into_object(self) -> HashMap<String, Value>;
+    fn into_f32(self) -> f32;
+    fn into_f64(self) -> f64;
+}
+
+impl CastValue for Value {
+    fn into_i8(self) -> i8 {
+        match self {
+            Value::I8(i) => i,
+            Value::I16(i) => i as i8,
+            Value::I32(i) => i as i8,
+            Value::I64(i) => i as i8,
+            Value::U8(i) => i as i8,
+            Value::U16(i) => i as i8,
+            Value::U32(i) => i as i8,
+            Value::U64(i) => i as i8,
+            Value::U128(i) => i as i8,
+            Value::F32(i) => i as i8,
+            Value::F64(i) => i as i8,
+            Value::Boolean(i) => i as i8,
+            Value::String(s) => s.parse::<i8>().unwrap(),
+            _ => panic!("Value cannot be cast to i8"),
+        }
+    }
+    fn into_i16(self) -> i16 {
+        match self {
+            Value::I16(i) => i,
+            Value::I8(i) => i as i16,
+            Value::I32(i) => i as i16,
+            Value::I64(i) => i as i16,
+            Value::U8(i) => i as i16,
+            Value::U16(i) => i as i16,
+            Value::U32(i) => i as i16,
+            Value::U64(i) => i as i16,
+            Value::U128(i) => i as i16,
+            Value::F32(i) => i as i16,
+            Value::F64(i) => i as i16,
+            Value::Boolean(i) => i as i16,
+            Value::String(s) => s.parse::<i16>().unwrap(),
+            _ => panic!("Value cannot be cast to i16"),
+        }
+    }
+    fn into_i32(self) -> i32 {
+        match self {
+            Value::I32(i) => i,
+            Value::I8(i) => i as i32,
+            Value::I16(i) => i as i32,
+            Value::I64(i) => i as i32,
+            Value::U8(i) => i as i32,
+            Value::U16(i) => i as i32,
+            Value::U32(i) => i as i32,
+            Value::U64(i) => i as i32,
+            Value::U128(i) => i as i32,
+            Value::F32(i) => i as i32,
+            Value::F64(i) => i as i32,
+            Value::Boolean(i) => i as i32,
+            Value::String(s) => s.parse::<i32>().unwrap(),
+            _ => panic!("Value cannot be cast to i32"),
+        }
+    }
+    fn into_i64(self) -> i64 {
+        match self {
+            Value::I64(i) => i,
+            Value::I8(i) => i as i64,
+            Value::I16(i) => i as i64,
+            Value::I32(i) => i as i64,
+            Value::U8(i) => i as i64,
+            Value::U16(i) => i as i64,
+            Value::U32(i) => i as i64,
+            Value::U64(i) => i as i64,
+            Value::U128(i) => i as i64,
+            Value::F32(i) => i as i64,
+            Value::F64(i) => i as i64,
+            Value::Boolean(i) => i as i64,
+            Value::String(s) => s.parse::<i64>().unwrap(),
+            _ => panic!("Value cannot be cast to i64"),
+        }
+    }
+
+    fn into_u8(self) -> u8 {
+        match self {
+            Value::U8(i) => i,
+            Value::I8(i) => i as u8,
+            Value::I16(i) => i as u8,
+            Value::I32(i) => i as u8,
+            Value::I64(i) => i as u8,
+            Value::U16(i) => i as u8,
+            Value::U32(i) => i as u8,
+            Value::U64(i) => i as u8,
+            Value::U128(i) => i as u8,
+            Value::F32(i) => i as u8,
+            Value::F64(i) => i as u8,
+            Value::Boolean(i) => i as u8,
+            Value::String(s) => s.parse::<u8>().unwrap(),
+            _ => panic!("Value cannot be cast to u8"),
+        }
+    }
+
+    fn into_u16(self) -> u16 {
+        match self {
+            Value::U16(i) => i,
+            Value::I8(i) => i as u16,
+            Value::I16(i) => i as u16,
+            Value::I32(i) => i as u16,
+            Value::I64(i) => i as u16,
+            Value::U8(i) => i as u16,
+            Value::U32(i) => i as u16,
+            Value::U64(i) => i as u16,
+            Value::U128(i) => i as u16,
+            Value::F32(i) => i as u16,
+            Value::F64(i) => i as u16,
+            Value::Boolean(i) => i as u16,
+            Value::String(s) => s.parse::<u16>().unwrap(),
+            _ => panic!("Value cannot be cast to u16"),
+        }
+    }
+
+    fn into_u32(self) -> u32 {
+        match self {
+            Value::U32(i) => i,
+            Value::I8(i) => i as u32,
+            Value::I16(i) => i as u32,
+            Value::I32(i) => i as u32,
+            Value::I64(i) => i as u32,
+            Value::U8(i) => i as u32,
+            Value::U16(i) => i as u32,
+            Value::U64(i) => i as u32,
+            Value::U128(i) => i as u32,
+            Value::F32(i) => i as u32,
+            Value::F64(i) => i as u32,
+            Value::Boolean(i) => i as u32,
+            Value::String(s) => s.parse::<u32>().unwrap(),
+            _ => panic!("Value cannot be cast to u32"),
+        }
+    }
+
+    fn into_u64(self) -> u64 {
+        match self {
+            Value::U64(i) => i,
+            Value::I8(i) => i as u64,
+            Value::I16(i) => i as u64,
+            Value::I32(i) => i as u64,
+            Value::U8(i) => i as u64,
+            Value::U16(i) => i as u64,
+            Value::U32(i) => i as u64,
+            Value::U128(i) => i as u64,
+            Value::F32(i) => i as u64,
+            Value::F64(i) => i as u64,
+            Value::Boolean(i) => i as u64,
+            Value::String(s) => s.parse::<u64>().unwrap(),
+            _ => panic!("Value cannot be cast to u64"),
+        }
+    }
+
+    fn into_u128(self) -> u128 {
+        match self {
+            Value::U128(i) => i,
+            Value::I8(i) => i as u128,
+            Value::I16(i) => i as u128,
+            Value::I32(i) => i as u128,
+            Value::I64(i) => i as u128,
+            Value::U8(i) => i as u128,
+            Value::U16(i) => i as u128,
+            Value::U32(i) => i as u128,
+            Value::U64(i) => i as u128,
+            Value::F32(i) => i as u128,
+            Value::F64(i) => i as u128,
+            Value::Boolean(i) => i as u128,
+            Value::String(s) => s.parse::<u128>().unwrap(),
+            _ => panic!("Value cannot be cast to u128"),
+        }
+    }
+
+    fn into_date(self) -> Result<Date, DateError> {
+        match self {
+            Value::String(s) => Date::new(&Value::String(s)),
+            Value::I64(i) => Date::new(&Value::I64(i)),
+            Value::U64(i) => Date::new(&Value::U64(i)),
+            _ => panic!("Value cannot be cast to date"),
+        }
+    }
+
+    fn into_boolean(self) -> bool {
+        match self {
+            Value::Boolean(b) => b,
+            _ => panic!("Value cannot be cast to boolean"),
+        }
+    }
+
+    fn into_id(self) -> ID {
+        match self {
+            Value::Id(id) => id,
+            Value::String(s) => ID::from(s),
+            Value::U128(i) => ID::from(i),
+            _ => panic!("Value cannot be cast to id"),
+        }
+    }
+
+    fn into_array(self) -> Vec<Value> {
+        match self {
+            Value::Array(a) => a,
+            _ => panic!("Value cannot be cast to array"),
+        }
+    }
+
+    fn into_object(self) -> HashMap<String, Value> {
+        match self {
+            Value::Object(o) => o,
+            _ => panic!("Value cannot be cast to object"),
+        }
+    }
+
+    fn into_f32(self) -> f32 {
+        match self {
+            Value::F32(f) => f,
+            Value::F64(f) => f as f32,
+            Value::I8(i) => i as f32,
+            Value::I16(i) => i as f32,
+            Value::I32(i) => i as f32,
+            Value::I64(i) => i as f32,
+            Value::U8(i) => i as f32,
+            Value::U16(i) => i as f32,
+            Value::U32(i) => i as f32,
+            Value::U64(i) => i as f32,
+            Value::U128(i) => i as f32,
+            Value::String(s) => s.parse::<f32>().unwrap(),
+            _ => panic!("Value cannot be cast to f32"),
+        }
+    }
+
+    fn into_f64(self) -> f64 {
+        match self {
+            Value::F64(f) => f,
+            Value::F32(f) => f as f64,
+            Value::I8(i) => i as f64,
+            Value::I16(i) => i as f64,
+            Value::I32(i) => i as f64,
+            Value::I64(i) => i as f64,
+            Value::U8(i) => i as f64,
+            Value::U16(i) => i as f64,
+            Value::U32(i) => i as f64,
+            Value::U64(i) => i as f64,
+            Value::U128(i) => i as f64,
+            Value::String(s) => s.parse::<f64>().unwrap(),
+            _ => panic!("Value cannot be cast to f64"),
+        }
+    }
+}
+
+pub mod casting {
+    use crate::helixc::parser::helix_parser::FieldType;
+
+    use super::*;
+
+    #[derive(Debug)]
+    pub enum CastType {
+        String,
+        I8,
+        I16,
+        I32,
+        I64,
+        U8,
+        U16,
+        U32,
+        U64,
+        U128,
+        F32,
+        F64,
+        Date,
+        Boolean,
+        Id,
+        Array,
+        Object,
+        Empty,
+    }
+
+    pub fn cast(value: Value, cast_type: CastType) -> Value {
+        match cast_type {
+            CastType::String => Value::String(value.to_string()),
+            CastType::I8 => Value::I8(value.into_i8()),
+            CastType::I16 => Value::I16(value.into_i16()),
+            CastType::I32 => Value::I32(value.into_i32()),
+            CastType::I64 => Value::I64(value.into_i64()),
+            CastType::U8 => Value::U8(value.into_u8()),
+            CastType::U16 => Value::U16(value.into_u16()),
+            CastType::U32 => Value::U32(value.into_u32()),
+            CastType::U64 => Value::U64(value.into_u64()),
+            CastType::U128 => Value::U128(value.into_u128()),
+            CastType::F32 => Value::F32(value.into_f32()),
+            CastType::F64 => Value::F64(value.into_f64()),
+            CastType::Date => Value::Date(value.into_date().unwrap()),
+            CastType::Boolean => Value::Boolean(value.into_boolean()),
+            CastType::Id => Value::Id(value.into_id()),
+            CastType::Array => Value::Array(value.into_array()),
+            CastType::Object => Value::Object(value.into_object()),
+            CastType::Empty => Value::Empty,
+        }
+    }
+
+    impl std::fmt::Display for CastType {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                CastType::String => write!(f, "String"),
+                CastType::I8 => write!(f, "I8"),
+                CastType::I16 => write!(f, "I16"),
+                CastType::I32 => write!(f, "I32"),
+                CastType::I64 => write!(f, "I64"),
+                CastType::U8 => write!(f, "U8"),
+                CastType::U16 => write!(f, "U16"),
+                CastType::U32 => write!(f, "U32"),
+                CastType::U64 => write!(f, "U64"),
+                CastType::U128 => write!(f, "U128"),
+                CastType::F32 => write!(f, "F32"),
+                CastType::F64 => write!(f, "F64"),
+                CastType::Date => write!(f, "Date"),
+                CastType::Boolean => write!(f, "Boolean"),
+                CastType::Id => write!(f, "Id"),
+                CastType::Array => write!(f, "Array"),
+                CastType::Object => write!(f, "Object"),
+                CastType::Empty => write!(f, "Empty"),
+            }
+        }
+    }
+
+    impl From<FieldType> for CastType {
+        fn from(value: FieldType) -> Self {
+            match value {
+                FieldType::String => CastType::String,
+                FieldType::I8 => CastType::I8,
+                FieldType::I16 => CastType::I16,
+                FieldType::I32 => CastType::I32,
+                FieldType::I64 => CastType::I64,
+                FieldType::U8 => CastType::U8,
+                FieldType::U16 => CastType::U16,
+                FieldType::U32 => CastType::U32,
+                FieldType::U64 => CastType::U64,
+                FieldType::U128 => CastType::U128,
+                FieldType::F32 => CastType::F32,
+                FieldType::F64 => CastType::F64,
+                FieldType::Date => CastType::Date,
+                FieldType::Boolean => CastType::Boolean,
+                FieldType::Uuid => CastType::Id,
+                FieldType::Array(_) => CastType::Array,
+                FieldType::Object(_) => CastType::Object,
+                _ => CastType::Empty,
+            }
+        }
     }
 }

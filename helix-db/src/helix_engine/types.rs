@@ -27,6 +27,7 @@ pub enum GraphError {
     SliceLengthError,
     ShortestPathNotFound,
     EmbeddingError(String),
+    ParamNotFound(&'static str),
 }
 
 impl std::error::Error for GraphError {}
@@ -59,6 +60,7 @@ impl fmt::Display for GraphError {
             GraphError::VectorError(msg) => write!(f, "Vector error: {msg}"),
             GraphError::ShortestPathNotFound => write!(f, "Shortest path not found"),
             GraphError::EmbeddingError(msg) => write!(f, "Error while embedding text: {msg}"),
+            GraphError::ParamNotFound(param) => write!(f, "Parameter {param} not found in request"),
         }
     }
 }

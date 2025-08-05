@@ -7,10 +7,14 @@ use crate::{
             g::G,
             in_::{in_e::InEdgesAdapter, to_n::ToNAdapter, to_v::ToVAdapter},
             out::{from_n::FromNAdapter, from_v::FromVAdapter, out::OutAdapter},
-            source::{add_n::AddNAdapter, e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
+            source::{
+                add_n::AddNAdapter, e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter,
+                n_from_index::NFromIndexAdapter,
+            },
             tr_val::{Traversable, TraversalVal},
             util::{
-                dedup::DedupAdapter, map::MapAdapter, order::OrderByAdapter, props::PropsAdapter, range::RangeAdapter
+                dedup::DedupAdapter, map::MapAdapter, order::OrderByAdapter, props::PropsAdapter,
+                range::RangeAdapter,
             },
             vectors::brute_force_search::BruteForceSearchVAdapter,
         },
@@ -55,7 +59,12 @@ use super::ops::{
 fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().to_str().unwrap();
-    let storage = HelixGraphStorage::new(db_path, super::config::Config::default()).unwrap();
+    let storage = HelixGraphStorage::new(
+        db_path,
+        super::config::Config::default(),
+        Default::default(),
+    )
+    .unwrap();
     (Arc::new(storage), temp_dir)
 }
 
@@ -1958,7 +1967,12 @@ fn test_vector_search() {
 
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
-        .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 2000, "vector", None)
+        .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            2000,
+            "vector",
+            None,
+        )
         .collect_to::<Vec<_>>();
     // traversal.reverse();
 
@@ -2593,12 +2607,8 @@ fn test_vector_deletion_in_existing_graph() {
     }
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(
-                &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                "vector",
-                None,
-            )
-            .collect_to_val();
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], "vector", None)
+        .collect_to_val();
 
     for other_vector in &other_vectors {
         let random_vector = other_vectors[rand::rng().random_range(0..other_vectors.len())].id();
@@ -2613,24 +2623,10 @@ fn test_vector_deletion_in_existing_graph() {
             )
             .collect_to_val();
         let _ = G::new_mut(Arc::clone(&storage), &mut txn)
-            .add_e(
-                "knows",
-                None,
-                node.id(),
-                vector.id(),
-                false,
-                EdgeType::Vec,
-            )
+            .add_e("knows", None, node.id(), vector.id(), false, EdgeType::Vec)
             .collect_to_val();
         let _ = G::new_mut(Arc::clone(&storage), &mut txn)
-            .add_e(
-                "knows",
-                None,
-                vector.id(),
-                node.id(),
-                false,
-                EdgeType::Node,
-            )
+            .add_e("knows", None, vector.id(), node.id(), false, EdgeType::Node)
             .collect_to_val();
     }
 
@@ -2683,6 +2679,52 @@ fn test_vector_deletion_in_existing_graph() {
             false
         }
     }));
+
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_update_of_secondary_indices() {
+    let (storage, _) = {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        let mut config = super::config::Config::default();
+        config.graph_config.as_mut().unwrap().secondary_indices = Some(vec!["name".to_string()]);
+        let storage = HelixGraphStorage::new(db_path, config, Default::default()).unwrap();
+        (Arc::new(storage), temp_dir)
+    };
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let node = G::new_mut(Arc::clone(&storage), &mut txn)
+        .add_n("person", Some(props! { "name" => "John" }), Some(&["name"]))
+        .collect_to_val();
+
+    let _ = G::new_mut_from(Arc::clone(&storage), &mut txn, node)
+        .update(Some(props! { "name" => "Jane" }))
+        .collect_to_val();
+
+    txn.commit().unwrap();
+
+    let txn = storage.graph_env.read_txn().unwrap();
+
+    let node = G::new(Arc::clone(&storage), &txn)
+        .n_from_index("name", &"Jane".to_string())
+        .collect_to::<Vec<_>>();
+    assert_eq!(node.len(), 1);
+    assert_eq!(node[0].id(), node.id());
+    if let TraversalVal::Node(node) = &node[0] {
+        assert_eq!(
+            *node.properties.as_ref().unwrap().get("name").unwrap(),
+            "Jane".to_string()
+        );
+    } else {
+        panic!("Node not found");
+    }
+
+    let node = G::new(Arc::clone(&storage), &txn)
+        .n_from_index("name", &"John".to_string())
+        .collect_to::<Vec<_>>();
+    assert_eq!(node.len(), 0);
 
     txn.commit().unwrap();
 }

@@ -9,10 +9,10 @@ use crate::{
             types::Type, utils::is_valid_identifier,
         },
         generator::{
-            generator_types::{
+            queries::Query as GeneratedQuery, statements::Statement as GeneratedStatement,
+            statements::{
                 Assignment as GeneratedAssignment, Drop as GeneratedDrop,
                 ForEach as GeneratedForEach, ForLoopInVariable, ForVariable,
-                Query as GeneratedQuery, Statement as GeneratedStatement,
             },
             utils::GenRef,
         },

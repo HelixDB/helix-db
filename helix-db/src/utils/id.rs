@@ -16,7 +16,7 @@ use sonic_rs::{Deserialize, Serialize};
 /// A wrapper around a 128-bit UUID.
 ///
 /// This is used to represent the ID of a node or edge.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(transparent)]
 /// The inner ID.
 pub struct ID(u128);
@@ -82,6 +82,23 @@ impl Deref for ID {
 impl From<u128> for ID {
     fn from(id: u128) -> Self {
         ID(id)
+    }
+}
+
+impl From<String> for ID {
+    fn from(id: String) -> Self {
+        ID(uuid::Uuid::parse_str(&id).unwrap().as_u128())
+    }
+}
+impl From<&String> for ID {
+    fn from(id: &String) -> Self {
+        ID(uuid::Uuid::parse_str(id).unwrap().as_u128())
+    }
+}
+
+impl From<&str> for ID {
+    fn from(id: &str) -> Self {
+        ID(uuid::Uuid::parse_str(id).unwrap().as_u128())
     }
 }
 

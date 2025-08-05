@@ -1,6 +1,8 @@
 use core::fmt;
 use std::fmt::Display;
 
+use crate::helixc::generator::traversal_steps::Traversal;
+
 use super::utils::GeneratedValue;
 
 #[derive(Clone)]
@@ -94,5 +96,38 @@ pub struct Contains {
 impl Display for Contains {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, ".contains({})", self.value)
+    }
+}
+
+
+/// Boolean expression is used for a traversal or set of traversals wrapped in AND/OR
+/// that resolve to a boolean value
+#[derive(Clone)]
+pub enum BoExp {
+    And(Vec<BoExp>),
+    Or(Vec<BoExp>),
+    Exists(Traversal),
+    Expr(Traversal),
+}
+impl Display for BoExp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BoExp::And(traversals) => {
+                let tr = traversals
+                    .iter()
+                    .map(|s| format!("{s}"))
+                    .collect::<Vec<_>>();
+                write!(f, "{}", tr.join(" && "))
+            }
+            BoExp::Or(traversals) => {
+                let tr = traversals
+                    .iter()
+                    .map(|s| format!("{s}"))
+                    .collect::<Vec<_>>();
+                write!(f, "{}", tr.join(" || "))
+            }
+            BoExp::Exists(traversal) => write!(f, "Exist::exists(&mut {traversal})"),
+            BoExp::Expr(traversal) => write!(f, "{traversal}"),
+        }
     }
 }

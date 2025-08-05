@@ -4,6 +4,7 @@ use super::{
 };
 use crate::protocol::value::Value;
 use chrono::{DateTime, NaiveDate, Utc};
+use itertools::Itertools;
 use pest::{
     Parser as PestParser,
     iterators::{Pair, Pairs},
@@ -39,9 +40,8 @@ impl Default for HelixParser {
         HelixParser {
             source: Source {
                 source: String::new(),
-                node_schemas: Vec::new(),
-                edge_schemas: Vec::new(),
-                vector_schemas: Vec::new(),
+                schema: HashMap::new(),
+                migrations: Vec::new(),
                 queries: Vec::new(),
             },
         }
@@ -52,10 +52,39 @@ impl Default for HelixParser {
 #[derive(Debug, Clone, Default)]
 pub struct Source {
     pub source: String,
+    pub schema: HashMap<usize, Schema>,
+    pub migrations: Vec<Migration>,
+    pub queries: Vec<Query>,
+}
+
+impl Source {
+    pub fn get_latest_schema(&self) -> &Schema {
+        let latest_schema = self
+            .schema
+            .iter()
+            .max_by(|a, b| a.1.version.1.cmp(&b.1.version.1))
+            .map(|(_, schema)| schema);
+        assert!(latest_schema.is_some());
+        latest_schema.unwrap()
+    }
+
+    /// Gets the schemas in order of version, from oldest to newest.
+    pub fn get_schemas_in_order(&self) -> Vec<&Schema> {
+        self.schema
+            .iter()
+            .sorted_by(|a, b| a.1.version.1.cmp(&b.1.version.1))
+            .map(|(_, schema)| schema)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Schema {
+    pub loc: Loc,
+    pub version: (Loc, usize),
     pub node_schemas: Vec<NodeSchema>,
     pub edge_schemas: Vec<EdgeSchema>,
     pub vector_schemas: Vec<VectorSchema>,
-    pub queries: Vec<Query>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +108,65 @@ pub struct EdgeSchema {
     pub to: (Loc, String),
     pub properties: Option<Vec<Field>>,
     pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct Migration {
+    pub from_version: (Loc, usize),
+    pub to_version: (Loc, usize),
+    pub body: Vec<MigrationItemMapping>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub enum MigrationItem {
+    Node(String),
+    Edge(String),
+    Vector(String),
+}
+
+impl MigrationItem {
+    pub fn inner(&self) -> &str {
+        match self {
+            MigrationItem::Node(s) => s,
+            MigrationItem::Edge(s) => s,
+            MigrationItem::Vector(s) => s,
+        }
+    }
+}
+
+impl PartialEq<MigrationItem> for MigrationItem {
+    fn eq(&self, other: &MigrationItem) -> bool {
+        match (self, other) {
+            (MigrationItem::Node(a), MigrationItem::Node(b)) => a == b,
+            (MigrationItem::Edge(a), MigrationItem::Edge(b)) => a == b,
+            (MigrationItem::Vector(a), MigrationItem::Vector(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MigrationItemMapping {
+    pub from_item: (Loc, MigrationItem),
+    pub to_item: (Loc, MigrationItem),
+    pub remappings: Vec<MigrationPropertyMapping>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct MigrationPropertyMapping {
+    pub property_name: (Loc, String),
+    pub property_value: FieldValue,
+    pub default: Option<DefaultValue>,
+    pub cast: Option<ValueCast>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValueCast {
+    pub loc: Loc,
+    pub cast_to: FieldType,
 }
 
 #[derive(Debug, Clone)]
@@ -271,10 +359,52 @@ impl PartialEq<Value> for FieldType {
     }
 }
 
+impl PartialEq<DefaultValue> for FieldType {
+    fn eq(&self, other: &DefaultValue) -> bool {
+        match (self, other) {
+            (FieldType::String, DefaultValue::String(_)) => true,
+            (FieldType::F32 | FieldType::F64, DefaultValue::F32(_) | DefaultValue::F64(_)) => true,
+            (
+                FieldType::I8
+                | FieldType::I16
+                | FieldType::I32
+                | FieldType::I64
+                | FieldType::U8
+                | FieldType::U16
+                | FieldType::U32
+                | FieldType::U64
+                | FieldType::U128,
+                DefaultValue::I8(_)
+                | DefaultValue::I16(_)
+                | DefaultValue::I32(_)
+                | DefaultValue::I64(_)
+                | DefaultValue::U8(_)
+                | DefaultValue::U16(_)
+                | DefaultValue::U32(_)
+                | DefaultValue::U64(_)
+                | DefaultValue::U128(_),
+            ) => true,
+            (FieldType::Boolean, DefaultValue::Boolean(_)) => true,
+            (FieldType::Date, DefaultValue::String(date)) => {
+                println!("date: {}, {:?}", date, date.parse::<NaiveDate>());
+                date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
+            }
+            (FieldType::Date, DefaultValue::I64(timestamp)) => {
+                DateTime::from_timestamp(*timestamp, 0).is_some()
+            }
+            (FieldType::Date, DefaultValue::U64(timestamp)) => {
+                DateTime::from_timestamp(*timestamp as i64, 0).is_some()
+            }
+            (FieldType::Date, DefaultValue::Now) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Query {
     pub original_query: String,
-    pub is_mcp: bool,
+    pub built_in_macro: Option<BuiltInMacro>,
     pub name: String,
     pub parameters: Vec<Parameter>,
     pub statements: Vec<Statement>,
@@ -286,6 +416,7 @@ pub struct Query {
 pub struct Parameter {
     pub name: (Loc, String),
     pub param_type: (Loc, FieldType),
+    pub is_optional: bool,
     pub loc: Loc,
 }
 
@@ -810,13 +941,18 @@ pub struct Closure {
     pub loc: Loc,
 }
 
+#[derive(Debug, Clone)]
+pub enum BuiltInMacro {
+    MCP,
+    Model(String),
+}
+
 impl HelixParser {
     pub fn parse_source(input: &Content) -> Result<Source, ParserError> {
         let mut source = Source {
             source: String::new(),
-            node_schemas: Vec::new(),
-            edge_schemas: Vec::new(),
-            vector_schemas: Vec::new(),
+            schema: HashMap::new(),
+            migrations: Vec::new(),
             queries: Vec::new(),
         };
 
@@ -836,32 +972,110 @@ impl HelixParser {
             };
 
             let pairs = pair.into_inner();
-            let mut remaining = HashSet::new();
+            let mut remaining_queries = HashSet::new();
+            let mut remaining_migrations = HashSet::new();
             for pair in pairs {
                 match pair.as_rule() {
-                    Rule::node_def => {
-                        let node_schema = parser.parse_node_def(pair, file.name.clone())?;
-                        parser.source.node_schemas.push(node_schema);
+                    Rule::schema_def => {
+                        let mut schema_pairs = pair.into_inner();
+
+                        let schema_version = match schema_pairs.peek() {
+                            Some(pair) => {
+                                if pair.as_rule() == Rule::schema_version {
+                                    schema_pairs
+                                        .next()
+                                        .unwrap()
+                                        .into_inner()
+                                        .next()
+                                        .unwrap()
+                                        .as_str()
+                                        .parse::<usize>()
+                                        .unwrap()
+                                } else {
+                                    1
+                                }
+                            }
+                            None => 1,
+                        };
+
+                        for pair in schema_pairs {
+                            match pair.as_rule() {
+                                Rule::node_def => {
+                                    let node_schema =
+                                        parser.parse_node_def(pair.clone(), file.name.clone())?;
+                                    parser
+                                        .source
+                                        .schema
+                                        .entry(schema_version)
+                                        .and_modify(|schema| {
+                                            schema.node_schemas.push(node_schema.clone())
+                                        })
+                                        .or_insert(Schema {
+                                            loc: pair.loc(),
+                                            version: (pair.loc(), schema_version),
+                                            node_schemas: vec![node_schema],
+                                            edge_schemas: vec![],
+                                            vector_schemas: vec![],
+                                        });
+                                }
+                                Rule::edge_def => {
+                                    let edge_schema =
+                                        parser.parse_edge_def(pair.clone(), file.name.clone())?;
+                                    parser
+                                        .source
+                                        .schema
+                                        .entry(schema_version)
+                                        .and_modify(|schema| {
+                                            schema.edge_schemas.push(edge_schema.clone())
+                                        })
+                                        .or_insert(Schema {
+                                            loc: pair.loc(),
+                                            version: (pair.loc(), schema_version),
+                                            node_schemas: vec![],
+                                            edge_schemas: vec![edge_schema],
+                                            vector_schemas: vec![],
+                                        });
+                                }
+                                Rule::vector_def => {
+                                    let vector_schema =
+                                        parser.parse_vector_def(pair.clone(), file.name.clone())?;
+                                    parser
+                                        .source
+                                        .schema
+                                        .entry(schema_version)
+                                        .and_modify(|schema| {
+                                            schema.vector_schemas.push(vector_schema.clone())
+                                        })
+                                        .or_insert(Schema {
+                                            loc: pair.loc(),
+                                            version: (pair.loc(), schema_version),
+                                            node_schemas: vec![],
+                                            edge_schemas: vec![],
+                                            vector_schemas: vec![vector_schema],
+                                        });
+                                }
+                                _ => return Err(ParserError::from("Unexpected rule encountered")),
+                            }
+                        }
                     }
-                    Rule::edge_def => {
-                        let edge_schema = parser.parse_edge_def(pair, file.name.clone())?;
-                        parser.source.edge_schemas.push(edge_schema);
-                    }
-                    Rule::vector_def => {
-                        let vector_schema = parser.parse_vector_def(pair, file.name.clone())?;
-                        parser.source.vector_schemas.push(vector_schema);
+                    Rule::migration_def => {
+                        remaining_migrations.insert(pair);
                     }
                     Rule::query_def => {
                         // parser.source.queries.push(parser.parse_query_def(pairs.next().unwrap())?),
-                        remaining.insert(pair);
+                        remaining_queries.insert(pair);
                     }
                     Rule::EOI => (),
                     _ => return Err(ParserError::from("Unexpected rule encountered")),
                 }
             }
 
-            for pair in remaining {
-                // println!("{:?}", parser.source);
+            for pair in remaining_migrations {
+                let migration = parser.parse_migration_def(pair, file.name.clone())?;
+                parser.source.migrations.push(migration);
+            }
+
+            for pair in remaining_queries {
                 parser
                     .source
                     .queries
@@ -869,10 +1083,9 @@ impl HelixParser {
             }
 
             // parse all schemas first then parse queries using self
-            source.node_schemas.extend(parser.source.node_schemas);
-            source.edge_schemas.extend(parser.source.edge_schemas);
-            source.vector_schemas.extend(parser.source.vector_schemas);
+            source.schema.extend(parser.source.schema);
             source.queries.extend(parser.source.queries);
+            source.migrations.extend(parser.source.migrations);
             Ok(())
         })?;
 
@@ -920,6 +1133,290 @@ impl HelixParser {
             .into_inner()
             .map(|p| self.parse_field_def(p))
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn parse_migration_def(
+        &self,
+        pair: Pair<Rule>,
+        filepath: String,
+    ) -> Result<Migration, ParserError> {
+        let mut pairs = pair.clone().into_inner();
+        let from_version = pairs.next().unwrap().into_inner().next().unwrap();
+        let to_version = pairs.next().unwrap().into_inner().next().unwrap();
+
+        // migration body -> [migration-item-mapping, migration-item-mapping, ...]
+        let body = pairs
+            .next()
+            .unwrap()
+            .into_inner()
+            .map(|p| self.parse_migration_item_mapping(p))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Migration {
+            from_version: (
+                from_version.loc(),
+                from_version.as_str().parse::<usize>().unwrap(),
+            ),
+            to_version: (
+                to_version.loc(),
+                to_version.as_str().parse::<usize>().unwrap(),
+            ),
+            body,
+            loc: pair.loc_with_filepath(filepath),
+        })
+    }
+
+    fn parse_migration_item_mapping(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<MigrationItemMapping, ParserError> {
+        let mut pairs = pair.clone().into_inner();
+        let from_item_type = match pairs.next() {
+            Some(item_def) => match item_def.into_inner().next() {
+                Some(item_decl) => match item_decl.as_rule() {
+                    Rule::node_decl => (
+                        item_decl.loc(),
+                        MigrationItem::Node(
+                            item_decl.into_inner().next().unwrap().as_str().to_string(),
+                        ),
+                    ),
+                    Rule::edge_decl => (
+                        item_decl.loc(),
+                        MigrationItem::Edge(
+                            item_decl.into_inner().next().unwrap().as_str().to_string(),
+                        ),
+                    ),
+                    Rule::vec_decl => (
+                        item_decl.loc(),
+                        MigrationItem::Vector(
+                            item_decl.into_inner().next().unwrap().as_str().to_string(),
+                        ),
+                    ),
+                    _ => {
+                        return Err(ParserError::from(format!(
+                            "Expected item declaration, got {:?}",
+                            item_decl.as_rule()
+                        )));
+                    }
+                },
+                None => {
+                    return Err(ParserError::from(format!(
+                        "Expected item declaration, got {:?}",
+                        pair.as_rule()
+                    )));
+                }
+            },
+            _ => {
+                return Err(ParserError::from(format!(
+                    "Expected item declaration, got {:?}",
+                    pair.as_rule()
+                )));
+            }
+        };
+
+        let to_item_type = match pairs.next() {
+            Some(pair) => match pair.as_rule() {
+                Rule::item_def => match pair.into_inner().next() {
+                    Some(item_decl) => match item_decl.as_rule() {
+                        Rule::node_decl => (
+                            item_decl.loc(),
+                            MigrationItem::Node(
+                                item_decl.into_inner().next().unwrap().as_str().to_string(),
+                            ),
+                        ),
+                        Rule::edge_decl => (
+                            item_decl.loc(),
+                            MigrationItem::Edge(
+                                item_decl.into_inner().next().unwrap().as_str().to_string(),
+                            ),
+                        ),
+                        Rule::vec_decl => (
+                            item_decl.loc(),
+                            MigrationItem::Vector(
+                                item_decl.into_inner().next().unwrap().as_str().to_string(),
+                            ),
+                        ),
+                        _ => {
+                            return Err(ParserError::from(format!(
+                                "Expected item declaration, got {:?}",
+                                item_decl.as_rule()
+                            )));
+                        }
+                    },
+                    None => {
+                        return Err(ParserError::from(format!(
+                            "Expected item, got {:?}",
+                            pairs.peek()
+                        )));
+                    }
+                },
+                Rule::anon_decl => from_item_type.clone(),
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Invalid item declaration, got {:?}",
+                        pair.as_rule()
+                    )));
+                }
+            },
+            None => {
+                return Err(ParserError::from(format!(
+                    "Expected item_def, got {:?}",
+                    pairs.peek()
+                )));
+            }
+        };
+        let remappings = match pairs.next() {
+            Some(p) => match p.as_rule() {
+                Rule::node_migration => p
+                    .into_inner()
+                    .next()
+                    .unwrap()
+                    .into_inner()
+                    .map(|p| self.parse_field_migration(p))
+                    .collect::<Result<Vec<_>, _>>()?,
+                Rule::edge_migration => p
+                    .into_inner()
+                    .next()
+                    .unwrap()
+                    .into_inner()
+                    .map(|p| self.parse_field_migration(p))
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => {
+                    return Err(ParserError::from(
+                        "Expected node_migration or edge_migration",
+                    ));
+                }
+            },
+            None => {
+                return Err(ParserError::from(
+                    "Expected node_migration or edge_migration",
+                ));
+            }
+        };
+        // let remappings = Vec::new();
+        // for pair in pairs {
+        //     match pair.as_rule() {
+        //         Rule::node_migration => {
+        //             remappings.push(self.parse_field_migration(pair.into_inner().next().unwrap())?);
+        //         }
+        //         Rule::edge_migration => {
+        //             remappings.push(self.parse_field_migration(pair.into_inner().next().unwrap())?);
+        //         }
+        //     }
+        // }
+
+        Ok(MigrationItemMapping {
+            from_item: from_item_type,
+            to_item: to_item_type,
+            remappings,
+            loc: pair.loc(),
+        })
+    }
+
+    fn parse_default_value(
+        &self,
+        pairs: &mut Pairs<Rule>,
+        field_type: &FieldType,
+    ) -> Option<DefaultValue> {
+        match pairs.peek() {
+            Some(pair) => {
+                if pair.as_rule() == Rule::default {
+                    pairs.next();
+                    let default_value = match pair.into_inner().next() {
+                        Some(pair) => match pair.as_rule() {
+                            Rule::string_literal => DefaultValue::String(pair.as_str().to_string()),
+                            Rule::float => {
+                                match field_type {
+                                    FieldType::F32 => {
+                                        DefaultValue::F32(pair.as_str().parse::<f32>().unwrap())
+                                    }
+                                    FieldType::F64 => {
+                                        DefaultValue::F64(pair.as_str().parse::<f64>().unwrap())
+                                    }
+                                    _ => unreachable!(), // throw error
+                                }
+                            }
+                            Rule::integer => {
+                                match field_type {
+                                    FieldType::I8 => {
+                                        DefaultValue::I8(pair.as_str().parse::<i8>().unwrap())
+                                    }
+                                    FieldType::I16 => {
+                                        DefaultValue::I16(pair.as_str().parse::<i16>().unwrap())
+                                    }
+                                    FieldType::I32 => {
+                                        DefaultValue::I32(pair.as_str().parse::<i32>().unwrap())
+                                    }
+                                    FieldType::I64 => {
+                                        DefaultValue::I64(pair.as_str().parse::<i64>().unwrap())
+                                    }
+                                    FieldType::U8 => {
+                                        DefaultValue::U8(pair.as_str().parse::<u8>().unwrap())
+                                    }
+                                    FieldType::U16 => {
+                                        DefaultValue::U16(pair.as_str().parse::<u16>().unwrap())
+                                    }
+                                    FieldType::U32 => {
+                                        DefaultValue::U32(pair.as_str().parse::<u32>().unwrap())
+                                    }
+                                    FieldType::U64 => {
+                                        DefaultValue::U64(pair.as_str().parse::<u64>().unwrap())
+                                    }
+                                    FieldType::U128 => {
+                                        DefaultValue::U128(pair.as_str().parse::<u128>().unwrap())
+                                    }
+                                    _ => unreachable!(), // throw error
+                                }
+                            }
+                            Rule::now => DefaultValue::Now,
+                            Rule::boolean => {
+                                DefaultValue::Boolean(pair.as_str().parse::<bool>().unwrap())
+                            }
+                            _ => unreachable!(), // throw error
+                        },
+                        None => DefaultValue::Empty,
+                    };
+                    Some(default_value)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
+    fn parse_cast(&self, pair: Pair<Rule>) -> Option<ValueCast> {
+        match pair.as_rule() {
+            Rule::cast => Some(ValueCast {
+                loc: pair.loc(),
+                cast_to: self
+                    .parse_field_type(pair.into_inner().next().unwrap(), None)
+                    .ok()?,
+            }),
+            _ => None,
+        }
+    }
+
+    fn parse_field_migration(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<MigrationPropertyMapping, ParserError> {
+        let mut pairs = pair.clone().into_inner();
+        let property_name = pairs.next().unwrap();
+        let property_value = pairs.next().unwrap();
+        let cast = if let Some(cast_pair) = pairs.next() {
+            self.parse_cast(cast_pair)
+        } else {
+            None
+        };
+
+        Ok(MigrationPropertyMapping {
+            property_name: (property_name.loc(), property_name.as_str().to_string()),
+            property_value: self.parse_field_value(property_value)?,
+            default: None,
+            cast,
+            loc: pair.loc(),
+        })
     }
 
     fn parse_field_type(
@@ -1008,70 +1505,7 @@ impl HelixParser {
             Some(&self.source),
         )?;
 
-        let defaults = match pairs.next() {
-            Some(pair) => {
-                if pair.as_rule() == Rule::default {
-                    let default_value = match pair.into_inner().next() {
-                        Some(pair) => match pair.as_rule() {
-                            Rule::string_literal => DefaultValue::String(pair.as_str().to_string()),
-                            Rule::float => {
-                                match field_type {
-                                    FieldType::F32 => {
-                                        DefaultValue::F32(pair.as_str().parse::<f32>().unwrap())
-                                    }
-                                    FieldType::F64 => {
-                                        DefaultValue::F64(pair.as_str().parse::<f64>().unwrap())
-                                    }
-                                    _ => unreachable!(), // throw error
-                                }
-                            }
-                            Rule::integer => {
-                                match field_type {
-                                    FieldType::I8 => {
-                                        DefaultValue::I8(pair.as_str().parse::<i8>().unwrap())
-                                    }
-                                    FieldType::I16 => {
-                                        DefaultValue::I16(pair.as_str().parse::<i16>().unwrap())
-                                    }
-                                    FieldType::I32 => {
-                                        DefaultValue::I32(pair.as_str().parse::<i32>().unwrap())
-                                    }
-                                    FieldType::I64 => {
-                                        DefaultValue::I64(pair.as_str().parse::<i64>().unwrap())
-                                    }
-                                    FieldType::U8 => {
-                                        DefaultValue::U8(pair.as_str().parse::<u8>().unwrap())
-                                    }
-                                    FieldType::U16 => {
-                                        DefaultValue::U16(pair.as_str().parse::<u16>().unwrap())
-                                    }
-                                    FieldType::U32 => {
-                                        DefaultValue::U32(pair.as_str().parse::<u32>().unwrap())
-                                    }
-                                    FieldType::U64 => {
-                                        DefaultValue::U64(pair.as_str().parse::<u64>().unwrap())
-                                    }
-                                    FieldType::U128 => {
-                                        DefaultValue::U128(pair.as_str().parse::<u128>().unwrap())
-                                    }
-                                    _ => unreachable!(), // throw error
-                                }
-                            }
-                            Rule::now => DefaultValue::Now,
-                            Rule::boolean => {
-                                DefaultValue::Boolean(pair.as_str().parse::<bool>().unwrap())
-                            }
-                            _ => unreachable!(), // throw error
-                        },
-                        None => DefaultValue::Empty,
-                    };
-                    Some(default_value)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
+        let defaults = self.parse_default_value(&mut pairs, &field_type);
 
         Ok(Field {
             prefix,
@@ -1127,21 +1561,31 @@ impl HelixParser {
     fn parse_query_def(&self, pair: Pair<Rule>, filepath: String) -> Result<Query, ParserError> {
         let original_query = pair.clone().as_str().to_string();
         let mut pairs = pair.clone().into_inner();
-        let is_mcp = match pairs.peek() {
-            Some(pair) if pair.as_rule() == Rule::mcp_macro => {
+        let built_in_macro = match pairs.peek() {
+            Some(pair) if pair.as_rule() == Rule::built_in_macro => {
+                let built_in_macro = match pair.into_inner().next() {
+                    Some(pair) => match pair.as_rule() {
+                        Rule::mcp_macro => Some(BuiltInMacro::MCP),
+                        Rule::model_macro => Some(BuiltInMacro::Model(
+                            pair.into_inner().next().unwrap().as_str().to_string(),
+                        )),
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 pairs.next();
-                true
+                built_in_macro
             }
-            _ => false,
+            _ => None,
         };
         let name = pairs.next().unwrap().as_str().to_string();
         let parameters = self.parse_parameters(pairs.next().unwrap())?;
-        let nect = pairs.next().unwrap();
-        let statements = self.parse_query_body(nect)?;
+        let body = pairs.next().unwrap();
+        let statements = self.parse_query_body(body)?;
         let return_values = self.parse_return_statement(pairs.next().unwrap())?;
 
         Ok(Query {
-            is_mcp,
+            built_in_macro,
             name,
             parameters,
             statements,
@@ -1162,8 +1606,16 @@ impl HelixParser {
                     (pair.loc(), pair.as_str().to_string())
                 };
 
+                // gets optional param
+                let is_optional = inner
+                    .peek()
+                    .is_some_and(|p| p.as_rule() == Rule::optional_param);
+                if is_optional {
+                    inner.next();
+                }
+
                 // gets param type
-                let param_pair = inner
+                let param_type_pair = inner
                     .clone()
                     .next()
                     .unwrap()
@@ -1171,10 +1623,10 @@ impl HelixParser {
                     .into_inner()
                     .next()
                     .unwrap();
-                let param_type_location = param_pair.loc();
+                let param_type_location = param_type_pair.loc();
                 let param_type = self.parse_field_type(
                     // unwraps the param type to get the rule (array, object, named_type, etc)
-                    param_pair,
+                    param_type_pair,
                     Some(&self.source),
                 )?;
 
@@ -1182,6 +1634,7 @@ impl HelixParser {
                     Ok(Parameter {
                         name,
                         param_type: (param_type_location, param_type),
+                        is_optional,
                         loc: pair.loc(),
                     })
                 } else {
@@ -2329,7 +2782,6 @@ impl HelixParser {
                 step: GraphStepType::SearchVector(self.parse_search_vector(pair).unwrap()),
             },
             _ => {
-                println!("rule_str: {:?}", pair.as_str());
                 unreachable!()
             }
         }
@@ -2385,12 +2837,8 @@ impl HelixParser {
             .collect()
     }
 
-    fn parse_new_field_pair(&self, pair: Pair<Rule>) -> Result<FieldAddition, ParserError> {
-        let mut pairs = pair.clone().into_inner();
-        let key = pairs.next().unwrap().as_str().to_string();
-        let value_pair = pairs.next().unwrap();
-
-        let value: FieldValue = match value_pair.as_rule() {
+    fn parse_field_value(&self, value_pair: Pair<Rule>) -> Result<FieldValue, ParserError> {
+        Ok(match value_pair.as_rule() {
             Rule::evaluates_to_anything => FieldValue {
                 loc: value_pair.loc(),
                 value: FieldValueType::Expression(self.parse_expression(value_pair)?),
@@ -2439,15 +2887,25 @@ impl HelixParser {
                 loc: value_pair.loc(),
                 value: FieldValueType::Fields(self.parse_field_additions(value_pair)?),
             },
+            Rule::identifier => FieldValue {
+                loc: value_pair.loc(),
+                value: FieldValueType::Identifier(value_pair.as_str().to_string()),
+            },
             _ => {
                 return Err(ParserError::from(format!(
-                    "Unexpected field pair type: {:?} \n {:?} \n\n {:?}",
+                    "Unexpected field pair type: {:?} \n {:?}",
                     value_pair.as_rule(),
-                    value_pair,
-                    pair
+                    value_pair
                 )));
             }
-        };
+        })
+    }
+
+    fn parse_new_field_pair(&self, pair: Pair<Rule>) -> Result<FieldAddition, ParserError> {
+        let mut pairs = pair.clone().into_inner();
+        let key = pairs.next().unwrap().as_str().to_string();
+        let value_pair = pairs.next().unwrap();
+        let value = self.parse_field_value(value_pair)?;
 
         Ok(FieldAddition {
             loc: pair.loc(),
@@ -2532,7 +2990,6 @@ impl HelixParser {
         let mut should_spread = false;
         for p in pair.clone().into_inner() {
             if p.as_rule() == Rule::spread_object {
-                println!("spread_object");
                 should_spread = true;
                 continue;
             }

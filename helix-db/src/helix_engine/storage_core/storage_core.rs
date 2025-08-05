@@ -2,7 +2,10 @@ use super::storage_methods::DBMethods;
 use crate::{
     helix_engine::{
         bm25::bm25::HBM25Config,
-        graph_core::config::Config,
+        graph_core::{
+            config::Config,
+            ops::version_info::VersionInfo,
+        },
         storage_core::storage_methods::StorageMethods,
         types::GraphError,
         vector_core::{
@@ -48,12 +51,17 @@ pub struct HelixGraphStorage {
     pub secondary_indices: HashMap<String, Database<Bytes, U128<BE>>>,
     pub vectors: VectorCore,
     pub bm25: Option<HBM25Config>,
+    pub version_info: VersionInfo,
 
     pub storage_config: StorageConfig,
 }
 
 impl HelixGraphStorage {
-    pub fn new(path: &str, config: Config) -> Result<HelixGraphStorage, GraphError> {
+    pub fn new(
+        path: &str,
+        config: Config,
+        version_info: VersionInfo,
+    ) -> Result<HelixGraphStorage, GraphError> {
         fs::create_dir_all(path)?;
 
         let db_size = if config.db_max_size_gb.unwrap_or(100) >= 9999 {
@@ -164,6 +172,7 @@ impl HelixGraphStorage {
             vectors,
             bm25,
             storage_config,
+            version_info,
         })
     }
 
@@ -300,6 +309,7 @@ impl StorageMethods for HelixGraphStorage {
             None => return Err(GraphError::NodeNotFound),
         };
         let node: Node = Node::decode_node(node, *id)?;
+        let node = self.version_info.upgrade_to_node_latest(node);
         Ok(node)
     }
 
@@ -310,7 +320,7 @@ impl StorageMethods for HelixGraphStorage {
             None => return Err(GraphError::EdgeNotFound),
         };
         let edge: Edge = Edge::decode_edge(edge, *id)?;
-        Ok(edge)
+        Ok(self.version_info.upgrade_to_edge_latest(edge))
     }
 
     fn drop_node(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
@@ -382,6 +392,24 @@ impl StorageMethods for HelixGraphStorage {
                 &Self::pack_edge_data(edge_id, id),
             )?;
         }
+
+        // delete secondary indices
+        let node = self.get_node(txn, id)?;
+        if let Some(properties) = node.properties {
+            for (key, v) in properties.iter() {
+                if let Some(db) = self.secondary_indices.get(key) {
+                    match bincode::serialize(v) {
+                        Ok(serialized) => {
+                            if let Err(e) = db.delete_one_duplicate(txn, &serialized, &node.id) {
+                                return Err(GraphError::from(e));
+                            }
+                        }
+                        Err(e) => return Err(GraphError::from(e)),
+                    }
+                }
+            }
+        }
+
         // Delete node data and label
         self.nodes_db.delete(txn, Self::node_key(id))?;
 

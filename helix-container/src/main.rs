@@ -1,4 +1,7 @@
 use helix_db::helix_engine::graph_core::graph_core::{HelixGraphEngine, HelixGraphEngineOpts};
+use helix_db::helix_engine::graph_core::ops::version_info::{
+    ItemInfo, Transition, TransitionFn, TransitionSubmission, VersionInfo,
+};
 use helix_db::helix_gateway::mcp::mcp::{MCPHandlerFn, MCPHandlerSubmission};
 use helix_db::helix_gateway::{
     gateway::{GatewayOpts, HelixGateway},
@@ -43,10 +46,47 @@ fn main() {
     println!("\tpath: {}", path.display());
     println!("\tport: {port}");
 
+    let transition_fns = inventory::iter::<TransitionSubmission>.into_iter().fold(
+        HashMap::new(),
+        |mut acc,
+         TransitionSubmission(Transition {
+             item_label,
+             func,
+             from_version,
+             to_version,
+         })| {
+            acc.entry(item_label.to_string())
+                .and_modify(|item_info: &mut ItemInfo| {
+                    item_info.latest = item_info.latest.max(*to_version);
+
+                    // asserts for versions
+                    assert!(
+                        *from_version < *to_version,
+                        "from_version must be less than to_version"
+                    );
+                    assert!(*from_version > 0, "from_version must be greater than 0");
+                    assert!(*to_version > 0, "to_version must be greater than 0");
+                    assert!(
+                        *to_version - *from_version == 1,
+                        "to_version must be exactly 1 greater than from_version"
+                    );
+
+                    item_info.transition_fns.push(TransitionFn {
+                        from_version: *from_version,
+                        to_version: *to_version,
+                        func: *func,
+                    });
+                    item_info.transition_fns.sort_by_key(|f| f.from_version);
+                });
+            acc
+        },
+    );
+
     let path_str = path.to_str().expect("Could not convert path to string");
     let opts = HelixGraphEngineOpts {
         path: path_str.to_string(),
         config,
+        version_info: VersionInfo(transition_fns),
     };
 
     let graph = Arc::new(HelixGraphEngine::new(opts.clone()).unwrap());

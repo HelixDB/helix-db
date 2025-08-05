@@ -113,14 +113,14 @@ impl G {
     /// let txn = storage.graph_env.write_txn().unwrap();
     /// let traversal = G::new_mut_from(storage, &mut txn, vec![TraversalVal::Node(Node { id: 1, label: "Person".to_string(), properties: None })]);
     /// ```
-    pub fn new_mut_from<'scope, 'env>(
+    pub fn new_mut_from<'scope, 'env, T: IntoTraversalValues>(
         storage: Arc<HelixGraphStorage>,
         txn: &'scope mut RwTxn<'env>,
-        vals: Vec<TraversalVal>,
+        vals: T,
     ) -> RwTraversalIterator<'scope, 'env, impl Iterator<Item = Result<TraversalVal, GraphError>>>
     {
         RwTraversalIterator {
-            inner: vals.into_iter().map(Ok),
+            inner: vals.into().into_iter().map(Ok),
             storage,
             txn,
         }

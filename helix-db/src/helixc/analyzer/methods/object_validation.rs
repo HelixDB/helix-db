@@ -14,7 +14,7 @@ use crate::{
             },
         },
         generator::{
-            generator_types::{Query as GeneratedQuery, Statement},
+            queries::Query as GeneratedQuery,
             object_remapping_generation::{
                 ExistsRemapping, IdentifierRemapping, ObjectRemapping, Remapping, RemappingType,
                 TraversalRemapping, ValueRemapping,
@@ -24,6 +24,7 @@ use crate::{
                 ShouldCollect, Step as GeneratedStep, Traversal as GeneratedTraversal,
                 TraversalType,
             },
+            statements::Statement,
             utils::{GenRef, Separator},
         },
         parser::{helix_parser::*, location::Loc},

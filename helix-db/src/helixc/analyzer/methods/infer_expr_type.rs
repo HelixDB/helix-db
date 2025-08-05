@@ -13,10 +13,12 @@ use crate::{
             },
         },
         generator::{
-            generator_types::{BoExp, Query as GeneratedQuery, Statement as GeneratedStatement},
+            bool_op::BoExp,
+            queries::Query as GeneratedQuery,
             source_steps::{
                 AddE, AddN, AddV, SearchBM25, SearchVector as GeneratedSearchVector, SourceStep,
             },
+            statements::Statement as GeneratedStatement,
             traversal_steps::{
                 ShouldCollect, Step as GeneratedStep, Traversal as GeneratedTraversal,
                 TraversalType, Where, WhereRef,
@@ -659,12 +661,19 @@ pub(crate) fn infer_expr_type<'a>(
                             VecData::Standard(id)
                         }
                         VectorData::Embed(e) => match &e.value {
-                            EvaluatesToString::Identifier(i) => VecData::Embed(
-                                gen_identifier_or_param(original_query, i.as_str(), true, false),
-                            ),
-                            EvaluatesToString::StringLiteral(s) => {
-                                VecData::Embed(GeneratedValue::Literal(GenRef::Ref(s.clone())))
-                            }
+                            EvaluatesToString::Identifier(i) => VecData::Embed {
+                                data: gen_identifier_or_param(
+                                    original_query,
+                                    i.as_str(),
+                                    true,
+                                    false,
+                                ),
+                                model_name: gen_query.embedding_model_to_use.clone(),
+                            },
+                            EvaluatesToString::StringLiteral(s) => VecData::Embed {
+                                data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                                model_name: gen_query.embedding_model_to_use.clone(),
+                            },
                         },
                     };
                     let add_v = AddV {
@@ -732,16 +741,16 @@ pub(crate) fn infer_expr_type<'a>(
                         false,
                     ))
                 }
-                Some(VectorData::Embed(e)) => {
-                    match &e.value {
-                        EvaluatesToString::Identifier(i) => VecData::Embed(
-                            gen_identifier_or_param(original_query, i.as_str(), true, false),
-                        ),
-                        EvaluatesToString::StringLiteral(s) => {
-                            VecData::Embed(GeneratedValue::Literal(GenRef::Ref(s.clone())))
-                        }
-                    }
-                }
+                Some(VectorData::Embed(e)) => match &e.value {
+                    EvaluatesToString::Identifier(i) => VecData::Embed {
+                        data: gen_identifier_or_param(original_query, i.as_str(), true, false),
+                        model_name: gen_query.embedding_model_to_use.clone(),
+                    },
+                    EvaluatesToString::StringLiteral(s) => VecData::Embed {
+                        data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                        model_name: gen_query.embedding_model_to_use.clone(),
+                    },
+                },
                 _ => {
                     generate_error!(
                         ctx,

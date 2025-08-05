@@ -1,4 +1,5 @@
 use crate::helix_engine::graph_core::config::Config;
+use crate::helix_engine::graph_core::ops::version_info::VersionInfo;
 use crate::helix_engine::storage_core::storage_core::HelixGraphStorage;
 use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::mcp::mcp::{McpBackend, McpConnections};
@@ -22,15 +23,17 @@ pub struct HelixGraphEngine {
 pub struct HelixGraphEngineOpts {
     pub path: String,
     pub config: Config,
+    pub version_info: VersionInfo,
 }
 
 impl HelixGraphEngine {
     pub fn new(opts: HelixGraphEngineOpts) -> Result<HelixGraphEngine, GraphError> {
         let should_use_mcp = opts.config.mcp;
-        let storage = match HelixGraphStorage::new(opts.path.as_str(), opts.config) {
-            Ok(db) => Arc::new(db),
-            Err(err) => return Err(err),
-        };
+        let storage =
+            match HelixGraphStorage::new(opts.path.as_str(), opts.config, opts.version_info) {
+                Ok(db) => Arc::new(db),
+                Err(err) => return Err(err),
+            };
 
         let (mcp_backend, mcp_connections) = if should_use_mcp.unwrap_or(false) {
             let mcp_backend = Arc::new(McpBackend::new(storage.clone()));

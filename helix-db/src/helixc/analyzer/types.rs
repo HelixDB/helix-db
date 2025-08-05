@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use crate::helixc::{
     generator::{
-        generator_types::{
-            EdgeSchema as GeneratedEdgeSchema, NodeSchema as GeneratedNodeSchema,
-            Parameter as GeneratedParameter, SchemaProperty, VectorSchema as GeneratedVectorSchema,
+        queries::Parameter as GeneratedParameter,
+        schemas::{
+            EdgeSchema as GeneratedEdgeSchema, NodeSchema as GeneratedNodeSchema, SchemaProperty,
+            VectorSchema as GeneratedVectorSchema,
         },
         utils::{GenRef, GeneratedType, GeneratedValue, RustType as GeneratedRustType},
     },
@@ -81,6 +82,7 @@ impl GeneratedParameter {
                 parameters.push(GeneratedParameter {
                     name: param.name.1,
                     field_type: GeneratedType::Variable(GenRef::Std(id.clone())),
+                    is_optional: param.is_optional,
                 });
             }
             FieldType::Array(inner) => match inner.as_ref() {
@@ -91,12 +93,14 @@ impl GeneratedParameter {
                         field_type: GeneratedType::Vec(Box::new(GeneratedType::Object(
                             GenRef::Std(format!("{}Data", param.name.1)),
                         ))),
+                        is_optional: param.is_optional,
                     });
                 }
                 param_type => {
                     parameters.push(GeneratedParameter {
                         name: param.name.1,
                         field_type: GeneratedType::Vec(Box::new(param_type.clone().into())),
+                        is_optional: param.is_optional,
                     });
                 }
             },
@@ -108,12 +112,14 @@ impl GeneratedParameter {
                         "{}Data",
                         param.name.1
                     ))),
+                    is_optional: param.is_optional,
                 });
             }
             param_type => {
                 parameters.push(GeneratedParameter {
                     name: param.name.1,
                     field_type: param_type.into(),
+                    is_optional: param.is_optional,
                 });
             }
         }
@@ -134,6 +140,7 @@ fn unwrap_object(
                     GeneratedParameter {
                         name: field_name.clone(),
                         field_type: GeneratedType::Object(GenRef::Std(format!("{field_name}Data"))),
+                        is_optional: false,
                     }
                 }
                 FieldType::Array(inner) => match inner.as_ref() {
@@ -144,16 +151,19 @@ fn unwrap_object(
                             field_type: GeneratedType::Vec(Box::new(GeneratedType::Object(
                                 GenRef::Std(format!("{field_name}Data")),
                             ))),
+                            is_optional: false,
                         }
                     }
                     _ => GeneratedParameter {
                         name: field_name.clone(),
                         field_type: GeneratedType::from(field_type.clone()),
+                        is_optional: false,
                     },
                 },
                 _ => GeneratedParameter {
                     name: field_name.clone(),
                     field_type: GeneratedType::from(field_type.clone()),
+                    is_optional: false,
                 },
             })
             .collect(),

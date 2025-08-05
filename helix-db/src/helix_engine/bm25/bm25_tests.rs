@@ -5,7 +5,7 @@ mod tests {
             bm25::bm25::{
                 BM25Flatten, BM25Metadata, HBM25Config, HybridSearch, BM25, METADATA_KEY,
             },
-            graph_core::config::Config,
+            graph_core::{config::Config, ops::version_info::VersionInfo},
             storage_core::storage_core::HelixGraphStorage,
             vector_core::{hnsw::HNSW, vector::HVector},
         },
@@ -44,7 +44,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let path = temp_dir.path().to_str().unwrap();
         let config = Config::default();
-        let storage = HelixGraphStorage::new(path, config).unwrap();
+        let storage = HelixGraphStorage::new(path, config, VersionInfo::default()).unwrap();
         (storage, temp_dir)
     }
 

@@ -1,8 +1,7 @@
 use crate::helixc::generator::utils::{write_properties, VecData};
 
 use super::{
-    bool_op::BoolOp,
-    generator_types::BoExp,
+    bool_op::{BoolOp, BoExp},
     object_remapping_generation::Remapping,
     source_steps::SourceStep,
     utils::{GenRef, GeneratedValue, Order, Separator},

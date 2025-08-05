@@ -1,7 +1,7 @@
 use super::super::tr_val::TraversalVal;
 use crate::{
     helix_engine::{
-        bm25::bm25::{BM25Flatten, BM25},
+        bm25::bm25::{BM25, BM25Flatten},
         graph_core::traversal_iter::RwTraversalIterator,
         types::GraphError,
     },
@@ -43,6 +43,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
         let node = Node {
             id: v6_uuid(),
             label: label.to_string(), // TODO: just &str or Cow<'a, str>
+            version: 1,
             properties: properties.map(|props| props.into_iter().collect()),
         };
         let secondary_indices = secondary_indices.unwrap_or(&[]).to_vec();
@@ -78,7 +79,11 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
                             // possibly append dup
 
                             if let Err(e) = db.put(self.txn, &serialized, &node.id) {
-                                println!("{} Error adding node to secondary index: {:?}", line!(), e);
+                                println!(
+                                    "{} Error adding node to secondary index: {:?}",
+                                    line!(),
+                                    e
+                                );
                                 result = Err(GraphError::from(e));
                             }
                         }
@@ -106,7 +111,9 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
         if result.is_ok() {
             result = Ok(TraversalVal::Node(node.clone()));
         } else {
-            result = Err(GraphError::New("Failed to add node to secondary indices".to_string()));
+            result = Err(GraphError::New(
+                "Failed to add node to secondary indices".to_string(),
+            ));
         }
 
         RwTraversalIterator {
@@ -116,4 +123,3 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddNAdapter<'
         }
     }
 }
-

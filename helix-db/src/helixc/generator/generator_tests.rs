@@ -2,7 +2,7 @@
 
 use crate::helixc::{
     analyzer::analyzer::analyze,
-    generator::generator_types::Source as GeneratedSource,
+    generator::Source as GeneratedSource,
     parser::helix_parser::{Content, HelixParser, HxFile, Source as ParsedSource},
 };
 

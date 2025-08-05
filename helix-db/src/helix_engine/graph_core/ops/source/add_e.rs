@@ -69,9 +69,11 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddEAdapter<'
         // edge_types: (EdgeType, EdgeType),
         edge_type: EdgeType,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalVal, GraphError>>> {
+        let version = self.storage.version_info.get_latest(label);
         let edge = Edge {
             id: v6_uuid(),
             label: label.to_string(),
+            version,
             properties: properties.map(|props| props.into_iter().collect()),
             from_node,
             to_node,
@@ -138,7 +140,9 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddEAdapter<'
         ) {
             Ok(_) => {}
             Err(e) => {
-                println!("add_e => error adding out edge between {from_node:?} and {to_node:?}: {e:?}");
+                println!(
+                    "add_e => error adding out edge between {from_node:?} and {to_node:?}: {e:?}"
+                );
                 result = Err(GraphError::from(e));
             }
         }
@@ -151,7 +155,9 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalVal, GraphError>>> AddEAdapter<'
         ) {
             Ok(_) => {}
             Err(e) => {
-                println!("add_e => error adding in edge between {from_node:?} and {to_node:?}: {e:?}");
+                println!(
+                    "add_e => error adding in edge between {from_node:?} and {to_node:?}: {e:?}"
+                );
                 result = Err(GraphError::from(e));
             }
         }
