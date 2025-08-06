@@ -22,7 +22,7 @@ use crate::{
 use core::fmt;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::protocol::{Request, Response};
+use crate::protocol::Request;
 
 pub struct HandlerInput {
     pub request: Request,

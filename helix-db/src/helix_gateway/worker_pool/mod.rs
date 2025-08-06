@@ -32,21 +32,14 @@ impl WorkerPool {
         );
 
         let (req_tx, req_rx) = flume::bounded::<ReqMsg>(1000); // TODO: make this configurable
-        let (cont_tx, cont_rx) = flume::bounded::<ContFn>(1000); // TODO: make this configurable
-
-        let context = TaskContext {
-            graph_access,
-            io_rt,
-            cont_tx,
-        };
 
         let workers = (0..size)
             .map(|_| {
                 Worker::start(
                     req_rx.clone(),
-                    cont_rx.clone(),
                     core_setter.clone(),
-                    context.clone(),
+                    graph_access.clone(),
+                    io_rt.clone(),
                     router.clone(),
                 )
             })
@@ -92,9 +85,9 @@ pub struct TaskContext {
 impl Worker {
     pub fn start(
         req_rx: Receiver<ReqMsg>,
-        cont_rx: Receiver<ContFn>,
         core_setter: Option<CoreSetter>,
-        context: TaskContext,
+        graph_access: Arc<HelixGraphEngine>,
+        io_rt: Arc<Runtime>,
         router: Arc<HelixRouter>,
     ) -> Worker {
         let handle = std::thread::spawn(move || {
@@ -103,6 +96,14 @@ impl Worker {
             }
 
             trace!("thread started");
+
+            let (cont_tx, cont_rx) = flume::bounded::<ContFn>(1000); // TODO: make this configurable
+
+            let context = TaskContext {
+                graph_access,
+                io_rt,
+                cont_tx,
+            };
 
             loop {
                 flume::Selector::new()
