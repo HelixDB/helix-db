@@ -81,8 +81,24 @@ impl Display for AddV {
                     write_properties(&self.properties)
                 )
             }
-            VecData::Embed { data, model_name } => todo!(),
-            VecData::Unknown => todo!(),
+            VecData::Embed(e) => {
+                let n = e
+                    .async_flip_flops
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let val_name = format!("__async_embed_value_{n}");
+                writeln!(f, "input.context.io_rt.spawn(async move{{")?;
+                writeln!(f, "let {val_name} = {e};")?;
+                writeln!(f, "input.context.cont_tx.send(move || {{")?;
+                write!(
+                    f,
+                    "insert_v::<fn(&HVector, &RoTxn) -> bool>(&{}, {}, {})",
+                    val_name,
+                    self.label,
+                    write_properties(&self.properties)
+                )
+                // Need to close with }).expect("Continuation channel should not be closed")});
+            }
+            VecData::Unknown => panic!("Cannot convert to string, VecData is unknown"),
         }
     }
 }
@@ -177,11 +193,32 @@ pub struct SearchVector {
 
 impl Display for SearchVector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.vec {
+            VecData::Standard(v) => self.fmt_inner(f, &v.to_string()),
+            VecData::Embed(e) => {
+                let n = e
+                    .async_flip_flops
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let val_name = format!("__async_embed_value_{n}");
+                writeln!(f, "input.context.io_rt.spawn(async move{{")?;
+                writeln!(f, "let {val_name} = {e};")?;
+                writeln!(f, "input.context.cont_tx.send(move || {{")?;
+                self.fmt_inner(f, &format!("&{val_name}"))
+
+                // Need to close with }).expect("Continuation channel should not be closed")});
+            }
+            VecData::Unknown => panic!("Cannot convert to string, VecData is unknown"),
+        }
+    }
+}
+
+impl SearchVector {
+    fn fmt_inner(&self, f: &mut fmt::Formatter<'_>, vec_val: &str) -> fmt::Result {
         match &self.pre_filter {
             Some(pre_filter) => write!(
                 f,
                 "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, Some(&[{}]))",
-                self.vec,
+                vec_val,
                 self.k,
                 self.label,
                 pre_filter
@@ -193,7 +230,7 @@ impl Display for SearchVector {
             None => write!(
                 f,
                 "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, None)",
-                self.vec, self.k, self.label,
+                vec_val, self.k, self.label,
             ),
         }
     }

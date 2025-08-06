@@ -374,6 +374,23 @@ pub struct SearchVectorStep {
 }
 impl Display for SearchVectorStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "brute_force_search_v({}, {})", self.vec, self.k)
+        match &self.vec {
+            VecData::Standard(v) => {
+                write!(f, "brute_force_search_v({}, {})", v, self.k)
+            }
+            VecData::Embed(e) => {
+                let n = e
+                    .async_flip_flops
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let val_name = format!("__async_embed_value_{n}");
+                writeln!(f, "input.context.io_rt.spawn(async move{{")?;
+                writeln!(f, "let {val_name} = {e};")?;
+                writeln!(f, "input.context.cont_tx.send(move || {{")?;
+                writeln!(f, "brute_force_search_v(&{}, {})", val_name, self.k)
+
+                // Need to close with }).expect("Continuation channel should not be closed")});
+            }
+            VecData::Unknown => panic!("Cannot convert to string, VecData is unknown"),
+        }
     }
 }

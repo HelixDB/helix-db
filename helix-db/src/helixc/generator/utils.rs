@@ -1,4 +1,7 @@
-use std::fmt::{self, Debug, Display};
+use std::{
+    fmt::{self, Debug, Display},
+    sync::{Arc, atomic::AtomicUsize},
+};
 
 use crate::helixc::parser::helix_parser::IdType;
 
@@ -117,13 +120,21 @@ pub enum VecData {
 
 #[derive(Clone)]
 pub struct VecEmbed {
-    data: GeneratedValue,
-    model_name: Option<String>,
+    pub data: GeneratedValue,
+    pub model_name: Option<String>,
+    pub async_flip_flops: Arc<AtomicUsize>,
 }
 
 impl Display for VecEmbed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let VecEmbed { data, model_name } = self;
+        let VecEmbed {
+            data,
+            model_name,
+            async_flip_flops,
+        } = self;
+
+        async_flip_flops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
         match model_name {
             Some(model) => write!(f, "&embed!(db, {data}, {model})"),
             None => write!(f, "&embed!(db, {data})"),

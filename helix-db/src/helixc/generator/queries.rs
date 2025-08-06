@@ -1,4 +1,7 @@
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    sync::{Arc, atomic::AtomicUsize},
+};
 
 use crate::helixc::generator::{
     return_values::ReturnValue, statements::Statement, utils::GeneratedType,
@@ -13,7 +16,9 @@ pub struct Query {
     pub sub_parameters: Vec<(String, Vec<Parameter>)>,
     pub return_values: Vec<ReturnValue>,
     pub is_mut: bool,
+    pub async_flip_flops: Arc<AtomicUsize>,
 }
+
 impl Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // prints sub parameter structs (e.g. (docs: {doc: String, id: String}))
@@ -67,7 +72,6 @@ impl Display for Query {
             "pub fn {} (input: &HandlerInput) -> Result<Response, GraphError> {{",
             self.name
         )?;
-        writeln!(f, "{{")?;
 
         // prints each statement
         for statement in &self.statements {
@@ -75,7 +79,7 @@ impl Display for Query {
         }
 
         // commit the transaction
-        // writeln!(f, "    txn.commit().unwrap();")?;
+        writeln!(f, "    txn.commit().unwrap();")?;
 
         // create the return values
         writeln!(
@@ -88,10 +92,28 @@ impl Display for Query {
             }
         }
 
-        writeln!(f, "}}")?;
+        // TODO: replace this expect
+        writeln!(
+            f,
+            r#"    ret_chan.send(input.request.out_fmt.create_response(&return_vals)).expect("Return channel should suceed")"#
+        )?;
+
+        // TODO: close closures
+
+        let closure_num = self
+            .async_flip_flops
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        let closure_end = r#"}).expect("Continuation channel should not be closed")});"#;
+
+        for _ in 0..closure_num {
+            write!(f, "{closure_end}")?;
+        }
+
         writeln!(f, "}}")
     }
 }
+
 impl Default for Query {
     fn default() -> Self {
         Self {
@@ -103,6 +125,7 @@ impl Default for Query {
             sub_parameters: vec![],
             return_values: vec![],
             is_mut: false,
+            async_flip_flops: Arc::new(AtomicUsize::from(0)),
         }
     }
 }

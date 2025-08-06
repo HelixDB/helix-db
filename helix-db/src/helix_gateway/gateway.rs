@@ -83,13 +83,6 @@ impl HelixGateway {
             );
         }
 
-        let worker_pool = WorkerPool::new(
-            self.worker_size,
-            worker_setter,
-            self.graph_access.clone(),
-            self.router.clone(),
-        );
-
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(self.io_size)
             .on_thread_start({
@@ -103,6 +96,16 @@ impl HelixGateway {
             .enable_all()
             .build()?;
 
+        let io_rt = Arc::new(rt);
+
+        let worker_pool = WorkerPool::new(
+            self.worker_size,
+            worker_setter,
+            self.graph_access.clone(),
+            io_rt.clone(),
+            self.router.clone(),
+        );
+
         let axum_app = axum::Router::new()
             .route("/{*path}", post(post_handler))
             .route("/graphvis", get(graphvis::graphvis_handler))
@@ -114,7 +117,7 @@ impl HelixGateway {
                 schema_json: self.opts.and_then(|o| o.config.schema),
             }));
 
-        rt.block_on(async move {
+        io_rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();
             info!("Listener has been bound, starting server");
             axum::serve(listener, axum_app).await.unwrap()

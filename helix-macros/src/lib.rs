@@ -61,9 +61,9 @@ pub fn handler(args: TokenStream, item: TokenStream) -> TokenStream {
 
             #(#query_stmts)*
 
-            txn.commit().unwrap();
-
-            Ok(input.request.out_fmt.create_response(&return_vals))
+            // The following should be included in generator, because they could be nested in callback closures
+            // txn.commit().unwrap();
+            // ret_chan.send(input.request.out_fmt.create_response(&return_vals)).expect("Return channel should suceed")
         }
 
         #[doc(hidden)]

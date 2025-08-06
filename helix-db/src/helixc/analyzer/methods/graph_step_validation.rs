@@ -1,6 +1,7 @@
 //! Semantic analyzer for Helix‑QL.
 use crate::helixc::analyzer::error_codes::ErrorCode;
 use crate::helixc::analyzer::utils::type_in_scope;
+use crate::helixc::generator::utils::VecEmbed;
 use crate::{
     generate_error,
     helix_engine::graph_core::ops::source::add_e::EdgeType,
@@ -12,13 +13,13 @@ use crate::{
             utils::{gen_identifier_or_param, is_valid_identifier},
         },
         generator::{
+            queries::Query as GeneratedQuery,
             traversal_steps::{
                 In as GeneratedIn, InE as GeneratedInE, Out as GeneratedOut, OutE as GeneratedOutE,
                 SearchVectorStep, ShortestPath as GeneratedShortestPath, ShouldCollect,
                 Step as GeneratedStep, Traversal as GeneratedTraversal,
             },
             utils::{GenRef, GeneratedValue, Separator, VecData},
-            queries::Query as GeneratedQuery,
         },
         parser::helix_parser::*,
     },
@@ -382,14 +383,16 @@ pub(crate) fn apply_graph_step<'a>(
                     VecData::Standard(value)
                 }
                 Some(VectorData::Embed(e)) => match &e.value {
-                    EvaluatesToString::Identifier(i) => VecData::Embed {
+                    EvaluatesToString::Identifier(i) => VecData::Embed(VecEmbed {
                         data: gen_identifier_or_param(original_query, i.as_str(), true, false),
                         model_name: gen_query.embedding_model_to_use.clone(),
-                    },
-                    EvaluatesToString::StringLiteral(s) => VecData::Embed {
+                        async_flip_flops: gen_query.async_flip_flops.clone(),
+                    }),
+                    EvaluatesToString::StringLiteral(s) => VecData::Embed(VecEmbed {
                         data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                         model_name: gen_query.embedding_model_to_use.clone(),
-                    },
+                        async_flip_flops: gen_query.async_flip_flops.clone(),
+                    }),
                 },
                 _ => {
                     generate_error!(

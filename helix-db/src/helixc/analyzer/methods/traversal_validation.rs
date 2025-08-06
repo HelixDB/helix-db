@@ -1,6 +1,6 @@
 use crate::helixc::analyzer::error_codes::*;
 use crate::helixc::generator::source_steps::SearchVector;
-use crate::helixc::generator::utils::VecData;
+use crate::helixc::generator::utils::{VecData, VecEmbed};
 use crate::{
     generate_error,
     helixc::{
@@ -317,14 +317,16 @@ pub(crate) fn validate_traversal<'a>(
                     ))
                 }
                 Some(VectorData::Embed(e)) => match &e.value {
-                    EvaluatesToString::Identifier(i) => VecData::Embed {
+                    EvaluatesToString::Identifier(i) => VecData::Embed(VecEmbed {
                         data: gen_identifier_or_param(original_query, i.as_str(), true, false),
                         model_name: gen_query.embedding_model_to_use.clone(),
-                    },
-                    EvaluatesToString::StringLiteral(s) => VecData::Embed {
+                        async_flip_flops: gen_query.async_flip_flops.clone(),
+                    }),
+                    EvaluatesToString::StringLiteral(s) => VecData::Embed(VecEmbed {
                         data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                         model_name: gen_query.embedding_model_to_use.clone(),
-                    },
+                        async_flip_flops: gen_query.async_flip_flops.clone(),
+                    }),
                 },
                 _ => {
                     generate_error!(

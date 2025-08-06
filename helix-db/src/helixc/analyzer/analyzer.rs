@@ -5,18 +5,18 @@ use crate::helixc::{
         methods::{
             migration_validation::validate_migration,
             query_validation::validate_query,
-            schema_methods::{build_field_lookups, check_schema, SchemaVersionMap},
+            schema_methods::{SchemaVersionMap, build_field_lookups, check_schema},
         },
         types::Type,
     },
-    generator::{Source as GeneratedSource},
+    generator::Source as GeneratedSource,
     parser::helix_parser::{EdgeSchema, ExpressionType, Field, Query, Source},
 };
 use serde::Serialize;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    sync::OnceLock,
+    sync::{Arc, OnceLock, atomic::AtomicUsize},
 };
 
 pub fn analyze(src: &Source) -> (Vec<Diagnostic>, GeneratedSource) {
