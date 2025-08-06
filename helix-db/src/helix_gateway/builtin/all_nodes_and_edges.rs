@@ -12,6 +12,7 @@ use crate::helix_engine::types::GraphError;
 use crate::helix_engine::vector_core::hnsw::HNSW;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
+use crate::protocol::request::RetChan;
 use crate::protocol::{self, request::RequestType};
 use crate::utils::id::ID;
 use crate::utils::items::{Edge, Node};
@@ -63,6 +64,12 @@ pub async fn nodes_edges_handler(
             e.into_response()
         }
     }
+}
+
+pub fn nodes_edges(input: &HandlerInput, ret_chan: RetChan) {
+    ret_chan
+        .send(nodes_edges_inner(input).map_err(Into::into))
+        .expect("Return channel should succeed");
 }
 
 pub fn nodes_edges_inner(input: &HandlerInput) -> Result<protocol::Response, GraphError> {
@@ -180,6 +187,6 @@ fn get_all_nodes_edges_json(
 
 inventory::submit! {
     HandlerSubmission(
-        Handler::new("nodes_edges", nodes_edges_inner)
+        Handler::new("nodes_edges", nodes_edges)
     )
 }

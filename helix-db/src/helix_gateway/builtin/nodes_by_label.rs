@@ -13,6 +13,7 @@ use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
 use crate::protocol::remapping::RemappingMap;
+use crate::protocol::request::RetChan;
 use crate::protocol::return_values::ReturnValue;
 use crate::protocol::{self, request::RequestType};
 use crate::utils::filterable::Filterable;
@@ -59,6 +60,12 @@ pub async fn nodes_by_label_handler(
             e.into_response()
         }
     }
+}
+
+pub fn nodes_by_label(input: &HandlerInput, ret_chan: RetChan) {
+    ret_chan
+        .send(nodes_by_label_inner(input).map_err(Into::into))
+        .expect("Return channel should succeed");
 }
 
 pub fn nodes_by_label_inner(input: &HandlerInput) -> Result<protocol::Response, GraphError> {
@@ -118,6 +125,6 @@ pub fn nodes_by_label_inner(input: &HandlerInput) -> Result<protocol::Response, 
 
 inventory::submit! {
     HandlerSubmission(
-        Handler::new("nodes_by_label", nodes_by_label_inner)
+        Handler::new("nodes_by_label", nodes_by_label)
     )
 }

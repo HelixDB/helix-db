@@ -1,7 +1,7 @@
-use crate::helixc::generator::utils::{write_properties, VecData};
+use crate::helixc::generator::utils::{VecData, write_properties};
 
 use super::{
-    bool_op::{BoolOp, BoExp},
+    bool_op::{BoExp, BoolOp},
     object_remapping_generation::Remapping,
     source_steps::SourceStep,
     utils::{GenRef, GeneratedValue, Order, Separator},
@@ -51,14 +51,12 @@ pub enum ShouldCollect {
     ToVec,
     ToVal,
     No,
-    Try,
 }
 impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ShouldCollect::ToVec => write!(f, ".collect_to::<Vec<_>>()"),
             ShouldCollect::ToVal => write!(f, ".collect_to_obj()"),
-            ShouldCollect::Try => write!(f, "?"),
             ShouldCollect::No => write!(f, ""),
         }
     }
