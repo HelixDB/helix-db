@@ -4,16 +4,17 @@ use crate::protocol::{self, HelixError};
 use flume::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 use tracing::trace;
 
-use crate::helix_gateway::router::router::HelixRouter;
+use crate::helix_gateway::router::router::{ContFn, HelixRouter};
 use crate::protocol::request::ReqMsg;
 use crate::protocol::response::Response;
 
 /// A Thread Pool of workers to execute Database operations
 pub struct WorkerPool {
-    tx: Sender<ReqMsg>,
+    req_tx: Sender<ReqMsg>,
     _workers: Vec<Worker>,
 }
 
@@ -22,6 +23,7 @@ impl WorkerPool {
         size: usize,
         core_setter: Option<CoreSetter>,
         graph_access: Arc<HelixGraphEngine>,
+        io_rt: Arc<Runtime>,
         router: Arc<HelixRouter>,
     ) -> WorkerPool {
         assert!(
@@ -29,20 +31,29 @@ impl WorkerPool {
             "Expected number of threads in thread pool to be more than 0, got {size}"
         );
 
-        let (tx, rx) = flume::bounded::<ReqMsg>(1000); // TODO: make this configurable
+        let (req_tx, req_rx) = flume::bounded::<ReqMsg>(1000); // TODO: make this configurable
+        let (cont_tx, cont_rx) = flume::bounded::<ContFn>(1000); // TODO: make this configurable
+
+        let context = TaskContext {
+            graph_access,
+            io_rt,
+            cont_tx,
+        };
+
         let workers = (0..size)
             .map(|_| {
                 Worker::start(
-                    rx.clone(),
+                    req_rx.clone(),
+                    cont_rx.clone(),
                     core_setter.clone(),
-                    graph_access.clone(),
+                    context.clone(),
                     router.clone(),
                 )
             })
             .collect::<Vec<_>>();
 
         WorkerPool {
-            tx,
+            req_tx,
             _workers: workers,
         }
     }
@@ -54,13 +65,13 @@ impl WorkerPool {
         // TODO: add graceful shutdown handling here
 
         // this read by Worker in start()
-        self.tx
+        self.req_tx
             .send_async((req, ret_tx))
             .await
             .expect("WorkerPool channel should be open");
 
         // This is sent by the Worker
-        
+
         ret_rx
             .await
             .expect("Worker shouldn't drop sender before replying")
@@ -71,11 +82,19 @@ struct Worker {
     _handle: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct TaskContext {
+    pub graph_access: Arc<HelixGraphEngine>,
+    pub io_rt: Arc<Runtime>,
+    pub cont_tx: Sender<ContFn>,
+}
+
 impl Worker {
     pub fn start(
-        rx: Receiver<ReqMsg>,
+        req_rx: Receiver<ReqMsg>,
+        cont_rx: Receiver<ContFn>,
         core_setter: Option<CoreSetter>,
-        graph_access: Arc<HelixGraphEngine>,
+        context: TaskContext,
         router: Arc<HelixRouter>,
     ) -> Worker {
         let handle = std::thread::spawn(move || {
@@ -85,13 +104,22 @@ impl Worker {
 
             trace!("thread started");
 
-            while let Ok((req, ret_chan)) = rx.recv() {
-                let res = router.handle(graph_access.clone(), req);
-
-                ret_chan
-                    .send(res)
-                    .expect("Should always be able to send, as only one worker processes a request")
+            loop {
+                flume::Selector::new()
+                    // Priorities continuations
+                    // flume: eventual-fairness should be off
+                    .recv(&cont_rx, |v| {
+                        if let Ok(cont_func) = v {
+                            cont_func();
+                        }
+                    })
+                    .recv(&req_rx, |v| {
+                        if let Ok((req, ret_chan)) = v {
+                            router.handle(context.clone(), req, ret_chan);
+                        }
+                    });
             }
+
             trace!("thread shutting down");
         });
         Worker { _handle: handle }

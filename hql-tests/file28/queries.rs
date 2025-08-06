@@ -83,7 +83,7 @@ let data: searchdocs_ragInput = match sonic_rs::from_slice(&input.request.body) 
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let vecs = G::new(Arc::clone(&db), &txn)
 .search_v::<fn(&HVector, &RoTxn) -> bool>(&data.query, data.k as usize, None).collect_to::<Vec<_>>();
@@ -111,7 +111,7 @@ let data: edge_nodeInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let e = G::new(Arc::clone(&db), &txn)
 .n_from_type("Chapter")
@@ -154,7 +154,7 @@ let data: loaddocs_ragInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     for data in data.chapters {
     let chapter_node = G::new_mut(Arc::clone(&db), &mut txn)

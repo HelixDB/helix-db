@@ -72,7 +72,7 @@ pub fn addUser(input: &HandlerInput, response: &mut Response) -> Result<(), Grap
     };
 
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
         .insert_v::<fn(&HVector, &RoTxn) -> bool>(

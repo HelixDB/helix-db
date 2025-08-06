@@ -70,7 +70,7 @@ let data: file9Input = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("File9", Some(props! { "created_at" => "2021-01-01T00:00:00+00:00", "name" => "File9" }), None).collect_to::<Vec<_>>();

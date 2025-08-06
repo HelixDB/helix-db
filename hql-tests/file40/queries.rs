@@ -76,7 +76,7 @@ let data: get_professor_research_areas_with_descriptions_v2Input = match sonic_r
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let research_areas = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.professor_id)
@@ -110,7 +110,7 @@ let data: get_professor_research_areas_with_descriptions_v1Input = match sonic_r
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let research_areas = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.professor_id)

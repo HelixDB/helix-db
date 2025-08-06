@@ -58,7 +58,7 @@ pub struct User {
 #[handler]
 pub fn GetOrder(input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let txn = db.graph_env.read_txn().unwrap();
     let userByAge = G::new(Arc::clone(&db), &txn)
         .n_from_type("User")

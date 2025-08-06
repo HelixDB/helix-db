@@ -66,7 +66,7 @@ pub async fn nodes_edges_handler(
 }
 
 pub fn nodes_edges_inner(input: &HandlerInput) -> Result<protocol::Response, GraphError> {
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
 
     let (limit, node_label) = if !input.request.body.is_empty() {
@@ -115,7 +115,8 @@ pub fn nodes_edges_inner(input: &HandlerInput) -> Result<protocol::Response, Gra
         })
         .unwrap_or_else(|_| "[]".to_string());
 
-    let combined = format!(r#"{{"data": {json_result}, "vectors": {vectors_result}, "stats": {db_stats}}}"#);
+    let combined =
+        format!(r#"{{"data": {json_result}, "vectors": {vectors_result}, "stats": {db_stats}}}"#);
 
     Ok(protocol::Response {
         body: combined.into_bytes(),

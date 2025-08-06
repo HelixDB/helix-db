@@ -67,7 +67,7 @@ let data: updateUserInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let u = {let update_tr = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.id)
@@ -97,7 +97,7 @@ let data: addUserInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("User", Some(props! { "age" => data.age.clone(), "email" => data.email.clone(), "name" => data.name.clone() }), None).collect_to::<Vec<_>>();
@@ -122,7 +122,7 @@ let data: getUserInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let u = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.id).collect_to::<Vec<_>>();

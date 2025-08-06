@@ -8,12 +8,16 @@
 // returns response
 
 use crate::{
-    helix_engine::{graph_core::graph_core::HelixGraphEngine, types::GraphError},
+    helix_engine::types::GraphError,
     helix_gateway::{
         graphvis,
         mcp::mcp::{MCPHandlerFn, MCPToolInput},
+        worker_pool::TaskContext,
     },
-    protocol::{HelixError, request::RequestType},
+    protocol::{
+        HelixError,
+        request::{RequestType, RetChan},
+    },
 };
 use core::fmt;
 use std::{collections::HashMap, sync::Arc};
@@ -22,14 +26,17 @@ use crate::protocol::{Request, Response};
 
 pub struct HandlerInput {
     pub request: Request,
-    pub graph: Arc<HelixGraphEngine>,
+    pub context: TaskContext,
 }
 
-// basic type for function pointer
-pub type BasicHandlerFn = fn(&HandlerInput) -> Result<Response, GraphError>;
+/// basic type for function pointer
+pub type BasicHandlerFn = fn(&HandlerInput, RetChan);
 
-// thread safe type for multi threaded use
-pub type HandlerFn = Arc<dyn Fn(&HandlerInput) -> Result<Response, GraphError> + Send + Sync>;
+/// thread safe type for multi threaded use
+pub type HandlerFn = Arc<dyn Fn(&HandlerInput, RetChan) + Send + Sync>;
+
+/// A Continuation of a handler execution
+pub type ContFn = Box<dyn Fn() + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct HandlerSubmission(pub Handler);
@@ -82,50 +89,45 @@ impl HelixRouter {
     ///
     /// * `graph_access` - A reference to the graph engine
     /// * `request` - The request to handle
-    ///
-    /// ## Returns
-    ///
-    /// * `Ok(Response)` if the request was handled successfully
-    /// * `Err(RouterError)` if there was an error handling the request
-    pub fn handle(
-        &self,
-        graph_access: Arc<HelixGraphEngine>,
-        request: Request,
-    ) -> Result<Response, HelixError> {
-        match request.req_type {
+    pub fn handle(&self, context: TaskContext, request: Request, ret_chan: RetChan) {
+        let out = match request.req_type {
             RequestType::Query => {
                 if let Some(handler) = self.routes.get(&request.name) {
-                    let input = HandlerInput {
-                        request,
-                        graph: Arc::clone(&graph_access),
-                    };
-                    return handler(&input).map_err(Into::into);
+                    let input = HandlerInput { request, context };
+                    return handler(&input, ret_chan);
+                } else {
+                    Err(request)
                 }
             }
             RequestType::MCP => {
                 if let Some(mcp_handler) = self.mcp_routes.get(&request.name) {
+                    let graph_access = context.graph_access;
                     let mut mcp_input = MCPToolInput {
                         request,
                         mcp_backend: Arc::clone(graph_access.mcp_backend.as_ref().unwrap()),
                         mcp_connections: Arc::clone(graph_access.mcp_connections.as_ref().unwrap()),
                         schema: Some(graph_access.storage.storage_config.schema.clone()),
                     };
-                    return mcp_handler(&mut mcp_input).map_err(Into::into);
-                };
+                    Ok(mcp_handler(&mut mcp_input).map_err(Into::into))
+                } else {
+                    Err(request)
+                }
             }
             RequestType::GraphVis => {
-                let input = HandlerInput {
-                    request,
-                    graph: graph_access.clone(),
-                };
-                return graphvis::graphvis_inner(&input);
+                let input = HandlerInput { request, context };
+                Ok(graphvis::graphvis_inner(&input))
             }
-        }
+        };
 
-        Err(HelixError::NotFound {
-            ty: request.req_type,
-            name: request.name,
-        })
+        match out {
+            Ok(v) => ret_chan.send(v).expect("Return channel should suceed"),
+            Err(request) => ret_chan
+                .send(Err(HelixError::NotFound {
+                    ty: request.req_type,
+                    name: request.name,
+                }))
+                .expect("Return channel should suceed"),
+        }
     }
 }
 

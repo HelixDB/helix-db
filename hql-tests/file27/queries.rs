@@ -79,7 +79,7 @@ let data: searchEmbeddingInput = match sonic_rs::from_slice(&input.request.body)
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let c = G::new(Arc::clone(&db), &txn)
 .n_from_index("number", &1).collect_to::<Vec<_>>();
@@ -120,7 +120,7 @@ let data: addEmbeddingInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let doc = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("Doc", Some(props! { "number" => 1, "content" => "Hello, content!" }), Some(&["number"])).collect_to::<Vec<_>>();
@@ -139,7 +139,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn getAllEmbedding (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let c = G::new(Arc::clone(&db), &txn)
 .n_from_index("number", &1).collect_to::<Vec<_>>();

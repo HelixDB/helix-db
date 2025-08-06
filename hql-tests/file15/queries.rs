@@ -69,7 +69,7 @@ let data: file15_2Input = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     Drop::<Vec<_>>::drop_traversal(
                 G::new(Arc::clone(&db), &txn)
@@ -88,7 +88,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn file15 (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     Drop::<Vec<_>>::drop_traversal(
                 G::new(Arc::clone(&db), &txn)

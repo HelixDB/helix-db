@@ -67,7 +67,7 @@ let data: file9Input = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let user = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.id).collect_to::<Vec<_>>();

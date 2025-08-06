@@ -95,7 +95,7 @@ let data: file2Input = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("File2", Some(props! { "f7" => "7", "f4" => 4, "f2" => 2, "f3" => 3, "f6" => 6.0, "is_admin" => true, "f10" => 10, "name" => data.name.clone(), "f9" => 9, "f1" => 1, "f11" => 11, "f5" => 5.0, "f12" => 12, "f8" => 8 }), None).collect_to::<Vec<_>>();

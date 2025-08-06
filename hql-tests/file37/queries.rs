@@ -72,7 +72,7 @@ pub fn insert_entity(input: &HandlerInput, response: &mut Response) -> Result<()
     };
 
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let mut txn = db.graph_env.write_txn().unwrap();
     let node = G::new_mut(Arc::clone(&db), &mut txn)
         .add_n(
@@ -107,7 +107,7 @@ pub fn get_entity(input: &HandlerInput, response: &mut Response) -> Result<(), G
     };
 
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let txn = db.graph_env.read_txn().unwrap();
     let node = G::new(Arc::clone(&db), &txn)
         .n_from_type("Entity")
@@ -152,7 +152,7 @@ pub fn insert_relationship(
     };
 
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let mut txn = db.graph_env.write_txn().unwrap();
     let from_entity = G::new(Arc::clone(&db), &txn)
         .n_from_index("entity_name", &data.from_entity_label)

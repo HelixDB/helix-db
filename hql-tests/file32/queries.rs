@@ -82,7 +82,7 @@ let data: GetAllCompanyEmbeddingsInput = match sonic_rs::from_slice(&input.reque
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let c = G::new(Arc::clone(&db), &txn)
 .n_from_index("company_number", &data.company_number).collect_to::<Vec<_>>();
@@ -114,7 +114,7 @@ let data: AddVectorInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let embedding = G::new_mut(Arc::clone(&db), &mut txn)
 .insert_v::<fn(&HVector, &RoTxn) -> bool>(&data.vector, "DocumentEmbedding", Some(props! { "text" => data.text, "page_number" => data.page_number, "chunk_id" => data.chunk_id, "reference" => data.reference })).collect_to::<Vec<_>>();
@@ -140,7 +140,7 @@ let data: AddCompanyInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let company = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("Company", Some(props! { "number_of_filings" => data.number_of_filings.clone(), "company_number" => data.company_number.clone() }), Some(&["company_number"])).collect_to::<Vec<_>>();
@@ -155,7 +155,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn DeleteAll (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     Drop::<Vec<_>>::drop_traversal(
                 G::new(Arc::clone(&db), &txn)
@@ -184,7 +184,7 @@ let data: HasCompanyInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let company = G::new(Arc::clone(&db), &txn)
 .n_from_index("company_number", &data.company_number).collect_to::<Vec<_>>();
@@ -209,7 +209,7 @@ let data: DeleteCompanyInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     Drop::<Vec<_>>::drop_traversal(
                 G::new(Arc::clone(&db), &txn)
@@ -246,7 +246,7 @@ let data: HasDocumentEmbeddingsInput = match sonic_rs::from_slice(&input.request
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let c = G::new(Arc::clone(&db), &txn)
 .n_from_index("company_number", &data.company_number).collect_to::<Vec<_>>();
@@ -264,7 +264,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn GetCompanies (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let companies = G::new(Arc::clone(&db), &txn)
 .n_from_type("Company").collect_to::<Vec<_>>();
@@ -305,7 +305,7 @@ let data: AddEmbeddingsToCompanyInput = match sonic_rs::from_slice(&input.reques
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let c = G::new(Arc::clone(&db), &txn)
 .n_from_index("company_number", &data.company_number).collect_to::<Vec<_>>();
@@ -338,7 +338,7 @@ let data: SearchVectorInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let embedding_search = G::new(Arc::clone(&db), &txn)
 .search_v::<fn(&HVector, &RoTxn) -> bool>(&data.query, data.k as usize, None).collect_to::<Vec<_>>();
@@ -365,7 +365,7 @@ let data: CompanyEmbeddingSearchInput = match sonic_rs::from_slice(&input.reques
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let c = G::new(Arc::clone(&db), &txn)
 .n_from_index("company_number", &data.company_number)

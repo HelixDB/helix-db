@@ -55,7 +55,7 @@ pub fn handler(args: TokenStream, item: TokenStream) -> TokenStream {
             let data = input.request.in_fmt.deserialize::<#input_data_name>(&input.request.body)?;
 
             let mut remapping_vals = RemappingMap::new();
-            let db = Arc::clone(&input.graph.storage);
+            let db = Arc::clone(&input.context.graph_access.storage);
             #txn_type
 
 
@@ -386,7 +386,6 @@ impl Parse for MigrationArgs {
     }
 }
 
-
 struct MigrationArgs {
     item: Ident,
     _comma: Token![,],
@@ -409,12 +408,11 @@ pub fn migration(args: TokenStream, item: TokenStream) -> TokenStream {
         "_MAIN_HANDLER_REGISTRATION_{}",
         fn_name.to_string().to_uppercase()
     );
-    
-    
+
     let item = &args.item;
     let from_version = &args.from_version;
     let to_version = &args.to_version;
-    
+
     let expanded = quote! {
         #input_fn
 

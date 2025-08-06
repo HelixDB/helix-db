@@ -86,7 +86,7 @@ let data: get_followed_usersInput = match sonic_rs::from_slice(&input.request.bo
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let followed = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.user_id)
@@ -103,7 +103,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn find_users_access (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let users = G::new(Arc::clone(&db), &txn)
 .n_from_type("User").collect_to::<Vec<_>>();
@@ -139,7 +139,7 @@ let data: create_userInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("User", Some(props! { "email" => data.email.clone(), "updated_at" => data.now.clone(), "name" => data.name.clone(), "created_at" => data.now.clone(), "age" => data.age.clone() }), None).collect_to::<Vec<_>>();
@@ -154,7 +154,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn find_users_exclusion (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let users = G::new(Arc::clone(&db), &txn)
 .n_from_type("User").collect_to::<Vec<_>>();
@@ -182,7 +182,7 @@ let data: find_user_posts_with_creator_detailsInput = match sonic_rs::from_slice
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let user = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.userID).collect_to::<Vec<_>>();
@@ -229,7 +229,7 @@ let data: create_followInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let follower = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.follower_id).collect_to::<Vec<_>>();
@@ -260,7 +260,7 @@ let data: create_postInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new(Arc::clone(&db), &txn)
 .n_from_id(&data.user_id).collect_to::<Vec<_>>();
@@ -279,7 +279,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn get_name_remapping_simple (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let users = G::new(Arc::clone(&db), &txn)
 .n_from_type("User").collect_to::<Vec<_>>();

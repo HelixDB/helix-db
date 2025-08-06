@@ -59,7 +59,7 @@ pub struct EdgeFile6 {
 #[handler]
 pub fn file6 (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("File6", Some(props! { "age" => 20, "name" => "John" }), None).collect_to::<Vec<_>>();

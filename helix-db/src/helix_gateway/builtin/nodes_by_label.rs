@@ -62,7 +62,7 @@ pub async fn nodes_by_label_handler(
 }
 
 pub fn nodes_by_label_inner(input: &HandlerInput) -> Result<protocol::Response, GraphError> {
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
 
     let label = if !input.request.body.is_empty() {

@@ -65,7 +65,7 @@ let data: addUserInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     for n in data.names {
     G::new_mut(Arc::clone(&db), &mut txn)

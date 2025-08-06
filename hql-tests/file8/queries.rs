@@ -72,7 +72,7 @@ let data: file8Input = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let new_vec = G::new_mut(Arc::clone(&db), &mut txn)
 .insert_v::<fn(&HVector, &RoTxn) -> bool>(&data.vec, "File8Vec", None).collect_to::<Vec<_>>();

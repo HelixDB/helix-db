@@ -90,7 +90,7 @@ let data: CreateUserInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("User", Some(props! { "email" => data.email.clone(), "created_at" => chrono::Utc::now().to_rfc3339(), "name" => data.name.clone(), "age" => data.age.clone(), "updated_at" => chrono::Utc::now().to_rfc3339() }), None).collect_to::<Vec<_>>();

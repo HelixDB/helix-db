@@ -66,7 +66,7 @@ pub fn getUser(input: &HandlerInput, response: &mut Response) -> Result<(), Grap
     };
 
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let txn = db.graph_env.read_txn().unwrap();
     let user = G::new(Arc::clone(&db), &txn)
         .n_from_id(&data.user_id)
@@ -97,7 +97,7 @@ pub fn createUser(input: &HandlerInput, response: &mut Response) -> Result<(), G
     };
 
     let mut remapping_vals = RemappingMap::new();
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
         .add_n("User", Some(props! { "arr" => data.arr.clone() }), None)

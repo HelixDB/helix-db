@@ -76,7 +76,7 @@ pub struct Created {
 #[handler]
 pub fn filter_users (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals = RemappingMap::new();
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let users = G::new(Arc::clone(&db), &txn)
 .n_from_type("User")

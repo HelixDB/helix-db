@@ -70,7 +70,7 @@ let data: CreatedUserInput = match sonic_rs::from_slice(&input.request.body) {
 };
 
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let mut txn = db.graph_env.write_txn().unwrap();
     let user = G::new_mut(Arc::clone(&db), &mut txn)
 .add_n("UserFile12", Some(props! { "email" => data.email.clone(), "age" => data.age.clone(), "name" => data.name.clone(), "created_at" => chrono::Utc::now().to_rfc3339(), "updated_at" => chrono::Utc::now().to_rfc3339() }), None).collect_to::<Vec<_>>();
@@ -85,7 +85,7 @@ let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
 #[handler]
 pub fn GetUsers (input: &HandlerInput, response: &mut Response) -> Result<(), GraphError> {
 let mut remapping_vals: RefCell<HashMap<u128, ResponseRemapping>> = RefCell::new(HashMap::new());
-let db = Arc::clone(&input.graph.storage);
+let db = Arc::clone(&input.context.graph_access.storage);
 let txn = db.graph_env.read_txn().unwrap();
     let users = G::new(Arc::clone(&db), &txn)
 .n_from_type("UserFile12").collect_to::<Vec<_>>();

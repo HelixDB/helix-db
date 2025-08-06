@@ -1,7 +1,7 @@
 use core::fmt;
 use std::fmt::Display;
 
-use crate::helixc::generator::utils::{write_properties, write_secondary_indices, VecData};
+use crate::helixc::generator::utils::{VecData, write_properties, write_secondary_indices};
 
 use super::{
     bool_op::BoExp,
@@ -71,16 +71,21 @@ pub struct AddV {
 }
 impl Display for AddV {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "insert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})",
-            self.vec,
-            self.label,
-            write_properties(&self.properties)
-        )
+        match &self.vec {
+            VecData::Standard(v) => {
+                write!(
+                    f,
+                    "insert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})",
+                    v,
+                    self.label,
+                    write_properties(&self.properties)
+                )
+            }
+            VecData::Embed { data, model_name } => todo!(),
+            VecData::Unknown => todo!(),
+        }
     }
 }
-
 
 #[derive(Clone)]
 pub struct NFromID {
@@ -134,7 +139,11 @@ pub struct SearchBM25 {
 
 impl Display for SearchBM25 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "search_bm25({}, {}, {})?", self.type_arg, self.query, self.k)
+        write!(
+            f,
+            "search_bm25({}, {}, {})?",
+            self.type_arg, self.query, self.k
+        )
     }
 }
 
@@ -184,9 +193,7 @@ impl Display for SearchVector {
             None => write!(
                 f,
                 "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, None)",
-                self.vec,
-                self.k,
-                self.label,
+                self.vec, self.k, self.label,
             ),
         }
     }
@@ -203,4 +210,3 @@ impl Display for NFromIndex {
         write!(f, "n_from_index({}, {})", self.index, self.key)
     }
 }
-

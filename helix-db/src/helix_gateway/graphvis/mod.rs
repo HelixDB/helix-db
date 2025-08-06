@@ -30,7 +30,7 @@ pub async fn graphvis_handler(
 }
 
 pub fn graphvis_inner(input: &HandlerInput) -> Result<protocol::Response, HelixError> {
-    let db = Arc::clone(&input.graph.storage);
+    let db = Arc::clone(&input.context.graph_access.storage);
     let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
 
     let json_ne: String =
