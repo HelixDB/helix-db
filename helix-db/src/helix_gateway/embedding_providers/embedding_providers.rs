@@ -1,5 +1,5 @@
 use crate::helix_engine::types::GraphError;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use sonic_rs::JsonValueTrait;
 use sonic_rs::{JsonContainerTrait, json};
 use std::env;
@@ -10,7 +10,7 @@ use url::Url;
 
 /// Trait for embedding models to fetch text embeddings.
 pub trait EmbeddingModel {
-    fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError>;
+    async fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError>;
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ impl EmbeddingModelImpl {
 }
 
 impl EmbeddingModel for EmbeddingModelImpl {
-    fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError> {
+    async fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError> {
         match &self.provider {
             EmbeddingProvider::OpenAI => {
                 let api_key = self
@@ -127,10 +127,12 @@ impl EmbeddingModel for EmbeddingModelImpl {
                         "model": &self.model,
                     }))
                     .send()
+                    .await
                     .map_err(|e| GraphError::from(format!("Failed to send request: {e}")))?;
 
                 let text_response = response
                     .text()
+                    .await
                     .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
 
                 let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
@@ -172,10 +174,12 @@ impl EmbeddingModel for EmbeddingModelImpl {
                         "taskType": task_type
                     }))
                     .send()
+                    .await
                     .map_err(|e| GraphError::from(format!("Failed to send request: {e}")))?;
 
                 let text_response = response
                     .text()
+                    .await
                     .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
 
                 let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
@@ -209,10 +213,12 @@ impl EmbeddingModel for EmbeddingModelImpl {
                         "chunk_size": 100
                     }))
                     .send()
+                    .await
                     .map_err(|e| GraphError::from(format!("Request failed: {e}")))?;
 
                 let text_response = response
                     .text()
+                    .await
                     .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
 
                 let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
@@ -275,43 +281,43 @@ macro_rules! embed {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_openai_embedding_success() {
+    #[tokio::test]
+    async fn test_openai_embedding_success() {
         let model = get_embedding_model(None, Some("text-embedding-ada-002"), None).unwrap();
-        let result = model.fetch_embedding("test text");
+        let result = model.fetch_embedding("test text").await;
         assert!(result.is_ok());
         let embedding = result.unwrap();
         println!("embedding: {embedding:?}");
     }
 
-    #[test]
-    fn test_gemini_embedding_success() {
+    #[tokio::test]
+    async fn test_gemini_embedding_success() {
         let model = get_embedding_model(None, Some("gemini-embedding-001"), None).unwrap();
-        let result = model.fetch_embedding("test text");
+        let result = model.fetch_embedding("test text").await;
         assert!(result.is_ok());
         let embedding = result.unwrap();
         println!("embedding: {embedding:?}");
     }
 
-    #[test]
-    fn test_gemini_embedding_with_task_type() {
+    #[tokio::test]
+    async fn test_gemini_embedding_with_task_type() {
         let model = get_embedding_model(
             None,
             Some("gemini:gemini-embedding-001:SEMANTIC_SIMILARITY"),
             None,
         )
         .unwrap();
-        let result = model.fetch_embedding("test text");
+        let result = model.fetch_embedding("test text").await;
         assert!(result.is_ok());
         let embedding = result.unwrap();
         println!("embedding: {embedding:?}");
     }
 
-    #[test]
-    fn test_local_embedding_success() {
+    #[tokio::test]
+    async fn test_local_embedding_success() {
         let model =
             get_embedding_model(None, Some("local"), Some("http://localhost:8699/embed")).unwrap();
-        let result = model.fetch_embedding("test text");
+        let result = model.fetch_embedding("test text").await;
         assert!(result.is_ok());
         let embedding = result.unwrap();
         println!("embedding: {:?}", embedding);
