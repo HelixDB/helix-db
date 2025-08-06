@@ -27,10 +27,12 @@ use crate::{
     protocol::{response::Response, return_values::ReturnValue, value::Value},
     utils::label_hash::hash_label,
 };
+use async_trait::async_trait;
 use heed3::RoTxn;
 use helix_macros::{mcp_handler, tool_calls};
 use serde::Deserialize;
 use std::sync::Arc;
+use tokio::sync::futures;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,7 +179,7 @@ trait McpTools<'a> {
     ) -> Result<Vec<TraversalVal>, GraphError>;
 
     /// HNSW Search with built int embedding model
-    async fn search_vector_text(
+    fn search_vector_text(
         &'a self,
         txn: &'a RoTxn<'a>,
         connection: &'a MCPConnection,
@@ -413,11 +415,14 @@ impl<'a> McpTools<'a> for McpBackend {
     ) -> Result<Vec<TraversalVal>, GraphError> {
         let db = Arc::clone(&self.db);
 
-//         let items = connection.iter.clone().collect::<Vec<_>>();
+        //         let items = connection.iter.clone().collect::<Vec<_>>();
 
         // Check if BM25 is enabled and has metadata
         if let Some(bm25) = &db.bm25 {
-            match bm25.metadata_db.get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY) {
+            match bm25
+                .metadata_db
+                .get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
+            {
                 Ok(Some(_)) => {
                     let results = G::new(db, txn)
                         .search_bm25(&label, &query, limit)?
@@ -425,15 +430,18 @@ impl<'a> McpTools<'a> for McpBackend {
 
                     println!("BM25 search results: {results:?}");
                     Ok(results)
-                },
+                }
                 Ok(None) => {
                     // BM25 metadata not found - index not initialized yet
                     debug_println!("BM25 index not initialized yet - returning empty results");
                     Ok(vec![])
-                },
+                }
                 Err(_e) => {
                     // Error accessing metadata database
-                    debug_println!("Error checking BM25 metadata: {:?} - returning empty results", e);
+                    debug_println!(
+                        "Error checking BM25 metadata: {:?} - returning empty results",
+                        e
+                    );
                     Ok(vec![])
                 }
             }
@@ -444,7 +452,7 @@ impl<'a> McpTools<'a> for McpBackend {
         }
     }
 
-    async fn search_vector_text(
+    fn search_vector_text(
         &'a self,
         txn: &'a RoTxn<'a>,
         _connection: &'a MCPConnection,
@@ -454,7 +462,13 @@ impl<'a> McpTools<'a> for McpBackend {
         let db = Arc::clone(&self.db);
 
         let model = get_embedding_model(None, None, None)?;
-        let result = model.fetch_embedding(&query).await?;
+
+        let local_rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("couldn't build local tokio runtime");
+
+        let result = local_rt.block_on(model.fetch_embedding(&query))?;
+
         let embedding = result;
 
         let res = G::new(db, txn)
@@ -514,7 +528,7 @@ pub(super) fn _filter_items(
     let initial_filtered_iter = match &filter.properties {
         Some(properties) => iter
             .filter(move |item| {
-                properties.iter().any( |filters| {
+                properties.iter().any(|filters| {
                     filters.iter().all(|filter| {
                         debug_println!("filter: {:?}", filter);
                         match item.check_property(&filter.key) {
@@ -614,4 +628,3 @@ pub(super) fn _filter_items(
     debug_println!("result: {:?}", result);
     result
 }
-

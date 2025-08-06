@@ -1,4 +1,5 @@
 use crate::helix_engine::types::GraphError;
+use async_trait::async_trait;
 use reqwest::Client;
 use sonic_rs::JsonValueTrait;
 use sonic_rs::{JsonContainerTrait, json};
@@ -9,6 +10,7 @@ use url::Url;
 //      in case we have a gpu or something on the server we're running it on
 
 /// Trait for embedding models to fetch text embeddings.
+#[async_trait(?Send)]
 pub trait EmbeddingModel {
     async fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError>;
 }
@@ -109,6 +111,7 @@ impl EmbeddingModelImpl {
     }
 }
 
+#[async_trait(?Send)]
 impl EmbeddingModel for EmbeddingModelImpl {
     async fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError> {
         match &self.provider {
