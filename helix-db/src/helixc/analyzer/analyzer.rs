@@ -16,7 +16,7 @@ use serde::Serialize;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    sync::{Arc, OnceLock, atomic::AtomicUsize},
+    sync::OnceLock,
 };
 
 pub fn analyze(src: &Source) -> (Vec<Diagnostic>, GeneratedSource) {

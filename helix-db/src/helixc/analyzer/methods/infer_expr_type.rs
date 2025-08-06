@@ -295,6 +295,7 @@ pub(crate) fn infer_expr_type<'a>(
                         steps: vec![],
                         traversal_type: TraversalType::Mut,
                         should_collect: ShouldCollect::ToVal,
+                        embeddings: vec![],
                     });
                     gen_query.is_mut = true;
                     return (Type::Node(Some(ty.to_string())), Some(stmt));
@@ -494,6 +495,7 @@ pub(crate) fn infer_expr_type<'a>(
                     steps: vec![],
                     traversal_type: TraversalType::Mut,
                     should_collect: ShouldCollect::ToVal,
+                    embeddings: vec![],
                 });
                 gen_query.is_mut = true;
                 return (Type::Edge(Some(ty.to_string())), Some(stmt));
@@ -689,6 +691,7 @@ pub(crate) fn infer_expr_type<'a>(
                         steps: vec![],
                         traversal_type: TraversalType::Mut,
                         should_collect: ShouldCollect::ToVal,
+                        embeddings: vec![],
                     });
                     gen_query.is_mut = true;
                     return (Type::Vector(Some(ty.to_string())), Some(stmt));
@@ -723,7 +726,8 @@ pub(crate) fn infer_expr_type<'a>(
                     generate_error!(ctx, original_query, sv.loc.clone(), E103, ty.as_str());
                 }
             }
-            let vec: VecData = match &sv.data {
+            let mut embeddings = vec![];
+            let vec = match &sv.data {
                 Some(VectorData::Vector(v)) => {
                     VecData::Standard(GeneratedValue::Literal(GenRef::Ref(format!(
                         "[{}]",
@@ -745,16 +749,24 @@ pub(crate) fn infer_expr_type<'a>(
                     ))
                 }
                 Some(VectorData::Embed(e)) => match &e.value {
-                    EvaluatesToString::Identifier(i) => VecData::Embed(VecEmbed {
-                        data: gen_identifier_or_param(original_query, i.as_str(), true, false),
-                        model_name: gen_query.embedding_model_to_use.clone(),
-                        async_flip_flops: gen_query.async_flip_flops.clone(),
-                    }),
-                    EvaluatesToString::StringLiteral(s) => VecData::Embed(VecEmbed {
-                        data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
-                        model_name: gen_query.embedding_model_to_use.clone(),
-                        async_flip_flops: gen_query.async_flip_flops.clone(),
-                    }),
+                    EvaluatesToString::Identifier(i) => {
+                        let embed = VecEmbed {
+                            data: gen_identifier_or_param(original_query, i.as_str(), true, false),
+                            model_name: gen_query.embedding_model_to_use.clone(),
+                            async_flip_flops: gen_query.async_flip_flops.clone(),
+                        };
+                        embeddings.push(embed.clone());
+                        VecData::Embed(embed)
+                    }
+                    EvaluatesToString::StringLiteral(s) => {
+                        let embed = VecEmbed {
+                            data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                            model_name: gen_query.embedding_model_to_use.clone(),
+                            async_flip_flops: gen_query.async_flip_flops.clone(),
+                        };
+                        embeddings.push(embed.clone());
+                        VecData::Embed(embed)
+                    }
                 },
                 _ => {
                     generate_error!(
@@ -839,6 +851,7 @@ pub(crate) fn infer_expr_type<'a>(
                         steps: vec![],
                         should_collect: ShouldCollect::ToVec,
                         source_step: Separator::Empty(SourceStep::Anonymous),
+                        embeddings: vec![],
                     };
                     match stmt {
                         GeneratedStatement::Traversal(tr) => {
@@ -885,6 +898,7 @@ pub(crate) fn infer_expr_type<'a>(
                             pre_filter,
                         },
                     )),
+                    embeddings,
                 })),
             )
         }
@@ -1113,6 +1127,7 @@ pub(crate) fn infer_expr_type<'a>(
                     steps: vec![],
                     should_collect: ShouldCollect::ToVec,
                     source_step: Separator::Period(SourceStep::SearchBM25(search_bm25)),
+                    embeddings: vec![],
                 })),
             )
         }

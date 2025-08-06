@@ -177,9 +177,9 @@ trait McpTools<'a> {
     ) -> Result<Vec<TraversalVal>, GraphError>;
 
     /// HNSW Search with built int embedding model
-    fn search_vector_text(
+    async fn search_vector_text(
         &'a self,
-        txn: &'a RoTxn,
+        txn: &'a RoTxn<'a>,
         connection: &'a MCPConnection,
         query: String,
         label: String,
@@ -444,9 +444,9 @@ impl<'a> McpTools<'a> for McpBackend {
         }
     }
 
-    fn search_vector_text(
+    async fn search_vector_text(
         &'a self,
-        txn: &'a RoTxn,
+        txn: &'a RoTxn<'a>,
         _connection: &'a MCPConnection,
         query: String,
         label: String,
@@ -454,8 +454,8 @@ impl<'a> McpTools<'a> for McpBackend {
         let db = Arc::clone(&self.db);
 
         let model = get_embedding_model(None, None, None)?;
-        let result = model.fetch_embedding(&query);
-        let embedding = result?;
+        let result = model.fetch_embedding(&query).await?;
+        let embedding = result;
 
         let res = G::new(db, txn)
             .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, 5, &label, None)

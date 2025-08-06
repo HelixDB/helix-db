@@ -1,4 +1,4 @@
-use crate::helixc::generator::utils::{VecData, write_properties};
+use crate::helixc::generator::utils::{VecData, VecEmbed, write_properties};
 
 use super::{
     bool_op::{BoExp, BoolOp},
@@ -68,10 +68,20 @@ pub struct Traversal {
     pub source_step: Separator<SourceStep>,
     pub steps: Vec<Separator<Step>>,
     pub should_collect: ShouldCollect,
+    pub embeddings: Vec<VecEmbed>,
 }
 
 impl Display for Traversal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.embeddings.len() > 0 {
+            writeln!(f, "input.context.io_rt.spawn(async move{{")?;
+            for embed in &self.embeddings {
+                let n = embed.async_flip_flops.load(std::sync::atomic::Ordering::SeqCst);
+                let val_name = format!("__async_embed_value_{n}");
+                writeln!(f, "let {val_name} = {embed};")?;
+            }
+            writeln!(f, "input.context.cont_tx.send(move || {{")?;
+        }
         match &self.traversal_type {
             TraversalType::FromVar(var) => {
                 write!(f, "G::new_from(Arc::clone(&db), &txn, {var}.clone())")?;
@@ -142,6 +152,7 @@ impl Default for Traversal {
             source_step: Separator::Empty(SourceStep::Empty),
             steps: vec![],
             should_collect: ShouldCollect::ToVec,
+            embeddings: vec![],
         }
     }
 }
@@ -379,13 +390,9 @@ impl Display for SearchVectorStep {
                 write!(f, "brute_force_search_v({}, {})", v, self.k)
             }
             VecData::Embed(e) => {
-                let n = e
-                    .async_flip_flops
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let n = e.async_flip_flops.load(std::sync::atomic::Ordering::SeqCst);
                 let val_name = format!("__async_embed_value_{n}");
-                writeln!(f, "input.context.io_rt.spawn(async move{{")?;
-                writeln!(f, "let {val_name} = {e};")?;
-                writeln!(f, "input.context.cont_tx.send(move || {{")?;
+
                 writeln!(f, "brute_force_search_v(&{}, {})", val_name, self.k)
 
                 // Need to close with }).expect("Continuation channel should not be closed")});

@@ -84,11 +84,8 @@ impl Display for AddV {
             VecData::Embed(e) => {
                 let n = e
                     .async_flip_flops
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    .load(std::sync::atomic::Ordering::SeqCst);
                 let val_name = format!("__async_embed_value_{n}");
-                writeln!(f, "input.context.io_rt.spawn(async move{{")?;
-                writeln!(f, "let {val_name} = {e};")?;
-                writeln!(f, "input.context.cont_tx.send(move || {{")?;
                 write!(
                     f,
                     "insert_v::<fn(&HVector, &RoTxn) -> bool>(&{}, {}, {})",
@@ -198,11 +195,8 @@ impl Display for SearchVector {
             VecData::Embed(e) => {
                 let n = e
                     .async_flip_flops
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    .load(std::sync::atomic::Ordering::SeqCst);
                 let val_name = format!("__async_embed_value_{n}");
-                writeln!(f, "input.context.io_rt.spawn(async move{{")?;
-                writeln!(f, "let {val_name} = {e};")?;
-                writeln!(f, "input.context.cont_tx.send(move || {{")?;
                 self.fmt_inner(f, &format!("&{val_name}"))
 
                 // Need to close with }).expect("Continuation channel should not be closed")});

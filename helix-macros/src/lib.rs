@@ -192,6 +192,8 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
     for item in input_trait.clone().items {
         if let TraitItem::Fn(method) = item {
+
+            let async_keyword = method.sig.asyncness.is_some();
             let fn_name = &method.sig.ident;
 
             // Extract method parameters (skip &self and txn)
@@ -214,6 +216,24 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 })
                 .collect();
 
+            let try_expr = if async_keyword {
+                quote! { .await? }
+            } else {
+                quote! { ? }
+            };
+
+            let async_prefix = if async_keyword {
+                quote! { async }
+            } else {
+                quote! {}
+            };
+
+            let return_type = if async_keyword {
+                quote! { -> Result<Response, GraphError> }
+            } else {
+                quote! { -> Result<Response, GraphError> }
+            };
+
             let struct_name = quote::format_ident!("{}Data", fn_name);
             let mcp_struct_name = quote::format_ident!("{}McpInput", fn_name);
             let expanded = quote! {
@@ -233,9 +253,9 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
                 #[mcp_handler]
                 #[allow(non_camel_case_types)]
-                pub fn #fn_name<'a>(
+                pub #async_prefix fn #fn_name<'a>(
                     input: &'a mut MCPToolInput,
-                ) -> Result<Response, GraphError> {
+                ) #return_type {
                     let data = input.request.in_fmt.deserialize_owned::<#struct_name>(&input.request.body)?;
 
                     let mut connections = input.mcp_connections.lock().unwrap();
@@ -247,7 +267,7 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
                     let txn = input.mcp_backend.db.graph_env.read_txn()?;
 
-                    let result = input.mcp_backend.#fn_name(&txn, &connection, #(data.data.#field_names),*)?;
+                    let result = input.mcp_backend.#fn_name(&txn, &connection, #(data.data.#field_names),*)#try_expr;
 
                     let first = result.first().unwrap_or(&TraversalVal::Empty).clone();
 
