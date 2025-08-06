@@ -158,19 +158,19 @@ impl Display for Remapping {
                 self.variable_name,
                 self.remappings
                     .iter()
-                    .map(|remapping| format!("{remapping}"))
+                    .map(|remapping| format!("err_bubble!(ret_chan, {remapping})"))
                     .collect::<Vec<String>>()
-                    .join("?;")
+                    .join(";")
             ),
             false => write!(
                 f,
-                "map_traversal(|{}, txn| {{ {}?;\n Ok({}) }})",
+                "map_traversal(|{}, txn| {{ {};\n Ok({}) }})",
                 self.variable_name,
                 self.remappings
                     .iter()
-                    .map(|remapping| format!("{remapping}"))
+                    .map(|remapping| format!("err_bubble!(ret_chan, {remapping})"))
                     .collect::<Vec<String>>()
-                    .join("?;\n"),
+                    .join(";\n"),
                 self.variable_name
             ),
         }

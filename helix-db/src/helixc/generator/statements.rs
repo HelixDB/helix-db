@@ -3,8 +3,6 @@ use std::fmt::Display;
 
 use crate::helixc::generator::{bool_op::BoExp, traversal_steps::Traversal, utils::GenRef};
 
-
-
 #[derive(Clone)]
 pub enum Statement {
     Assignment(Assignment),
@@ -126,13 +124,12 @@ impl Display for Drop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Drop::<Vec<_>>::drop_traversal(
+            "err_bubble!(ret_chan, Drop::<Vec<_>>::drop_traversal(
                 {},
                 Arc::clone(&db),
                 &mut txn,
-            )?;",
+            ));",
             self.expression
         )
     }
 }
-

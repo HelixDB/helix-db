@@ -365,7 +365,7 @@ pub fn write_headers() -> String {
 
 
 use heed3::RoTxn;
-use helix_macros::{handler, tool_call, mcp_handler, migration};
+use helix_macros::{handler, tool_call, mcp_handler, migration, err_bubble};
 use helix_db::{
     helix_engine::{
         graph_core::{

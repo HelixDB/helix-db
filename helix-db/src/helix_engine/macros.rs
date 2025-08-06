@@ -138,7 +138,7 @@ pub mod macros {
                     return Err(GraphError::ConversionError(format!(
                         "Error Decoding: {:?}",
                         "Invalid node".to_string()
-                    )))
+                    )));
                 }
             };
             let old_value_remapping =
@@ -206,15 +206,15 @@ pub mod macros {
                     return Err(GraphError::ConversionError(format!(
                         "Error Decoding: {:?}",
                         "Invalid node".to_string()
-                    )))
+                    )));
                 }
             };
             let value_remapping = Remapping::new(
                 false,
                 Some($identifier_value.to_string()),
                 Some(ReturnValue::from(value)),
-            );-
-            $remapping_vals.insert(
+            );
+            -$remapping_vals.insert(
                 $var_name.id(),
                 ResponseRemapping::new(
                     HashMap::from([($field_name.to_string(), value_remapping)]),
@@ -234,7 +234,7 @@ pub mod macros {
                     return Err(GraphError::ConversionError(format!(
                         "Error Decoding: {:?}",
                         "Invalid node".to_string()
-                    )))
+                    )));
                 }
             };
             let old_value_remapping = Remapping::new(
@@ -300,5 +300,17 @@ pub mod macros {
             result
         }};
     }
-}
 
+    #[macro_export]
+    macro_rules! err_bubble {
+        ($ret_chan:ident, $e:expr) => {
+            match e {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = $ret_chan.send(e.into());
+                    return;
+                }
+            }
+        };
+    }
+}

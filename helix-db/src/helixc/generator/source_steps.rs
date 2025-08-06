@@ -157,7 +157,7 @@ impl Display for SearchBM25 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "search_bm25({}, {}, {})?",
+            "err_bubble!(ret_chan, search_bm25({}, {}, {}))",
             self.type_arg, self.query, self.k
         )
     }
