@@ -268,15 +268,15 @@ macro_rules! embed {
     ($db:expr, $query:expr) => {{
         let embedding_model =
             get_embedding_model(None, $db.storage_config.embedding_model.as_deref(), None)?;
-        embedding_model.fetch_embedding($query)?
+        embedding_model.fetch_embedding($query).await?
     }};
     ($db:expr, $query:expr, $provider:expr) => {{
         let embedding_model = get_embedding_model(None, Some($provider), None)?;
-        embedding_model.fetch_embedding($query)?
+        embedding_model.fetch_embedding($query).await?
     }};
     ($db:expr, $query:expr, $provider:expr, $url:expr) => {{
         let embedding_model = get_embedding_model(None, Some($provider), Some($url))?;
-        embedding_model.fetch_embedding($query)?
+        embedding_model.fetch_embedding($query).await?
     }};
 }
 

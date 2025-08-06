@@ -516,6 +516,7 @@ pub(crate) fn infer_expr_type<'a>(
                     generate_error!(ctx, original_query, add.loc.clone(), E103, ty.as_str());
                 }
                 // Validate vector fields
+                let mut embeddings = vec![];
                 let (label, properties) = match &add.fields {
                     Some(fields) => {
                         let field_set = ctx.vector_fields.get(ty.as_str()).cloned();
@@ -664,21 +665,29 @@ pub(crate) fn infer_expr_type<'a>(
                             VecData::Standard(id)
                         }
                         VectorData::Embed(e) => match &e.value {
-                            EvaluatesToString::Identifier(i) => VecData::Embed(VecEmbed {
-                                data: gen_identifier_or_param(
-                                    original_query,
-                                    i.as_str(),
-                                    true,
-                                    false,
-                                ),
-                                model_name: gen_query.embedding_model_to_use.clone(),
-                                async_flip_flops: gen_query.async_flip_flops.clone(),
-                            }),
-                            EvaluatesToString::StringLiteral(s) => VecData::Embed(VecEmbed {
-                                data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
-                                model_name: gen_query.embedding_model_to_use.clone(),
-                                async_flip_flops: gen_query.async_flip_flops.clone(),
-                            }),
+                            EvaluatesToString::Identifier(i) => {
+                                let embed = VecEmbed {
+                                    data: gen_identifier_or_param(
+                                        original_query,
+                                        i.as_str(),
+                                        true,
+                                        false,
+                                    ),
+                                    model_name: gen_query.embedding_model_to_use.clone(),
+                                    async_flip_flops: gen_query.async_flip_flops.clone(),
+                                };
+                                embeddings.push(embed.clone());
+                                VecData::Embed(embed)
+                            }
+                            EvaluatesToString::StringLiteral(s) => {
+                                let embed = VecEmbed {
+                                    data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                                    model_name: gen_query.embedding_model_to_use.clone(),
+                                    async_flip_flops: gen_query.async_flip_flops.clone(),
+                                };
+                                embeddings.push(embed.clone());
+                                VecData::Embed(embed)
+                            }
                         },
                     };
                     let add_v = AddV {
@@ -691,7 +700,7 @@ pub(crate) fn infer_expr_type<'a>(
                         steps: vec![],
                         traversal_type: TraversalType::Mut,
                         should_collect: ShouldCollect::ToVal,
-                        embeddings: vec![],
+                        embeddings,
                     });
                     gen_query.is_mut = true;
                     return (Type::Vector(Some(ty.to_string())), Some(stmt));

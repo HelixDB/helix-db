@@ -295,7 +295,7 @@ pub(crate) fn validate_traversal<'a>(
                     generate_error!(ctx, original_query, sv.loc.clone(), E103, ty.as_str());
                 }
             }
-            let mut embeddings = vec![];
+
             let vec = match &sv.data {
                 Some(VectorData::Vector(v)) => {
                     VecData::Standard(GeneratedValue::Literal(GenRef::Ref(format!(
@@ -324,7 +324,7 @@ pub(crate) fn validate_traversal<'a>(
                             model_name: gen_query.embedding_model_to_use.clone(),
                             async_flip_flops: gen_query.async_flip_flops.clone(),
                         };
-                        embeddings.push(embed.clone());
+                        gen_traversal.embeddings.push(embed.clone());
                         VecData::Embed(embed)
                     }
                     EvaluatesToString::StringLiteral(s) => {
@@ -333,7 +333,7 @@ pub(crate) fn validate_traversal<'a>(
                             model_name: gen_query.embedding_model_to_use.clone(),
                             async_flip_flops: gen_query.async_flip_flops.clone(),
                         };
-                        embeddings.push(embed.clone());
+                        gen_traversal.embeddings.push(embed.clone());
                         VecData::Embed(embed)
                     }
                 },
@@ -420,7 +420,7 @@ pub(crate) fn validate_traversal<'a>(
                         steps: vec![],
                         should_collect: ShouldCollect::ToVec,
                         source_step: Separator::Empty(SourceStep::Anonymous),
-                        embeddings,
+                        embeddings: vec![],
                     };
                     match stmt {
                         GeneratedStatement::Traversal(tr) => {
