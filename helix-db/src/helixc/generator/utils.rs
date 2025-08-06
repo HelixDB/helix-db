@@ -416,6 +416,7 @@ use helix_db::{
         return_values::ReturnValue,
         value::{Value, casting::{CastType, cast}},
         format::Format,
+        request::RetChan,
     },
     utils::{
         count::Count,

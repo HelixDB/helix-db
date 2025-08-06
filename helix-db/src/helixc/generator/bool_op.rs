@@ -26,7 +26,11 @@ impl Display for BoolOp {
             BoolOp::Neq(neq) => format!("{neq}"),
             BoolOp::Contains(_) => unimplemented!(),
         };
-        write!(f, "map_value_or(false, |v| *v{s})?")
+
+        write!(
+            f,
+            "match map_value_or(false, |v| *v{s}) {{ Ok(v) => v, Err(e) => {{ let _ = ret_chan.send(Err(e.into())); return; }} }}"
+        )
     }
 }
 #[derive(Clone)]
@@ -98,7 +102,6 @@ impl Display for Contains {
         write!(f, ".contains({})", self.value)
     }
 }
-
 
 /// Boolean expression is used for a traversal or set of traversals wrapped in AND/OR
 /// that resolve to a boolean value

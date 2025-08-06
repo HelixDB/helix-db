@@ -69,9 +69,11 @@ impl Display for Query {
         // prints the function signature
         writeln!(
             f,
-            "pub fn {} (input: &HandlerInput) -> Result<Response, GraphError> {{",
+            "pub fn {} (input: &HandlerInput, ret_chan: RetChan) {{",
             self.name
         )?;
+        writeln!(f, "{{")?;
+        writeln!(f, "// FOO!!!!")?;
 
         // prints each statement
         for statement in &self.statements {
@@ -95,7 +97,7 @@ impl Display for Query {
         // TODO: replace this expect
         writeln!(
             f,
-            r#"    ret_chan.send(input.request.out_fmt.create_response(&return_vals)).expect("Return channel should suceed")"#
+            r#"    ret_chan.send(Ok(input.request.out_fmt.create_response(&return_vals))).expect("Return channel should suceed")"#
         )?;
 
         // TODO: close closures
@@ -110,6 +112,7 @@ impl Display for Query {
             write!(f, "{closure_end}")?;
         }
 
+        writeln!(f, "}}")?;
         writeln!(f, "}}")
     }
 }
