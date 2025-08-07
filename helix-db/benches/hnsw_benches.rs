@@ -1,7 +1,7 @@
 /// cargo test --test hnsw_benches --release -- --no-capture
 #[cfg(test)]
 mod tests {
-    use heed3::{Env, EnvOpenOptions, RoTxn};
+    use heed3::{Env, EnvOpenOptions, RoTxn, WithoutTls};
     use helix_db::{
         helix_engine::vector_core::{
             hnsw::HNSW,
@@ -25,12 +25,13 @@ mod tests {
 
     type Filter = fn(&HVector, &RoTxn) -> bool;
 
-    fn setup_temp_env() -> Env {
+    fn setup_temp_env() -> Env<WithoutTls> {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().to_str().unwrap();
 
         unsafe {
             EnvOpenOptions::new()
+                .read_txn_without_tls()
                 .map_size(20 * 1024 * 1024 * 1024) // 20 GB
                 .max_dbs(10)
                 .open(path)

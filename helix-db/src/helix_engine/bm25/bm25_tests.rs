@@ -12,17 +12,18 @@ mod tests {
         protocol::value::Value,
     };
 
-    use heed3::{Env, EnvOpenOptions, RoTxn};
+    use heed3::{Env, EnvOpenOptions, RoTxn, WithoutTls};
     use rand::Rng;
     use std::collections::HashMap;
     use tempfile::tempdir;
 
-    fn setup_test_env() -> (Env, tempfile::TempDir) {
+    fn setup_test_env() -> (Env<WithoutTls>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let path = temp_dir.path();
 
         let env = unsafe {
             EnvOpenOptions::new()
+                .read_txn_without_tls()
                 .map_size(4 * 1024 * 1024 * 1024) // 4GB
                 .max_dbs(20)
                 .open(path)

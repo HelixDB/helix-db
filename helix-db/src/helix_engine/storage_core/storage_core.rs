@@ -16,7 +16,7 @@ use crate::{
         label_hash::hash_label,
     },
 };
-use heed3::{Database, DatabaseFlags, Env, EnvOpenOptions, RoTxn, RwTxn, byteorder::BE, types::*};
+use heed3::{byteorder::BE, types::*, Database, DatabaseFlags, Env, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -39,7 +39,7 @@ pub struct StorageConfig {
 }
 
 pub struct HelixGraphStorage {
-    pub graph_env: Env,
+    pub graph_env: Env<WithoutTls>,
 
     pub nodes_db: Database<U128<BE>, Bytes>,
     pub edges_db: Database<U128<BE>, Bytes>,
@@ -69,6 +69,7 @@ impl HelixGraphStorage {
 
         let graph_env = unsafe {
             EnvOpenOptions::new()
+                .read_txn_without_tls()
                 .map_size(db_size * 1024 * 1024 * 1024)
                 .max_dbs(20)
                 .max_readers(200)

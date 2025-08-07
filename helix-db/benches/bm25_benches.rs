@@ -7,18 +7,19 @@ mod tests {
         utils::{id::v6_uuid, tqdm::tqdm},
     };
 
-    use heed3::{Env, EnvOpenOptions};
+    use heed3::{Env, EnvOpenOptions, WithoutTls};
     use rand::seq::SliceRandom;
     use reqwest::blocking::get;
     use std::collections::HashMap;
     use tempfile::tempdir;
 
-    fn setup_test_env() -> (Env, tempfile::TempDir) {
+    fn setup_test_env() -> (Env<WithoutTls>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let path = temp_dir.path();
 
         let env = unsafe {
             EnvOpenOptions::new()
+                .read_txn_without_tls()
                 .map_size(4 * 1024 * 1024 * 1024) // 4GB
                 .max_dbs(20)
                 .open(path)

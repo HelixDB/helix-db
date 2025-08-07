@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use heed3::RoTxn;
 use helix_db::{
-    embed, exclude_field, field_addition_from_old_field, field_addition_from_value,
+    err_bubble,embed, exclude_field, field_addition_from_old_field, field_addition_from_value,
     field_remapping, field_type_cast,
     helix_engine::{
         graph_core::{
@@ -72,7 +72,7 @@ use helix_db::{
     },
     value_remapping,
 };
-use helix_macros::{err_bubble, handler, mcp_handler, migration, tool_call};
+use helix_macros::{handler, mcp_handler, migration, tool_call};
 use sonic_rs::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -173,10 +173,10 @@ pub fn SearchSimilarUsers(input: &HandlerInput, ret_chan: RetChan) {
             input
                 .context
                 .cont_tx
-                .send(move || {
-                    G::new(Arc::clone(&db), &txn)
+                .send(Box::new(move || {
+                    let search_results = G::new(Arc::clone(&db), &txn)
                         .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
-                            &__async_embed_value_1,
+                            &__async_embed_value_0,
                             data.k.clone(),
                             "UserEmbedding",
                             None,
@@ -195,7 +195,7 @@ pub fn SearchSimilarUsers(input: &HandlerInput, ret_chan: RetChan) {
                     ret_chan
                         .send(Ok(input.request.out_fmt.create_response(&return_vals)))
                         .expect("Return channel should suceed")
-                })
+                }))
                 .expect("Continuation channel should not be closed")
         });
     }

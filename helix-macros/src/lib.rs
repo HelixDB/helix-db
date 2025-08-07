@@ -52,7 +52,8 @@ pub fn handler(args: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #[allow(non_camel_case_types)]
         #vis #sig {
-            let data = input.request.in_fmt.deserialize::<#input_data_name>(&input.request.body)?;
+            // TODO: Handle errors
+            let data = input.request.in_fmt.deserialize::<#input_data_name>(&input.request.body).unwrap();
 
             let mut remapping_vals = RemappingMap::new();
             let db = Arc::clone(&input.context.graph_access.storage);

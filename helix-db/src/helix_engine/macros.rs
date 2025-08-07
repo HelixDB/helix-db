@@ -304,10 +304,10 @@ pub mod macros {
     #[macro_export]
     macro_rules! err_bubble {
         ($ret_chan:ident, $e:expr) => {
-            match e {
+            match $e {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = $ret_chan.send(e.into());
+                    let _ = $ret_chan.send(Err(e.into()));
                     return;
                 }
             }

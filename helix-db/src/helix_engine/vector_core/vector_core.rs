@@ -11,8 +11,7 @@ use crate::{
     protocol::value::Value,
 };
 use heed3::{
-    Database, Env, RoTxn, RwTxn,
-    types::{Bytes, Unit},
+    types::{Bytes, Unit}, Database, Env, RoTxn, RwTxn, WithoutTls
 };
 use itertools::Itertools;
 use rand::prelude::Rng;
@@ -67,7 +66,7 @@ pub struct VectorCore {
 }
 
 impl VectorCore {
-    pub fn new(env: &Env, txn: &mut RwTxn, config: HNSWConfig) -> Result<Self, VectorError> {
+    pub fn new(env: &Env<WithoutTls>, txn: &mut RwTxn, config: HNSWConfig) -> Result<Self, VectorError> {
         let vectors_db = env.create_database(txn, Some(DB_VECTORS))?;
         let vector_data_db = env.create_database(txn, Some(DB_VECTOR_DATA))?;
         let edges_db = env.create_database(txn, Some(DB_HNSW_EDGES))?;

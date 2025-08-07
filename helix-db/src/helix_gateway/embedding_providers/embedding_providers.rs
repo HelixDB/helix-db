@@ -264,19 +264,20 @@ pub fn get_embedding_model(
 /// let embedding = embed!("Hello, world!", "gemini:gemini-embedding-001:SEMANTIC_SIMILARITY");
 /// let embedding = embed!("Hello, world!", "text-embedding-ada-002", "http://localhost:8699/embed");
 /// ```
+/// TODO: Handle errors
 macro_rules! embed {
     ($db:expr, $query:expr) => {{
         let embedding_model =
-            get_embedding_model(None, $db.storage_config.embedding_model.as_deref(), None)?;
-        embedding_model.fetch_embedding($query).await?
+            get_embedding_model(None, $db.storage_config.embedding_model.as_deref(), None).unwrap();
+        embedding_model.fetch_embedding($query).await.unwrap()
     }};
     ($db:expr, $query:expr, $provider:expr) => {{
-        let embedding_model = get_embedding_model(None, Some($provider), None)?;
-        embedding_model.fetch_embedding($query).await?
+        let embedding_model = get_embedding_model(None, Some($provider), None).unwrap();
+        embedding_model.fetch_embedding($query).await.unwrap()
     }};
     ($db:expr, $query:expr, $provider:expr, $url:expr) => {{
-        let embedding_model = get_embedding_model(None, Some($provider), Some($url))?;
-        embedding_model.fetch_embedding($query).await?
+        let embedding_model = get_embedding_model(None, Some($provider), Some($url)).unwrap();
+        embedding_model.fetch_embedding($query).await.unwrap()
     }};
 }
 

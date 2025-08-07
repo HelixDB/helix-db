@@ -6,7 +6,7 @@ use crate::{
         vector_core::{HNSWConfig, VectorCore},
     },
 };
-use heed3::{Env, EnvOpenOptions, RoTxn};
+use heed3::{Env, EnvOpenOptions, RoTxn, WithoutTls};
 use rand::{
     seq::SliceRandom,
     Rng,
@@ -19,12 +19,13 @@ use std::{
 
 type Filter = fn(&HVector, &RoTxn) -> bool;
 
-fn setup_temp_env() -> Env {
+fn setup_temp_env() -> Env<WithoutTls> {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap();
 
     unsafe {
         EnvOpenOptions::new()
+            .read_txn_without_tls()
             .map_size(2 * 1024 * 1024 * 1024) // 2 GB
             .max_dbs(10)
             .open(path)
