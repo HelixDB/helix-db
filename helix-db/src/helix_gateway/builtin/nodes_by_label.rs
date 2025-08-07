@@ -86,7 +86,7 @@ pub fn nodes_by_label_inner(input: &HandlerInput) -> Result<protocol::Response, 
 
     let label = label.ok_or_else(|| GraphError::New("label is required".to_string()))?;
 
-    let remapping_vals = RemappingMap::new();
+    let mut remapping_vals = RemappingMap::new();
 
     let nodes: Vec<TraversalVal> = db
         .nodes_db
@@ -112,7 +112,7 @@ pub fn nodes_by_label_inner(input: &HandlerInput) -> Result<protocol::Response, 
 
     return_vals.insert(
         "nodes".to_string(),
-        ReturnValue::from_traversal_value_array_with_mixin(nodes, remapping_vals.borrow_mut()),
+        ReturnValue::from_traversal_value_array_with_mixin(nodes, &mut remapping_vals.remappings),
     );
 
     return_vals.insert("count".to_string(), ReturnValue::from(count as i32));

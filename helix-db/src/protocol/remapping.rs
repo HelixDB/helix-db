@@ -1,7 +1,6 @@
 use super::return_values::ReturnValue;
 use sonic_rs::{Deserialize, Serialize};
 use std::{
-    cell::{RefCell, RefMut},
     collections::HashMap,
 };
 
@@ -64,7 +63,7 @@ impl ResponseRemapping {
 }
 
 pub struct RemappingMap {
-    pub remappings: RefCell<HashMap<u128, ResponseRemapping>>,
+    pub remappings: HashMap<u128, ResponseRemapping>,
 }
 
 impl Default for RemappingMap {
@@ -76,24 +75,24 @@ impl Default for RemappingMap {
 impl RemappingMap {
     pub fn new() -> Self {
         Self {
-            remappings: RefCell::new(HashMap::new()),
+            remappings: HashMap::new(),
         }
     }
 
     #[inline(always)]
-    pub fn insert(&self, key: u128, remapping: ResponseRemapping) {
-        let remapping = match self.remappings.borrow_mut().remove(&key) {
+    pub fn insert(&mut self, key: u128, remapping: ResponseRemapping) {
+        let remapping = match self.remappings.remove(&key) {
             Some(mut old_remapping) => {
                 old_remapping.remappings.extend(remapping.remappings);
                 old_remapping
             }
             None => remapping,
         };
-        self.remappings.borrow_mut().insert(key, remapping);
+        self.remappings.insert(key, remapping);
     }
 
     #[inline(always)]
-    pub fn borrow_mut(&self) -> RefMut<'_, HashMap<u128, ResponseRemapping>> {
-        self.remappings.borrow_mut()
+    pub fn borrow_mut(&mut self) -> &mut HashMap<u128, ResponseRemapping> {
+        &mut self.remappings
     }
 }

@@ -2137,7 +2137,7 @@ fn test_exclude_field_remapping() {
         .n_from_type("person")
         .collect_to::<Vec<_>>();
 
-    let remapping_vals = RemappingMap::new();
+    let mut remapping_vals = RemappingMap::new();
 
     let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
     return_vals.insert(
@@ -2151,7 +2151,7 @@ fn test_exclude_field_remapping() {
                 })
                 .collect_to::<Vec<_>>()
                 .clone(),
-            remapping_vals.borrow_mut(),
+            &mut remapping_vals.remappings,
         ),
     );
 

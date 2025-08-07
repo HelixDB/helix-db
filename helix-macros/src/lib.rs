@@ -50,22 +50,23 @@ pub fn handler(args: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        #[allow(non_camel_case_types)]
-        #vis #sig {
-            // TODO: Handle errors
-            let data = input.request.in_fmt.deserialize::<#input_data_name>(&input.request.body).unwrap();
+        // #[allow(non_camel_case_types)]
+        // #vis #sig {
+        //     // TODO: Handle errors
+        //     let data = input.request.in_fmt.deserialize::<#input_data_name>(&input.request.body).unwrap();
 
-            let mut remapping_vals = RemappingMap::new();
-            let db = Arc::clone(&input.context.graph_access.storage);
-            #txn_type
+        //     let mut remapping_vals = RemappingMap::new();
+        //     let db = Arc::clone(&input.context.graph_access.storage);
+        //     #txn_type
 
 
-            #(#query_stmts)*
+        //     #(#query_stmts)*
 
-            // The following should be included in generator, because they could be nested in callback closures
-            // txn.commit().unwrap();
-            // ret_chan.send(input.request.out_fmt.create_response(&return_vals)).expect("Return channel should suceed")
-        }
+        //     // The following should be included in generator, because they could be nested in callback closures
+        //     // txn.commit().unwrap();
+        //     // ret_chan.send(input.request.out_fmt.create_response(&return_vals)).expect("Return channel should suceed")
+        // }
+        #input_fn
 
         #[doc(hidden)]
         #[used]

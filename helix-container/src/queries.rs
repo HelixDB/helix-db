@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use heed3::RoTxn;
 use helix_db::{
-    err_bubble,embed, exclude_field, field_addition_from_old_field, field_addition_from_value,
+    embed, err_bubble, exclude_field, field_addition_from_old_field, field_addition_from_value,
     field_remapping, field_type_cast,
     helix_engine::{
         graph_core::{
@@ -156,49 +156,56 @@ pub struct SearchSimilarUsersInput {
     pub k: i64,
     pub dataType: String,
 }
-#[handler(with_read)]
-pub fn SearchSimilarUsers(input: &HandlerInput, ret_chan: RetChan) {
-    {
-        // FOO!!!!
-        let search_results = input.context.io_rt.spawn(async move {
-            let __async_embed_value_0 = &embed!(
-                db,
-                err_bubble!(
-                    ret_chan,
-                    data.queryText
-                        .as_ref()
-                        .ok_or_else(|| GraphError::ParamNotFound("queryText"))
-                )
-            );
-            input
-                .context
-                .cont_tx
-                .send(Box::new(move || {
-                    let search_results = G::new(Arc::clone(&db), &txn)
-                        .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
-                            &__async_embed_value_0,
-                            data.k.clone(),
-                            "UserEmbedding",
-                            None,
-                        )
-                        .collect_to::<Vec<_>>();
-                    txn.commit().unwrap();
-                    let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
-                    return_vals.insert(
-                        "search_results".to_string(),
-                        ReturnValue::from_traversal_value_array_with_mixin(
-                            search_results.clone().clone(),
-                            remapping_vals.borrow_mut(),
-                        ),
-                    );
 
-                    ret_chan
-                        .send(Ok(input.request.out_fmt.create_response(&return_vals)))
-                        .expect("Return channel should suceed")
-                }))
-                .expect("Continuation channel should not be closed")
-        });
-    }
+pub fn SearchSimilarUsers(input: &HandlerInput, ret_chan: RetChan) {
+    let data = input
+        .request
+        .in_fmt
+        .deserialize::<SearchSimilarUsersInput>(&input.request.body)
+        .unwrap();
+    let mut remapping_vals = RemappingMap::new();
+    let db = Arc::clone(&input.context.graph_access.storage);
+
+    input.context.io_rt.spawn(async move {
+        let __async_embed_value_0 = &embed!(
+            db,
+            err_bubble!(
+                ret_chan,
+                data.queryText
+                    .as_ref()
+                    .ok_or_else(|| GraphError::ParamNotFound("queryText"))
+            )
+        );
+        input
+            .context
+            .cont_tx
+            .send(Box::new(move || {
+                let txn = db.graph_env.read_txn().unwrap();
+
+                let search_results = G::new(Arc::clone(&db), &txn)
+                    .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
+                        &__async_embed_value_0,
+                        data.k.clone(),
+                        "UserEmbedding",
+                        None,
+                    )
+                    .collect_to::<Vec<_>>();
+                let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
+                return_vals.insert(
+                    "search_results".to_string(),
+                    ReturnValue::from_traversal_value_array_with_mixin(
+                        search_results.clone().clone(),
+                        &mut remapping_vals.remappings,
+                    ),
+                );
+
+                txn.commit().unwrap();
+                ret_chan
+                    .send(Ok(input.request.out_fmt.create_response(&return_vals)))
+                    .expect("Return channel should suceed")
+            }))
+            .expect("Continuation channel should not be closed")
+    });
 }
 
 #[derive(Serialize, Deserialize)]
@@ -207,20 +214,51 @@ pub struct CreateUserBioEmbeddingInput {
     pub bioText: String,
     pub lastUpdated: String,
 }
-#[handler(with_write)]
-pub fn CreateUserBioEmbedding(input: &HandlerInput, ret_chan: RetChan) {
-    {
-        // FOO!!!!
-        let embedding = input.context.io_rt.spawn(async move{
-let __async_embed_value_0 = &embed!(db, &data.bioText);
-input.context.cont_tx.send(move || {
-G::new_mut(Arc::clone(&db), &mut txn)
-.insert_v::<fn(&HVector, &RoTxn) -> bool>(&__async_embed_value_1, "UserEmbedding", Some(props! { "lastUpdated" => data.lastUpdated.clone(), "userId" => data.userId.clone(), "metadata" => "{}", "dataType" => "bio" })).collect_to_obj();
-    txn.commit().unwrap();
-let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
-        return_vals.insert("embedding".to_string(), ReturnValue::from_traversal_value_with_mixin(embedding.clone().clone(), remapping_vals.borrow_mut()));
 
-    ret_chan.send(Ok(input.request.out_fmt.create_response(&return_vals))).expect("Return channel should suceed")
-}).expect("Continuation channel should not be closed")});
-    }
+pub fn CreateUserBioEmbedding(input: &HandlerInput, ret_chan: RetChan) {
+    let data = input
+        .request
+        .in_fmt
+        .deserialize::<CreateUserBioEmbeddingInput>(&input.request.body)
+        .unwrap();
+    let mut remapping_vals = RemappingMap::new();
+    let db = Arc::clone(&input.context.graph_access.storage);
+    
+    input.context.io_rt.spawn(async move {
+        let __async_embed_value_0 = &embed!(db, &data.bioText);
+        input
+        .context
+        .cont_tx
+        .send(Box::new(move || {
+                let mut txn = db.graph_env.write_txn().unwrap();
+                let embedding = G::new_mut(Arc::clone(&db), &mut txn)
+                    .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+                        &__async_embed_value_0,
+                        "UserEmbedding",
+                        Some(props! {
+                                "lastUpdated" => data.lastUpdated.clone(),
+                            "userId" => data.userId.clone(),
+                            "metadata" => "{}",
+                            "dataType" => "bio"
+                        }),
+                    )
+                    .collect_to_obj();
+
+                txn.commit().unwrap();
+                let mut return_vals: HashMap<String, ReturnValue> = HashMap::new();
+
+                return_vals.insert(
+                    "embedding".to_string(),
+                    ReturnValue::from_traversal_value_with_mixin(
+                        embedding.clone().clone(),
+                        &mut remapping_vals.remappings,
+                    ),
+                );
+
+                ret_chan
+                    .send(Ok(input.request.out_fmt.create_response(&return_vals)))
+                    .expect("Return channel should suceed")
+            }))
+            .expect("Continuation channel should not be closed")
+    });
 }

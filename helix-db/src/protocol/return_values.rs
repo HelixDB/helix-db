@@ -56,20 +56,16 @@ impl ReturnValue {
     #[inline]
     pub fn from_traversal_value_array_with_mixin(
         traversal_value: Vec<TraversalVal>,
-        mut mixin: RefMut<HashMap<u128, ResponseRemapping>>,
+        mixin: &mut HashMap<u128, ResponseRemapping>,
     ) -> Self {
         ReturnValue::Array(
             traversal_value
                 .into_iter()
                 .map(|val| match val {
-                    TraversalVal::Node(node) => {
-                        ReturnValue::process_items_with_mixin(node, &mut mixin)
-                    }
-                    TraversalVal::Edge(edge) => {
-                        ReturnValue::process_items_with_mixin(edge, &mut mixin)
-                    }
+                    TraversalVal::Node(node) => ReturnValue::process_items_with_mixin(node, mixin),
+                    TraversalVal::Edge(edge) => ReturnValue::process_items_with_mixin(edge, mixin),
                     TraversalVal::Vector(vector) => {
-                        ReturnValue::process_items_with_mixin(vector, &mut mixin)
+                        ReturnValue::process_items_with_mixin(vector, mixin)
                     }
                     TraversalVal::Count(count) => ReturnValue::from(count),
                     TraversalVal::Empty => ReturnValue::Empty,
@@ -94,16 +90,16 @@ impl ReturnValue {
     #[inline]
     pub fn from_traversal_value_with_mixin(
         traversal_value: TraversalVal,
-        mut mixin: RefMut<HashMap<u128, ResponseRemapping>>,
+        mixin: &mut HashMap<u128, ResponseRemapping>,
     ) -> Self {
         match traversal_value {
             TraversalVal::Node(node) => {
                 println!("node processing");
-                ReturnValue::process_items_with_mixin(node, &mut mixin)
+                ReturnValue::process_items_with_mixin(node, mixin)
             }
-            TraversalVal::Edge(edge) => ReturnValue::process_items_with_mixin(edge, &mut mixin),
+            TraversalVal::Edge(edge) => ReturnValue::process_items_with_mixin(edge, mixin),
             TraversalVal::Vector(vector) => {
-                ReturnValue::process_items_with_mixin(vector, &mut mixin)
+                ReturnValue::process_items_with_mixin(vector, mixin)
             }
             TraversalVal::Count(count) => ReturnValue::from(count),
             TraversalVal::Empty => ReturnValue::Empty,
