@@ -550,6 +550,7 @@ pub fn compile_and_build_helix(
     output: &PathBuf,
     files: Vec<DirEntry>,
     release_mode: BuildMode,
+    enable_dev_instance: bool,
 ) -> Result<Content, String> {
     let mut sp = Spinner::new(Spinners::Dots9, "Compiling Helix queries".into());
 
@@ -624,12 +625,19 @@ pub fn compile_and_build_helix(
 
     println!("building helix at: {}", output.display());
     let mut runner = Command::new("cargo");
+    let mut args = vec!["build"];
+    
+    match release_mode {
+        BuildMode::Dev => args.extend_from_slice(&["--profile", "dev"]),
+        BuildMode::Release => args.push("--release"),
+    }
+    
+    if enable_dev_instance {
+        args.extend_from_slice(&["--features", "dev-instance"]);
+    }
+    
     runner
-        .arg("build")
-        .args(match release_mode {
-            BuildMode::Dev => vec!["--profile", "dev"],
-            BuildMode::Release => vec!["--release"],
-        })
+        .args(args)
         .current_dir(PathBuf::from(&output))
         .env("RUSTFLAGS", "-Awarnings");
 

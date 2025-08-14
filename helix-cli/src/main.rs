@@ -114,6 +114,7 @@ async fn main() -> ExitCode {
                     &output,
                     files,
                     BuildMode::from_release(command.release),
+                    command.dev,
                 ) {
                     Ok(code) => code,
                     Err(_) => return ExitCode::FAILURE,

@@ -2,6 +2,7 @@ use crate::{
     debug_println,
     helix_engine::{storage_core::storage_core::HelixGraphStorage, types::GraphError},
     utils::items::Node,
+    utils::id::ID,
 };
 use heed3::{RoIter, RoTxn, types::*};
 use sonic_rs::{JsonValueMutTrait, Value as JsonValue, json};
@@ -294,7 +295,8 @@ impl HelixGraphStorage {
         top_nodes
             .iter()
             .try_for_each(|(id, out_edges, _in_edges)| {
-                let mut json_node = json!({ "id": id.to_string(), "title": id.to_string() });
+                let id_str = ID::from(*id).stringify();
+                let mut json_node = json!({ "id": id_str.clone(), "title": id_str });
                 if let Some(prop) = &node_prop {
                     let mut node = self
                         .nodes_db
@@ -321,9 +323,9 @@ impl HelixGraphStorage {
                     .iter()
                     .for_each(|(edge_id, from_node_id, to_node_id)| {
                         edges.push(json!({
-                            "from": from_node_id.to_string(),
-                            "to": to_node_id.to_string(),
-                            "title": edge_id.to_string(),
+                            "from": ID::from(*from_node_id).stringify(),
+                            "to": ID::from(*to_node_id).stringify(),
+                            "title": ID::from(*edge_id).stringify(),
                         }));
                     });
 

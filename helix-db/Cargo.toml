@@ -63,6 +63,7 @@ vectors = ["cosine", "url"]
 server = ["build", "compiler", "vectors", "reqwest"]
 full = ["build", "compiler", "vectors"]
 dev = ["debug-output", "server"]
+dev-instance = []
 default = ["server"]
 
 # benches/tests

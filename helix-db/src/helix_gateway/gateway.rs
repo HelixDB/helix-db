@@ -11,7 +11,13 @@ use tracing::{info, trace, warn};
 
 use super::router::router::{HandlerFn, HelixRouter};
 use crate::helix_engine::graph_core::graph_core::HelixGraphEngineOpts;
+#[cfg(feature = "dev-instance")]
 use crate::helix_gateway::builtin::all_nodes_and_edges::nodes_edges_handler;
+#[cfg(feature = "dev-instance")]
+use crate::helix_gateway::builtin::node_by_id::node_details_handler;
+#[cfg(feature = "dev-instance")]
+use crate::helix_gateway::builtin::node_connections::node_connections_handler;
+#[cfg(feature = "dev-instance")]
 use crate::helix_gateway::builtin::nodes_by_label::nodes_by_label_handler;
 use crate::helix_gateway::graphvis;
 use crate::helix_gateway::introspect_schema::introspect_schema_handler;
@@ -103,16 +109,24 @@ impl HelixGateway {
             .enable_all()
             .build()?;
 
-        let axum_app = axum::Router::new()
+        let mut axum_app = axum::Router::new()
             .route("/{*path}", post(post_handler))
             .route("/graphvis", get(graphvis::graphvis_handler))
-            .route("/introspect", get(introspect_schema_handler))
-            .route("/nodes-edges", get(nodes_edges_handler))
-            .route("/nodes-by-label", get(nodes_by_label_handler))
-            .with_state(Arc::new(AppState {
-                worker_pool,
-                schema_json: self.opts.and_then(|o| o.config.schema),
-            }));
+            .route("/introspect", get(introspect_schema_handler));
+
+        #[cfg(feature = "dev-instance")]
+        {
+            axum_app = axum_app
+                .route("/nodes-edges", get(nodes_edges_handler))
+                .route("/nodes-by-label", get(nodes_by_label_handler))
+                .route("/node-connections", get(node_connections_handler))
+                .route("/node-details", get(node_details_handler));
+        }
+
+        let axum_app = axum_app.with_state(Arc::new(AppState {
+            worker_pool,
+            schema_json: self.opts.and_then(|o| o.config.schema),
+        }));
 
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();

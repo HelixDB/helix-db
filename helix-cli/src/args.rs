@@ -82,6 +82,9 @@ pub struct DeployCommand {
 
     #[clap(long, help = "Port to run the instance on")]
     pub port: Option<u16>,
+
+    #[clap(long, help = "Enable dev-instance feature flags, allows you to use visualizer endpoints")]
+    pub dev: bool,
 }
 
 #[derive(Debug, Args)]

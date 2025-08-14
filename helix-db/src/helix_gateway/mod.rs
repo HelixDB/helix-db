@@ -1,3 +1,4 @@
+#[cfg(feature = "dev-instance")]
 pub mod builtin;
 pub mod embedding_providers;
 pub mod gateway;
