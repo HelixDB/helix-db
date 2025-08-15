@@ -60,7 +60,7 @@ pub enum CommandType {
     /// Remove login credentials
     Logout,
 
-    /// Create a new key for a clowd cluster
+    /// Create a new key for a cloud cluster
     #[command(name = "create-key")]
     CreateKey { cluster: String },
 }
