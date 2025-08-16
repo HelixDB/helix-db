@@ -4,19 +4,6 @@
 HelixDB is a high-performance graph-vector database built in Rust, optimized for RAG and AI applications. It combines graph traversals, vector similarity search, and full-text search in a single database.
 
 ## Project Structure
-Expand
-message.txt
-5 KB
-﻿
-George
-georgecurtis
- 
-# HelixDB Contributors Guide
-
-## Overview
-HelixDB is a high-performance graph-vector database built in Rust, optimized for RAG and AI applications. It combines graph traversals, vector similarity search, and full-text search in a single database.
-
-## Project Structure
 
 ### Core Components
 
