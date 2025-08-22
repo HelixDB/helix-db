@@ -9,7 +9,8 @@ use crate::{
             types::Type, utils::is_valid_identifier,
         },
         generator::{
-            queries::Query as GeneratedQuery, statements::Statement as GeneratedStatement,
+            queries::Query as GeneratedQuery,
+            statements::Statement as GeneratedStatement,
             statements::{
                 Assignment as GeneratedAssignment, Drop as GeneratedDrop,
                 ForEach as GeneratedForEach, ForLoopInVariable, ForVariable,
@@ -58,7 +59,9 @@ pub(crate) fn validate_statements<'a>(
             let (rhs_ty, stmt) =
                 infer_expr_type(ctx, &assign.value, scope, original_query, None, query);
 
-            stmt.as_ref()?;
+            if stmt.is_none() {
+                return None;
+            }
 
             scope.insert(assign.variable.as_str(), rhs_ty);
 
