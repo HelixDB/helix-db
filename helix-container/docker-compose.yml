@@ -1,0 +1,26 @@
+services:
+  helix-dev:
+    container_name: helix-dockerdev
+    build:
+      context: ..
+      dockerfile: helix-container/Dockerfile
+    ports:
+      - "${HELIX_PORT:-6969}:6969"
+    volumes:
+      - helix-dev-data:/usr/src/app/data
+      - ${HOME}/.helix/dockerdev:/home/user/.helix
+    environment:
+      - HELIX_PORT=${HELIX_PORT:-6969}
+      - HELIX_DATA_DIR=/usr/src/app/data
+      - HELIX_DAEMON=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6969/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  helix-dev-data:
+    driver: local

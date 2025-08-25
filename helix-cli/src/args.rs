@@ -18,6 +18,10 @@ pub struct HelixCli {
 
 #[derive(Debug, Subcommand)]
 pub enum CommandType {
+    /// Docker development instance
+    #[command(name = "dockerdev")]
+    DockerDev(DockerDevCommand),
+
     /// Deploy a Helix project
     Deploy(DeployCommand),
 
@@ -83,7 +87,10 @@ pub struct DeployCommand {
     #[clap(long, help = "Port to run the instance on")]
     pub port: Option<u16>,
 
-    #[clap(long, help = "Enable dev-instance feature flags, allows you to use visualizer endpoints")]
+    #[clap(
+        long,
+        help = "Enable dev-instance feature flags, allows you to use visualizer endpoints"
+    )]
     pub dev: bool,
 }
 
@@ -163,4 +170,54 @@ pub struct MetricsCommand {
 
     #[clap(long, help = "Turn metrics on")]
     pub on: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DockerDevCommand {
+    #[clap(subcommand)]
+    pub subcommand: DockerDevSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DockerDevSubcommand {
+    /// Start development instance
+    Run(DockerDevRunCommand),
+    /// Stop development instance
+    Stop,
+    /// Restart development instance
+    Restart(DockerDevRunCommand),
+    /// Delete container and all data
+    Delete,
+    /// Show container status and info
+    Status,
+    /// View container logs
+    Logs(DockerDevLogsCommand),
+    /// Execute command in the running container
+    Exec(DockerDevExecCommand),
+    /// Get the URL of the running instance
+    Url,
+}
+
+#[derive(Debug, Args)]
+pub struct DockerDevRunCommand {
+    #[clap(short, long, help = "Run in background mode")]
+    pub background: bool,
+
+    #[clap(short, long, help = "Port to expose (default: 6969)")]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Args)]
+pub struct DockerDevLogsCommand {
+    #[clap(short, long, help = "Follow log output")]
+    pub follow: bool,
+
+    #[clap(short, long, help = "Number of lines to show")]
+    pub lines: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub struct DockerDevExecCommand {
+    #[clap(help = "Command to execute in the container")]
+    pub command: Vec<String>,
 }

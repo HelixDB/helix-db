@@ -24,6 +24,7 @@ use std::{
 };
 
 mod args;
+mod docker_dev_manager;
 mod instance_manager;
 mod types;
 mod utils;
@@ -327,7 +328,9 @@ async fn run() -> ExitCode {
                 "local helix-cli version: {local_cli_version}, local helix-db version: {local_helix_version}, remote helix version: {remote_helix_version}",
             );
 
-            if local_helix_version < remote_helix_version || local_cli_version < remote_helix_version {
+            if local_helix_version < remote_helix_version
+                || local_cli_version < remote_helix_version
+            {
                 let mut runner = Command::new("git");
                 runner.arg("reset");
                 runner.arg("--hard");
@@ -1104,6 +1107,98 @@ async fn run() -> ExitCode {
                     println!("Error creating key: {e:?}");
                     return ExitCode::FAILURE;
                 }
+            }
+        }
+
+        CommandType::DockerDev(command) => {
+            use args::DockerDevSubcommand;
+            use docker_dev_manager::DockerDevManager;
+
+            let manager = match DockerDevManager::new() {
+                Ok(m) => m,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("Error initializing Docker dev manager: {e}")
+                            .red()
+                            .bold()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match command.subcommand {
+                DockerDevSubcommand::Run(run_cmd) => {
+                    if let Err(e) = manager.run(run_cmd.background, run_cmd.port) {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Stop => {
+                    if let Err(e) = manager.stop() {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Restart(run_cmd) => {
+                    println!(
+                        "{}",
+                        "Restarting Docker development instance...".blue().bold()
+                    );
+
+                    // Stop first (don't fail if it's not running)
+                    if let Err(e) = manager.stop() {
+                        println!("{}", format!("Warning: {e}").yellow());
+                    }
+
+                    // Wait a moment for cleanup
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+
+                    // Start again
+                    if let Err(e) = manager.run(run_cmd.background, run_cmd.port) {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Delete => {
+                    if let Err(e) = manager.delete() {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Status => {
+                    if let Err(e) = manager.status() {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Logs(logs_cmd) => {
+                    if let Err(e) = manager.logs(logs_cmd.follow, logs_cmd.lines) {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Exec(exec_cmd) => {
+                    if exec_cmd.command.is_empty() {
+                        println!("{}", "Error: No command specified".red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                    let command_args: Vec<&str> =
+                        exec_cmd.command.iter().map(|s| s.as_str()).collect();
+                    if let Err(e) = manager.exec_command(&command_args) {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                DockerDevSubcommand::Url => match manager.get_instance_url() {
+                    Ok(url) => {
+                        println!("{}", url.blue().bold());
+                    }
+                    Err(e) => {
+                        println!("{}", format!("Error: {e}").red().bold());
+                        return ExitCode::FAILURE;
+                    }
+                },
             }
         }
     }

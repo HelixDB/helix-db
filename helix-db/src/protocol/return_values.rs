@@ -172,11 +172,11 @@ impl ReturnValue {
     /// ```
     #[inline(always)]
     pub fn mixin_remapping(self, remappings: HashMap<String, Remapping>) -> Self {
-        println!("Remapping: {:#?}", self);
+        println!("Remapping: {self:#?}");
         let return_value = match self {
             ReturnValue::Object(mut a) => {
                 remappings.into_iter().for_each(|(k, v)| {
-                    println!("k: {:?}, v: {:?}", k, v);
+                    println!("k: {k:?}, v: {v:?}");
                     if v.exclude {
                         let _ = a.remove(&k);
                     } else if let Some(new_name) = v.new_name {
@@ -193,7 +193,7 @@ impl ReturnValue {
             }
             _ => unreachable!(),
         };
-        println!("Return value: {:?}", return_value);
+        println!("Return value: {return_value:?}");
         return_value
     }
 
@@ -510,8 +510,8 @@ impl IfPresentThereInsertHere for HashMap<String, ReturnValue> {
         // value in mixin
         // if there.should_spread {
         //     self.insert(key, value);
-        // } else 
-        
+        // } else
+
         if let Some(existing_value) = there.remappings.get(&key)
             && !existing_value.exclude
         {
