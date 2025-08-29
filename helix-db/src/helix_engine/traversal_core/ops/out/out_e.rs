@@ -10,10 +10,10 @@ use crate::{
     utils::label_hash::hash_label,
 };
 use helix_macros::debug_trace;
-use heed3::{types::Bytes, RoTxn};
+use heed3::{types::Bytes, AnyTls, RoTxn};
 use std::sync::Arc;
 
-pub struct OutEdgesIterator<'a, T> {
+pub struct OutEdgesIterator<'a, Tls=AnyTls> {
     pub iter: heed3::RoIter<
         'a,
         Bytes,
@@ -21,10 +21,10 @@ pub struct OutEdgesIterator<'a, T> {
         heed3::iteration_method::MoveOnCurrentKeyDuplicates,
     >,
     pub storage: Arc<HelixGraphStorage>,
-    pub txn: &'a T,
+    pub txn: &'a RoTxn<'a, Tls>,
 }
 
-impl<'a> Iterator for OutEdgesIterator<'a, RoTxn<'a>> {
+impl<'a> Iterator for OutEdgesIterator<'a> {
     type Item = Result<TraversalValue, GraphError>;
 
     #[debug_trace("OUT_E")]

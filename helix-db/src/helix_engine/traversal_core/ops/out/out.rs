@@ -12,11 +12,11 @@ use crate::{
     },
     utils::label_hash::hash_label,
 };
-use heed3::{RoTxn, types::Bytes};
+use heed3::{types::Bytes, AnyTls, RoTxn};
 use helix_macros::debug_trace;
 use std::sync::Arc;
 
-pub struct OutNodesIterator<'a, T> {
+pub struct OutNodesIterator<'a, Tls=AnyTls> {
     pub iter: heed3::RoIter<
         'a,
         Bytes,
@@ -25,10 +25,10 @@ pub struct OutNodesIterator<'a, T> {
     >,
     pub storage: Arc<HelixGraphStorage>,
     pub edge_type: EdgeType,
-    pub txn: &'a T,
+    pub txn: &'a RoTxn<'a, Tls>,
 }
 
-impl<'a> Iterator for OutNodesIterator<'a, RoTxn<'a>> {
+impl<'a> Iterator for OutNodesIterator<'a> {
     type Item = Result<TraversalValue, GraphError>;
 
     #[debug_trace("OUT")]
@@ -80,7 +80,7 @@ pub trait OutAdapter<'a, T>: Iterator<Item = Result<TraversalValue, GraphError>>
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> OutAdapter<'a, RoTxn<'a>>
+impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> OutAdapter<'a, RoTxn<'a, AnyTls>>
     for RoTraversalIterator<'a, I>
 {
     #[inline]

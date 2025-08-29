@@ -151,8 +151,8 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
         if let TraitItem::Fn(method) = item {
             let fn_name = &method.sig.ident;
 
-            // Extract method parameters (skip &self and txn)
-            let method_params: Vec<_> = method.sig.inputs.iter().skip(3).collect();
+            // Extract method parameters (skip &self and connection)
+            let method_params: Vec<_> = method.sig.inputs.iter().skip(2).collect();
             let (field_names, struct_fields): (Vec<_>, Vec<_>) = method_params
                 .iter()
                 .filter_map(|param| {
@@ -202,9 +202,9 @@ pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
                     };
                     drop(connections);
 
-                    let txn = input.mcp_backend.db.graph_env.read_txn()?;
+                    
 
-                    let result = input.mcp_backend.#fn_name(&txn, &connection, #(data.data.#field_names),*)?;
+                    let result = input.mcp_backend.#fn_name(&connection, #(data.data.#field_names),*)?;
 
                     let first = result.first().unwrap_or(&TraversalValue::Empty).clone();
 

@@ -1,6 +1,7 @@
 use crate::{
     debug_println,
     helix_engine::{
+        bm25::bm25::{BM25, BM25Flatten, HBM25Config},
         storage_core::HelixGraphStorage,
         traversal_core::{
             ops::{
@@ -117,7 +118,6 @@ pub struct FilterTraversal {
 pub(super) trait McpTools<'a> {
     fn out_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
         edge_type: EdgeType,
@@ -125,14 +125,12 @@ pub(super) trait McpTools<'a> {
 
     fn out_e_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn in_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
         edge_type: EdgeType,
@@ -140,21 +138,18 @@ pub(super) trait McpTools<'a> {
 
     fn in_e_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn n_from_type(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         node_type: String,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn e_from_type(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_type: String,
     ) -> Result<Vec<TraversalValue>, GraphError>;
@@ -163,7 +158,6 @@ pub(super) trait McpTools<'a> {
     /// a node or edge needs to have been search first though
     fn filter_items(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         filter: FilterTraversal,
     ) -> Result<Vec<TraversalValue>, GraphError>;
@@ -171,7 +165,6 @@ pub(super) trait McpTools<'a> {
     /// BM25
     fn search_keyword(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         query: String,
         limit: usize,
@@ -181,7 +174,6 @@ pub(super) trait McpTools<'a> {
     /// HNSW Search with built int embedding model
     fn search_vector_text(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         query: String,
         label: String,
@@ -190,7 +182,6 @@ pub(super) trait McpTools<'a> {
 
     fn search_vector(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         vector: Vec<f64>,
         k: usize,
@@ -201,11 +192,11 @@ pub(super) trait McpTools<'a> {
 impl<'a> McpTools<'a> for McpBackend {
     fn out_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
         edge_type: EdgeType,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let iter = connection
@@ -242,10 +233,10 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn out_e_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let iter = connection
@@ -281,11 +272,11 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn in_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
         edge_type: EdgeType,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let iter = connection
@@ -322,7 +313,6 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn in_e_step(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         edge_label: String,
     ) -> Result<Vec<TraversalValue>, GraphError> {
@@ -361,10 +351,10 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn n_from_type(
         &'a self,
-        txn: &'a RoTxn,
         _connection: &'a MCPConnection,
         node_type: String,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let iter = NFromType {
@@ -379,10 +369,10 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn e_from_type(
         &'a self,
-        txn: &'a RoTxn,
         _connection: &'a MCPConnection,
         edge_type: String,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let iter = EFromType {
@@ -397,7 +387,6 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn filter_items(
         &'a self,
-        txn: &'a RoTxn,
         connection: &'a MCPConnection,
         filter: FilterTraversal,
     ) -> Result<Vec<TraversalValue>, GraphError> {
@@ -408,62 +397,71 @@ impl<'a> McpTools<'a> for McpBackend {
 
     fn search_keyword(
         &'a self,
-        txn: &'a RoTxn,
-        _connection: &'a MCPConnection,
+        connection: &'a MCPConnection,
         query: String,
         limit: usize,
         label: String,
     ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
+        // let db = Arc::clone(&self.db);
 
-        //         let items = connection.iter.clone().collect::<Vec<_>>();
+        // //         let items = connection.iter.clone().collect::<Vec<_>>();
 
-        // Check if BM25 is enabled and has metadata
-        if let Some(bm25) = &db.bm25 {
-            match bm25
-                .metadata_db
-                .get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
-            {
-                Ok(Some(_)) => {
-                    let results = G::new(db, txn)
-                        .search_bm25(&label, &query, limit)?
-                        .collect_to::<Vec<_>>();
+        // // Check if BM25 is enabled and has metadata
+        // if let Some(bm25) = &db.bm25 {
+        //     match bm25
+        //         .metadata_db
+        //         .get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
+        //     {
+        //         Ok(Some(_)) => {
+        //             let results = G::new(db, txn)
+        //                 .search_bm25(&label, &query, limit)?
+        //                 .collect_to::<Vec<_>>();
 
-                    println!("BM25 search results: {results:?}");
-                    Ok(results)
-                }
-                Ok(None) => {
-                    // BM25 metadata not found - index not initialized yet
-                    debug_println!("BM25 index not initialized yet - returning empty results");
-                    println!("BM25 index not initialized yet - returning empty results");
-                    Err(GraphError::from("BM25 index not initialized yet - returning empty results"))
-                }
-                Err(_e) => {
-                    // Error accessing metadata database
-                    debug_println!(
-                        "Error checking BM25 metadata: {:?} - returning empty results",
-                        e
-                    );
-                    println!("Error checking BM25 metadata: {:?} - returning empty results", _e);
-                    Err(GraphError::from("Error checking BM25 metadata - returning empty results"))
-                }
-            }
-        } else {
-            // BM25 is not enabled
-            debug_println!("BM25 is not enabled - returning empty results");
-            println!("BM25 is not enabled - returning empty results");
-            Err(GraphError::from("BM25 is not enabled - returning empty results"))
-        }
+        //             println!("BM25 search results: {results:?}");
+        //             Ok(results)
+        //         }
+        //         Ok(None) => {
+        //             // BM25 metadata not found - index not initialized yet
+        //             debug_println!("BM25 index not initialized yet - returning empty results");
+        //             println!("BM25 index not initialized yet - returning empty results");
+        //             Err(GraphError::from(
+        //                 "BM25 index not initialized yet - returning empty results",
+        //             ))
+        //         }
+        //         Err(_e) => {
+        //             // Error accessing metadata database
+        //             debug_println!(
+        //                 "Error checking BM25 metadata: {:?} - returning empty results",
+        //                 e
+        //             );
+        //             println!(
+        //                 "Error checking BM25 metadata: {:?} - returning empty results",
+        //                 _e
+        //             );
+        //             Err(GraphError::from(
+        //                 "Error checking BM25 metadata - returning empty results",
+        //             ))
+        //         }
+        //     }
+        // } else {
+        //     // BM25 is not enabled
+        //     debug_println!("BM25 is not enabled - returning empty results");
+        //     println!("BM25 is not enabled - returning empty results");
+        //     Err(GraphError::from(
+        //         "BM25 is not enabled - returning empty results",
+        //     ))
+        // }
+        _search_keyword(Arc::clone(&self.db), connection, query, limit, label)
     }
 
     fn search_vector_text(
         &'a self,
-        txn: &'a RoTxn,
         _connection: &'a MCPConnection,
         query: String,
         label: String,
         k: Option<usize>,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let model = get_embedding_model(None, None, None)?;
@@ -479,13 +477,13 @@ impl<'a> McpTools<'a> for McpBackend {
     }
 
     fn search_vector(
-        &'a self,
-        txn: &'a RoTxn,
+        &'a self,       
         connection: &'a MCPConnection,
         vector: Vec<f64>,
         k: usize,
         min_score: Option<f64>,
     ) -> Result<Vec<TraversalValue>, GraphError> {
+        let txn = &self.db.graph_env.read_txn()?;
         let db = Arc::clone(&self.db);
 
         let items = connection.iter.clone().collect::<Vec<_>>();
@@ -507,6 +505,69 @@ impl<'a> McpTools<'a> for McpBackend {
         debug_println!("result: {res:?}");
         Ok(res)
     }
+}
+
+fn _search_keyword(
+    db: Arc<HelixGraphStorage>,
+    connection: &MCPConnection,
+    query: String,
+    limit: usize,
+    label: String,
+) -> Result<Vec<TraversalValue>, GraphError> {
+    let mut txn = db.graph_env.write_txn()?;
+    let bm25_index = HBM25Config::new_temp(&db.graph_env, &mut txn, &connection.connection_id)?;
+
+    for item in connection.iter.clone().into_iter() {
+        if let Some(props) = item.get_properties() {
+            let mut data = props.flatten_bm25();
+            data.push_str(&item.label());
+            bm25_index.insert_doc(&mut txn, item.id(), &data)?;
+        }
+    }
+
+    // Check if BM25 is enabled and has metadata
+
+    let results = match bm25_index
+        .metadata_db
+        .get(&txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
+    {
+        Ok(Some(_)) => {
+            let results = G::new(Arc::clone(&db), &txn)
+                .search_bm25(&label, &query, limit)?
+                .collect_to::<Vec<_>>();
+
+            println!("BM25 search results: {results:?}");
+            Ok(results)
+        }
+        Ok(None) => {
+            // BM25 metadata not found - index not initialized yet
+            debug_println!("BM25 index not initialized yet - returning empty results");
+            println!("BM25 index not initialized yet - returning empty results");
+            Err(GraphError::from(
+                "BM25 index not initialized yet - returning empty results",
+            ))
+        }
+        Err(_e) => {
+            // Error accessing metadata database
+            debug_println!(
+                "Error checking BM25 metadata: {:?} - returning empty results",
+                e
+            );
+            println!(
+                "Error checking BM25 metadata: {:?} - returning empty results",
+                _e
+            );
+            Err(GraphError::from(
+                "Error checking BM25 metadata - returning empty results",
+            ))
+        }
+    };
+
+    // clear all data made in this function
+    // can just abort as nothing is flushed to disk
+    txn.abort();
+
+    results
 }
 
 pub trait FilterValues {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use heed3::{RoTxn, RwTxn};
+use heed3::{AnyTls, RoTxn, RwTxn};
 
 use crate::{
     helix_engine::{
@@ -11,10 +11,10 @@ use crate::{
 };
 use itertools::Itertools;
 
-pub struct RoTraversalIterator<'a, I> {
+pub struct RoTraversalIterator<'a, I, Tls = AnyTls> {
     pub inner: I,
     pub storage: Arc<HelixGraphStorage>,
-    pub txn: &'a RoTxn<'a>,
+    pub txn: &'a RoTxn<'a, Tls>,
 }
 
 // implementing iterator for TraversalIterator
