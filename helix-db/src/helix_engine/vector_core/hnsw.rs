@@ -1,3 +1,4 @@
+use crate::helix_engine::vector_core::vec_txn::VecTxn;
 use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use crate::helix_engine::vector_core::vector::HVector;
 use heed3::{RoTxn, RwTxn};
@@ -37,9 +38,9 @@ pub trait HNSW
     /// # Returns
     ///
     /// An HVector of the data inserted
-    fn insert<F>(
+    fn insert<'a, F>(
         &self,
-        txn: &mut RwTxn,
+        txn: &mut VecTxn<'a>,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
@@ -59,7 +60,7 @@ pub trait HNSW
     fn get_all_vectors(
         &self,
         txn: &RoTxn,
-        level: Option<usize>,
+        level: Option<u8>,
     ) -> Result<Vec<HVector>, VectorError>;
 
     /// Delete a vector from the index
@@ -90,7 +91,7 @@ pub trait HNSW
         &self,
         txn: &RoTxn,
         id: u128,
-        level: usize,
+        level: u8,
         with_data: bool,
     ) -> Result<HVector, VectorError>;
 }

@@ -25,7 +25,7 @@ pub struct HVector {
     /// Whether the HVector is deleted (will be used for soft deletes)
     // pub is_deleted: bool,
     /// The level of the HVector
-    pub level: usize,
+    pub level: u8, // TODO ENSURE SERDES FROM usize
     /// The distance of the HVector
     pub distance: Option<f64>,
     /// The actual vector
@@ -79,7 +79,7 @@ impl HVector {
     }
 
     #[inline(always)]
-    pub fn from_slice(level: usize, data: Vec<f64>) -> Self {
+    pub fn from_slice(level: u8, data: Vec<f64>) -> Self {
         let id = v6_uuid();
         HVector {
             id,
@@ -105,7 +105,7 @@ impl HVector {
 
     /// Returns the level of the HVector
     #[inline(always)]
-    pub fn get_level(&self) -> usize {
+    pub fn get_level(&self) -> u8 {
         self.level
     }
 
@@ -122,7 +122,7 @@ impl HVector {
 
     // will make to use const param for type of encoding (f32, f64, etc)
     /// Converts a byte array into a HVector by chunking the bytes into f64 values
-    pub fn from_bytes(id: u128, level: usize, bytes: &[u8]) -> Result<Self, VectorError> {
+    pub fn from_bytes(id: u128, level: u8, bytes: &[u8]) -> Result<Self, VectorError> {
         if bytes.len() % std::mem::size_of::<f64>() != 0 {
             return Err(VectorError::InvalidVectorData);
         }
