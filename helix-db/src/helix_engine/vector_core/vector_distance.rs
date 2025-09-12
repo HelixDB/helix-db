@@ -8,20 +8,34 @@ pub trait DistanceCalc {
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError>;
 }
 impl DistanceCalc for HVector {
-    /// Calculates the distance between two vectors.
+    /// Return the cosine similarity between two vectors.
+    /// - 1.0 (most similar)
+    /// - 0.0 (orthogonal)
+    /// - -1.0 (most dissimilar)
     ///
-    /// It normalizes the distance to be between 0 and 2.
-    ///
-    /// - 1.0 (most similar) → Distance 0.0 (closest)
-    /// - 0.0 (orthogonal) → Distance 1.0
-    /// - -1.0 (most dissimilar) → Distance 2.0 (furthest)
+    /// Previously, it mapped it to a distance, 0.0 to 2.0. That is now outdated.
     #[inline(always)]
     #[cfg(feature = "cosine")]
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError> {
-        cosine_similarity(&from.data, &to.data).map(|sim| 1.0 - sim)
+        cosine_similarity(&from.data, &to.data)
     }
-}
 
+    // TODO: If we want to instead use the below, brute_force_search_v has to be updated to call this
+    //       instead of cosine_similarity directly.
+    // ///
+    // /// Calculates the distance between two vectors.
+    // ///
+    // /// It normalizes the distance to be between 0 and 2.
+    // ///
+    // /// - 1.0 (most similar) → Distance 0.0 (closest)
+    // /// - 0.0 (orthogonal) → Distance 1.0
+    // /// - -1.0 (most dissimilar) → Distance 2.0 (furthest)
+    // #[inline(always)]
+    // #[cfg(feature = "cosine")]
+    // fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError> {
+    //     cosine_similarity(&from.data, &to.data).map(|sim| 1.0 - sim)
+    // }
+}
 
 #[inline]
 #[cfg(feature = "cosine")]
