@@ -1,5 +1,4 @@
 use heed3::PutFlags;
-
 use crate::{
     helix_engine::{
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
