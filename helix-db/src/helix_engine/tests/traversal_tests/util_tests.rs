@@ -17,7 +17,7 @@ use crate::{
             },
             traversal_value::Traversable,
         },
-        vector_core::vector::HVector,
+        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
     },
     props,
 };
@@ -212,22 +212,43 @@ fn test_order_vector_by_asc() {
     type FnTy = fn(&HVector, &RoTxn) -> bool;
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", Some(props! { "age" => 30 }))
+        .insert_v::<FnTy>(
+            &[1.0, 2.0, 3.0],
+            "vector",
+            Some(props! { "age" => 30 }),
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     let vector2 = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", Some(props! { "age" => 20 }))
+        .insert_v::<FnTy>(
+            &[1.0, 2.0, 3.0],
+            "vector",
+            Some(props! { "age" => 20 }),
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     let vector3 = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", Some(props! { "age" => 10 }))
+        .insert_v::<FnTy>(
+            &[1.0, 2.0, 3.0],
+            "vector",
+            Some(props! { "age" => 10 }),
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     txn.commit().unwrap();
 
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
-        .search_v::<FnTy, _>(&[1.0, 2.0, 3.0], 10, "vector", None)
+        .search_v::<FnTy, _>(
+            &[1.0, 2.0, 3.0],
+            10,
+            "vector",
+            None,
+            &SimilarityMethod::default(),
+        )
         .order_by_asc("age")
         .collect_to::<Vec<_>>();
 
@@ -244,22 +265,43 @@ fn test_order_vector_by_desc() {
     type FnTy = fn(&HVector, &RoTxn) -> bool;
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", Some(props! { "age" => 30 }))
+        .insert_v::<FnTy>(
+            &[1.0, 2.0, 3.0],
+            "vector",
+            Some(props! { "age" => 30 }),
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     let vector2 = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", Some(props! { "age" => 20 }))
+        .insert_v::<FnTy>(
+            &[1.0, 2.0, 3.0],
+            "vector",
+            Some(props! { "age" => 20 }),
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     let vector3 = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", Some(props! { "age" => 10 }))
+        .insert_v::<FnTy>(
+            &[1.0, 2.0, 3.0],
+            "vector",
+            Some(props! { "age" => 10 }),
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     txn.commit().unwrap();
 
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
-        .search_v::<FnTy, _>(&[1.0, 2.0, 3.0], 10, "vector", None)
+        .search_v::<FnTy, _>(
+            &[1.0, 2.0, 3.0],
+            10,
+            "vector",
+            None,
+            &SimilarityMethod::default(),
+        )
         .order_by_desc("age")
         .collect_to::<Vec<_>>();
 

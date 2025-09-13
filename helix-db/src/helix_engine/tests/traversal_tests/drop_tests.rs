@@ -21,7 +21,7 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::vector::HVector,
+        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
     },
     props,
     utils::filterable::Filterable,
@@ -362,13 +362,19 @@ fn test_vector_deletion_in_existing_graph() {
                 &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 "vector",
                 None,
+                &SimilarityMethod::default(),
             )
             .collect_to_obj();
         other_vectors.push(other_vector);
     }
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "vector",
+            None,
+            &SimilarityMethod::default(),
+        )
         .collect_to_obj();
 
     for other_vector in &other_vectors {

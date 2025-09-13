@@ -6,7 +6,7 @@ mod tests {
         helix_engine::vector_core::{
             hnsw::HNSW,
             vector::HVector,
-            vector_core::{HNSWConfig, VectorCore},
+            vector_core::{HNSWConfig, VectorCore}, vector_distance::SimilarityMethod,
         },
         utils::tqdm::tqdm,
     };
@@ -84,7 +84,7 @@ mod tests {
                                 .iter()
                                 .filter_map(|base_vec| {
                                     query_hvector
-                                        .distance_to(base_vec)
+                                        .distance_to(base_vec, &SimilarityMethod::default())
                                         .map(|dist| (base_vec.id.clone(), dist))
                                         .ok()
                                 })
@@ -319,7 +319,7 @@ mod tests {
         let over_all_time = Instant::now();
         for (i, data) in base_vectors.iter().enumerate() {
             let start_time = Instant::now();
-            let vec = index.insert::<Filter>(&mut txn, &data, None).unwrap();
+            let vec = index.insert::<Filter>(&mut txn, &data, None, &SimilarityMethod::default()).unwrap();
             let time = start_time.elapsed();
             base_all_vectors.push(vec);
             //println!("{} => inserting in {} ms", i, time.as_millis());
@@ -354,7 +354,7 @@ mod tests {
         let mut total_search_time = std::time::Duration::from_secs(0);
         for (qid, query) in query_vectors.iter() {
             let start_time = Instant::now();
-            let results = index.search::<Filter>(&txn, query, k, "vector", None, false).unwrap();
+            let results = index.search::<Filter>(&txn, query, k, "vector", None, false, &SimilarityMethod::default()).unwrap();
             let search_duration = start_time.elapsed();
             total_search_time += search_duration;
 

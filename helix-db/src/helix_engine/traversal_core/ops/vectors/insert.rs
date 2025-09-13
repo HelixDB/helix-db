@@ -4,7 +4,7 @@ use crate::{
     helix_engine::{
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector},
+        vector_core::{hnsw::HNSW, vector::HVector, vector_distance::SimilarityMethod},
     },
     protocol::value::Value,
 };
@@ -27,6 +27,7 @@ pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, GraphEr
         query: &[f64],
         label: &str,
         fields: Option<Vec<(String, Value)>>,
+        method: &SimilarityMethod,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
@@ -40,6 +41,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
         query: &[f64],
         label: &str,
         fields: Option<Vec<(String, Value)>>,
+        method: &SimilarityMethod,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -55,7 +57,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
                 (String::from("is_deleted"), Value::Boolean(false)),
             ]),
         };
-        let vector = self.storage.vectors.insert::<F>(self.txn, query, fields);
+        let vector = self.storage.vectors.insert::<F>(self.txn, query, fields, method);
 
         let result = match vector {
             Ok(vector) => Ok(TraversalValue::Vector(vector)),

@@ -1,11 +1,25 @@
+use serde::Deserialize;
+
 use crate::helix_engine::{types::VectorError, vector_core::vector::HVector};
 
 pub const MAX_DISTANCE: f64 = 2.0;
 pub const ORTHOGONAL: f64 = 1.0;
 pub const MIN_DISTANCE: f64 = 0.0;
 
+#[derive(Default, Debug, Deserialize, Clone)]
+pub enum SimilarityMethod {
+    #[default]
+    #[serde(rename = "cosine_distance")]
+    CosineDistance,
+    #[serde(rename = "cosine_similarity")]
+    CosineSimilarity,
+    #[serde(rename = "euclidean_distance")]
+    EuclideanDistance,
+}
+
 pub trait DistanceCalc {
-    fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError>;
+    fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError>;
+
 }
 impl DistanceCalc for HVector {
     /// Calculates the distance between two vectors.
@@ -16,15 +30,18 @@ impl DistanceCalc for HVector {
     /// - 0.0 (orthogonal) → Distance 1.0
     /// - -1.0 (most dissimilar) → Distance 2.0 (furthest)
     #[inline(always)]
-    #[cfg(feature = "cosine")]
-    fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError> {
-        cosine_similarity(&from.data, &to.data).map(|sim| 1.0 - sim)
+    fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError> {
+        match method {
+            SimilarityMethod::CosineDistance =>  cosine_similarity(&from, &to).map(|sim| 1.0 - sim),
+            SimilarityMethod::CosineSimilarity =>  cosine_similarity(&from, &to),
+            SimilarityMethod::EuclideanDistance => todo!(),
+        }
+       
     }
 }
 
 
 #[inline]
-#[cfg(feature = "cosine")]
 pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
     let len = from.len();
     let other_len = to.len();

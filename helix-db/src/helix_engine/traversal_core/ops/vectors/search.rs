@@ -3,7 +3,7 @@ use heed3::RoTxn;
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+    vector_core::{hnsw::HNSW, vector::HVector, vector_distance::SimilarityMethod},
 };
 use helix_macros::debug_trace;
 use std::iter::once;
@@ -29,6 +29,7 @@ pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalValue, GraphError>
         k: K,
         label: &str,
         filter: Option<&[F]>,
+        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -45,16 +46,22 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         k: K,
         label: &str,
         filter: Option<&[F]>,
+        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let vectors =
-            self.storage
-                .vectors
-                .search(self.txn, query, k.try_into().unwrap(), label, filter, false);
+        let vectors = self.storage.vectors.search(
+            self.txn,
+            query,
+            k.try_into().unwrap(),
+            label,
+            filter,
+            false,
+            method,
+        );
 
         let iter = match vectors {
             Ok(vectors) => vectors
@@ -104,4 +111,3 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         }
     }
 }
-

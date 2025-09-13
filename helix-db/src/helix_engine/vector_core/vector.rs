@@ -1,7 +1,7 @@
 use crate::{
     helix_engine::{
         types::{GraphError, VectorError},
-        vector_core::vector_distance::DistanceCalc,
+        vector_core::vector_distance::{DistanceCalc, SimilarityMethod},
     },
     protocol::{return_values::ReturnValue, value::Value},
     utils::{
@@ -156,8 +156,12 @@ impl HVector {
     }
 
     #[inline(always)]
-    pub fn distance_to(&self, other: &HVector) -> Result<f64, VectorError> {
-        HVector::distance(self, other)
+    pub fn distance_to(
+        &self,
+        other: &HVector,
+        method: &SimilarityMethod,
+    ) -> Result<f64, VectorError> {
+        HVector::distance(&self.data, &other.data, method)
     }
 
     #[inline(always)]
@@ -270,4 +274,3 @@ impl Filterable for HVector {
         unreachable!()
     }
 }
-

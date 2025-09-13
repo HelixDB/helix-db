@@ -5,7 +5,10 @@ use crate::{
     helix_engine::{
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
-        vector_core::vector_distance::cosine_similarity,
+        vector_core::{
+            vector::HVector,
+            vector_distance::{DistanceCalc, SimilarityMethod},
+        },
     },
     protocol::value::Value,
     utils::filterable::Filterable,
@@ -34,6 +37,7 @@ pub trait BruteForceSearchVAdapter<'a>:
         self,
         query: &[f64],
         k: K,
+        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         K: TryInto<usize>,
@@ -47,6 +51,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
         self,
         query: &[f64],
         k: K,
+        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         K: TryInto<usize>,
@@ -59,7 +64,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.get_data(), query).unwrap();
+                    let d = HVector::distance(v.get_data(), query, method).unwrap();
                     v.set_distance(d);
                     Some(v)
                 }

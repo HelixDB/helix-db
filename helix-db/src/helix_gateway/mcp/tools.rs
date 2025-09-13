@@ -1,24 +1,34 @@
 use crate::{
-    debug_println, helix_engine::{
+    debug_println,
+    helix_engine::{
         storage_core::HelixGraphStorage,
         traversal_core::{
             ops::{
-                bm25::search_bm25::SearchBM25Adapter, g::G, in_::{
+                bm25::search_bm25::SearchBM25Adapter,
+                g::G,
+                in_::{
                     in_::{InAdapter, InNodesIterator},
                     in_e::{InEdgesAdapter, InEdgesIterator},
-                }, out::{
+                },
+                out::{
                     out::{OutAdapter, OutNodesIterator},
                     out_e::{OutEdgesAdapter, OutEdgesIterator},
-                }, source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType}, util::order::OrderByAdapter, vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter}
+                },
+                source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
+                util::order::OrderByAdapter,
+                vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter},
             },
             traversal_value::{Traversable, TraversalValue},
         },
         types::GraphError,
-        vector_core::vector::HVector,
-    }, helix_gateway::{
-        embedding_providers::embedding_providers::{get_embedding_model, EmbeddingModel},
+        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
+    },
+    helix_gateway::{
+        embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
         mcp::mcp::{MCPConnection, MCPHandler, MCPHandlerSubmission, MCPToolInput, McpBackend},
-    }, protocol::{response::Response, return_values::ReturnValue, value::Value}, utils::label_hash::hash_label
+    },
+    protocol::{response::Response, return_values::ReturnValue, value::Value},
+    utils::label_hash::hash_label,
 };
 use heed3::RoTxn;
 use helix_macros::{mcp_handler, tool_calls};
@@ -70,7 +80,6 @@ pub enum Order {
     #[serde(rename = "desc")]
     Desc,
 }
-
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -190,6 +199,7 @@ pub(super) trait McpTools<'a> {
         query: String,
         label: String,
         k: Option<usize>,
+        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn search_vector(
@@ -199,6 +209,7 @@ pub(super) trait McpTools<'a> {
         vector: Vec<f64>,
         k: usize,
         min_score: Option<f64>,
+        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn order_by(
@@ -480,6 +491,7 @@ impl<'a> McpTools<'a> for McpBackend {
         query: String,
         label: String,
         k: Option<usize>,
+        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError> {
         let db = Arc::clone(&self.db);
 
@@ -488,7 +500,13 @@ impl<'a> McpTools<'a> for McpBackend {
         let embedding = result?;
 
         let res = G::new(db, txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, k.unwrap_or(5), &label, None)
+            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
+                &embedding,
+                k.unwrap_or(5),
+                &label,
+                None,
+                &method.unwrap_or_default(),
+            )
             .collect_to::<Vec<_>>();
 
         debug_println!("result: {res:?}");
@@ -502,13 +520,14 @@ impl<'a> McpTools<'a> for McpBackend {
         vector: Vec<f64>,
         k: usize,
         min_score: Option<f64>,
+        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError> {
         let db = Arc::clone(&self.db);
 
         let items = connection.iter.clone().collect::<Vec<_>>();
 
         let mut res = G::new_from(db, txn, items)
-            .brute_force_search_v(&vector, k)
+            .brute_force_search_v(&vector, k, &method.unwrap_or_default())
             .collect_to::<Vec<_>>();
 
         if let Some(min_score) = min_score {
@@ -536,10 +555,13 @@ impl<'a> McpTools<'a> for McpBackend {
 
         let iter = connection.iter.clone().collect::<Vec<_>>();
 
-
         let res = match order {
-            Order::Asc => G::new_from(db, txn, iter).order_by_asc(&properties).collect_to::<Vec<_>>(),
-            Order::Desc => G::new_from(db, txn, iter).order_by_desc(&properties).collect_to::<Vec<_>>(),
+            Order::Asc => G::new_from(db, txn, iter)
+                .order_by_asc(&properties)
+                .collect_to::<Vec<_>>(),
+            Order::Desc => G::new_from(db, txn, iter)
+                .order_by_desc(&properties)
+                .collect_to::<Vec<_>>(),
         };
 
         debug_println!("result: {res:?}");

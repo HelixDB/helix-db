@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use crate::{
     helix_engine::{
-        storage_core::{version_info::VersionInfo},
+        storage_core::version_info::VersionInfo,
         traversal_core::{
             HelixGraphEngine, HelixGraphEngineOpts,
             config::Config,
@@ -19,7 +19,7 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::vector::HVector,
+        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
     },
     helix_gateway::mcp::{mcp::MCPConnection, tools::McpTools},
 };
@@ -66,7 +66,6 @@ fn test_mcp_tool_search_vector_text() {}
 
 use rand::prelude::SliceRandom;
 
-
 #[test]
 fn test_mcp_tool_search_vector() {
     let (engine, _temp_dir) = setup_test_db();
@@ -94,7 +93,12 @@ fn test_mcp_tool_search_vector() {
 
     for vector in vectors {
         let vector = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(&vector, "vector", None)
+            .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+                &vector,
+                "vector",
+                None,
+                &crate::helix_engine::vector_core::vector_distance::SimilarityMethod::default(),
+            )
             .collect_to_obj();
 
         let _ = G::new_mut(Arc::clone(&engine.storage), &mut txn)
@@ -127,7 +131,14 @@ fn test_mcp_tool_search_vector() {
 
     // brute force searches for vectors
     let res = mcp_backend
-        .search_vector(&txn, &mcp_connection, vec![1.0, 1.0, 1.0], 10, None)
+        .search_vector(
+            &txn,
+            &mcp_connection,
+            vec![1.0, 1.0, 1.0],
+            10,
+            None,
+            Some(SimilarityMethod::default()),
+        )
         .unwrap();
 
     // checks that the first vector is correct
