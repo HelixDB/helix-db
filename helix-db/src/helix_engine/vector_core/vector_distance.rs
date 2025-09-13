@@ -19,7 +19,6 @@ pub enum SimilarityMethod {
 
 pub trait DistanceCalc {
     fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError>;
-
 }
 impl DistanceCalc for HVector {
     /// Calculates the distance between two vectors.
@@ -32,14 +31,12 @@ impl DistanceCalc for HVector {
     #[inline(always)]
     fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError> {
         match method {
-            SimilarityMethod::CosineDistance =>  cosine_similarity(&from, &to).map(|sim| 1.0 - sim),
-            SimilarityMethod::CosineSimilarity =>  cosine_similarity(&from, &to),
-            SimilarityMethod::EuclideanDistance => todo!(),
+            SimilarityMethod::CosineDistance => cosine_similarity(&from, &to).map(|sim| 1.0 - sim),
+            SimilarityMethod::CosineSimilarity => cosine_similarity(&from, &to),
+            SimilarityMethod::EuclideanDistance => euclidean_distance(&from, &to),
         }
-       
     }
 }
-
 
 #[inline]
 pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
@@ -172,4 +169,18 @@ unsafe fn horizontal_sum_pd(__v: __m256d) -> f64 {
 
     // Extract the low 64 bits as a scalar
     _mm_cvtsd_f64(sum)
+}
+
+pub fn euclidean_distance(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
+    if from.len() != to.len() {
+        return Err(VectorError::InvalidVectorLength);
+    }
+    Ok(from
+        .iter()
+        .zip(to.iter())
+        .map(|(x, y)| {
+            let c = x - y;
+            c * c
+        })
+        .sum())
 }
