@@ -20,9 +20,9 @@ impl DistanceCalc for HVector {
     #[inline(always)]
     fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError> {
         match method {
-            SimilarityMethod::CosineDistance => cosine_similarity(&from, &to).map(|sim| 1.0 - sim),
-            SimilarityMethod::CosineSimilarity => cosine_similarity(&from, &to),
-            SimilarityMethod::EuclideanDistance => euclidean_distance(&from, &to),
+            SimilarityMethod::CosineDistance => cosine_similarity(from, to).map(|sim| 1.0 - sim),
+            SimilarityMethod::CosineSimilarity => cosine_similarity(from, to),
+            SimilarityMethod::EuclideanDistance => euclidean_distance(from, to),
         }
     }
 }

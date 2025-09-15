@@ -84,7 +84,7 @@ impl VectorCore {
             vector_data_db,
             edges_db,
             config,
-            method: method.unwrap_or(SimilarityMethod::default()),
+            method: method.unwrap_or_default(),
         })
     }
 
