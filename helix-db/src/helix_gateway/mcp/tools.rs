@@ -21,7 +21,7 @@ use crate::{
             traversal_value::{Traversable, TraversalValue},
         },
         types::GraphError,
-        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
+        vector_core::vector::HVector,
     },
     helix_gateway::{
         embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
@@ -199,7 +199,6 @@ pub(super) trait McpTools<'a> {
         query: String,
         label: String,
         k: Option<usize>,
-        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn search_vector(
@@ -209,7 +208,6 @@ pub(super) trait McpTools<'a> {
         vector: Vec<f64>,
         k: usize,
         min_score: Option<f64>,
-        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError>;
 
     fn order_by(
@@ -491,7 +489,6 @@ impl<'a> McpTools<'a> for McpBackend {
         query: String,
         label: String,
         k: Option<usize>,
-        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError> {
         let db = Arc::clone(&self.db);
 
@@ -505,7 +502,6 @@ impl<'a> McpTools<'a> for McpBackend {
                 k.unwrap_or(5),
                 &label,
                 None,
-                &method.unwrap_or_default(),
             )
             .collect_to::<Vec<_>>();
 
@@ -520,14 +516,13 @@ impl<'a> McpTools<'a> for McpBackend {
         vector: Vec<f64>,
         k: usize,
         min_score: Option<f64>,
-        method: Option<SimilarityMethod>,
     ) -> Result<Vec<TraversalValue>, GraphError> {
         let db = Arc::clone(&self.db);
 
         let items = connection.iter.clone().collect::<Vec<_>>();
 
         let mut res = G::new_from(db, txn, items)
-            .brute_force_search_v(&vector, k, &method.unwrap_or_default())
+            .brute_force_search_v(&vector, k)
             .collect_to::<Vec<_>>();
 
         if let Some(min_score) = min_score {

@@ -21,7 +21,8 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
+        vector_core::vector::HVector,
+
     },
     props,
     utils::filterable::Filterable,
@@ -362,7 +363,6 @@ fn test_vector_deletion_in_existing_graph() {
                 &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
                 "vector",
                 None,
-                &SimilarityMethod::default(),
             )
             .collect_to_obj();
         other_vectors.push(other_vector);
@@ -373,7 +373,6 @@ fn test_vector_deletion_in_existing_graph() {
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             "vector",
             None,
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 

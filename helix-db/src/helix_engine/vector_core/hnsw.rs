@@ -1,5 +1,4 @@
 use crate::helix_engine::vector_core::vector::HVector;
-use crate::helix_engine::vector_core::vector_distance::SimilarityMethod;
 use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use heed3::{RoTxn, RwTxn};
 
@@ -23,7 +22,6 @@ pub trait HNSW {
         label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
-        method: &SimilarityMethod,
     ) -> Result<Vec<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
@@ -43,7 +41,6 @@ pub trait HNSW {
         txn: &mut RwTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
-        method: &SimilarityMethod,
     ) -> Result<HVector, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;

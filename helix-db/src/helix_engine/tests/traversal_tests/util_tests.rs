@@ -17,7 +17,7 @@ use crate::{
             },
             traversal_value::Traversable,
         },
-        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
+        vector_core::vector::HVector,
     },
     props,
 };
@@ -216,7 +216,6 @@ fn test_order_vector_by_asc() {
             &[1.0, 2.0, 3.0],
             "vector",
             Some(props! { "age" => 30 }),
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 
@@ -225,7 +224,6 @@ fn test_order_vector_by_asc() {
             &[1.0, 2.0, 3.0],
             "vector",
             Some(props! { "age" => 20 }),
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 
@@ -234,7 +232,6 @@ fn test_order_vector_by_asc() {
             &[1.0, 2.0, 3.0],
             "vector",
             Some(props! { "age" => 10 }),
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 
@@ -247,7 +244,6 @@ fn test_order_vector_by_asc() {
             10,
             "vector",
             None,
-            &SimilarityMethod::default(),
         )
         .order_by_asc("age")
         .collect_to::<Vec<_>>();
@@ -269,7 +265,6 @@ fn test_order_vector_by_desc() {
             &[1.0, 2.0, 3.0],
             "vector",
             Some(props! { "age" => 30 }),
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 
@@ -277,8 +272,7 @@ fn test_order_vector_by_desc() {
         .insert_v::<FnTy>(
             &[1.0, 2.0, 3.0],
             "vector",
-            Some(props! { "age" => 20 }),
-            &SimilarityMethod::default(),
+            Some(props! { "age" => 20 }),       
         )
         .collect_to_obj();
 
@@ -287,7 +281,6 @@ fn test_order_vector_by_desc() {
             &[1.0, 2.0, 3.0],
             "vector",
             Some(props! { "age" => 10 }),
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 
@@ -300,7 +293,6 @@ fn test_order_vector_by_desc() {
             10,
             "vector",
             None,
-            &SimilarityMethod::default(),
         )
         .order_by_desc("age")
         .collect_to::<Vec<_>>();

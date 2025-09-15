@@ -1,5 +1,5 @@
 use crate::helix_engine::vector_core::vector::HVector;
-use crate::helix_engine::vector_core::vector_distance::SimilarityMethod;
+use crate::helix_engine::traversal_core::config::SimilarityMethod;
 use crate::helix_engine::vector_core::vector_distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL};
 
 #[test]

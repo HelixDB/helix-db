@@ -1,21 +1,10 @@
-use serde::Deserialize;
-
-use crate::helix_engine::{types::VectorError, vector_core::vector::HVector};
+use crate::helix_engine::{
+    traversal_core::config::SimilarityMethod, types::VectorError, vector_core::vector::HVector,
+};
 
 pub const MAX_DISTANCE: f64 = 2.0;
 pub const ORTHOGONAL: f64 = 1.0;
 pub const MIN_DISTANCE: f64 = 0.0;
-
-#[derive(Default, Debug, Deserialize, Clone)]
-pub enum SimilarityMethod {
-    #[default]
-    #[serde(rename = "cosine_distance")]
-    CosineDistance,
-    #[serde(rename = "cosine_similarity")]
-    CosineSimilarity,
-    #[serde(rename = "euclidean_distance")]
-    EuclideanDistance,
-}
 
 pub trait DistanceCalc {
     fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError>;

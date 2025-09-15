@@ -1,9 +1,9 @@
 // MAKE SURE TO --release
+use crate::helix_engine::traversal_core::config::SimilarityMethod;
 use crate::helix_engine::vector_core::{
     hnsw::HNSW,
     vector::HVector,
     vector_core::{HNSWConfig, VectorCore},
-    vector_distance::SimilarityMethod,
 };
 use heed3::{Env, EnvOpenOptions, RoTxn};
 use rand::{Rng, seq::SliceRandom};
@@ -111,7 +111,7 @@ fn tests_hnsw_config_build() {
 
     let config = HNSWConfig::new(Some(32), Some(256), Some(256));
 
-    let index = VectorCore::new(&env, &mut txn, config).unwrap();
+    let index = VectorCore::new(&env, &mut txn, config, Some(SimilarityMethod::default())).unwrap();
     assert_eq!(index.config.m, 32);
     assert_eq!(index.config.ef_construct, 256);
     assert_eq!(index.config.ef, 256);
@@ -126,7 +126,7 @@ fn tests_hnsw_config_build() {
 fn test_hnsw_insert() {
     let env = setup_temp_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None), Some(SimilarityMethod::default())).unwrap();
 
     let n_base = 500;
     let dims = 750;
@@ -134,7 +134,7 @@ fn test_hnsw_insert() {
 
     for data in vectors {
         let vec = index
-            .insert::<Filter>(&mut txn, &data, None, &SimilarityMethod::default())
+            .insert::<Filter>(&mut txn, &data, None)
             .unwrap();
         assert_eq!(vec.data, data);
         assert!(vec.properties.is_none());
@@ -148,7 +148,7 @@ fn test_hnsw_insert() {
 fn test_get_vector() {
     let env = setup_temp_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None), Some(SimilarityMethod::default())).unwrap();
 
     let n_base = 500;
     let dims = 750;
@@ -158,7 +158,7 @@ fn test_get_vector() {
     for data in vectors {
         all_vectors.push(
             index
-                .insert::<Filter>(&mut txn, &data, None, &SimilarityMethod::default())
+                .insert::<Filter>(&mut txn, &data, None)
                 .unwrap(),
         );
     }
@@ -198,13 +198,13 @@ fn test_hnsw_search() {
 
     let env = setup_temp_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None), Some(SimilarityMethod::default())).unwrap();
 
     let mut base_all_vectors: Vec<HVector> = Vec::new();
     for data in base_vectors.iter() {
         base_all_vectors.push(
             index
-                .insert::<Filter>(&mut txn, &data, None, &SimilarityMethod::default())
+                .insert::<Filter>(&mut txn, &data, None)
                 .unwrap(),
         );
     }
@@ -228,7 +228,6 @@ fn test_hnsw_search() {
                 "vector",
                 None,
                 false,
-                &SimilarityMethod::default(),
             )
             .unwrap();
 

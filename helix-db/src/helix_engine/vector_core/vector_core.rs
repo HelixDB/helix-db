@@ -1,12 +1,12 @@
 use crate::{
     debug_println,
     helix_engine::{
+        traversal_core::config::SimilarityMethod,
         types::VectorError,
         vector_core::{
             hnsw::HNSW,
             utils::{Candidate, HeapOps, VectorFilter},
             vector::HVector,
-            vector_distance::SimilarityMethod,
         },
     },
     protocol::value::Value,
@@ -65,10 +65,16 @@ pub struct VectorCore {
     pub vector_data_db: Database<Bytes, Bytes>,
     pub edges_db: Database<Bytes, Unit>,
     pub config: HNSWConfig,
+    pub method: SimilarityMethod,
 }
 
 impl VectorCore {
-    pub fn new(env: &Env, txn: &mut RwTxn, config: HNSWConfig) -> Result<Self, VectorError> {
+    pub fn new(
+        env: &Env,
+        txn: &mut RwTxn,
+        config: HNSWConfig,
+        method: Option<SimilarityMethod>,
+    ) -> Result<Self, VectorError> {
         let vectors_db = env.create_database(txn, Some(DB_VECTORS))?;
         let vector_data_db = env.create_database(txn, Some(DB_VECTOR_DATA))?;
         let edges_db = env.create_database(txn, Some(DB_HNSW_EDGES))?;
@@ -78,6 +84,7 @@ impl VectorCore {
             vector_data_db,
             edges_db,
             config,
+            method: method.unwrap_or(SimilarityMethod::default()),
         })
     }
 
@@ -249,7 +256,6 @@ impl VectorCore {
         level: usize,
         should_extend: bool,
         filter: Option<&[F]>,
-        method: &SimilarityMethod,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -268,7 +274,7 @@ impl VectorCore {
                     continue;
                 }
 
-                neighbor.set_distance(neighbor.distance_to(query, method)?);
+                neighbor.set_distance(neighbor.distance_to(query, &self.method)?);
 
                 /*
                 let passes_filters = match filter {
@@ -299,7 +305,6 @@ impl VectorCore {
         ef: usize,
         level: usize,
         filter: Option<&[F]>,
-        method: &SimilarityMethod,
     ) -> Result<BinaryHeap<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -308,7 +313,7 @@ impl VectorCore {
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
         let mut results: BinaryHeap<HVector> = BinaryHeap::new();
 
-        entry_point.set_distance(entry_point.distance_to(query, method)?);
+        entry_point.set_distance(entry_point.distance_to(query, &self.method)?);
         candidates.push(Candidate {
             id: entry_point.get_id(),
             distance: entry_point.get_distance(),
@@ -335,7 +340,7 @@ impl VectorCore {
                 .into_iter()
                 .filter(|neighbor| visited.insert(neighbor.get_id()))
                 .filter_map(|mut neighbor| {
-                    let distance = neighbor.distance_to(query, method).ok()?;
+                    let distance = neighbor.distance_to(query, &self.method).ok()?;
 
                     if max_distance.is_none_or(|max| distance < max) {
                         neighbor.set_distance(distance);
@@ -406,7 +411,6 @@ impl HNSW for VectorCore {
         label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
-        method: &SimilarityMethod,
     ) -> Result<Vec<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -429,7 +433,6 @@ impl HNSW for VectorCore {
                     true => filter,
                     false => None,
                 },
-                method,
             )?;
 
             if let Some(closest) = nearest.pop() {
@@ -447,7 +450,6 @@ impl HNSW for VectorCore {
                 true => filter,
                 false => None,
             },
-            method,
         )?;
 
         let results =
@@ -462,7 +464,6 @@ impl HNSW for VectorCore {
         txn: &mut RwTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
-        method: &SimilarityMethod,
     ) -> Result<HVector, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -496,8 +497,7 @@ impl HNSW for VectorCore {
         let l = entry_point.get_level();
         let mut curr_ep = entry_point;
         for level in (new_level + 1..=l).rev() {
-            let nearest =
-                self.search_level::<F>(txn, &query, &mut curr_ep, 1, level, None, method)?;
+            let nearest = self.search_level::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
             curr_ep = nearest
                 .peek()
                 .ok_or(VectorError::VectorCoreError(
@@ -514,19 +514,18 @@ impl HNSW for VectorCore {
                 self.config.ef_construct,
                 level,
                 None,
-                method,
             )?;
             curr_ep = nearest.peek().unwrap().clone();
 
             let neighbors =
-                self.select_neighbors::<F>(txn, &query, nearest, level, true, None, method)?;
+                self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
             self.set_neighbours(txn, query.get_id(), &neighbors, level)?;
 
             for e in neighbors {
                 let id = e.get_id();
                 let e_conns = BinaryHeap::from(self.get_neighbors::<F>(txn, id, level, None)?);
                 let e_new_conn =
-                    self.select_neighbors::<F>(txn, &query, e_conns, level, true, None, method)?;
+                    self.select_neighbors::<F>(txn, &query, e_conns, level, true, None)?;
                 self.set_neighbours(txn, id, &e_new_conn, level)?;
             }
         }

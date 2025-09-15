@@ -19,7 +19,7 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
+        vector_core::vector::HVector,
     },
     helix_gateway::mcp::{mcp::MCPConnection, tools::McpTools},
 };
@@ -93,12 +93,7 @@ fn test_mcp_tool_search_vector() {
 
     for vector in vectors {
         let vector = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(
-                &vector,
-                "vector",
-                None,
-                &crate::helix_engine::vector_core::vector_distance::SimilarityMethod::default(),
-            )
+            .insert_v::<fn(&HVector, &RoTxn) -> bool>(&vector, "vector", None)
             .collect_to_obj();
 
         let _ = G::new_mut(Arc::clone(&engine.storage), &mut txn)
@@ -131,14 +126,7 @@ fn test_mcp_tool_search_vector() {
 
     // brute force searches for vectors
     let res = mcp_backend
-        .search_vector(
-            &txn,
-            &mcp_connection,
-            vec![1.0, 1.0, 1.0],
-            10,
-            None,
-            Some(SimilarityMethod::default()),
-        )
+        .search_vector(&txn, &mcp_connection, vec![1.0, 1.0, 1.0], 10, None)
         .unwrap();
 
     // checks that the first vector is correct

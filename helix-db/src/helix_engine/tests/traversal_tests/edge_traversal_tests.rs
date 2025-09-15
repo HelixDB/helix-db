@@ -20,7 +20,7 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::{vector::HVector, vector_distance::SimilarityMethod},
+        vector_core::vector::HVector,
     },
     props,
     utils::filterable::Filterable,
@@ -412,7 +412,6 @@ fn test_add_e_between_node_and_vector() {
             &[1.0, 2.0, 3.0],
             "vector",
             None,
-            &SimilarityMethod::default(),
         )
         .collect_to_obj();
 
@@ -445,7 +444,6 @@ fn test_add_e_between_node_and_vector() {
                 10,
                 "vector",
                 None,
-                &SimilarityMethod::default()
             )
             .collect_to::<Vec<_>>()
     );

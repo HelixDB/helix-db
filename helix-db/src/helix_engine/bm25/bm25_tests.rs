@@ -7,7 +7,7 @@ mod tests {
             },
             storage_core::{HelixGraphStorage, version_info::VersionInfo},
             traversal_core::config::Config,
-            vector_core::{hnsw::HNSW, vector::HVector, vector_distance::SimilarityMethod},
+            vector_core::{hnsw::HNSW, vector::HVector},
         },
         protocol::value::Value,
     };
@@ -1424,12 +1424,9 @@ mod tests {
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let vectors = generate_random_vectors(800, 650);
         for vec in vectors {
-            let _ = storage.vectors.insert::<fn(&HVector, &RoTxn) -> bool>(
-                &mut wtxn,
-                &vec,
-                None,
-                &SimilarityMethod::default(),
-            );
+            let _ = storage
+                .vectors
+                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
         }
         wtxn.commit().unwrap();
 
@@ -1439,13 +1436,7 @@ mod tests {
         let limit = 10;
 
         let result = storage
-            .hybrid_search(
-                query,
-                &query_vector[0],
-                alpha,
-                limit,
-                SimilarityMethod::default(),
-            )
+            .hybrid_search(query, &query_vector[0], alpha, limit)
             .await;
 
         match result {
@@ -1475,12 +1466,9 @@ mod tests {
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let vectors = generate_random_vectors(800, 650);
         for vec in vectors {
-            let _ = storage.vectors.insert::<fn(&HVector, &RoTxn) -> bool>(
-                &mut wtxn,
-                &vec,
-                None,
-                &SimilarityMethod::default(),
-            );
+            let _ = storage
+                .vectors
+                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
         }
         wtxn.commit().unwrap();
 
@@ -1489,13 +1477,7 @@ mod tests {
 
         // alpha = 0.0 (Vector only)
         let results_vector_only = storage
-            .hybrid_search(
-                query,
-                &query_vector[0],
-                0.0,
-                10,
-                SimilarityMethod::default(),
-            )
+            .hybrid_search(query, &query_vector[0], 0.0, 10)
             .await;
 
         match results_vector_only {
@@ -1527,12 +1509,9 @@ mod tests {
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let vectors = generate_random_vectors(800, 650);
         for vec in vectors {
-            let _ = storage.vectors.insert::<fn(&HVector, &RoTxn) -> bool>(
-                &mut wtxn,
-                &vec,
-                None,
-                &SimilarityMethod::default(),
-            );
+            let _ = storage
+                .vectors
+                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
         }
         wtxn.commit().unwrap();
 
@@ -1541,13 +1520,7 @@ mod tests {
 
         // alpha = 1.0 (BM25 only)
         let results_bm25_only = storage
-            .hybrid_search(
-                query,
-                &query_vector[0],
-                1.0,
-                10,
-                SimilarityMethod::default(),
-            )
+            .hybrid_search(query, &query_vector[0], 1.0, 10)
             .await;
 
         // all should be valid results or acceptable errors

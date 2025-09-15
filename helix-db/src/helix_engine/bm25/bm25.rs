@@ -3,7 +3,7 @@ use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,
         types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector, vector_distance::SimilarityMethod},
+        vector_core::{hnsw::HNSW, vector::HVector},
     },
     protocol::value::Value,
 };
@@ -350,7 +350,6 @@ pub trait HybridSearch {
         query_vector: &[f64],
         alpha: f32,
         limit: usize,
-        similarity_method: SimilarityMethod,
     ) -> impl std::future::Future<Output = Result<Vec<(u128, f32)>, GraphError>> + Send;
 }
 
@@ -361,7 +360,6 @@ impl HybridSearch for HelixGraphStorage {
         query_vector: &[f64],
         alpha: f32,
         limit: usize,
-        similarity_method: SimilarityMethod,
     ) -> Result<Vec<(u128, f32)>, GraphError> {
         let query_owned = query.to_string();
         let query_vector_owned = query_vector.to_vec();
@@ -386,7 +384,6 @@ impl HybridSearch for HelixGraphStorage {
                     "vector",
                     None,
                     false,
-                    &similarity_method,
                 )?;
                 Ok(Some(results))
             });

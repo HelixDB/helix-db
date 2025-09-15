@@ -1,7 +1,8 @@
 use crate::{
     helix_engine::{
+        traversal_core::config::SimilarityMethod,
         types::{GraphError, VectorError},
-        vector_core::vector_distance::{DistanceCalc, SimilarityMethod},
+        vector_core::vector_distance::DistanceCalc,
     },
     protocol::{return_values::ReturnValue, value::Value},
     utils::{

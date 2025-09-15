@@ -3,7 +3,7 @@ use heed3::RoTxn;
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector, vector_distance::SimilarityMethod},
+    vector_core::{hnsw::HNSW, vector::HVector},
 };
 use helix_macros::debug_trace;
 use std::iter::once;
@@ -29,7 +29,6 @@ pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalValue, GraphError>
         k: K,
         label: &str,
         filter: Option<&[F]>,
-        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -46,7 +45,6 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         k: K,
         label: &str,
         filter: Option<&[F]>,
-        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
@@ -60,7 +58,6 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
             label,
             filter,
             false,
-            method,
         );
 
         let iter = match vectors {

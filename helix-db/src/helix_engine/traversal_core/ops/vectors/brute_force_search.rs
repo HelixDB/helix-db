@@ -7,7 +7,7 @@ use crate::{
         types::GraphError,
         vector_core::{
             vector::HVector,
-            vector_distance::{DistanceCalc, SimilarityMethod},
+            vector_distance::DistanceCalc,
         },
     },
     protocol::value::Value,
@@ -37,7 +37,6 @@ pub trait BruteForceSearchVAdapter<'a>:
         self,
         query: &[f64],
         k: K,
-        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         K: TryInto<usize>,
@@ -51,7 +50,6 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
         self,
         query: &[f64],
         k: K,
-        method: &SimilarityMethod,
     ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         K: TryInto<usize>,
@@ -64,7 +62,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = HVector::distance(v.get_data(), query, method).unwrap();
+                    let d = HVector::distance(v.get_data(), query, &self.storage.vectors.method).unwrap();
                     v.set_distance(d);
                     Some(v)
                 }
