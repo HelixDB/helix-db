@@ -171,5 +171,6 @@ pub fn euclidean_distance(from: &[f64], to: &[f64]) -> Result<f64, VectorError> 
             let c = x - y;
             c * c
         })
-        .sum())
+        .sum::<f64>()
+        .sqrt())
 }
