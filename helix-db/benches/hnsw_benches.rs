@@ -82,7 +82,7 @@ mod tests {
                                 .filter_map(|base_vec| {
                                     query_hvector
                                         .distance_to(base_vec, &SimilarityMethod::default())
-                                        .map(|dist| (base_vec.id.clone(), dist))
+                                        .map(|dist| (base_vec.id.clone(), *dist))
                                         .ok()
                                 })
                                 .collect();

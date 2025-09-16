@@ -1,3 +1,8 @@
+use core::fmt;
+use std::{cmp::Ordering, fmt::Display, ops::Deref};
+
+use serde::{Deserialize, Serialize};
+
 use crate::helix_engine::{
     traversal_core::config::SimilarityMethod, types::VectorError, vector_core::vector::HVector,
 };
@@ -7,7 +12,7 @@ pub const ORTHOGONAL: f64 = 1.0;
 pub const MIN_DISTANCE: f64 = 0.0;
 
 pub trait DistanceCalc {
-    fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError>;
+    fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<DistanceResult, VectorError>;
 }
 impl DistanceCalc for HVector {
     /// Calculates the distance between two vectors.
@@ -18,11 +23,21 @@ impl DistanceCalc for HVector {
     /// - 0.0 (orthogonal) → Distance 1.0
     /// - -1.0 (most dissimilar) → Distance 2.0 (furthest)
     #[inline(always)]
-    fn distance(from: &[f64], to: &[f64], method: &SimilarityMethod) -> Result<f64, VectorError> {
+    fn distance(
+        from: &[f64],
+        to: &[f64],
+        method: &SimilarityMethod,
+    ) -> Result<DistanceResult, VectorError> {
         match method {
-            SimilarityMethod::CosineDistance => cosine_similarity(from, to).map(|sim| 1.0 - sim),
-            SimilarityMethod::CosineSimilarity => cosine_similarity(from, to),
-            SimilarityMethod::EuclideanDistance => euclidean_distance(from, to),
+            SimilarityMethod::CosineDistance => {
+                cosine_similarity(from, to).map(|sim| DistanceResult::CosineDistance(1.0 - sim))
+            }
+            SimilarityMethod::CosineSimilarity => {
+                cosine_similarity(from, to).map(|sim| DistanceResult::CosineSimilarity(sim))
+            }
+            SimilarityMethod::EuclideanDistance => {
+                euclidean_distance(from, to).map(|dist| DistanceResult::EuclideanDistance(dist))
+            }
         }
     }
 }
@@ -173,4 +188,128 @@ pub fn euclidean_distance(from: &[f64], to: &[f64]) -> Result<f64, VectorError> 
         })
         .sum::<f64>()
         .sqrt())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[serde(untagged)]
+pub enum DistanceResult {
+    CosineDistance(f64),
+    CosineSimilarity(f64),
+    EuclideanDistance(f64),
+    Empty,
+}
+
+impl PartialEq for DistanceResult {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DistanceResult::CosineDistance(a), DistanceResult::CosineDistance(b)) => a == b,
+            (DistanceResult::CosineSimilarity(a), DistanceResult::CosineSimilarity(b)) => b == a,
+            (DistanceResult::EuclideanDistance(a), DistanceResult::EuclideanDistance(b)) => a == b,
+            (DistanceResult::Empty, _) => false,
+            (_, DistanceResult::Empty) => false,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl PartialEq<f64> for DistanceResult {
+    fn eq(&self, other: &f64) -> bool {
+        match self {
+            DistanceResult::CosineDistance(a) => a == other,
+            DistanceResult::CosineSimilarity(a) => a == other,
+            DistanceResult::EuclideanDistance(a) => a == other,
+            DistanceResult::Empty => false,
+        }
+    }
+}
+impl PartialOrd<f64> for DistanceResult {
+    fn partial_cmp(&self, other: &f64) -> Option<Ordering> {
+        match self {
+            DistanceResult::CosineDistance(a) => a.partial_cmp(other),
+            DistanceResult::CosineSimilarity(a) => a.partial_cmp(other),
+            DistanceResult::EuclideanDistance(a) => a.partial_cmp(other),
+            DistanceResult::Empty => None,
+        }
+    }
+}
+
+impl PartialOrd for DistanceResult {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (DistanceResult::CosineDistance(a), DistanceResult::CosineDistance(b)) => {
+                b.partial_cmp(a)
+            }
+            (DistanceResult::CosineSimilarity(a), DistanceResult::CosineSimilarity(b)) => {
+                a.partial_cmp(b)
+            }
+            (DistanceResult::EuclideanDistance(a), DistanceResult::EuclideanDistance(b)) => {
+                b.partial_cmp(a)
+            }
+            (DistanceResult::Empty, DistanceResult::Empty) => Some(Ordering::Equal),
+            (DistanceResult::Empty, _) => Some(Ordering::Greater),
+            (_, DistanceResult::Empty) => Some(Ordering::Less),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Ord for DistanceResult {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+impl Eq for DistanceResult {}
+
+impl Deref for DistanceResult {
+    type Target = f64;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            DistanceResult::CosineDistance(a) => a,
+            DistanceResult::CosineSimilarity(a) => a,
+            DistanceResult::EuclideanDistance(a) => a,
+            DistanceResult::Empty => panic!("Empty distance result"),
+        }
+    }
+}
+
+
+impl From<DistanceResult> for f64 {
+    fn from(result: DistanceResult) -> Self {
+        match result {
+            DistanceResult::CosineDistance(a) => a,
+            DistanceResult::CosineSimilarity(a) => a,
+            DistanceResult::EuclideanDistance(a) => a,
+            DistanceResult::Empty => panic!("Empty distance result"),
+        }
+    }
+}
+
+impl From<&DistanceResult> for f64 {
+    fn from(result: &DistanceResult) -> Self {
+        match result {
+            DistanceResult::CosineDistance(a) => *a,
+            DistanceResult::CosineSimilarity(a) => *a,
+            DistanceResult::EuclideanDistance(a) => *a,
+            DistanceResult::Empty => panic!("Empty distance result"),
+        }
+    }
+}
+
+impl Default for DistanceResult {
+    fn default() -> Self {
+        DistanceResult::CosineDistance(2.0)
+    }
+}
+
+impl Display for DistanceResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DistanceResult::CosineDistance(a) => write!(f, "CosineDistance({})", a),
+            DistanceResult::CosineSimilarity(a) => write!(f, "CosineSimilarity({})", a),
+            DistanceResult::EuclideanDistance(a) => write!(f, "EuclideanDistance({})", a),
+            DistanceResult::Empty => write!(f, "Empty"),
+        }
+    }
 }

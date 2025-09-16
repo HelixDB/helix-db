@@ -1,7 +1,7 @@
 use crate::{
     helix_engine::{
         types::VectorError,
-        vector_core::vector::HVector,
+        vector_core::vector::HVector, vector_core::vector_distance::DistanceResult,
     },
     protocol::value::Value, utils::filterable::Filterable
 };
@@ -11,7 +11,7 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 #[derive(PartialEq)]
 pub(super) struct Candidate {
     pub id: u128,
-    pub distance: f64,
+    pub distance: DistanceResult,
 }
 
 impl Eq for Candidate {}
@@ -25,9 +25,7 @@ impl PartialOrd for Candidate {
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
         other
-            .distance
-            .partial_cmp(&self.distance)
-            .unwrap_or(Ordering::Equal)
+            .distance.cmp(&self.distance)
     }
 }
 

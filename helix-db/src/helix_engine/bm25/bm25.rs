@@ -403,7 +403,7 @@ impl HybridSearch for HelixGraphStorage {
         if let Some(vector_results) = vector_results? {
             for doc in vector_results {
                 let doc_id = doc.id;
-                let score = doc.distance.unwrap_or(0.0);
+                let score = *doc.distance;
                 let similarity = (1.0 / (1.0 + score)) as f32;
                 combined_scores
                     .entry(doc_id)

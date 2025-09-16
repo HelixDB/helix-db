@@ -68,7 +68,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
                 }
                 _ => None,
             })
-            .sorted_by(|v1, v2| v1.partial_cmp(v2).unwrap())
+            .sorted()
             .take(k.try_into().unwrap())
             .filter_map(move |mut item| {
                 item.properties = match storage

@@ -6,7 +6,7 @@ use crate::{
         vector_core::{
             hnsw::HNSW,
             utils::{Candidate, HeapOps, VectorFilter},
-            vector::HVector,
+            vector::HVector, vector_distance::DistanceResult,
         },
     },
     protocol::value::Value,
@@ -274,7 +274,7 @@ impl VectorCore {
                     continue;
                 }
 
-                neighbor.set_distance(neighbor.distance_to(query, &self.method)?);
+                neighbor.set_distance(neighbor.distance_to(query, &self.method)?.into());
 
                 /*
                 let passes_filters = match filter {
@@ -313,10 +313,10 @@ impl VectorCore {
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
         let mut results: BinaryHeap<HVector> = BinaryHeap::new();
 
-        entry_point.set_distance(entry_point.distance_to(query, &self.method)?);
+        entry_point.set_distance(entry_point.distance_to(query, &self.method)?.into());
         candidates.push(Candidate {
             id: entry_point.get_id(),
-            distance: entry_point.get_distance(),
+            distance: entry_point.get_distance().clone(),
         });
         results.push(entry_point.clone());
         visited.insert(entry_point.get_id());
@@ -481,7 +481,7 @@ impl HNSW for VectorCore {
             Ok(ep) => ep,
             Err(_) => {
                 self.set_entry_point(txn, &query)?;
-                query.set_distance(0.0);
+                query.set_distance(DistanceResult::Empty);
 
                 if let Some(fields) = fields {
                     self.vector_data_db.put(

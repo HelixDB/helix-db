@@ -2,7 +2,7 @@ use crate::{
     helix_engine::{
         traversal_core::config::SimilarityMethod,
         types::{GraphError, VectorError},
-        vector_core::vector_distance::DistanceCalc,
+        vector_core::vector_distance::{DistanceCalc, DistanceResult},
     },
     protocol::{return_values::ReturnValue, value::Value},
     utils::{
@@ -28,7 +28,7 @@ pub struct HVector {
     /// The level of the HVector
     pub level: usize,
     /// The distance of the HVector
-    pub distance: Option<f64>,
+    pub distance: DistanceResult,
     /// The actual vector
     pub data: Vec<f64>,
     /// The properties of the HVector
@@ -44,9 +44,7 @@ impl PartialOrd for HVector {
 impl Ord for HVector {
     fn cmp(&self, other: &Self) -> Ordering {
         other
-            .distance
-            .partial_cmp(&self.distance)
-            .unwrap_or(Ordering::Equal)
+            .distance.cmp(&self.distance)
     }
 }
 
@@ -74,7 +72,7 @@ impl HVector {
             // is_deleted: false,
             level: 0,
             data,
-            distance: None,
+            distance: DistanceResult::Empty,
             properties: None,
         }
     }
@@ -87,7 +85,7 @@ impl HVector {
             // is_deleted: false,
             level,
             data,
-            distance: None,
+            distance: DistanceResult::Empty,
             properties: None,
         }
     }
@@ -141,7 +139,7 @@ impl HVector {
             // is_deleted: false,
             level,
             data,
-            distance: None,
+            distance: DistanceResult::Empty,
             properties: None,
         })
     }
@@ -161,18 +159,18 @@ impl HVector {
         &self,
         other: &HVector,
         method: &SimilarityMethod,
-    ) -> Result<f64, VectorError> {
+    ) -> Result<DistanceResult, VectorError> {
         HVector::distance(&self.data, &other.data, method)
     }
 
     #[inline(always)]
-    pub fn set_distance(&mut self, distance: f64) {
-        self.distance = Some(distance);
+    pub fn set_distance(&mut self, distance: DistanceResult) {
+        self.distance = distance;
     }
 
     #[inline(always)]
-    pub fn get_distance(&self) -> f64 {
-        self.distance.unwrap_or(2.0)
+    pub fn get_distance(&self) -> DistanceResult {
+        self.distance
     }
 }
 
@@ -234,7 +232,7 @@ impl Filterable for HVector {
     }
 
     fn score(&self) -> f64 {
-        self.get_distance()
+        self.get_distance().into()
     }
 
     fn properties_mut(&mut self) -> &mut Option<HashMap<String, Value>> {
