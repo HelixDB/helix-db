@@ -274,7 +274,7 @@ impl VectorCore {
                     continue;
                 }
 
-                neighbor.set_distance(neighbor.distance_to(query, &self.method)?.into());
+                neighbor.set_distance(neighbor.distance_to(query, &self.method)?);
 
                 /*
                 let passes_filters = match filter {
@@ -313,10 +313,10 @@ impl VectorCore {
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
         let mut results: BinaryHeap<HVector> = BinaryHeap::new();
 
-        entry_point.set_distance(entry_point.distance_to(query, &self.method)?.into());
+        entry_point.set_distance(entry_point.distance_to(query, &self.method)?);
         candidates.push(Candidate {
             id: entry_point.get_id(),
-            distance: entry_point.get_distance().clone(),
+            distance: entry_point.get_distance(),
         });
         results.push(entry_point.clone());
         visited.insert(entry_point.get_id());
