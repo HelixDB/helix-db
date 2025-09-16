@@ -34,9 +34,9 @@ pub struct GraphConfig {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub enum SimilarityMethod {
+    #[default]
     #[serde(rename = "cosine_distance")]
     CosineDistance,
-    #[default]
     #[serde(rename = "cosine_similarity")]
     CosineSimilarity,
     #[serde(rename = "euclidean_distance")]
