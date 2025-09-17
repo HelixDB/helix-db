@@ -1,35 +1,25 @@
 use crate::{
     debug_println,
     helix_engine::{
-        helix_gateway::embedding_providers::embedding_providers::{
-            EmbeddingModel, get_embedding_model,
-        },
+        bm25::bm25::{BM25, BM25Flatten, HBM25Config},
         storage_core::HelixGraphStorage,
         traversal_core::{
-            bm25::bm25::{BM25, BM25Flatten, HBM25Config},
-            storage_core::HelixGraphStorage,
-            traversal_core::{
-                ops::{
-                    bm25::search_bm25::SearchBM25Adapter,
-                    g::G,
-                    in_::{
-                        in_::{InAdapter, InNodesIterator},
-                        in_e::{InEdgesAdapter, InEdgesIterator},
-                    },
-                    out::{
-                        out::{OutAdapter, OutNodesIterator},
-                        out_e::{OutEdgesAdapter, OutEdgesIterator},
-                    },
-                    source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
-                    util::order::OrderByAdapter,
-                    vectors::{
-                        brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter,
-                    },
+            ops::{
+                bm25::search_bm25::SearchBM25Adapter,
+                g::G,
+                in_::{
+                    in_::{InAdapter, InNodesIterator},
+                    in_e::{InEdgesAdapter, InEdgesIterator},
                 },
-                traversal_value::{Traversable, TraversalValue},
+                out::{
+                    out::{OutAdapter, OutNodesIterator},
+                    out_e::{OutEdgesAdapter, OutEdgesIterator},
+                },
+                source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
+                util::order::OrderByAdapter,
+                vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter},
             },
-            types::GraphError,
-            vector_core::vector::HVector,
+            traversal_value::{Traversable, TraversalValue},
         },
         types::GraphError,
         vector_core::vector::HVector,
