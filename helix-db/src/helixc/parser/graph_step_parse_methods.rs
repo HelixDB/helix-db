@@ -1,7 +1,11 @@
 use crate::helixc::parser::{
-    location::HasLoc, types::{
-        BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition, FieldValue, FieldValueType, GraphStep, GraphStepType, IdType, Object, OrderBy, OrderByType, ShortestPath, Step, StepType, Update
-    }, HelixParser, ParserError, Rule
+    HelixParser, ParserError, Rule,
+    location::HasLoc,
+    types::{
+        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition,
+        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Object, OrderBy,
+        OrderByType, ShortestPath, Step, StepType, Update,
+    },
 };
 use pest::iterators::Pair;
 
@@ -33,7 +37,10 @@ impl HelixParser {
     /// ```rs
     /// ::RANGE(1, 10)
     /// ```
-    pub(super) fn parse_range(&self, pair: Pair<Rule>) -> Result<(Expression, Expression), ParserError> {
+    pub(super) fn parse_range(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<(Expression, Expression), ParserError> {
         let mut inner = pair.into_inner().next().unwrap().into_inner();
         let start = self.parse_expression(inner.next().unwrap())?;
         let end = self.parse_expression(inner.next().unwrap())?;
@@ -207,6 +214,31 @@ impl HelixParser {
         })
     }
 
+    pub(super) fn parse_aggregate(&self, pair: Pair<Rule>) -> Result<Aggregate, ParserError> {
+        let loc = pair.loc();
+        let identifiers = pair
+            .into_inner()
+            .map(|i| i.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        Ok(Aggregate {
+            loc,
+            properties: identifiers,
+        })
+    }
+
+    pub(super) fn parse_group_by(&self, pair: Pair<Rule>) -> Result<GroupBy, ParserError> {
+        let loc = pair.loc();
+        let identifiers = pair
+            .into_inner()
+            .map(|i| i.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        Ok(GroupBy {
+            loc,
+            properties: identifiers,
+        })
+    }
 
     pub(super) fn parse_step(&self, pair: Pair<Rule>) -> Result<Step, ParserError> {
         let inner = pair.clone().into_inner().next().unwrap();
@@ -270,6 +302,14 @@ impl HelixParser {
             Rule::order_by => Ok(Step {
                 loc: inner.loc(),
                 step: StepType::OrderBy(self.parse_order_by(inner)?),
+            }),
+            Rule::aggregate => Ok(Step {
+                loc: inner.loc(),
+                step: StepType::Aggregate(self.parse_aggregate(inner)?),
+            }),
+            Rule::group_by => Ok(Step {
+                loc: inner.loc(),
+                step: StepType::GroupBy(self.parse_group_by(inner)?),
             }),
             Rule::first => Ok(Step {
                 loc: inner.loc(),

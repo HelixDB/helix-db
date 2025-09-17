@@ -55,10 +55,6 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> RoTraversalIter
         }
     }
 
-    pub fn count_to_val(self) -> Value {
-        Value::from(self.inner.count())
-    }
-
     pub fn map_value_or(
         mut self,
         default: bool,
@@ -131,10 +127,6 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>>
             Some(val) => val,
             None => TraversalValue::Empty,
         }
-    }
-
-    pub fn count_to_val(self) -> Value {
-        Value::from(self.inner.count())
     }
 
     pub fn map_value_or(

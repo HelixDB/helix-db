@@ -13,7 +13,7 @@ use crate::{
                     n_from_id::NFromIdAdapter,
                     n_from_type::NFromTypeAdapter,
                 },
-                util::{filter_ref::FilterRefAdapter, range::RangeAdapter},
+                util::{count::CountAdapter, filter_ref::FilterRefAdapter, range::RangeAdapter},
             },
             traversal_value::Traversable,
         },

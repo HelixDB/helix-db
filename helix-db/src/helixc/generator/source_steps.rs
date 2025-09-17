@@ -28,6 +28,10 @@ pub enum SourceStep {
     EFromID(EFromID),
     /// Lookup an edge by type
     EFromType(EFromType),
+    /// Lookup a vector by ID
+    VFromID(VFromID),
+    /// Lookup a vector by type
+    VFromType(VFromType),
     /// Search for vectors
     SearchVector(SearchVector),
     /// Search for vectors using BM25
@@ -156,6 +160,35 @@ impl Display for EFromType {
 }
 
 #[derive(Clone)]
+pub struct VFromID {
+    /// ID of vector
+    pub id: GenRef<String>,
+    /// Label of vector
+    pub label: GenRef<String>,
+}
+
+impl Display for VFromID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v_from_id({})", self.id)
+    }
+}
+
+
+#[derive(Clone)]
+pub struct VFromType {
+    /// Label of vectors to lookup
+    pub label: GenRef<String>,
+}
+
+
+impl Display for VFromType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v_from_type({})", self.label)
+    }
+}
+
+
+#[derive(Clone)]
 pub struct SearchBM25 {
     /// Type of node to search for
     pub type_arg: GenRef<String>,
@@ -187,6 +220,8 @@ impl Display for SourceStep {
             SourceStep::SearchBM25(search_bm25) => write!(f, "{search_bm25}"),
             SourceStep::Anonymous => write!(f, ""),
             SourceStep::Empty => panic!("Should not be empty"),
+            SourceStep::VFromID(v_from_id) => write!(f, "{v_from_id}"),
+            SourceStep::VFromType(v_from_type) => write!(f, "{v_from_type}"),
         }
     }
 }

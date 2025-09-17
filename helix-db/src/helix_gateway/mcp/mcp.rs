@@ -1,6 +1,13 @@
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage, traversal_core::traversal_value::TraversalValue,
+        storage_core::HelixGraphStorage,
+        traversal_core::{
+            ops::{
+                g::G,
+                util::{aggregate::AggregateAdapter, group_by::GroupByAdapter},
+            },
+            traversal_value::TraversalValue,
+        },
         types::GraphError,
     },
     helix_gateway::mcp::tools::ToolArgs,
@@ -207,6 +214,87 @@ pub fn collect(input: &mut MCPToolInput) -> Result<Response, GraphError> {
             .collect::<Vec<TraversalValue>>(),
         None => connection.iter.clone().collect::<Vec<TraversalValue>>(),
     };
+
+    let mut connections = input.mcp_connections.lock().unwrap();
+
+    if data.drop.unwrap_or(true) {
+        connections.add_connection(MCPConnection::new(
+            connection.connection_id.clone(),
+            vec![].into_iter(),
+        ));
+    } else {
+        connections.add_connection(connection);
+    }
+
+    drop(connections);
+
+    Ok(Format::Json.create_response(&ReturnValue::from(values)))
+}
+
+#[derive(Deserialize)]
+pub struct AggregateRequest {
+    pub connection_id: String,
+    properties: Vec<String>,
+    pub drop: Option<bool>,
+}
+#[mcp_handler]
+pub fn aggregate_by(input: &mut MCPToolInput) -> Result<Response, GraphError> {
+    let data: AggregateRequest = match sonic_rs::from_slice(&input.request.body) {
+        Ok(data) => data,
+        Err(e) => return Err(GraphError::from(e)),
+    };
+
+    let mut connections = input.mcp_connections.lock().unwrap();
+    let connection = match connections.get_connection_owned(&data.connection_id) {
+        Some(conn) => conn,
+        None => return Err(GraphError::StorageError("Connection not found".to_string())),
+    };
+    drop(connections);
+
+    let iter = connection.iter.clone().collect::<Vec<_>>();
+    let db = Arc::clone(&input.mcp_backend.db);
+    let txn = input.mcp_backend.db.graph_env.read_txn()?;
+
+    let values = G::new_from(db, &txn, iter)
+        .aggregate_by(&data.properties)?
+        .into_count();
+
+    let mut connections = input.mcp_connections.lock().unwrap();
+
+    if data.drop.unwrap_or(true) {
+        connections.add_connection(MCPConnection::new(
+            connection.connection_id.clone(),
+            vec![].into_iter(),
+        ));
+    } else {
+        connections.add_connection(connection);
+    }
+
+    drop(connections);
+
+    Ok(Format::Json.create_response(&ReturnValue::from(values)))
+}
+#[mcp_handler]
+pub fn group_by(input: &mut MCPToolInput) -> Result<Response, GraphError> {
+    let data: AggregateRequest = match sonic_rs::from_slice(&input.request.body) {
+        Ok(data) => data,
+        Err(e) => return Err(GraphError::from(e)),
+    };
+
+    let mut connections = input.mcp_connections.lock().unwrap();
+    let connection = match connections.get_connection_owned(&data.connection_id) {
+        Some(conn) => conn,
+        None => return Err(GraphError::StorageError("Connection not found".to_string())),
+    };
+    drop(connections);
+
+    let iter = connection.iter.clone().collect::<Vec<_>>();
+    let db = Arc::clone(&input.mcp_backend.db);
+    let txn = input.mcp_backend.db.graph_env.read_txn()?;
+
+    let values = G::new_from(db, &txn, iter)
+        .group_by(&data.properties)?
+        .into_count();
 
     let mut connections = input.mcp_connections.lock().unwrap();
 

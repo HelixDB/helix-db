@@ -30,6 +30,8 @@ flume = { version = "0.11.1", default-features = false, features = [
 itertools = "0.14.0"
 tempfile = "3.20.0"
 paste = "1.0.15"
+rayon = "1.11.0"
+mimalloc = "0.1.48"
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }

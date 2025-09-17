@@ -4,3 +4,8 @@ pub mod helix_gateway;
 pub mod helixc;
 pub mod protocol;
 pub mod utils;
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;

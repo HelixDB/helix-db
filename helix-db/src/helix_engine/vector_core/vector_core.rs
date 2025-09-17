@@ -88,6 +88,7 @@ impl VectorCore {
         })
     }
 
+    /// Vector key: [v, id, ]
     #[inline(always)]
     fn vector_key(id: u128, level: usize) -> Vec<u8> {
         [VECTOR_PREFIX, &id.to_be_bytes(), &level.to_be_bytes()].concat()

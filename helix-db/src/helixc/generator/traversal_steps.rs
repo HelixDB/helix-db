@@ -56,7 +56,7 @@ pub enum ShouldCollect {
 impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ShouldCollect::ToVec => write!(f, ".collect_to::<Vec<_>>()"),
+            ShouldCollect::ToVec => write!(f, ""),
             ShouldCollect::ToVal => write!(f, ".collect_to_obj()"),
             ShouldCollect::Try => write!(f, "?"),
             ShouldCollect::No => write!(f, ""),
@@ -179,6 +179,10 @@ pub enum Step {
 
     // search vector
     SearchVector(SearchVectorStep),
+
+    GroupBy(GroupBy),
+
+    AggregateBy(AggregateBy),
 }
 impl Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -202,6 +206,8 @@ impl Display for Step {
             Step::Remapping(remapping) => write!(f, "{remapping}"),
             Step::ShortestPath(shortest_path) => write!(f, "{shortest_path}"),
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
+            Step::GroupBy(group_by) => write!(f, "{group_by}"),
+            Step::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
         }
     }
 }
@@ -226,6 +232,8 @@ impl Debug for Step {
             Step::Remapping(_) => write!(f, "Remapping"),
             Step::ShortestPath(_) => write!(f, "ShortestPath"),
             Step::SearchVector(_) => write!(f, "SearchVector"),
+            Step::GroupBy(_) => write!(f, "GroupBy"),
+            Step::AggregateBy(_) => write!(f, "AggregateBy"),
         }
     }
 }
@@ -327,6 +335,29 @@ impl Display for OrderBy {
         }
     }
 }
+
+#[derive(Clone)]
+pub struct GroupBy {
+    pub should_count: bool,
+    pub properties: Vec<GenRef<String>>,
+}
+impl Display for GroupBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "group_by(&[{}])", self.properties.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","))
+    }
+}
+
+#[derive(Clone)]
+pub struct AggregateBy {
+    pub should_count: bool,
+    pub properties: Vec<GenRef<String>>,
+}
+impl Display for AggregateBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "aggregate_by(&[{}])", self.properties.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","))
+    }
+}
+
 
 #[derive(Clone)]
 pub struct ShortestPath {

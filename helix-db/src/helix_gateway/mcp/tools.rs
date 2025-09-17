@@ -1,24 +1,35 @@
 use crate::{
     debug_println,
     helix_engine::{
+        helix_gateway::embedding_providers::embedding_providers::{
+            EmbeddingModel, get_embedding_model,
+        },
         storage_core::HelixGraphStorage,
         traversal_core::{
-            ops::{
-                bm25::search_bm25::SearchBM25Adapter,
-                g::G,
-                in_::{
-                    in_::{InAdapter, InNodesIterator},
-                    in_e::{InEdgesAdapter, InEdgesIterator},
+            bm25::bm25::{BM25, BM25Flatten, HBM25Config},
+            storage_core::HelixGraphStorage,
+            traversal_core::{
+                ops::{
+                    bm25::search_bm25::SearchBM25Adapter,
+                    g::G,
+                    in_::{
+                        in_::{InAdapter, InNodesIterator},
+                        in_e::{InEdgesAdapter, InEdgesIterator},
+                    },
+                    out::{
+                        out::{OutAdapter, OutNodesIterator},
+                        out_e::{OutEdgesAdapter, OutEdgesIterator},
+                    },
+                    source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
+                    util::order::OrderByAdapter,
+                    vectors::{
+                        brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter,
+                    },
                 },
-                out::{
-                    out::{OutAdapter, OutNodesIterator},
-                    out_e::{OutEdgesAdapter, OutEdgesIterator},
-                },
-                source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
-                util::order::OrderByAdapter,
-                vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter},
+                traversal_value::{Traversable, TraversalValue},
             },
-            traversal_value::{Traversable, TraversalValue},
+            types::GraphError,
+            vector_core::vector::HVector,
         },
         types::GraphError,
         vector_core::vector::HVector,
@@ -30,10 +41,10 @@ use crate::{
     protocol::{response::Response, return_values::ReturnValue, value::Value},
     utils::label_hash::hash_label,
 };
-use heed3::RoTxn;
+use heed3::{EnvOpenOptions, RoTxn};
 use helix_macros::{mcp_handler, tool_calls};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -427,59 +438,70 @@ impl<'a> McpTools<'a> for McpBackend {
         Ok(result)
     }
 
+    // fn search_keyword_old(
+    //     &'a self,
+    //     txn: &'a RoTxn,
+    //     _connection: &'a MCPConnection,
+    //     query: String,
+    //     limit: usize,
+    //     label: String,
+    // ) -> Result<Vec<TraversalValue>, GraphError> {
+    //     let db = Arc::clone(&self.db);
+
+    //     //         let items = connection.iter.clone().collect::<Vec<_>>();
+
+    //     // Check if BM25 is enabled and has metadata
+    //     if let Some(bm25) = &db.bm25 {
+    //         match bm25
+    //             .metadata_db
+    //             .get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
+    //         {
+    //             Ok(Some(_)) => {
+    //                 let results = G::new(db, txn)
+    //                     .search_bm25(&label, &query, limit)?
+    //                     .collect_to::<Vec<_>>();
+
+    //                 println!("BM25 search results: {results:?}");
+    //                 Ok(results)
+    //             }
+    //             Ok(None) => {
+    //                 // BM25 metadata not found - index not initialized yet
+    //                 debug_println!("BM25 index not initialized yet - returning empty results");
+    //                 println!("BM25 index not initialized yet - returning empty results");
+    //                 Err(GraphError::from(
+    //                     "BM25 index not initialized yet - returning empty results",
+    //                 ))
+    //             }
+    //             Err(_e) => {
+    //                 // Error accessing metadata database
+    //                 debug_println!(
+    //                     "Error checking BM25 metadata: {_e:?} - returning empty results"
+    //                 );
+    //                 println!("Error checking BM25 metadata: {_e:?} - returning empty results");
+    //                 Err(GraphError::from(
+    //                     "Error checking BM25 metadata - returning empty results",
+    //                 ))
+    //             }
+    //         }
+    //     } else {
+    //         // BM25 is not enabled
+    //         debug_println!("BM25 is not enabled - returning empty results");
+    //         println!("BM25 is not enabled - returning empty results");
+    //         Err(GraphError::from(
+    //             "BM25 is not enabled - returning empty results",
+    //         ))
+    //     }
+    // }
+
     fn search_keyword(
         &'a self,
-        txn: &'a RoTxn,
-        _connection: &'a MCPConnection,
+        _txn: &'a RoTxn,
+        connection: &'a MCPConnection,
         query: String,
         limit: usize,
         label: String,
     ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        //         let items = connection.iter.clone().collect::<Vec<_>>();
-
-        // Check if BM25 is enabled and has metadata
-        if let Some(bm25) = &db.bm25 {
-            match bm25
-                .metadata_db
-                .get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
-            {
-                Ok(Some(_)) => {
-                    let results = G::new(db, txn)
-                        .search_bm25(&label, &query, limit)?
-                        .collect_to::<Vec<_>>();
-
-                    println!("BM25 search results: {results:?}");
-                    Ok(results)
-                }
-                Ok(None) => {
-                    // BM25 metadata not found - index not initialized yet
-                    debug_println!("BM25 index not initialized yet - returning empty results");
-                    println!("BM25 index not initialized yet - returning empty results");
-                    Err(GraphError::from(
-                        "BM25 index not initialized yet - returning empty results",
-                    ))
-                }
-                Err(_e) => {
-                    // Error accessing metadata database
-                    debug_println!(
-                        "Error checking BM25 metadata: {_e:?} - returning empty results"
-                    );
-                    println!("Error checking BM25 metadata: {_e:?} - returning empty results");
-                    Err(GraphError::from(
-                        "Error checking BM25 metadata - returning empty results",
-                    ))
-                }
-            }
-        } else {
-            // BM25 is not enabled
-            debug_println!("BM25 is not enabled - returning empty results");
-            println!("BM25 is not enabled - returning empty results");
-            Err(GraphError::from(
-                "BM25 is not enabled - returning empty results",
-            ))
-        }
+        _search_keyword(Arc::clone(&self.db), connection, query, limit, label)
     }
 
     fn search_vector_text(
@@ -497,12 +519,7 @@ impl<'a> McpTools<'a> for McpBackend {
         let embedding = result?;
 
         let res = G::new(db, txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
-                &embedding,
-                k.unwrap_or(5),
-                &label,
-                None,
-            )
+            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, k.unwrap_or(5), &label, None)
             .collect_to::<Vec<_>>();
 
         debug_println!("result: {res:?}");
@@ -736,4 +753,71 @@ mod tests {
         let result = _filter_items(Arc::clone(&storage), &txn, items.into_iter(), &filter);
         assert_eq!(result.len(), 50);
     }
+}
+
+fn _search_keyword(
+    db: Arc<HelixGraphStorage>,
+    connection: &MCPConnection,
+    query: String,
+    limit: usize,
+    label: String,
+) -> Result<Vec<TraversalValue>, GraphError> {
+    let env = unsafe {
+        EnvOpenOptions::new()
+            .map_size(10 * 1024 * 1024 * 1024)
+            .max_dbs(20)
+            .max_readers(200)
+            .open(Path::new("bm25_index"))?
+    };
+    let mut txn = env.write_txn()?;
+    let bm25_index = HBM25Config::new_temp(&env, &mut txn, &connection.connection_id)?;
+
+    for item in connection.iter.clone() {
+        if let Some(props) = item.get_properties() {
+            let mut data = props.flatten_bm25();
+            data.push_str(&item.label());
+            bm25_index.insert_doc(&mut txn, item.id(), &data)?;
+        }
+    }
+
+    // Check if BM25 is enabled and has metadata
+
+    let results = match bm25_index
+        .metadata_db
+        .get(&txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
+    {
+        Ok(Some(_)) => {
+            let results = G::new(Arc::clone(&db), &txn)
+                .search_bm25(&label, &query, limit)?
+                .collect_to::<Vec<_>>();
+
+            println!("BM25 search results: {results:?}");
+            Ok(results)
+        }
+        Ok(None) => {
+            // BM25 metadata not found - index not initialized yet
+            debug_println!("BM25 index not initialized yet - returning empty results");
+            println!("BM25 index not initialized yet - returning empty results");
+            Err(GraphError::from(
+                "BM25 index not initialized yet - returning empty results",
+            ))
+        }
+        Err(e) => {
+            // Error accessing metadata database
+            debug_println!(
+                "Error checking BM25 metadata: {:?} - returning empty results",
+                e
+            );
+            println!("Error checking BM25 metadata: {e:?} - returning empty results",);
+            Err(GraphError::from(
+                "Error checking BM25 metadata - returning empty results",
+            ))
+        }
+    };
+
+    // clear all data made in this function
+    // can just abort as nothing is flushed to disk
+    txn.abort();
+
+    results
 }

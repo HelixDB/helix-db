@@ -158,6 +158,15 @@ pub(crate) fn check_schema(ctx: &mut Ctx) {
                         Some("rename the field".to_string()),
                     );
                 }
+                if !is_valid_schema_field_type(&f.field_type) {
+                    push_schema_err(
+                        ctx,
+                        f.loc.clone(),
+                        ErrorCode::E209,
+                        format!("invalid type in schema field: `{}`", f.name),
+                        Some("use built-in types only (String, U32, etc.)".to_string()),
+                    );
+                }
             })
         }
         ctx.output.edges.push(edge.clone().into());
@@ -171,6 +180,15 @@ pub(crate) fn check_schema(ctx: &mut Ctx) {
                     ErrorCode::E204,
                     format!("field `{}` is a reserved field name", f.name),
                     Some("rename the field".to_string()),
+                );
+            }
+            if !is_valid_schema_field_type(&f.field_type) {
+                push_schema_err(
+                    ctx,
+                    f.loc.clone(),
+                    ErrorCode::E209,
+                    format!("invalid type in schema field: `{}`", f.name),
+                    Some("use built-in types only (String, U32, etc.)".to_string()),
                 );
             }
         });
@@ -187,8 +205,26 @@ pub(crate) fn check_schema(ctx: &mut Ctx) {
                     Some("rename the field".to_string()),
                 );
             }
+            if !is_valid_schema_field_type(&f.field_type) {
+                push_schema_err(
+                    ctx,
+                    f.loc.clone(),
+                    ErrorCode::E209,
+                    format!("invalid type in schema field: `{}`", f.name),
+                    Some("use built-in types only (String, U32, etc.)".to_string()),
+                );
+            }
         });
         ctx.output.vectors.push(vector.clone().into());
+    }
+}
+
+fn is_valid_schema_field_type(ft: &FieldType) -> bool {
+    match ft {
+        FieldType::Identifier(_) => false,
+        FieldType::Object(_) => false,
+        FieldType::Array(inner) => is_valid_schema_field_type(inner),
+        _ => true,
     }
 }
 

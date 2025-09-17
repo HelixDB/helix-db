@@ -109,6 +109,44 @@ impl HBM25Config {
             b: 0.75,
         })
     }
+
+    pub fn new_temp(graph_env: &Env, wtxn: &mut RwTxn, uuid: &str) -> Result<HBM25Config, GraphError> {
+        let inverted_index_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .flags(heed3::DatabaseFlags::DUP_SORT)
+            .name(format!("{DB_BM25_INVERTED_INDEX}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        let doc_lengths_db: Database<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>> =
+            graph_env
+            .database_options()
+            .types::<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>>()
+            .name(format!("{DB_BM25_DOC_LENGTHS}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        let term_frequencies_db: Database<Bytes, U32<heed3::byteorder::BE>> = graph_env
+            .database_options()
+            .types::<Bytes, U32<heed3::byteorder::BE>>()
+            .name(format!("{DB_BM25_TERM_FREQUENCIES}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        let metadata_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name(format!("{DB_BM25_METADATA}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        Ok(HBM25Config {
+            graph_env: graph_env.clone(),
+            inverted_index_db,
+            doc_lengths_db,
+            term_frequencies_db,
+            metadata_db,
+            k1: 1.2,
+            b: 0.75,
+        })
+    }
 }
 
 impl BM25 for HBM25Config {

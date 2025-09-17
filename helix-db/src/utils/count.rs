@@ -1,5 +1,10 @@
 use sonic_rs::{Deserialize, Serialize};
 
+pub enum ShouldCount {
+    Yes,
+    No,
+}
+
 #[derive(PartialEq, Deserialize, Clone)]
 pub struct Count {
     value: usize,
