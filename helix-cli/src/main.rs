@@ -34,6 +34,8 @@ pub static HELIX_METRICS_CLIENT: LazyLock<HelixMetricsClient> =
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    println!("Hello from coder!");
+
     let exit_code = run().await;
     HELIX_METRICS_CLIENT.flush().await;
     exit_code
@@ -234,7 +236,6 @@ async fn run() -> ExitCode {
                 }
                 println!("{}", "Successfully deployed Helix queries".green().bold());
                 return ExitCode::SUCCESS;
-
             } else if let Some(cluster) = command.cluster {
                 match redeploy_helix_remote(cluster.clone(), path, files).await {
                     Ok(_) => {
