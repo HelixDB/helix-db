@@ -1,0 +1,15 @@
+[project]
+name = "test"
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud.test.FlyIo]
+cluster_id = "70151319-e78d-4288-b4a7-1128519259d1"
+build_mode = "debug"
+vm_size = "shared-cpu-4x"
+volume = "helix_test_test_data:/data"
+volume_initial_size = 20
+privacy = "Public"
+auth_type = "Cli"

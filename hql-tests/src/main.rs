@@ -522,6 +522,7 @@ async fn process_test_directory(
         return Ok(());
     }
 
+
     // Find the query file - could be queries.hx or file*.hx
     let mut query_file_path = None;
     let schema_hx_path = folder_path.join("schema.hx");

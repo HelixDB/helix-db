@@ -76,8 +76,8 @@ impl HelixGateway {
         trace!("Starting Helix Gateway");
         let (io_setter, worker_setter) = match core_affinity::get_core_ids() {
             Some(all_cores) => {
-                let io_cores = CoreSetter::new(&all_cores[0..self.io_size]);
-                let worker_cores = CoreSetter::new(&all_cores[self.io_size..]);
+                let io_cores = CoreSetter::new(&all_cores[0..self.io_size.min(all_cores.len())]);
+                let worker_cores = CoreSetter::new(&all_cores[self.io_size.min(all_cores.len())..]);
                 (Some(io_cores), Some(worker_cores))
             }
             None => {
