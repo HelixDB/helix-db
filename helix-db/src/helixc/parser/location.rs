@@ -1,7 +1,7 @@
 use crate::helixc::parser::Rule;
 use pest::{Position, iterators::Pair};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Loc {
     pub filepath: Option<String>,
     pub start: Span,
@@ -9,7 +9,7 @@ pub struct Loc {
     pub span: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Span {
     pub line: usize,
     pub column: usize,

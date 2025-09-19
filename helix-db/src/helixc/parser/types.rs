@@ -607,6 +607,61 @@ pub struct GroupBy {
     pub properties: Vec<String>
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Match {
+    pub loc: Loc,
+    pub variable: Option<MatchVariable>,
+    pub statements: Vec<MatchStatement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchVariable {
+    pub loc: Loc,
+    pub variable: MatchVariableType,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchVariableType {
+    Identifier(String),
+    Traversal(Box<Traversal>),
+    Anonymous,
+}
+
+
+#[derive(Debug, Clone)]
+pub struct MatchStatement {
+    pub loc: Loc,
+    pub match_type: MatchType,
+    pub match_value: MatchValueType,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchValueType {
+    Expression(Expression),
+    Statements(Vec<Statement>),
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchType {
+    Optional(Optional),
+    Identifier(String),
+    Boolean(bool),
+    SchemaType(SchemaMatchType),
+}
+
+#[derive(Debug, Clone)]
+pub enum Optional {
+    Some(String),
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub enum SchemaMatchType {
+    Node(String),
+    Edge(String),
+    Vector(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum StepType {
     Node(GraphStep),
@@ -624,6 +679,7 @@ pub enum StepType {
     GroupBy(GroupBy),
     AddEdge(AddEdge),
     First,
+    Match(Match),
 }
 impl PartialEq<StepType> for StepType {
     fn eq(&self, other: &StepType) -> bool {

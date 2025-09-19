@@ -3,8 +3,9 @@ use crate::helixc::parser::{
     location::HasLoc,
     types::{
         Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition,
-        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Object, OrderBy,
-        OrderByType, ShortestPath, Step, StepType, Update,
+        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Match,
+        MatchStatement, MatchType, MatchValueType, MatchVariable, MatchVariableType, Object,
+        Optional, OrderBy, OrderByType, ShortestPath, Step, StepType, Update,
     },
 };
 use pest::iterators::Pair;
@@ -315,11 +316,110 @@ impl HelixParser {
                 loc: inner.loc(),
                 step: StepType::First,
             }),
+            Rule::match_step => Ok(Step {
+                loc: inner.loc(),
+                step: StepType::Match(self.parse_match_step(inner)?),
+            }),
             _ => Err(ParserError::from(format!(
                 "Unexpected step type: {:?}",
                 inner.as_rule()
             ))),
         }
+    }
+
+    pub(super) fn parse_match_step(&self, pair: Pair<Rule>) -> Result<Match, ParserError> {
+        // get inner
+        let step_loc = pair.loc();
+        let mut inner = pair.into_inner();
+        // match variable via peek
+        let match_variable = match inner.peek() {
+            Some(variable) => {
+                let match_variable = match variable.into_inner().next() {
+                    Some(inner) => match inner.as_rule() {
+                        Rule::identifier => Some(MatchVariable {
+                            loc: inner.loc(),
+                            variable: MatchVariableType::Identifier(inner.as_str().to_string()),
+                        }),
+                        Rule::traversal | Rule::id_traversal => Some(MatchVariable {
+                            loc: inner.loc(),
+                            variable: MatchVariableType::Traversal(Box::new(
+                                self.parse_traversal(inner)?,
+                            )),
+                        }),
+                        Rule::anonymous_traversal => Some(MatchVariable {
+                            loc: inner.loc(),
+                            variable: MatchVariableType::Traversal(Box::new(
+                                self.parse_anon_traversal(inner)?,
+                            )),
+                        }),
+                        Rule::anon_variable => Some(MatchVariable {
+                            loc: inner.loc(),
+                            variable: MatchVariableType::Anonymous,
+                        }),
+                        _ => None,
+                    },
+                    None => panic!("poo"),
+                };
+                inner.next();
+                match_variable
+            }
+            None => None,
+        };
+        // then get match statements via .next.inner
+        let mut statements = Vec::new();
+        for stmt in inner.next().ok_or(ParserError::Error)?.into_inner() {
+            // for each statement do .inner
+            let stmt_loc = stmt.loc();
+            let mut inner = stmt.into_inner();
+            // .next for match_type
+            let match_type = inner
+                .next()
+                .ok_or(ParserError::Error)?
+                .into_inner()
+                .next()
+                .unwrap();
+            // .inner then match for exact
+            let mt = match match_type.as_rule() {
+                Rule::match_type_enum => todo!(),
+                Rule::boolean => MatchType::Boolean(match_type.as_str() == "true"),
+                Rule::optional_type => {
+                    let optional_inner = match_type.into_inner().next().unwrap();
+                    MatchType::Optional(match optional_inner.as_rule() {
+                        Rule::identifier => Optional::Some(optional_inner.as_str().to_string()),
+                        Rule::none => Optional::None,
+                        _ => unreachable!(),
+                    })
+                }
+                _ => unreachable!(),
+            };
+            // .next for match_value
+            let match_value = inner
+                .next()
+                .ok_or(ParserError::Error)?
+                .into_inner()
+                .next()
+                .unwrap();
+
+            // .inner then match for exact
+            let mv = match match_value.as_rule() {
+                Rule::query_body => MatchValueType::Statements(self.parse_query_body(match_value)?),
+                _ => self
+                    .parse_expression(match_value)
+                    .map(|expr| MatchValueType::Expression(expr))?,
+            };
+
+            statements.push(MatchStatement {
+                loc: stmt_loc,
+                match_type: mt,
+                match_value: mv,
+            });
+        }
+
+        Ok(Match {
+            loc: step_loc,
+            variable: match_variable,
+            statements,
+        })
     }
 
     pub(super) fn parse_graph_step(&self, pair: Pair<Rule>) -> GraphStep {

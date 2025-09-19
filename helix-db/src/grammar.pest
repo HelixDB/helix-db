@@ -62,7 +62,21 @@ get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | search_vector | start_vector) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
 anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
-step                = { "::" ~ (graph_step | order_by| aggregate | group_by | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE) }
+step                = { "::" ~ ( 
+  graph_step 
+  | order_by
+  | aggregate 
+  | group_by 
+  | where_step 
+  | closure_step 
+  | object_step 
+  | exclude_field 
+  | count 
+  | ID 
+  | range_step 
+  | AddE
+  | match_step
+) }
 last_step           = { "::" ~ (bool_operations | update | first) }
 // change this for loop to be able to take traversals etc in the future. 
 for_loop            = { "FOR" ~ for_argument ~ "IN" ~ identifier ~ "{" ~ query_body ~ "}" }
@@ -248,7 +262,24 @@ mcp_macro = { "#[mcp]" }
 model_macro = { "#[" ~ "model" ~ "(" ~ model_name ~ ")" ~ "]" }
 model_name = { identifier | string_literal }
 
+// ---------------------------------------------------------------------
+// Match steps
+// ---------------------------------------------------------------------
+match_step = { "MATCH" ~ match_variable? ~ "{" ~ match_statements ~ "}" }
+match_variable = { "|" ~ (identifier | traversal | id_traversal | anonymous_traversal | anon_variable) ~ "|" }
+anon_variable = {"_"}
+match_statements = { match_statement ~ ("," ~ match_statement)* ~ ","? }
+match_statement = { match_type ~ "=>" ~ match_value }
+match_value = { ("{" ~ query_body ~ "}") | traversal | id_traversal | anonymous_traversal | none | identifier | evaluates_to_anything }
 
+match_type = { match_type_enum | boolean | optional_type }
+optional_type = { ("Some(" ~ identifier ~ ")") | none}
+match_type_enum = { type_prefix ~ "::" ~ identifier_upper  ~ ("(" ~ identifier ~ ")")? }
+type_prefix = { node_type_prefix | edge_type_prefix | vec_type_prefix}
+node_type_prefix = { "N" }
+edge_type_prefix = { "E" }
+vec_type_prefix = { "V" }
+enum_type_prefix = { identifier }
 
 // ---------------------------------------------------------------------
 // Types

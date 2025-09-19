@@ -1,8 +1,12 @@
 use crate::helixc::analyzer::error_codes::*;
+use crate::helixc::analyzer::methods::statement_validation::validate_statements;
 use crate::helixc::analyzer::utils::DEFAULT_VAR_NAME;
 use crate::helixc::generator::bool_ops::{Contains, IsIn};
 use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
-use crate::helixc::generator::traversal_steps::{AggregateBy, GroupBy};
+use crate::helixc::generator::traversal_steps::{
+    AggregateBy, GeneratedMatch, GeneratedMatchStatement, GeneratedMatchVariable, GroupBy,
+    MatchValueType as GeneratedMatchValueType,
+};
 use crate::helixc::generator::utils::{EmbedData, VecData};
 use crate::{
     generate_error,
@@ -293,7 +297,6 @@ pub(crate) fn validate_traversal<'a>(
             }
         }
 
-
         StartNode::Identifier(identifier) => {
             match is_valid_identifier(ctx, original_query, tr.loc.clone(), identifier.as_str()) {
                 true => scope.get(identifier.as_str()).cloned().map_or_else(
@@ -321,11 +324,10 @@ pub(crate) fn validate_traversal<'a>(
         }
         // anonymous will be the traversal type rather than the start type
         StartNode::Anonymous => {
-            let parent = parent_ty.unwrap();
             gen_traversal.traversal_type =
                 TraversalType::FromVar(GenRef::Std(DEFAULT_VAR_NAME.to_string()));
             gen_traversal.source_step = Separator::Empty(SourceStep::Anonymous);
-            parent
+            parent_ty.clone().unwrap_or(Type::Unknown)
         }
         StartNode::SearchVector(sv) => {
             if let Some(ref ty) = sv.vector_type
@@ -1429,18 +1431,147 @@ pub(crate) fn validate_traversal<'a>(
                     scope,
                     Some(Variable::new(cl.identifier.clone(), cur_ty.clone())),
                 );
-
-                // gen_traversal
-                //     .steps
-                //     .push(Separator::Period(GeneratedStep::Remapping(Remapping {
-                //         is_inner: false,
-                //         should_spread: false,
-                //         variable_name: cl.identifier.clone(),
-                //         remappings: (),
-                //     })));
                 scope.remove(cl.identifier.as_str());
-                // gen_traversal.traversal_type =
-                //     TraversalType::Nested(GenRef::Std(var));
+            }
+            StepType::Match(match_stmt) => {
+                // for each statment
+                let mut arm_type = None;
+                for stmt in &match_stmt.statements {
+                    // validate each type (LHS) of each arm matches type of variable
+                    match &stmt.match_type {
+                        MatchType::Optional(optional) => match optional {
+                            Optional::Some(some) => {
+                                scope.insert(some.as_str(), cur_ty.clone());
+                            }
+                            Optional::None => {}
+                        },
+                        MatchType::Identifier(identifier) => {
+                            scope.insert(identifier.as_str(), cur_ty.clone());
+                        }
+                        MatchType::Boolean(_) => {}
+                        MatchType::SchemaType(schema_type) => {
+                            // ensure current type = unknown
+                            if cur_ty != Type::Unknown {
+                                unreachable!("Cannot reach here"); // handle error 
+                            }
+                            match schema_type {
+                                SchemaMatchType::Node(node_type) => {
+                                    if !ctx.node_set.contains(node_type.as_str()) {
+                                        generate_error!(
+                                            ctx,
+                                            original_query,
+                                            stmt.loc.clone(),
+                                            E101,
+                                            node_type
+                                        );
+                                    }
+                                    scope.insert(
+                                        node_type.as_str(),
+                                        Type::Node(Some(node_type.clone())),
+                                    );
+                                }
+                                SchemaMatchType::Edge(edge_type) => {
+                                    if !ctx.edge_map.contains_key(edge_type.as_str()) {
+                                        generate_error!(
+                                            ctx,
+                                            original_query,
+                                            stmt.loc.clone(),
+                                            E102,
+                                            edge_type
+                                        );
+                                    }
+                                    scope.insert(
+                                        edge_type.as_str(),
+                                        Type::Edge(Some(edge_type.clone())),
+                                    );
+                                }
+                                SchemaMatchType::Vector(vector_type) => {
+                                    if !ctx.vector_set.contains(vector_type.as_str()) {
+                                        generate_error!(
+                                            ctx,
+                                            original_query,
+                                            stmt.loc.clone(),
+                                            E103,
+                                            vector_type
+                                        );
+                                    }
+                                    scope.insert(
+                                        vector_type.as_str(),
+                                        Type::Vector(Some(vector_type.clone())),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // validate (RHS) stmts
+                    // validate return type of each arm is the same.
+                    let mv = match &stmt.match_value {
+                        MatchValueType::Expression(expression) => {
+                            let (ty, stmt) = infer_expr_type(
+                                ctx,
+                                expression,
+                                scope,
+                                original_query,
+                                None,
+                                gen_query,
+                            );
+                            if let Some(arm_type) = &arm_type {
+                                if arm_type != &ty {
+                                    unreachable!("Cannot reach here"); // handle error
+                                }
+                            } else {
+                                arm_type = Some(ty);
+                            }
+                            GeneratedMatchValueType::Expression(stmt.unwrap())
+                        }
+                        MatchValueType::Statements(statements) => {
+                            let mut validated_statements = Vec::new();
+                            for statement in statements {
+                                let validated_statement = validate_statements(
+                                    ctx,
+                                    scope,
+                                    original_query,
+                                    gen_query,
+                                    statement,
+                                );
+                                if let Some(validated_statement) = validated_statement {
+                                    validated_statements.push(validated_statement);
+                                }
+                            }
+                            GeneratedMatchValueType::Statements(validated_statements)
+                        }
+                    };
+
+                    let variable = match_stmt.variable.as_ref().map(|v| match &v.variable {
+                        MatchVariableType::Identifier(identifier) => {
+                            GeneratedMatchVariable::Identifier(identifier.clone())
+                        }
+                        MatchVariableType::Traversal(traversal) => {
+                            let mut generated_traversal = GeneratedTraversal::default();
+                            validate_traversal(
+                                ctx,
+                                &traversal,
+                                scope,
+                                original_query,
+                                Some(cur_ty.clone()),
+                                &mut generated_traversal,
+                                gen_query,
+                            );
+                            GeneratedMatchVariable::Traversal(Box::new(generated_traversal))
+                        }
+                        MatchVariableType::Anonymous => GeneratedMatchVariable::Anonymous,
+                    });
+                    gen_traversal
+                        .steps
+                        .push(Separator::Empty(GeneratedStep::Match(GeneratedMatch {
+                            variable,
+                            statements: vec![GeneratedMatchStatement {
+                                match_type: stmt.match_type.clone(),
+                                match_value: mv,
+                            }],
+                        })));
+                }
             }
         }
         previous_step = Some(step.clone());

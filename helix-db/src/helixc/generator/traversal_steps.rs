@@ -1,4 +1,10 @@
-use crate::helixc::generator::utils::{VecData, write_properties};
+use crate::helixc::{
+    generator::{
+        statements::Statement,
+        utils::{VecData, write_properties},
+    },
+    parser::types::MatchType,
+};
 
 use super::{
     bool_ops::{BoExp, BoolOp},
@@ -183,6 +189,8 @@ pub enum Step {
     GroupBy(GroupBy),
 
     AggregateBy(AggregateBy),
+
+    Match(GeneratedMatch),
 }
 impl Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -208,6 +216,7 @@ impl Display for Step {
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
             Step::GroupBy(group_by) => write!(f, "{group_by}"),
             Step::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
+            Step::Match(match_) => write!(f, "{match_}"),
         }
     }
 }
@@ -234,6 +243,7 @@ impl Debug for Step {
             Step::SearchVector(_) => write!(f, "SearchVector"),
             Step::GroupBy(_) => write!(f, "GroupBy"),
             Step::AggregateBy(_) => write!(f, "AggregateBy"),
+            Step::Match(_) => write!(f, "Match"),
         }
     }
 }
@@ -343,7 +353,16 @@ pub struct GroupBy {
 }
 impl Display for GroupBy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "group_by(&[{}], {})", self.properties.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","), self.should_count)
+        write!(
+            f,
+            "group_by(&[{}], {})",
+            self.properties
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.should_count
+        )
     }
 }
 
@@ -354,10 +373,18 @@ pub struct AggregateBy {
 }
 impl Display for AggregateBy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "aggregate_by(&[{}], {})", self.properties.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","), self.should_count)
+        write!(
+            f,
+            "aggregate_by(&[{}], {})",
+            self.properties
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.should_count
+        )
     }
 }
-
 
 #[derive(Clone)]
 pub struct ShortestPath {
@@ -392,4 +419,48 @@ impl Display for SearchVectorStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "brute_force_search_v({}, {})", self.vec, self.k)
     }
+}
+
+#[derive(Clone)]
+pub struct GeneratedMatch {
+    pub variable: Option<GeneratedMatchVariable>,
+    pub statements: Vec<GeneratedMatchStatement>,
+}
+impl Display for GeneratedMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "match {} {{",
+            self.variable.as_ref().map_or("".to_string(), |v| format!("{v}"))
+        )
+    }
+}
+
+#[derive(Clone)]
+pub enum GeneratedMatchVariable {
+    Identifier(String),
+    Traversal(Box<Traversal>),
+    Anonymous,
+}
+
+impl Display for GeneratedMatchVariable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedMatchVariable::Identifier(identifier) => write!(f, "{identifier}"),
+            GeneratedMatchVariable::Traversal(traversal) => write!(f, "{traversal}"),
+            GeneratedMatchVariable::Anonymous => write!(f, "_"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GeneratedMatchStatement {
+    pub match_type: MatchType,
+    pub match_value: MatchValueType,
+}
+
+#[derive(Clone)]
+pub enum MatchValueType {
+    Expression(Statement),
+    Statements(Vec<Statement>),
 }
