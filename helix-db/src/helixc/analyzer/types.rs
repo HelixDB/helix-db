@@ -378,7 +378,7 @@ impl PartialEq for Type {
             (Type::Vectors(name), Type::Vectors(other_name)) => name == other_name,
             (Type::Array(inner), Type::Array(other_inner)) => inner == other_inner,
             (Type::Vector(name), Type::Vectors(other_name)) => name == other_name,
-            _ => unreachable!(),
+            _ =>  false,
         }
     }
 }

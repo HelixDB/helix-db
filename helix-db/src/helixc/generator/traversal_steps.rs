@@ -486,6 +486,7 @@ pub enum GeneratedMatchType {
     Identifier(String),
     Boolean(bool),
     SchemaType(GeneratedSchemaMatchType),
+    Anonymous,
 }
 
 impl Display for GeneratedMatchType {
@@ -501,6 +502,7 @@ impl Display for GeneratedMatchType {
                 }
             }
             GeneratedMatchType::SchemaType(schema_type) => write!(f, "{schema_type}"),
+            GeneratedMatchType::Anonymous => write!(f, "_"),
         }
     }
 }
@@ -511,9 +513,8 @@ impl From<MatchType> for GeneratedMatchType {
             MatchType::Optional(optional) => GeneratedMatchType::Optional(optional.into()),
             MatchType::Identifier(identifier) => GeneratedMatchType::Identifier(identifier.clone()),
             MatchType::Boolean(boolean) => GeneratedMatchType::Boolean(boolean),
-            MatchType::SchemaType(schema_type) => {
-                GeneratedMatchType::SchemaType(schema_type.into())
-            }
+            MatchType::Anonymous => GeneratedMatchType::Anonymous,
+            MatchType::SchemaType(schema_type) => GeneratedMatchType::SchemaType(schema_type.into()),
         }
     }
 }
@@ -535,9 +536,18 @@ impl From<Optional> for GeneratedOptional {
 
 #[derive(Clone, Debug)]
 pub enum GeneratedSchemaMatchType {
-    Node(String),
-    Edge(String),
-    Vector(String),
+    Node {
+        type_arg: String,
+        identifier: Option<String>,
+    },
+    Edge {
+        type_arg: String,
+        identifier: Option<String>,
+    },
+    Vector {
+        type_arg: String,
+        identifier: Option<String>,
+    },
 }
 
 impl Display for GeneratedOptional {
@@ -552,9 +562,27 @@ impl Display for GeneratedOptional {
 impl From<SchemaMatchType> for GeneratedSchemaMatchType {
     fn from(schema_type: SchemaMatchType) -> Self {
         match schema_type {
-            SchemaMatchType::Node(node) => GeneratedSchemaMatchType::Node(node.clone()),
-            SchemaMatchType::Edge(edge) => GeneratedSchemaMatchType::Edge(edge.clone()),
-            SchemaMatchType::Vector(vector) => GeneratedSchemaMatchType::Vector(vector.clone()),
+            SchemaMatchType::Node {
+                type_arg,
+                identifier,
+            } => GeneratedSchemaMatchType::Node {
+                type_arg: type_arg.clone(),
+                identifier: identifier.clone(),
+            },
+            SchemaMatchType::Edge {
+                type_arg,
+                identifier,
+            } => GeneratedSchemaMatchType::Edge {
+                type_arg: type_arg.clone(),
+                identifier: identifier.clone(),
+            },
+            SchemaMatchType::Vector {
+                type_arg,
+                identifier,
+            } => GeneratedSchemaMatchType::Vector {
+                type_arg: type_arg.clone(),
+                identifier: identifier.clone(),
+            },
         }
     }
 }
@@ -562,17 +590,35 @@ impl From<SchemaMatchType> for GeneratedSchemaMatchType {
 impl Display for GeneratedSchemaMatchType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GeneratedSchemaMatchType::Node(identifier) => write!(
+            GeneratedSchemaMatchType::Node {
+                type_arg,
+                identifier,
+            } => write!(
                 f,
-                "TraversalValue::Node(node) if node.label() == \"{identifier}\""
+                "TraversalValue::Node({}) if node.label() == \"{type_arg}\"",
+                identifier
+                    .as_ref()
+                    .map_or("None".to_string(), |i| format!("Some({i})"))
             ),
-            GeneratedSchemaMatchType::Edge(identifier) => write!(
+            GeneratedSchemaMatchType::Edge {
+                type_arg,
+                identifier,
+            } => write!(
                 f,
-                "TraversalValue::Edge(edge) if edge.label() == \"{identifier}\""
+                "TraversalValue::Edge({}) if edge.label() == \"{type_arg}\"",
+                identifier
+                    .as_ref()
+                    .map_or("None".to_string(), |i| format!("Some({i})"))
             ),
-            GeneratedSchemaMatchType::Vector(identifier) => write!(
+            GeneratedSchemaMatchType::Vector {
+                type_arg,
+                identifier,
+            } => write!(
                 f,
-                "TraversalValue::Vector(vector) if vector.label() == \"{identifier}\""
+                "TraversalValue::Vector({}) if vector.label() == \"{type_arg}\"",
+                identifier
+                    .as_ref()
+                    .map_or("None".to_string(), |i| format!("Some({i})"))
             ),
         }
     }

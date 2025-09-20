@@ -598,13 +598,13 @@ pub struct OrderBy {
 #[derive(Debug, Clone)]
 pub struct Aggregate {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GroupBy {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -627,7 +627,6 @@ pub enum MatchVariableType {
     Anonymous,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct MatchStatement {
     pub loc: Loc,
@@ -649,6 +648,7 @@ pub enum MatchType {
     Identifier(String),
     Boolean(bool),
     SchemaType(SchemaMatchType),
+    Anonymous,
 }
 
 #[derive(Debug, Clone)]
@@ -659,9 +659,9 @@ pub enum Optional {
 
 #[derive(Debug, Clone)]
 pub enum SchemaMatchType {
-    Node(String),
-    Edge(String),
-    Vector(String),
+    Node{ type_arg: String, identifier: Option<String> },
+    Edge{ type_arg: String, identifier: Option<String> },
+    Vector{ type_arg: String, identifier: Option<String> },
 }
 
 #[derive(Debug, Clone)]

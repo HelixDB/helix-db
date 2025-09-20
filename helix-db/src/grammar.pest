@@ -272,7 +272,7 @@ match_statements = { match_statement ~ ("," ~ match_statement)* ~ ","? }
 match_statement = { match_type ~ "=>" ~ match_value }
 match_value = { ("{" ~ query_body ~ "}") | none | traversal | id_traversal | anonymous_traversal | anon_variable | identifier | evaluates_to_anything }
 
-match_type = { match_type_enum | boolean | optional_type }
+match_type = { match_type_enum | boolean | optional_type | anon_variable }
 optional_type = { ("Some(" ~ identifier ~ ")") | none}
 match_type_enum = { type_prefix ~ "::" ~ identifier_upper  ~ ("(" ~ identifier ~ ")")? }
 type_prefix = { node_type_prefix | edge_type_prefix | vec_type_prefix}

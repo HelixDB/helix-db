@@ -8,4 +8,10 @@ QUERY GetUser(user_id: ID) =>
         false => NONE,
     }
     RETURN user
-
+    
+QUERY GetUser(user_id: ID) => 
+    user <- N<User>::MATCH|_|{
+        N::User(u) => u,
+        _ => NONE,
+    }
+    RETURN user

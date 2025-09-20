@@ -1442,72 +1442,85 @@ pub(crate) fn validate_traversal<'a>(
                 for stmt in &match_stmt.statements {
                     // validate each type (LHS) of each arm matches type of variable
                     match &stmt.match_type {
-                        MatchType::Optional(optional) => {
-                            match optional {
-                                Optional::Some(some) => {
-                                    scope.insert(some.as_str(), cur_ty.clone());
-                                }
-                                Optional::None => {}
+                        MatchType::Optional(optional) => match optional {
+                            Optional::Some(some) => {
+                                scope.insert(some.as_str(), cur_ty.clone());
                             }
-                        }
+                            Optional::None => {}
+                        },
                         MatchType::Identifier(identifier) => {
                             scope.insert(identifier.as_str(), cur_ty.clone());
                         }
-                        MatchType::Boolean(_) => {}
                         MatchType::SchemaType(schema_type) => {
                             // ensure current type = unknown
-                            if cur_ty != Type::Unknown {
-                                unreachable!("Cannot reach here"); // handle error 
-                            }
-                            match schema_type {
-                                SchemaMatchType::Node(node_type) => {
-                                    if !ctx.node_set.contains(node_type.as_str()) {
+                            // if cur_ty != Type::Unknown {
+                            //     unreachable!("Cannot reach here"); // handle error 
+                            // }
+                            match &schema_type {
+                                SchemaMatchType::Node {
+                                    type_arg,
+                                    identifier,
+                                } => {
+                                    if !ctx.node_set.contains(type_arg.as_str()) {
                                         generate_error!(
                                             ctx,
                                             original_query,
                                             stmt.loc.clone(),
                                             E101,
-                                            node_type
+                                            type_arg
                                         );
                                     }
-                                    scope.insert(
-                                        node_type.as_str(),
-                                        Type::Node(Some(node_type.clone())),
-                                    );
+                                    if let Some(identifier) = identifier {
+                                        scope.insert(
+                                            identifier.as_str(),
+                                            Type::Node(Some(type_arg.clone())),
+                                        );
+                                    }
                                 }
-                                SchemaMatchType::Edge(edge_type) => {
-                                    if !ctx.edge_map.contains_key(edge_type.as_str()) {
+                                SchemaMatchType::Edge {
+                                    type_arg,
+                                    identifier,
+                                } => {
+                                    if !ctx.edge_map.contains_key(type_arg.as_str()) {
                                         generate_error!(
                                             ctx,
                                             original_query,
                                             stmt.loc.clone(),
                                             E102,
-                                            edge_type
+                                            type_arg
                                         );
                                     }
-                                    scope.insert(
-                                        edge_type.as_str(),
-                                        Type::Edge(Some(edge_type.clone())),
-                                    );
+                                    if let Some(identifier) = identifier {
+                                        scope.insert(
+                                            identifier.as_str(),
+                                            Type::Edge(Some(type_arg.clone())),
+                                        );
+                                    }
                                 }
-                                SchemaMatchType::Vector(vector_type) => {
-                                    if !ctx.vector_set.contains(vector_type.as_str()) {
+                                SchemaMatchType::Vector {
+                                    type_arg,
+                                    identifier,
+                                } => {
+                                    if !ctx.vector_set.contains(type_arg.as_str()) {
                                         generate_error!(
                                             ctx,
                                             original_query,
                                             stmt.loc.clone(),
                                             E103,
-                                            vector_type
+                                            type_arg
                                         );
                                     }
-                                    scope.insert(
-                                        vector_type.as_str(),
-                                        Type::Vector(Some(vector_type.clone())),
-                                    );
+                                    if let Some(identifier) = identifier {
+                                        scope.insert(
+                                            identifier.as_str(),
+                                            Type::Vector(Some(type_arg.clone())),
+                                        );
+                                    }
                                 }
                             }
                             default = GeneratedMatchDefault::TraversalValue;
                         }
+                        _ => {}
                     }
 
                     // validate (RHS) stmts

@@ -1,12 +1,7 @@
 use crate::helixc::parser::{
-    HelixParser, ParserError, Rule,
-    location::HasLoc,
-    types::{
-        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition,
-        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Match,
-        MatchStatement, MatchType, MatchValueType, MatchVariable, MatchVariableType, Object,
-        Optional, OrderBy, OrderByType, ShortestPath, Step, StepType, Update,
-    },
+    location::HasLoc, types::{
+        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, ExpressionType, FieldAddition, FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Match, MatchStatement, MatchType, MatchValueType, MatchVariable, MatchVariableType, Object, Optional, OrderBy, OrderByType, SchemaMatchType, ShortestPath, Step, StepType, Update
+    }, HelixParser, ParserError, Rule
 };
 use pest::iterators::Pair;
 
@@ -380,7 +375,26 @@ impl HelixParser {
                 .unwrap();
             // .inner then match for exact
             let mt = match match_type.as_rule() {
-                Rule::match_type_enum => todo!(),
+                Rule::match_type_enum => {
+                    let mut match_type_inner = match_type.into_inner();
+                    let prefix = match_type_inner.next().unwrap();
+                    let schema_type = match prefix.into_inner().next().unwrap().as_rule() {
+                        Rule::node_type_prefix => SchemaMatchType::Node {
+                            type_arg: match_type_inner.next().unwrap().as_str().to_string(),
+                            identifier: match_type_inner.next().map(|i| i.as_str().to_string()),
+                        },
+                        Rule::edge_type_prefix => SchemaMatchType::Edge {
+                            type_arg: match_type_inner.next().unwrap().as_str().to_string(),
+                            identifier: match_type_inner.next().map(|i| i.as_str().to_string()),
+                        },
+                        Rule::vec_type_prefix => SchemaMatchType::Vector {
+                            type_arg: match_type_inner.next().unwrap().as_str().to_string(),
+                            identifier: match_type_inner.next().map(|i| i.as_str().to_string()),
+                        },
+                        _ => unreachable!(),
+                    };
+                    MatchType::SchemaType(schema_type)
+                }
                 Rule::boolean => MatchType::Boolean(match_type.as_str() == "true"),
                 Rule::optional_type => {
                     let optional_inner = match_type.into_inner().next().unwrap();
@@ -390,6 +404,7 @@ impl HelixParser {
                         _ => unreachable!(),
                     })
                 }
+                Rule::anon_variable => MatchType::Anonymous,
                 _ => unreachable!(),
             };
             // .next for match_value
@@ -405,6 +420,10 @@ impl HelixParser {
                 Rule::query_body => MatchValueType::Statements(self.parse_query_body(match_value)?),
                 Rule::none => MatchValueType::None,
                 Rule::anon_variable => MatchValueType::Anonymous,
+                Rule::identifier => MatchValueType::Expression(Expression {
+                    loc: match_value.loc(),
+                    expr: ExpressionType::Identifier(match_value.as_str().to_string()),
+                }),
                 _ => {
                     println!("match_value: {:?}", match_value.as_rule());
                     MatchValueType::Expression(self.parse_expression(match_value)?)
