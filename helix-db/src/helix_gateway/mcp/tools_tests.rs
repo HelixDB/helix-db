@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use crate::{
     helix_engine::{
-        storage_core::{version_info::VersionInfo},
+        storage_core::version_info::VersionInfo,
         traversal_core::{
             HelixGraphEngine, HelixGraphEngineOpts,
             config::Config,
@@ -65,7 +65,6 @@ fn test_mcp_tool_search_keyword() {}
 fn test_mcp_tool_search_vector_text() {}
 
 use rand::prelude::SliceRandom;
-
 
 #[test]
 fn test_mcp_tool_search_vector() {

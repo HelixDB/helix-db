@@ -9,7 +9,7 @@ use crate::{
             storage_methods::{DBMethods, StorageMethods},
             version_info::VersionInfo,
         },
-        traversal_core::config::Config,
+        traversal_core::config::{Config},
         types::GraphError,
         vector_core::{
             hnsw::HNSW,
@@ -41,13 +41,11 @@ pub type EdgeId = u128;
 
 pub struct StorageConfig {
     pub schema: String,
-    pub graphvis_node_label: Option<String>,
     pub embedding_model: Option<String>,
 }
 
 pub struct HelixGraphStorage {
     pub graph_env: Env,
-
     pub nodes_db: Database<U128<BE>, Bytes>,
     pub edges_db: Database<U128<BE>, Bytes>,
     pub out_edges_db: Database<Bytes, Bytes>,
@@ -56,7 +54,6 @@ pub struct HelixGraphStorage {
     pub vectors: VectorCore,
     pub bm25: Option<HBM25Config>,
     pub version_info: VersionInfo,
-
     pub storage_config: StorageConfig,
 }
 
@@ -152,6 +149,7 @@ impl HelixGraphStorage {
                 vector_config.ef_construction,
                 vector_config.ef_search,
             ),
+            vector_config.vector_similarity,
         )?;
 
         let bm25 = config
@@ -161,7 +159,6 @@ impl HelixGraphStorage {
 
         let storage_config = StorageConfig::new(
             config.schema.unwrap_or("".to_string()),
-            config.graphvis_node_label,
             config.embedding_model,
         );
 
@@ -265,12 +262,10 @@ impl HelixGraphStorage {
 impl StorageConfig {
     pub fn new(
         schema: String,
-        graphvis_node_label: Option<String>,
         embedding_model: Option<String>,
     ) -> StorageConfig {
         Self {
             schema,
-            graphvis_node_label,
             embedding_model,
         }
     }

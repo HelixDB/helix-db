@@ -1,11 +1,12 @@
 use crate::{
     debug_println,
     helix_engine::{
+        traversal_core::config::SimilarityMethod,
         types::VectorError,
         vector_core::{
             hnsw::HNSW,
             utils::{Candidate, HeapOps, VectorFilter},
-            vector::HVector,
+            vector::HVector, vector_distance::DistanceResult,
         },
     },
     protocol::value::Value,
@@ -64,10 +65,16 @@ pub struct VectorCore {
     pub vector_data_db: Database<Bytes, Bytes>,
     pub edges_db: Database<Bytes, Unit>,
     pub config: HNSWConfig,
+    pub method: SimilarityMethod,
 }
 
 impl VectorCore {
-    pub fn new(env: &Env, txn: &mut RwTxn, config: HNSWConfig) -> Result<Self, VectorError> {
+    pub fn new(
+        env: &Env,
+        txn: &mut RwTxn,
+        config: HNSWConfig,
+        method: Option<SimilarityMethod>,
+    ) -> Result<Self, VectorError> {
         let vectors_db = env.create_database(txn, Some(DB_VECTORS))?;
         let vector_data_db = env.create_database(txn, Some(DB_VECTOR_DATA))?;
         let edges_db = env.create_database(txn, Some(DB_HNSW_EDGES))?;
@@ -77,6 +84,7 @@ impl VectorCore {
             vector_data_db,
             edges_db,
             config,
+            method: method.unwrap_or_default(),
         })
     }
 
@@ -267,7 +275,7 @@ impl VectorCore {
                     continue;
                 }
 
-                neighbor.set_distance(neighbor.distance_to(query)?);
+                neighbor.set_distance(neighbor.distance_to(query, &self.method)?);
 
                 /*
                 let passes_filters = match filter {
@@ -306,7 +314,7 @@ impl VectorCore {
         let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
         let mut results: BinaryHeap<HVector> = BinaryHeap::new();
 
-        entry_point.set_distance(entry_point.distance_to(query)?);
+        entry_point.set_distance(entry_point.distance_to(query, &self.method)?);
         candidates.push(Candidate {
             id: entry_point.get_id(),
             distance: entry_point.get_distance(),
@@ -333,7 +341,7 @@ impl VectorCore {
                 .into_iter()
                 .filter(|neighbor| visited.insert(neighbor.get_id()))
                 .filter_map(|mut neighbor| {
-                    let distance = neighbor.distance_to(query).ok()?;
+                    let distance = neighbor.distance_to(query, &self.method).ok()?;
 
                     if max_distance.is_none_or(|max| distance < max) {
                         neighbor.set_distance(distance);
@@ -474,7 +482,7 @@ impl HNSW for VectorCore {
             Ok(ep) => ep,
             Err(_) => {
                 self.set_entry_point(txn, &query)?;
-                query.set_distance(0.0);
+                query.set_distance(DistanceResult::Empty);
 
                 if let Some(fields) = fields {
                     self.vector_data_db.put(
@@ -510,7 +518,8 @@ impl HNSW for VectorCore {
             )?;
             curr_ep = nearest.peek().unwrap().clone();
 
-            let neighbors = self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
+            let neighbors =
+                self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
             self.set_neighbours(txn, query.get_id(), &neighbors, level)?;
 
             for e in neighbors {
