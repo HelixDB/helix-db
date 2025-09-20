@@ -4,8 +4,8 @@ N::User {
 
 QUERY GetUser(user_id: ID) => 
     user <- N<User>::MATCH|_::{boolean}|{
-        true => "true",
-        false => "false",
+        true => _,
+        false => NONE,
     }
     RETURN user
 

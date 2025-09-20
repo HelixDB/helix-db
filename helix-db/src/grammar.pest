@@ -61,7 +61,7 @@ optional_param = { "?" }
 get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | search_vector | start_vector) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
-anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
+anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step) }
 step                = { "::" ~ ( 
   graph_step 
   | order_by
@@ -270,7 +270,7 @@ match_variable = { "|" ~ (identifier | traversal | id_traversal | anonymous_trav
 anon_variable = {"_"}
 match_statements = { match_statement ~ ("," ~ match_statement)* ~ ","? }
 match_statement = { match_type ~ "=>" ~ match_value }
-match_value = { ("{" ~ query_body ~ "}") | traversal | id_traversal | anonymous_traversal | none | identifier | evaluates_to_anything }
+match_value = { ("{" ~ query_body ~ "}") | none | traversal | id_traversal | anonymous_traversal | anon_variable | identifier | evaluates_to_anything }
 
 match_type = { match_type_enum | boolean | optional_type }
 optional_type = { ("Some(" ~ identifier ~ ")") | none}

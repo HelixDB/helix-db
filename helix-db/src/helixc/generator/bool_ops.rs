@@ -113,7 +113,7 @@ impl Display for IsIn {
 
 /// Boolean expression is used for a traversal or set of traversals wrapped in AND/OR
 /// that resolve to a boolean value
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum BoExp {
     Not(Box<BoExp>),
     And(Vec<BoExp>),

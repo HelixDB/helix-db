@@ -3,7 +3,7 @@ use crate::helixc::{
         statements::Statement,
         utils::{VecData, write_properties},
     },
-    parser::types::MatchType,
+    parser::types::{MatchType, Optional, SchemaMatchType},
 };
 
 use super::{
@@ -52,7 +52,7 @@ impl Debug for TraversalType {
 //         }
 //     }
 // }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ShouldCollect {
     ToVec,
     ToVal,
@@ -70,7 +70,7 @@ impl Display for ShouldCollect {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Traversal {
     pub traversal_type: TraversalType,
     pub source_step: Separator<SourceStep>,
@@ -421,22 +421,49 @@ impl Display for SearchVectorStep {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GeneratedMatch {
     pub variable: Option<GeneratedMatchVariable>,
     pub statements: Vec<GeneratedMatchStatement>,
+    pub default: GeneratedMatchDefault,
 }
 impl Display for GeneratedMatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "match {} {{",
-            self.variable.as_ref().map_or("".to_string(), |v| format!("{v}"))
-        )
+            "match_(|val, txn| {{ match {} {{",
+            self.variable
+                .as_ref()
+                .map_or("".to_string(), |v| format!("{v}"))
+        )?;
+        for statement in &self.statements {
+            println!("GeneratedMatchStatement: {:?}", statement);
+            writeln!(f, "    {statement}")?;
+        }
+        writeln!(f, "    _ => {},", self.default)?;
+        writeln!(f, "\t}}")?;
+        writeln!(f, "}})")
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+pub enum GeneratedMatchDefault {
+    Empty,
+    Optional,
+    TraversalValue,
+}
+
+impl Display for GeneratedMatchDefault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedMatchDefault::Empty => write!(f, "{{}}"),
+            GeneratedMatchDefault::Optional => write!(f, "None"),
+            GeneratedMatchDefault::TraversalValue => write!(f, "TraversalValue::Empty"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum GeneratedMatchVariable {
     Identifier(String),
     Traversal(Box<Traversal>),
@@ -453,14 +480,135 @@ impl Display for GeneratedMatchVariable {
     }
 }
 
-#[derive(Clone)]
-pub struct GeneratedMatchStatement {
-    pub match_type: MatchType,
-    pub match_value: MatchValueType,
+#[derive(Clone, Debug)]
+pub enum GeneratedMatchType {
+    Optional(GeneratedOptional),
+    Identifier(String),
+    Boolean(bool),
+    SchemaType(GeneratedSchemaMatchType),
 }
 
-#[derive(Clone)]
-pub enum MatchValueType {
+impl Display for GeneratedMatchType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedMatchType::Optional(optional) => write!(f, "{optional}"),
+            GeneratedMatchType::Identifier(identifier) => write!(f, "{identifier}"),
+            GeneratedMatchType::Boolean(boolean) => {
+                if *boolean {
+                    write!(f, "TraversalValue::Value(Value::Boolean(b)) if b")
+                } else {
+                    write!(f, "TraversalValue::Value(Value::Boolean(b)) if !b")
+                }
+            }
+            GeneratedMatchType::SchemaType(schema_type) => write!(f, "{schema_type}"),
+        }
+    }
+}
+
+impl From<MatchType> for GeneratedMatchType {
+    fn from(match_type: MatchType) -> Self {
+        match match_type {
+            MatchType::Optional(optional) => GeneratedMatchType::Optional(optional.into()),
+            MatchType::Identifier(identifier) => GeneratedMatchType::Identifier(identifier.clone()),
+            MatchType::Boolean(boolean) => GeneratedMatchType::Boolean(boolean),
+            MatchType::SchemaType(schema_type) => {
+                GeneratedMatchType::SchemaType(schema_type.into())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GeneratedOptional {
+    Some(String),
+    None,
+}
+
+impl From<Optional> for GeneratedOptional {
+    fn from(optional: Optional) -> Self {
+        match optional {
+            Optional::Some(some) => GeneratedOptional::Some(some),
+            Optional::None => GeneratedOptional::None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GeneratedSchemaMatchType {
+    Node(String),
+    Edge(String),
+    Vector(String),
+}
+
+impl Display for GeneratedOptional {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedOptional::Some(identifier) => write!(f, "Some({identifier})"),
+            GeneratedOptional::None => write!(f, "None"),
+        }
+    }
+}
+
+impl From<SchemaMatchType> for GeneratedSchemaMatchType {
+    fn from(schema_type: SchemaMatchType) -> Self {
+        match schema_type {
+            SchemaMatchType::Node(node) => GeneratedSchemaMatchType::Node(node.clone()),
+            SchemaMatchType::Edge(edge) => GeneratedSchemaMatchType::Edge(edge.clone()),
+            SchemaMatchType::Vector(vector) => GeneratedSchemaMatchType::Vector(vector.clone()),
+        }
+    }
+}
+
+impl Display for GeneratedSchemaMatchType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedSchemaMatchType::Node(identifier) => write!(
+                f,
+                "TraversalValue::Node(node) if node.label() == \"{identifier}\""
+            ),
+            GeneratedSchemaMatchType::Edge(identifier) => write!(
+                f,
+                "TraversalValue::Edge(edge) if edge.label() == \"{identifier}\""
+            ),
+            GeneratedSchemaMatchType::Vector(identifier) => write!(
+                f,
+                "TraversalValue::Vector(vector) if vector.label() == \"{identifier}\""
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GeneratedMatchStatement {
+    pub match_type: GeneratedMatchType,
+    pub match_value: GeneratedMatchValueType,
+}
+impl Display for GeneratedMatchStatement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} => {{ {} }}", self.match_type, self.match_value)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GeneratedMatchValueType {
     Expression(Statement),
     Statements(Vec<Statement>),
+    Anonymous,
+    None,
+}
+
+impl Display for GeneratedMatchValueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedMatchValueType::Expression(expression) => write!(f, "{expression}"),
+            GeneratedMatchValueType::Statements(statements) => {
+                for statement in statements {
+                    writeln!(f, "    {statement};")?;
+                }
+                Ok(())
+            }
+            GeneratedMatchValueType::Anonymous => write!(f, "Some(val)"),
+            GeneratedMatchValueType::None => write!(f, "None"),
+        }
+    }
 }

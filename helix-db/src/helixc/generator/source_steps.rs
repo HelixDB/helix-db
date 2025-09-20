@@ -8,7 +8,7 @@ use super::{
     utils::{GenRef, GeneratedValue},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SourceStep {
     /// Traversal starts from an identifier
     Identifier(GenRef<String>),
@@ -41,7 +41,7 @@ pub enum SourceStep {
     Empty,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddN {
     /// Label of node
     pub label: GenRef<String>,
@@ -62,7 +62,7 @@ impl Display for AddN {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddE {
     /// Label of edge
     pub label: GenRef<String>,
@@ -85,7 +85,7 @@ impl Display for AddE {
         )
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddV {
     /// Vector to add
     pub vec: VecData,
@@ -107,7 +107,7 @@ impl Display for AddV {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NFromID {
     /// ID of node
     pub id: GenRef<String>,
@@ -122,7 +122,7 @@ impl Display for NFromID {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NFromType {
     /// Label of nodes to lookup
     pub label: GenRef<String>,
@@ -133,7 +133,7 @@ impl Display for NFromType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EFromID {
     /// ID of edge
     pub id: GenRef<String>,
@@ -148,7 +148,7 @@ impl Display for EFromID {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EFromType {
     /// Label of edges to lookup
     pub label: GenRef<String>,
@@ -159,7 +159,7 @@ impl Display for EFromType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VFromID {
     /// ID of vector
     pub id: GenRef<String>,
@@ -174,7 +174,7 @@ impl Display for VFromID {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VFromType {
     /// Label of vectors to lookup
     pub label: GenRef<String>,
@@ -188,7 +188,7 @@ impl Display for VFromType {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SearchBM25 {
     /// Type of node to search for
     pub type_arg: GenRef<String>,
@@ -226,7 +226,7 @@ impl Display for SourceStep {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SearchVector {
     /// Label of vector to search for
     pub label: GenRef<String>,
@@ -264,7 +264,7 @@ impl Display for SearchVector {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NFromIndex {
     /// Index to search against
     pub index: GenRef<String>,

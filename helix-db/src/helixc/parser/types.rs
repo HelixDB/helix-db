@@ -639,6 +639,8 @@ pub struct MatchStatement {
 pub enum MatchValueType {
     Expression(Expression),
     Statements(Vec<Statement>),
+    Anonymous,
+    None,
 }
 
 #[derive(Debug, Clone)]

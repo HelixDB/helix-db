@@ -403,9 +403,12 @@ impl HelixParser {
             // .inner then match for exact
             let mv = match match_value.as_rule() {
                 Rule::query_body => MatchValueType::Statements(self.parse_query_body(match_value)?),
-                _ => self
-                    .parse_expression(match_value)
-                    .map(|expr| MatchValueType::Expression(expr))?,
+                Rule::none => MatchValueType::None,
+                Rule::anon_variable => MatchValueType::Anonymous,
+                _ => {
+                    println!("match_value: {:?}", match_value.as_rule());
+                    MatchValueType::Expression(self.parse_expression(match_value)?)
+                }
             };
 
             statements.push(MatchStatement {

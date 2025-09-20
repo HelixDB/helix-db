@@ -5,7 +5,7 @@ use crate::helixc::generator::{bool_ops::BoExp, traversal_steps::Traversal, util
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Statement {
     Assignment(Assignment),
     Drop(Drop),
@@ -41,7 +41,7 @@ pub enum IdentifierType {
     Empty,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Assignment {
     pub variable: GenRef<String>,
     pub value: Box<Statement>,
@@ -52,7 +52,7 @@ impl Display for Assignment {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ForEach {
     pub for_variables: ForVariable,
     pub in_variable: ForLoopInVariable,
@@ -89,7 +89,7 @@ impl Display for ForEach {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ForVariable {
     ObjectDestructure(Vec<GenRef<String>>),
     Identifier(GenRef<String>),
@@ -121,7 +121,7 @@ impl Display for ForLoopInVariable {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Drop {
     pub expression: Traversal,
 }

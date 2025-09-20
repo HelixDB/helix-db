@@ -107,7 +107,7 @@ impl From<IdType> for GenRef<String> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum VecData {
     Standard(GeneratedValue),
     // Embed {
@@ -396,7 +396,7 @@ use helix_db::{
                     dedup::DedupAdapter, drop::Drop, exist::Exist, filter_mut::FilterMut,
                     filter_ref::FilterRefAdapter, map::MapAdapter, paths::ShortestPathAdapter,
                     props::PropsAdapter, range::RangeAdapter, update::UpdateAdapter, order::OrderByAdapter,
-                    aggregate::AggregateAdapter, group_by::GroupByAdapter,
+                    aggregate::AggregateAdapter, group_by::GroupByAdapter, match_::MatchAdapter,
                     },
                     vectors::{
                         brute_force_search::BruteForceSearchVAdapter, insert::InsertVAdapter,

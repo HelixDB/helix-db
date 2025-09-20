@@ -7,6 +7,7 @@ pub mod filter_mut;
 pub mod filter_ref;
 pub mod group_by;
 pub mod map;
+pub mod match_;
 pub mod order;
 pub mod paths;
 pub mod props;
