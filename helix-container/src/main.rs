@@ -6,7 +6,7 @@ use helix_db::helix_engine::{
 };
 use helix_db::helix_gateway::mcp::mcp::{MCPHandlerFn, MCPHandlerSubmission};
 use helix_db::helix_gateway::{
-    gateway::{GatewayOpts, HelixGateway},
+    gateway::HelixGateway,
     router::router::{HandlerFn, HandlerSubmission},
 };
 use std::{collections::HashMap, sync::Arc};
@@ -138,11 +138,26 @@ fn main() {
         .collect::<HashMap<String, MCPHandlerFn>>();
 
     println!("Routes: {:?}", query_routes.keys());
+    
+    // Get configurable thread pool sizes from environment
+    let worker_threads = std::env::var("HELIX_WORKER_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(num_cpus::get()); // Default to number of CPUs
+        
+    let io_threads = std::env::var("HELIX_IO_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(num_cpus::get() / 4) // Default to num_cpus / 4
+        .max(2); // At least 2 IO threads
+        
+    info!("Starting gateway with worker_threads={}, io_threads={}", worker_threads, io_threads);
+    
     let gateway = HelixGateway::new(
         &format!("0.0.0.0:{port}"),
         graph,
-        GatewayOpts::DEFAULT_POOL_SIZE,
-        2,
+        worker_threads,
+        io_threads,
         Some(query_routes),
         Some(mcp_routes),
         Some(opts),

@@ -163,6 +163,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed51fe0f224d1d4ea768be38c51f9f831dee9d05c163c11fba0b8c44387b1fc3"
 
 [[package]]
+name = "async-compression"
+version = "0.4.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59a194f9d963d8099596278594b3107448656ba73831c9d8c783e613ce86da64"
+dependencies = [
+ "brotli",
+ "flate2",
+ "futures-core",
+ "memchr",
+ "pin-project-lite",
+ "tokio",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1226,6 +1242,7 @@ dependencies = [
  "helix-db",
  "helix-macros",
  "inventory",
+ "num_cpus",
  "rand 0.9.1",
  "serde",
  "serde_json",
@@ -1263,11 +1280,14 @@ dependencies = [
  "rayon",
  "reqwest",
  "serde",
+ "socket2",
  "sonic-rs",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
  "tokio-util",
+ "tower",
+ "tower-http",
  "tracing",
  "twox-hash",
  "url",
@@ -4292,13 +4312,18 @@ version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adc82fd73de2a9722ac5da747f12383d2bfdb93591ee6c58486e0097890f05f2"
 dependencies = [
+ "async-compression",
  "bitflags 2.8.0",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",

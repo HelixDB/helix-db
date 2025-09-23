@@ -74,11 +74,17 @@ impl HelixGraphStorage {
             config.db_max_size_gb.unwrap_or(100)
         };
 
+        // Get max readers from environment variable
+        let max_readers = std::env::var("HELIX_MAX_READERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000); // Default to 1000 for better concurrency
+            
         let graph_env = unsafe {
             EnvOpenOptions::new()
                 .map_size(db_size * 1024 * 1024 * 1024)
                 .max_dbs(20)
-                .max_readers(200)
+                .max_readers(max_readers)
                 .open(Path::new(path))?
         };
 

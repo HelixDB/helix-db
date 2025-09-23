@@ -33,8 +33,14 @@ impl WorkerPool {
             "Expected number of threads in thread pool to be more than 0, got {size}"
         );
 
-        let (req_tx, req_rx) = flume::bounded::<ReqMsg>(1000); 
-        let (cont_tx, cont_rx) = flume::bounded::<ContMsg>(1000); 
+        // Get channel capacity from environment variable
+        let channel_capacity = std::env::var("HELIX_CHANNEL_CAPACITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10000); // Default to 10000 for better throughput
+            
+        let (req_tx, req_rx) = flume::bounded::<ReqMsg>(channel_capacity); 
+        let (cont_tx, cont_rx) = flume::bounded::<ContMsg>(channel_capacity); 
 
         let workers = (0..size)
             .map(|_| {

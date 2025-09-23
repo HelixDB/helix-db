@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 use std::sync::atomic::{self, AtomicUsize};
 use std::thread::available_parallelism;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, sync::Arc};
 
 use axum::body::Body;
@@ -11,6 +11,9 @@ use axum::routing::{get, post};
 use core_affinity::{CoreId, set_for_current};
 use helix_metrics::events::{EventType, QueryErrorEvent, QuerySuccessEvent};
 use sonic_rs::json;
+use tower_http::compression::CompressionLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tracing::{info, trace, warn};
 
 use super::router::router::{HandlerFn, HelixRouter};
@@ -34,6 +37,8 @@ pub struct GatewayOpts {}
 
 impl GatewayOpts {
     pub const DEFAULT_POOL_SIZE: usize = 8;
+    pub const DEFAULT_MAX_REQUEST_SIZE: usize = 100 * 1024 * 1024; // 100MB
+    pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60); // 60s
 }
 
 pub static HELIX_METRICS_CLIENT: LazyLock<helix_metrics::HelixMetricsClient> =
@@ -61,6 +66,18 @@ impl HelixGateway {
     ) -> HelixGateway {
         let router = Arc::new(HelixRouter::new(routes, mcp_routes));
         let cluster_id = std::env::var("CLUSTER_ID").ok();
+
+        // Apply environment variable overrides
+        let worker_size = std::env::var("HELIX_WORKER_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(worker_size);
+
+        let io_size = std::env::var("HELIX_IO_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(io_size);
+
         HelixGateway {
             address: address.to_string(),
             graph_access,
@@ -121,6 +138,26 @@ impl HelixGateway {
             rt.clone(),
         );
 
+        // Get configurable values from environment
+        let max_request_size = std::env::var("HELIX_MAX_REQUEST_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(GatewayOpts::DEFAULT_MAX_REQUEST_SIZE);
+
+        let request_timeout = std::env::var("HELIX_REQUEST_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(GatewayOpts::DEFAULT_REQUEST_TIMEOUT);
+
+        info!(
+            "Starting gateway with worker_threads={}, io_threads={}, max_request_size={}, timeout={}s",
+            self.worker_size,
+            self.io_size,
+            max_request_size,
+            request_timeout.as_secs()
+        );
+
         let mut axum_app = axum::Router::new();
 
         axum_app = axum_app
@@ -136,15 +173,23 @@ impl HelixGateway {
                 .route("/node-details", get(node_details_handler));
         }
 
-        let axum_app = axum_app.with_state(Arc::new(AppState {
-            worker_pool,
-            schema_json: self.opts.and_then(|o| o.config.schema),
-            cluster_id: self.cluster_id,
-        }));
+        // Add middleware layers
+        let axum_app = axum_app
+            .layer(RequestBodyLimitLayer::new(max_request_size))
+            .layer(TimeoutLayer::new(request_timeout))
+            .layer(CompressionLayer::new())
+            .with_state(Arc::new(AppState {
+                worker_pool,
+                schema_json: self.opts.and_then(|o| o.config.schema),
+                cluster_id: self.cluster_id,
+            }));
 
         rt.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();
-            info!("Listener has been bound, starting server");
+            let listener = tokio::net::TcpListener::bind(&self.address).await.unwrap();
+
+            // Note: TCP socket optimizations could be added here in the future
+            // by using socket2 crate to set TCP_NODELAY, buffer sizes, etc.
+            info!("Listener bound at {}", self.address);
             axum::serve(listener, axum_app)
                 .with_graceful_shutdown(shutdown_signal())
                 .await

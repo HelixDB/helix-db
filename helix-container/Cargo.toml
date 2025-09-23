@@ -21,6 +21,7 @@ async-trait = "0.1"
 tracing-subscriber = "0.3.19"
 tracing = "0.1.41"
 dotenvy = "0.15.7"
+num_cpus = "1.17"
 
 [features]
 dev-instance = ["helix-db/dev-instance"]

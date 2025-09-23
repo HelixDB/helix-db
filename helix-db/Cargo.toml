@@ -42,17 +42,20 @@ reqwest = { version = "0.12.15", features = [
 url = { version = "2.5", optional = true }
 tokio-util = { version = "0.7.15", features = ["compat"] }
 axum = "0.8.4"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["limit", "compression-full", "timeout"] }
+socket2 = "0.5"
 tracing = "0.1.41"
 core_affinity = "0.8.3"
 async-trait = "0.1.88"
 thiserror = "2.0.12"
+num_cpus = "1.17"
 
 [dev-dependencies]
 rand = "0.9.0"
 lazy_static = "1.4.0"
 polars = { version = "0.46.0", features = ["parquet", "lazy", "json"] }
 kdam = "0.3"
-num_cpus = "1.17"                                                       # TODO: write ourselves
 
 [features]
 debug-output = ["helix-macros/debug-output"]
