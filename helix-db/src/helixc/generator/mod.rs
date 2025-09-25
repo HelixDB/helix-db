@@ -21,6 +21,7 @@ use std::{fmt::Display, fs::File, io::Result, path::Path};
 pub mod bool_ops;
 pub mod migrations;
 pub mod object_remappings;
+pub mod python;
 pub mod queries;
 pub mod return_values;
 pub mod schemas;
@@ -35,6 +36,26 @@ pub mod utils;
 pub fn generate(source: Source, path: &Path) -> Result<()> {
     let mut file = File::create(path.join("queries.rs"))?;
     write!(file, "{source}")?;
+    Ok(())
+}
+
+/// Generate Python code from analyzed source
+pub fn generate_python(source: &Source, path: &Path) -> Result<()> {
+    use self::python::PythonGenerator;
+    use std::fs;
+
+    let generator = PythonGenerator::new(source);
+    let package = generator.generate_package();
+
+    // Create Python package directory if it doesn't exist
+    fs::create_dir_all(&path)?;
+
+    // Write Python files directly to the package directory
+    fs::write(path.join("__init__.py"), package.init)?;
+    fs::write(path.join("models.py"), package.models)?;
+    fs::write(path.join("queries.py"), package.queries)?;
+    fs::write(path.join("client.py"), package.client)?;
+
     Ok(())
 }
 

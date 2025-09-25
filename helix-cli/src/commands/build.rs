@@ -4,6 +4,7 @@ use crate::metrics_sender::MetricsSender;
 use crate::project::{ProjectContext, get_helix_repo_cache};
 use crate::utils::{copy_dir_recursive_excluding, print_status, print_success, helixc_utils::collect_hx_files};
 use eyre::Result;
+use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -223,6 +224,26 @@ async fn compile_project(project: &ProjectContext, instance_name: &str) -> Resul
     fs::write(src_dir.join("queries.rs"), generated_rust_code)?;
 
     print_success("Helix queries compiled to Rust files");
+
+    // Generate Python code if enabled in config
+    if project.config.project.codegen.python.enabled {
+        print_status("CODEGEN", "Generating Python code from Helix queries...");
+
+        use helix_db::helixc::generator::generate_python;
+
+        // Generate Python code to the configured output directory
+        let python_output_dir = PathBuf::from(&project.config.project.codegen.python.output);
+        let python_package_dir = python_output_dir.join("src");
+
+        // Create the Python package directory if it doesn't exist
+        fs::create_dir_all(&python_package_dir)?;
+
+        // Generate Python code
+        generate_python(&analyzed_source, &python_package_dir)?;
+
+        print_success("Python code generated successfully");
+    }
+
     Ok(metrics_data)
 }
 

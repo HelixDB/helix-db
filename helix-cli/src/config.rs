@@ -25,6 +25,30 @@ pub struct ProjectConfig {
         deserialize_with = "deserialize_path"
     )]
     pub queries: PathBuf,
+    #[serde(default)]
+    pub codegen: CodegenConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodegenConfig {
+    #[serde(default)]
+    pub python: PythonCodegenConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PythonCodegenConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(
+        default = "default_python_output",
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
+    pub output: PathBuf,
+}
+
+fn default_python_output() -> PathBuf {
+    PathBuf::from("./helix-python")
 }
 
 fn default_queries_path() -> PathBuf {
@@ -377,6 +401,7 @@ impl HelixConfig {
             project: ProjectConfig {
                 name: project_name.to_string(),
                 queries: default_queries_path(),
+                codegen: CodegenConfig::default(),
             },
             local,
             cloud: HashMap::new(),

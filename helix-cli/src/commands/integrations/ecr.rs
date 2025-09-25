@@ -92,11 +92,6 @@ impl<'a> EcrManager<'a> {
         format!("helix-{}-{instance_name}", self.project.config.project.name)
     }
 
-    /// Get the full image URI for an ECR repository
-    fn image_uri(&self, registry_url: &str, repository_name: &str, tag: &str) -> String {
-        format!("{registry_url}/{repository_name}:{tag}")
-    }
-
     fn image_name(&self, repository_name: &str, build_mode: BuildMode) -> String {
         let tag = match build_mode {
             BuildMode::Debug => "debug",

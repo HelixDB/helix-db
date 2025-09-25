@@ -6,15 +6,15 @@ use crate::config::{CloudConfig, HelixConfig};
 use crate::docker::DockerManager;
 use crate::errors::project_error;
 use crate::project::ProjectContext;
-use crate::utils::{print_instructions, print_status, print_success};
+use crate::utils::{print_instructions, print_status, print_success, Template};
 use eyre::Result;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub async fn run(
     path: Option<String>,
-    _template: String,
+    template: Option<String>,
     queries_path: String,
     deployment_type: Option<CloudDeploymentTypeCommand>,
 ) -> Result<()> {
@@ -53,6 +53,22 @@ pub async fn run(
     config.save_to_file(&config_path)?;
     // Create project structure
     create_project_structure(&project_dir, &queries_path)?;
+
+    // Create template-specific files
+    let template_type = Template::from(template)?;
+    match template_type {
+        Template::Python => {
+            let output_path = project_dir.join("helix-python");
+            create_python_project(&output_path, &queries_path, project_name)?;
+            // Enable Python codegen in config with correct output path
+            config.project.codegen.python.enabled = true;
+            config.project.codegen.python.output = PathBuf::from("./helix-python/");
+            config.save_to_file(&config_path)?;
+        },
+        _ => {
+            // Other templates not yet implemented
+        }
+    }
 
     // Initialize deployment type based on flags
 
@@ -258,6 +274,189 @@ target/
 *.log
 "#;
     fs::write(project_dir.join(".gitignore"), gitignore)?;
+
+    Ok(())
+}
+
+fn create_python_project(project_dir: &Path, queries_path: &str, project_name: &str) -> Result<()> {
+    print_status("PYTHON", "Creating Python project structure");
+
+    // Create Python source directory
+    let src_dir = project_dir.join("src");
+    fs::create_dir_all(&src_dir)?;
+
+    // Create __init__.py files
+    fs::write(src_dir.join("__init__.py"),
+        format!(r#""""{}
+Auto-generated HelixDB Python client
+"""
+from .client import HelixDBClient
+
+__version__ = "0.1.0"
+__all__ = ["HelixDBClient"]
+"#, project_name))?;
+
+    // Create client.py
+    let client_content = r#""""HelixDB client wrapper"""
+from helix import Client
+from typing import Optional, Dict, Any
+import os
+
+
+class HelixDBClient:
+    """Wrapper for HelixDB client with project-specific configuration"""
+
+    def __init__(
+        self,
+        local: bool = True,
+        port: int = 6969,
+        api_endpoint: Optional[str] = None,
+        api_key: Optional[str] = None,
+        verbose: bool = False,
+        max_workers: int = 1
+    ):
+        """Initialize HelixDB client
+
+        Args:
+            local: Whether to connect to local instance
+            port: Port for local connection (default: 6969)
+            api_endpoint: Remote API endpoint URL
+            api_key: API key for remote connection
+            verbose: Enable verbose logging
+            max_workers: Number of concurrent workers
+        """
+        self._client = Client(
+            local=local,
+            port=port,
+            api_endpoint=api_endpoint or os.getenv("HELIX_API_ENDPOINT"),
+            api_key=api_key or os.getenv("HELIX_API_KEY"),
+            verbose=verbose,
+            max_workers=max_workers
+        )
+
+    @property
+    def client(self) -> Client:
+        """Get the underlying helix-py client"""
+        return self._client
+
+    def query(self, name: str, payload: Optional[Dict] = None) -> Any:
+        """Execute a query
+
+        Args:
+            name: Query name
+            payload: Query parameters
+
+        Returns:
+            Query results
+        """
+        return self._client.query(name, payload)
+"#;
+    fs::write(src_dir.join("client.py"), client_content)?;
+
+    // Create placeholder files for generated code
+    fs::write(src_dir.join("models.py"),
+        "\"\"\"Generated models will appear here after running 'helix build'\"\"\"\n")?;
+
+    fs::write(src_dir.join("queries.py"),
+        "\"\"\"Generated query functions will appear here after running 'helix build'\"\"\"\n")?;
+
+    // Create requirements.txt
+    let requirements = r#"helix-py>=0.2.30
+pydantic>=2.11.9
+python-dotenv>=1.1.1
+"#;
+    fs::write(project_dir.join("requirements.txt"), requirements)?;
+
+    // Create pyproject.toml
+    let pyproject = format!(r#"[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{}"
+version = "0.1.0"
+description = "HelixDB Python client for {}"
+requires-python = ">=3.13"
+dependencies = [
+    "helix-py>=0.2.30",
+    "pydantic>=2.11.9",
+    "python-dotenv>=1.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "mypy>=1.18.2",
+    "black>=25.9.0",
+    "ruff>=0.1.0",
+]
+"#, project_name, project_name);
+    fs::write(project_dir.join("pyproject.toml"), pyproject)?;
+
+    // Create .env.example
+    let env_example = r#"# HelixDB Configuration
+HELIX_API_ENDPOINT=https://your-api-endpoint.com
+HELIX_API_KEY=your-api-key-here
+"#;
+    fs::write(project_dir.join(".env.example"), env_example)?;
+
+    // Create README.md
+    let readme = format!(r#"# {}
+
+A HelixDB Python client project.
+
+## Setup
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Configure environment (for remote connections):
+   ```bash
+   cp .env.example .env
+   # Edit .env with your credentials
+   ```
+
+## Development
+
+1. Define your schema in `{}/schema.hx`
+2. Write queries in `{}/queries.hx`
+3. Build the project to generate Python code:
+   ```bash
+   helix build dev
+   ```
+4. Start your local instance:
+   ```bash
+   helix push dev
+   ```
+
+## Usage
+
+```python
+from {}.client import HelixDBClient
+
+# Connect to local instance
+client = HelixDBClient(local=True, port=6969)
+
+# Or connect to remote instance
+client = HelixDBClient(
+    local=False,
+    api_endpoint="https://your-api.com",
+    api_key="your-key"
+)
+```
+
+## Testing
+
+```bash
+pytest tests/
+```
+"#, project_name, queries_path, queries_path, project_name.replace("-", "_"));
+    fs::write(project_dir.join("README.md"), readme)?;
+
+    print_success("Python project structure created");
 
     Ok(())
 }

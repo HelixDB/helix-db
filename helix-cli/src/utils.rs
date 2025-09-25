@@ -126,6 +126,7 @@ pub fn print_success(message: &str) {
 }
 
 /// Print a completion message with summary
+#[allow(unused)]
 pub fn print_completion(operation: &str, details: &str) {
     println!("{} {} completed successfully", "[SUCCESS]".green().bold(), operation);
     if !details.is_empty() {
@@ -180,13 +181,14 @@ pub enum Template {
 }
 impl Template {
     #[allow(unused)]
-    pub fn from(value: &str) -> Result<Self> {
-        let template = match value {
+    pub fn from(value: Option<String>) -> Result<Self> {
+        let template = match value.as_ref().unwrap_or(&"".to_string()).as_str() {
             "ts" | "typescript" => Template::Typescript,
             "py" | "python" => Template::Python,
             "rs" | "rust" => Template::Rust,
             "go" => Template::Go,
-            _ => return Err(eyre::eyre!("Invalid template: {value}")),
+            "" => Template::Empty,
+            _ => return Err(eyre::eyre!("Invalid template: {value:?}")),
         };
         Ok(template)
     }
