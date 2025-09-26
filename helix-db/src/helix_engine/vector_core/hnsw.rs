@@ -1,9 +1,8 @@
-use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use crate::helix_engine::vector_core::vector::HVector;
+use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use heed3::{RoTxn, RwTxn};
 
-pub trait HNSW
-{
+pub trait HNSW {
     /// Search for the k nearest neighbors of a query vector
     ///
     /// # Arguments
@@ -68,11 +67,7 @@ pub trait HNSW
     ///
     /// * `txn` - The transaction to use
     /// * `id` - The id of the vector
-    fn delete(
-        &self,
-        txn: &mut RwTxn,
-        id: u128,
-    ) -> Result<(), VectorError>;
+    fn delete(&self, txn: &mut RwTxn, id: u128) -> Result<(), VectorError>;
 
     /// Get specific vector based on id and level
     ///
@@ -94,4 +89,3 @@ pub trait HNSW
         with_data: bool,
     ) -> Result<HVector, VectorError>;
 }
-

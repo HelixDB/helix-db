@@ -3,13 +3,17 @@ use crate::{
     helixc::analyzer::{INTROSPECTION_DATA, SECONDARY_INDICES},
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt, path::PathBuf};
+use std::{
+    fmt::{self, Display},
+    path::PathBuf,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VectorConfig {
     pub m: Option<usize>,
     pub ef_construction: Option<usize>,
     pub ef_search: Option<usize>,
+    pub vector_similarity: Option<SimilarityMethod>,
 }
 
 impl Default for VectorConfig {
@@ -18,6 +22,7 @@ impl Default for VectorConfig {
             m: Some(16),
             ef_construction: Some(128),
             ef_search: Some(768),
+            vector_similarity: Some(SimilarityMethod::default()),
         }
     }
 }
@@ -25,6 +30,27 @@ impl Default for VectorConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GraphConfig {
     pub secondary_indices: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub enum SimilarityMethod {
+    #[default]
+    #[serde(rename = "cosine_distance")]
+    CosineDistance,
+    #[serde(rename = "cosine_similarity")]
+    CosineSimilarity,
+    #[serde(rename = "euclidean_distance")]
+    EuclideanDistance,
+}
+
+impl Display for SimilarityMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SimilarityMethod::CosineDistance => write!(f, "cosine_distance"),
+            SimilarityMethod::CosineSimilarity => write!(f, "cosine_similarity"),
+            SimilarityMethod::EuclideanDistance => write!(f, "euclidean_distance"),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -36,7 +62,6 @@ pub struct Config {
     pub bm25: Option<bool>,
     pub schema: Option<String>,
     pub embedding_model: Option<String>,
-    pub graphvis_node_label: Option<String>,
 }
 
 impl Config {
@@ -49,13 +74,14 @@ impl Config {
         bm25: bool,
         schema: Option<String>,
         embedding_model: Option<String>,
-        graphvis_node_label: Option<String>,
+        vector_similarity: Option<SimilarityMethod>,
     ) -> Self {
         Self {
             vector_config: Some(VectorConfig {
                 m: Some(m),
                 ef_construction: Some(ef_construction),
                 ef_search: Some(ef_search),
+                vector_similarity,
             }),
             graph_config: Some(GraphConfig {
                 secondary_indices: None,
@@ -65,7 +91,6 @@ impl Config {
             bm25: Some(bm25),
             schema,
             embedding_model,
-            graphvis_node_label,
         }
     }
 
@@ -94,7 +119,8 @@ impl Config {
 	"vector_config": {
 		"m": 16,
 		"ef_construction": 128,
-		"ef_search": 768
+		"ef_search": 768,
+        "vector_similarity": "cosine_similarity"
 	},
 	"graph_config": {
 		"secondary_indices": []
@@ -103,7 +129,6 @@ impl Config {
 	"mcp": true,
 	"bm25": true,
 	"embedding_model": "text-embedding-ada-002",
-	"graphvis_node_label": ""
 }
         "#
         .trim()
@@ -146,6 +171,7 @@ impl Default for Config {
                 m: Some(16),
                 ef_construction: Some(128),
                 ef_search: Some(768),
+                vector_similarity: Some(SimilarityMethod::default()),
             }),
             graph_config: Some(GraphConfig {
                 secondary_indices: None,
@@ -155,7 +181,6 @@ impl Default for Config {
             bm25: Some(true),
             schema: None,
             embedding_model: Some("text-embedding-ada-002".to_string()),
-            graphvis_node_label: None,
         }
     }
 }
@@ -191,6 +216,16 @@ impl fmt::Display for Config {
                 .unwrap_or(&VectorConfig::default())
                 .ef_search
                 .unwrap_or(768)
+        )?;
+        writeln!(
+            f,
+            "vector_similarity: {},",
+            self.vector_config
+                .as_ref()
+                .unwrap_or(&VectorConfig::default())
+                .vector_similarity
+                .as_ref()
+                .unwrap_or(&SimilarityMethod::default())
         )?;
         writeln!(f, "}}),")?;
         writeln!(f, "graph_config: Some(GraphConfig {{")?;
@@ -231,14 +266,6 @@ impl fmt::Display for Config {
             "embedding_model: {},",
             match &self.embedding_model {
                 Some(model) => format!("Some(\"{model}\".to_string())"),
-                None => "None".to_string(),
-            }
-        )?;
-        writeln!(
-            f,
-            "graphvis_node_label: {},",
-            match &self.graphvis_node_label {
-                Some(label) => format!("Some(\"{label}\".to_string())"),
                 None => "None".to_string(),
             }
         )?;

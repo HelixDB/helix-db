@@ -1,6 +1,6 @@
-use crate::helix_engine::vector_core::vector_distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL};
-
 use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::traversal_core::config::SimilarityMethod;
+use crate::helix_engine::vector_core::vector_distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL};
 
 #[test]
 fn test_hvector_new() {
@@ -20,7 +20,7 @@ fn test_hvector_from_slice() {
 fn test_hvector_distance_orthogonal() {
     let v1 = HVector::new(vec![1.0, 0.0]);
     let v2 = HVector::new(vec![0.0, 1.0]);
-    let distance = v1.distance_to(&v2).unwrap();
+    let distance = v1.distance_to(&v2, &SimilarityMethod::default()).unwrap();
     assert!(distance == ORTHOGONAL);
 }
 
@@ -28,7 +28,7 @@ fn test_hvector_distance_orthogonal() {
 fn test_hvector_distance_min() {
     let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
     let v2 = HVector::new(vec![1.0, 2.0, 3.0]);
-    let distance = v2.distance_to(&v1).unwrap();
+    let distance = v2.distance_to(&v1, &SimilarityMethod::default()).unwrap();
     assert!(distance.abs() == MIN_DISTANCE);
 }
 
@@ -36,7 +36,7 @@ fn test_hvector_distance_min() {
 fn test_hvector_distance_max() {
     let v1 = HVector::new(vec![0.0, 0.0]);
     let v2 = HVector::new(vec![3.0, 4.0]);
-    let distance = v1.distance_to(&v2).unwrap();
+    let distance = v1.distance_to(&v2, &SimilarityMethod::default()).unwrap();
     assert!(distance == MAX_DISTANCE);
 }
 
@@ -69,7 +69,7 @@ fn test_hvector_is_empty() {
 fn test_hvector_distance_different_dimensions() {
     let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
     let v2 = HVector::new(vec![1.0, 2.0, 3.0, 4.0]);
-    let distance = v1.distance_to(&v2).unwrap();
+    let distance = v1.distance_to(&v2, &SimilarityMethod::default()).unwrap();
     println!("distance: {distance}");
     assert!(distance.is_finite());
 }
@@ -78,7 +78,7 @@ fn test_hvector_distance_different_dimensions() {
 fn test_hvector_large_values() {
     let v1 = HVector::new(vec![1e6, 2e6]);
     let v2 = HVector::new(vec![1e6, 2e6]);
-    let distance = v1.distance_to(&v2).unwrap();
+    let distance = v1.distance_to(&v2, &SimilarityMethod::default()).unwrap();
     assert!(distance.abs() < 1e-10);
 }
 
@@ -86,7 +86,7 @@ fn test_hvector_large_values() {
 fn test_hvector_negative_values() {
     let v1 = HVector::new(vec![-1.0, -2.0]);
     let v2 = HVector::new(vec![1.0, 2.0]);
-    let distance = v1.distance_to(&v2).unwrap();
+    let distance = v1.distance_to(&v2, &SimilarityMethod::default()).unwrap();
     // used round to avoid floating point precision issues
     assert!(distance.round() == MAX_DISTANCE);
 }
@@ -95,6 +95,6 @@ fn test_hvector_negative_values() {
 fn test_hvector_cosine_similarity() {
     let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
     let v2 = HVector::new(vec![4.0, 5.0, 6.0]);
-    let similarity = v1.distance_to(&v2).unwrap();
+    let similarity = v1.distance_to(&v2, &SimilarityMethod::default()).unwrap();
     assert!(similarity == 1.0 - 0.9746318461970762);
 }
