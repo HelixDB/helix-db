@@ -1,6 +1,6 @@
 // User node - represents users of the memory system with email indexing
 N::User {
-    email: String,
+    email?: String,
     name: String,
     created_at: String,
     updated_at: String,
