@@ -140,7 +140,7 @@ function Get-AssetInfo {
     # Map amd64 to x86_64 for Rust target format
     $rustArch = "x86_64"
     
-    # new naming format strting from v2.0.2
+    # new naming format starting with v2.0.2
     $assetName = "helix-$rustArch-pc-windows-msvc.exe"
     $asset = $Release.assets | Where-Object { $_.name -eq $assetName }
     
@@ -298,7 +298,7 @@ function Update-UserPath {
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         
         # Check if already in PATH
-        $pathEntries = $userPath -split ";" | Where-Object { $_ -and $_ -ne $BinPath }
+        $pathEntries = $userPath -split ";" | Where-Object { $_ }
         if ($pathEntries -contains $BinPath) {
             Write-Verbose "PATH already contains $BinPath"
             return $false
