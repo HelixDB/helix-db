@@ -1,12 +1,7 @@
 use crate::helixc::parser::{
-    HelixParser, ParserError, Rule,
-    location::HasLoc,
-    types::{
-        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition,
-        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Object, OrderBy,
-        OrderByType, ShortestPath, ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update,
-    },
-    utils::{PairTools, PairsTools},
+    location::HasLoc, types::{
+        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, ExpressionType, FieldAddition, FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Match, MatchStatement, MatchType, MatchValueType, MatchVariable, MatchVariableType, Object, Optional, OrderBy, OrderByType, SchemaMatchType, ShortestPath, ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update
+    }, utils::{PairTools, PairsTools}, HelixParser, ParserError, Rule
 };
 use pest::iterators::Pair;
 
@@ -316,8 +311,8 @@ impl HelixParser {
                 step: StepType::First,
             }),
             Rule::match_step => Ok(Step {
-                loc: inner.loc(),
-                step: StepType::Match(self.parse_match_step(inner)?),
+                loc: step_pair.loc(),
+                step: StepType::Match(self.parse_match_step(step_pair)?),
             }),
             _ => Err(ParserError::from(format!(
                 "Unexpected step type: {:?}",
