@@ -1,4 +1,4 @@
-use crate::helixc::parser::types::IdType;
+use crate::helixc::{generator::traversal_steps::Traversal, parser::types::IdType};
 use std::fmt::{self, Debug, Display};
 
 #[derive(Clone)]
@@ -57,9 +57,16 @@ where
             GenRef::MutRefLT(_, t) => t,
             GenRef::MutDeRef(t) => t,
             GenRef::RefLiteral(t) => t,
-            GenRef::Unknown => panic!("Cannot get inner of unknown"),
+            GenRef::Unknown => {
+                // This should have been caught during analysis
+                // For now, panic with a descriptive message
+                panic!("Code generation error: Unknown reference type encountered. This indicates a bug in the analyzer.")
+            }
             GenRef::Std(t) => t,
-            GenRef::Id(_) => panic!("Cannot get inner of unknown"),
+            GenRef::Id(_) => {
+                // Id doesn't have an inner T, it's just a String identifier
+                panic!("Code generation error: Cannot get inner value of Id type. Use the identifier directly.")
+            }
         }
     }
 }
@@ -90,9 +97,15 @@ impl From<GenRef<String>> for String {
             GenRef::Literal(s) => format!("\"{s}\""),
             GenRef::Std(s) => format!("\"{s}\""),
             GenRef::Ref(s) => format!("\"{s}\""),
+            GenRef::Id(s) => s,  // Identifiers don't need quotes
+            GenRef::Unknown => {
+                // Generate a compile error in the output code
+                "compile_error!(\"Unknown value in code generation\")".to_string()
+            }
             _ => {
-                println!("Cannot convert to string: {value:?}");
-                panic!("Cannot convert to string")
+                // For other ref types, try to use the inner value
+                eprintln!("Warning: Unexpected GenRef variant in String conversion: {value:?}");
+                "compile_error!(\"Unsupported GenRef variant in code generation\")".to_string()
             }
         }
     }
@@ -102,7 +115,10 @@ impl From<IdType> for GenRef<String> {
         match value {
             IdType::Literal { value: s, .. } => GenRef::Literal(s),
             IdType::Identifier { value: s, .. } => GenRef::Id(s),
-            _ => panic!("Cannot convert to string: {value:?}"),
+            _ => {
+                eprintln!("Warning: Unexpected IdType variant in GenRef conversion: {value:?}");
+                GenRef::Unknown
+            }
         }
     }
 }
@@ -127,7 +143,10 @@ impl Display for VecData {
             //     None => write!(f, "&embed!(db, {data})"),
             // },
             VecData::Hoisted(ident) => write!(f, "&{ident}"),
-            VecData::Unknown => panic!("Cannot convert to string, VecData is unknown"),
+            VecData::Unknown => {
+                // Generate a compile error in the output code
+                write!(f, "compile_error!(\"Unknown VecData in code generation\")")
+            }
         }
     }
 }
@@ -205,6 +224,7 @@ pub enum GeneratedValue {
     Parameter(GenRef<String>),
     Array(GenRef<String>),
     Aggregate(GenRef<String>),
+    Traversal(Box<Traversal>),
     Unknown,
 }
 impl GeneratedValue {
@@ -216,7 +236,15 @@ impl GeneratedValue {
             GeneratedValue::Parameter(value) => value,
             GeneratedValue::Array(value) => value,
             GeneratedValue::Aggregate(value) => value,
-            GeneratedValue::Unknown => panic!("Cannot get inner of unknown"),
+            GeneratedValue::Traversal(_) => {
+                // This should not be called for traversals
+                // The caller should handle traversals specially
+                panic!("Code generation error: Cannot get inner value of Traversal. Traversals should be handled specially.")
+            }
+            GeneratedValue::Unknown => {
+                // This indicates a bug in the analyzer
+                panic!("Code generation error: Unknown GeneratedValue encountered. This indicates incomplete type inference in the analyzer.")
+            }
         }
     }
 }
@@ -230,6 +258,7 @@ impl Display for GeneratedValue {
             GeneratedValue::Parameter(value) => write!(f, "{value}"),
             GeneratedValue::Array(value) => write!(f, "&[{value}]"),
             GeneratedValue::Aggregate(value) => write!(f, "{value}"),
+            GeneratedValue::Traversal(value) => write!(f, "{value}"),
             GeneratedValue::Unknown => write!(f, ""),
         }
     }
@@ -243,6 +272,7 @@ impl Debug for GeneratedValue {
             GeneratedValue::Parameter(value) => write!(f, "GV: Parameter({value})"),
             GeneratedValue::Array(value) => write!(f, "GV: Array({value:?})"),
             GeneratedValue::Aggregate(value) => write!(f, "GV: Aggregate({value:?})"),
+            GeneratedValue::Traversal(value) => write!(f, "GV: Traversal({value})"),
             GeneratedValue::Unknown => write!(f, "Unknown"),
         }
     }
@@ -391,20 +421,22 @@ use helix_db::{
                     n_from_id::NFromIdAdapter,
                     n_from_index::NFromIndexAdapter,
                     n_from_type::NFromTypeAdapter,
+                    v_from_id::VFromIdAdapter,
+                    v_from_type::VFromTypeAdapter
                 },
                 util::{
                     dedup::DedupAdapter, drop::Drop, exist::Exist, filter_mut::FilterMut,
-                    filter_ref::FilterRefAdapter, map::MapAdapter, paths::ShortestPathAdapter,
+                    filter_ref::FilterRefAdapter, map::MapAdapter, paths::{PathAlgorithm, ShortestPathAdapter},
                     props::PropsAdapter, range::RangeAdapter, update::UpdateAdapter, order::OrderByAdapter,
-                    aggregate::AggregateAdapter, group_by::GroupByAdapter, match_::MatchAdapter,
-                    },
-                    vectors::{
-                        brute_force_search::BruteForceSearchVAdapter, insert::InsertVAdapter,
-                        search::SearchVAdapter,
-                    },
+                    aggregate::AggregateAdapter, group_by::GroupByAdapter, match_::MatchAdapter, count::CountAdapter,
                 },
-                traversal_value::{Traversable, TraversalValue},
+                vectors::{
+                    brute_force_search::BruteForceSearchVAdapter, insert::InsertVAdapter,
+                    search::SearchVAdapter,
+                },
             },
+            traversal_value::{Traversable, TraversalValue},
+        },
         types::GraphError,
         vector_core::vector::HVector,
     },

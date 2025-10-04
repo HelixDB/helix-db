@@ -94,7 +94,7 @@ pub fn node_details_inner(input: HandlerInput) -> Result<protocol::Response, Gra
 
             if let Some(properties) = &node.properties {
                 for (key, value) in properties {
-                    node_json[key] = sonic_rs::to_value(&value.to_string())
+                    node_json[key] = sonic_rs::to_value(&value.inner_stringify())
                         .unwrap_or_else(|_| sonic_rs::Value::from(""));
                 }
             }

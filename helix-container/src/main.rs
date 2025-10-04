@@ -10,7 +10,7 @@ use helix_db::helix_gateway::{
     router::router::{HandlerFn, HandlerSubmission},
 };
 use std::{collections::HashMap, sync::Arc};
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod queries;
@@ -39,7 +39,9 @@ fn main() {
     };
 
     let port = match std::env::var("HELIX_PORT") {
-        Ok(val) => val.parse::<u16>().unwrap(),
+        Ok(val) => val
+            .parse::<u16>()
+            .expect("HELIX_PORT must be a valid port number"),
         Err(_) => 6969,
     };
 
@@ -91,7 +93,10 @@ fn main() {
         version_info: VersionInfo(transition_fns),
     };
 
-    let graph = Arc::new(HelixGraphEngine::new(opts.clone()).unwrap());
+    let graph = Arc::new(
+        HelixGraphEngine::new(opts.clone())
+            .unwrap_or_else(|e| panic!("Failed to create graph engine: {e}")),
+    );
 
     // generates routes from handler proc macro
     let submissions: Vec<_> = inventory::iter::<HandlerSubmission>.into_iter().collect();
@@ -141,12 +146,11 @@ fn main() {
     let gateway = HelixGateway::new(
         &format!("0.0.0.0:{port}"),
         graph,
-        GatewayOpts::DEFAULT_POOL_SIZE,
-        2,
+        GatewayOpts::DEFAULT_WORKERS_PER_CORE,
         Some(query_routes),
         Some(mcp_routes),
         Some(opts),
     );
 
-    gateway.run().unwrap()
+    gateway.run().expect("Failed to run gateway")
 }

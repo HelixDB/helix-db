@@ -31,6 +31,5 @@ jobs:
           
     - name: Run tests
       run: | 
-        sh clippy_check.sh
         cd helix-db
         cargo test --profile dev helix_engine

@@ -150,6 +150,10 @@ pub(super) fn validate_field_name_existence_for_item_type(
     }
 }
 
+pub(super) fn get_field_type_from_item_fields(ctx: &mut Ctx, item_type: &Type, name: &str) -> Option<FieldType> {
+    item_type.get_field_type_from_item_fields(ctx, name)
+}
+
 pub(super) fn gen_property_access(name: &str) -> Step {
     match name {
         "id" => Step::PropertyFetch(GenRef::Literal("id".to_string())),
@@ -196,6 +200,7 @@ impl VariableAccess for Option<Variable> {
 pub(super) trait FieldLookup {
     fn item_fields_contains_key(&self, ctx: &Ctx, key: &str) -> bool;
     fn item_fields_contains_key_with_type(&self, ctx: &Ctx, key: &str) -> (bool, String);
+    fn get_field_type_from_item_fields(&self, ctx: &Ctx, key: &str) -> Option<FieldType>;
 }
 
 impl FieldLookup for Type {
@@ -265,5 +270,51 @@ impl FieldLookup for Type {
         };
 
         (is_valid_field, item_type.to_string())
+    }
+
+    fn get_field_type_from_item_fields(&self, ctx: &Ctx, key: &str) -> Option<FieldType> {
+        match self {
+            Type::Node(Some(node_type)) | Type::Nodes(Some(node_type)) => ctx
+                .node_fields
+                .get(node_type.as_str())
+                .map(|fields| match key {
+                    "id" | "ID" => Some(FieldType::Uuid),
+                    "label" => Some(FieldType::String),
+                    _ => fields
+                        .get(key)
+                        .map(|field| Some(field.field_type.clone()))
+                        .unwrap_or(None),
+                })
+                .unwrap_or(None),
+            Type::Edge(Some(edge_type)) | Type::Edges(Some(edge_type)) => ctx
+                .edge_fields
+                .get(edge_type.as_str())
+                .map(|fields| match key {
+                    "id" | "ID" => Some(FieldType::Uuid),
+                    "label" => Some(FieldType::String),
+                    "from_node" | "to_node" => Some(FieldType::Uuid),
+                    _ => fields
+                        .get(key)
+                        .map(|field| Some(field.field_type.clone()))
+                        .unwrap_or(None),
+                })
+                .unwrap_or(None),
+
+            Type::Vector(Some(vector_type)) | Type::Vectors(Some(vector_type)) => ctx
+                .vector_fields
+                .get(vector_type.as_str())
+                .map(|fields| match key {
+                    "id" | "ID" => Some(FieldType::Uuid),
+                    "label" => Some(FieldType::String),
+                    "data" => Some(FieldType::Array(Box::new(FieldType::F64))),
+                    "score" => Some(FieldType::F64),
+                    _ => fields
+                        .get(key)
+                        .map(|field| Some(field.field_type.clone()))
+                        .unwrap_or(None),
+                })
+                .unwrap_or(None),
+            _ => unreachable!("shouldve been caught eariler"),
+        }
     }
 }

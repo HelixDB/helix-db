@@ -140,6 +140,12 @@ impl ReturnValue {
             return_type: ReturnType::Aggregate(name),
         }
     }
+    pub fn new_aggregate_traversal(name: GeneratedValue, value: ReturnValueExpr) -> Self {
+        Self {
+            value,
+            return_type: ReturnType::Aggregate(name),
+        }
+    }
 }
 
 #[derive(Clone)]

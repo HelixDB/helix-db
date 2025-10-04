@@ -17,7 +17,7 @@ use crate::helixc::{
         types::Type,
     },
     generator::Source as GeneratedSource,
-    parser::types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source},
+    parser::{errors::ParserError, types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source}},
 };
 use itertools::Itertools;
 use serde::Serialize;
@@ -27,12 +27,12 @@ use std::{
     sync::OnceLock,
 };
 
-pub fn analyze(src: &Source) -> (Vec<Diagnostic>, GeneratedSource) {
-    let mut ctx = Ctx::new(src);
-    ctx.check_schema();
+pub fn analyze(src: &Source) -> Result<(Vec<Diagnostic>, GeneratedSource), ParserError> {
+    let mut ctx = Ctx::new(src)?;
+    ctx.check_schema()?;
     ctx.check_schema_migrations();
     ctx.check_queries();
-    (ctx.diagnostics, ctx.output)
+    Ok((ctx.diagnostics, ctx.output))
 }
 
 pub mod diagnostic;
@@ -64,7 +64,7 @@ pub static INTROSPECTION_DATA: OnceLock<IntrospectionData> = OnceLock::new();
 pub static SECONDARY_INDICES: OnceLock<Vec<String>> = OnceLock::new();
 
 impl<'a> Ctx<'a> {
-    pub(super) fn new(src: &'a Source) -> Self {
+    pub(super) fn new(src: &'a Source) -> Result<Self, ParserError> {
         // Build field look‑ups once
         let all_schemas = build_field_lookups(src);
         let (node_fields, edge_fields, vector_fields) = all_schemas.get_latest();
@@ -76,19 +76,19 @@ impl<'a> Ctx<'a> {
 
         let ctx = Self {
             node_set: src
-                .get_latest_schema()
+                .get_latest_schema()?
                 .node_schemas
                 .iter()
                 .map(|n| n.name.1.as_str())
                 .collect(),
             vector_set: src
-                .get_latest_schema()
+                .get_latest_schema()?
                 .vector_schemas
                 .iter()
                 .map(|v| v.name.as_str())
                 .collect(),
             edge_map: src
-                .get_latest_schema()
+                .get_latest_schema()?
                 .edge_schemas
                 .iter()
                 .map(|e| (e.name.1.as_str(), e))
@@ -108,7 +108,7 @@ impl<'a> Ctx<'a> {
 
         SECONDARY_INDICES
             .set(
-                src.get_latest_schema()
+                src.get_latest_schema()?
                     .node_schemas
                     .iter()
                     .flat_map(|schema| {
@@ -122,7 +122,7 @@ impl<'a> Ctx<'a> {
                     .collect(),
             )
             .ok();
-        ctx
+        Ok(ctx)
     }
 
     #[allow(unused)]
@@ -146,8 +146,8 @@ impl<'a> Ctx<'a> {
 
     // ---------- Pass #1: schema --------------------------
     /// Validate that every edge references declared node types.
-    pub(super) fn check_schema(&mut self) {
-        check_schema(self);
+    pub(super) fn check_schema(&mut self) -> Result<(), ParserError> {
+        check_schema(self)
     }
 
     // ---------- Pass #1.5: schema migrations --------------------------

@@ -1,8 +1,9 @@
 use crate::{
     helixc::parser::{
         HelixParser, ParserError, Rule,
-        location::{HasLoc, Loc},
+        location::HasLoc,
         types::{FieldAddition, FieldValue, FieldValueType, ValueType},
+        utils::{PairTools, PairsTools},
     },
     protocol::value::Value,
 };
@@ -18,47 +19,35 @@ impl HelixParser {
         pair.into_inner()
             .map(|p| {
                 let mut pairs = p.into_inner();
-                let prop_key = pairs
-                    .next()
-                    .ok_or_else(|| ParserError::from("Missing property key"))?
-                    .as_str()
-                    .to_string();
+                let prop_key = pairs.try_next()?.as_str().to_string();
 
-                let prop_val = match pairs.next() {
-                    Some(p) => {
-                        let value_pair = p
-                            .into_inner()
-                            .next()
-                            .ok_or_else(|| ParserError::from("Empty property value"))?;
+                let value_pair = pairs.try_next().try_inner_next()?;
 
-                        match value_pair.as_rule() {
-                            Rule::string_literal => Ok(ValueType::new(
-                                Value::from(value_pair.as_str().to_string()),
-                                value_pair.loc(),
-                            )),
-                            Rule::integer => value_pair
-                                .as_str()
-                                .parse()
-                                .map(|i| ValueType::new(Value::I32(i), value_pair.loc()))
-                                .map_err(|_| ParserError::from("Invalid integer value")),
-                            Rule::float => value_pair
-                                .as_str()
-                                .parse()
-                                .map(|f| ValueType::new(Value::F64(f), value_pair.loc()))
-                                .map_err(|_| ParserError::from("Invalid float value")),
-                            Rule::boolean => Ok(ValueType::new(
-                                Value::Boolean(value_pair.as_str() == "true"),
-                                value_pair.loc(),
-                            )),
-                            Rule::identifier => Ok(ValueType::Identifier {
-                                value: value_pair.as_str().to_string(),
-                                loc: value_pair.loc(),
-                            }),
-                            _ => Err(ParserError::from("Invalid property value type")),
-                        }?
-                    }
-                    None => ValueType::new(Value::Empty, Loc::empty()),
-                };
+                let prop_val = match value_pair.as_rule() {
+                    Rule::string_literal => Ok(ValueType::new(
+                        Value::from(value_pair.as_str().to_string()),
+                        value_pair.loc(),
+                    )),
+                    Rule::integer => value_pair
+                        .as_str()
+                        .parse()
+                        .map(|i| ValueType::new(Value::I32(i), value_pair.loc()))
+                        .map_err(|_| ParserError::from("Invalid integer value")),
+                    Rule::float => value_pair
+                        .as_str()
+                        .parse()
+                        .map(|f| ValueType::new(Value::F64(f), value_pair.loc()))
+                        .map_err(|_| ParserError::from("Invalid float value")),
+                    Rule::boolean => Ok(ValueType::new(
+                        Value::Boolean(value_pair.as_str() == "true"),
+                        value_pair.loc(),
+                    )),
+                    Rule::identifier => Ok(ValueType::Identifier {
+                        value: value_pair.as_str().to_string(),
+                        loc: value_pair.loc(),
+                    }),
+                    _ => Err(ParserError::from("Invalid property value type")),
+                }?;
 
                 Ok((prop_key, prop_val))
             })
@@ -146,8 +135,8 @@ impl HelixParser {
         pair: Pair<Rule>,
     ) -> Result<FieldAddition, ParserError> {
         let mut pairs = pair.clone().into_inner();
-        let key = pairs.next().unwrap().as_str().to_string();
-        let value_pair = pairs.next().unwrap();
+        let key = pairs.try_next()?.as_str().to_string();
+        let value_pair = pairs.try_next()?;
         let value = self.parse_field_value(value_pair)?;
 
         Ok(FieldAddition {
@@ -161,7 +150,7 @@ impl HelixParser {
         &self,
         pair: Pair<Rule>,
     ) -> Result<FieldValue, ParserError> {
-        let value_pair = pair.into_inner().next().unwrap();
+        let value_pair = pair.try_inner_next()?;
         let value: FieldValue = match value_pair.as_rule() {
             Rule::evaluates_to_anything => FieldValue {
                 loc: value_pair.loc(),

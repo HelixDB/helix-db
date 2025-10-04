@@ -1,0 +1,9 @@
+[project]
+name = "where_filter_with_count_comparison"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

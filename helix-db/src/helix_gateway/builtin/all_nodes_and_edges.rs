@@ -145,11 +145,11 @@ fn get_all_nodes_edges_json(
         });
 
         if let Some(prop) = &node_label {
-            let node = Node::decode_node(&value, id)?;
+            let node = Node::decode_node(value, id)?;
             json_node["label"] = json!(node.label());
             if let Some(props) = node.properties {
                 if let Some(prop_value) = props.get(prop) {
-                    json_node["label"] = sonic_rs::to_value(&prop_value.to_string())
+                    json_node["label"] = sonic_rs::to_value(&prop_value.inner_stringify())
                         .unwrap_or_else(|_| sonic_rs::Value::from(""));
                 }
             }
@@ -162,7 +162,7 @@ fn get_all_nodes_edges_json(
     let edge_iter = db.edges_db.iter(txn)?;
     for result in edge_iter {
         let (id, value) = result?;
-        let edge = Edge::decode_edge(&value, id)?;
+        let edge = Edge::decode_edge(value, id)?;
         let id_str = ID::from(id).stringify();
 
         edges.push(json!({

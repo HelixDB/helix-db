@@ -1,0 +1,9 @@
+[project]
+name = "update_drop_then_add"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

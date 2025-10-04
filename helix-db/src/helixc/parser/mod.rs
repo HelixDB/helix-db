@@ -5,17 +5,19 @@
 //! The parsing methods are broken up into separate files, grouped by general functionality.
 //! File names should be self-explanatory as to what is included in the file.
 
+use crate::helixc::parser::errors::ParserError;
 use crate::helixc::parser::types::{Content, HxFile, Schema, Source};
 use location::HasLoc;
 use pest::Parser as PestParser;
 use pest_derive::Parser;
 use std::{
     collections::{HashMap, HashSet},
-    fmt::{Debug, Display, Formatter},
+    fmt::Debug,
     io::Write,
 };
 
 pub mod creation_step_parse_methods;
+pub mod errors;
 pub mod expression_parse_methods;
 pub mod graph_step_parse_methods;
 pub mod location;
@@ -68,15 +70,21 @@ impl HelixParser {
                         let schema_version = match schema_pairs.peek() {
                             Some(pair) => {
                                 if pair.as_rule() == Rule::schema_version {
-                                    schema_pairs
-                                        .next()
-                                        .unwrap()
+                                    let version_pair = schema_pairs.next().ok_or_else(|| {
+                                        ParserError::from("Expected schema version")
+                                    })?;
+                                    let version_str = version_pair
                                         .into_inner()
                                         .next()
-                                        .unwrap()
-                                        .as_str()
-                                        .parse::<usize>()
-                                        .unwrap()
+                                        .ok_or_else(|| {
+                                            ParserError::from("Schema version missing value")
+                                        })?
+                                        .as_str();
+                                    version_str.parse::<usize>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid schema version number '{version_str}': {e}"
+                                        ))
+                                    })?
                                 } else {
                                     1
                                 }
@@ -148,7 +156,6 @@ impl HelixParser {
                         remaining_migrations.insert(pair);
                     }
                     Rule::query_def => {
-                        // parser.source.queries.push(parser.parse_query_def(pairs.next().unwrap())?),
                         remaining_queries.insert(pair);
                     }
                     Rule::EOI => (),
@@ -194,56 +201,5 @@ pub fn write_to_temp_file(content: Vec<&str>) -> Content {
         content: String::new(),
         files,
         source: Source::default(),
-    }
-}
-
-pub enum ParserError {
-    ParseError(String),
-    LexError(String),
-    ParamDoesNotMatchSchema(String),
-    Error,
-}
-
-impl Display for ParserError {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        match self {
-            ParserError::Error => write!(f, "Parse error"),
-             ParserError::ParseError(e) => write!(f, "Parse error: {e}"),
-            ParserError::LexError(e) => write!(f, "Lex error: {e}"),
-            ParserError::ParamDoesNotMatchSchema(p) => {
-                write!(f, "Parameter with name: {p} does not exist in the schema")
-            }
-        }
-    }
-}
-
-impl From<pest::error::Error<Rule>> for ParserError {
-    fn from(e: pest::error::Error<Rule>) -> Self {
-        ParserError::ParseError(e.to_string())
-    }
-}
-
-impl From<String> for ParserError {
-    fn from(e: String) -> Self {
-        ParserError::LexError(e)
-    }
-}
-
-impl From<&'static str> for ParserError {
-    fn from(e: &'static str) -> Self {
-        ParserError::LexError(e.to_string())
-    }
-}
-
-impl std::fmt::Debug for ParserError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ParserError::Error => write!(f, "Parse error"),
-            ParserError::ParseError(e) => write!(f, "Parse error: {e}"),
-            ParserError::LexError(e) => write!(f, "Lex error: {e}"),
-            ParserError::ParamDoesNotMatchSchema(p) => {
-                write!(f, "Parameter with name: {p} does not exist in the schema")
-            }
-        }
     }
 }

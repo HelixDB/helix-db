@@ -8,7 +8,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: v1.1.0
 
 jobs:
   create_release:
@@ -41,36 +40,22 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary_name: helix-cli-linux-amd64
+            binary_name: helix-x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            binary_name: helix-cli-linux-arm64
+            binary_name: helix-aarch64-unknown-linux-gnu
           - os: macos-13
             target: x86_64-apple-darwin
-            binary_name: helix-cli-macos-amd64
+            binary_name: helix-x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary_name: helix-cli-macos-arm64
+            binary_name: helix-aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary_name: helix-cli-windows-amd64.exe
+            binary_name: helix-x86_64-pc-windows-msvc.exe
 
     steps:
       - uses: actions/checkout@v3
-
-      - name: Install OpenSSL, pkg-config, and GCC (Linux only)
-        if: matrix.os == 'ubuntu-20.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config gcc
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          target: ${{ matrix.target }}
-          override: true
-
       - name: Build
         run: |
           cd helix-cli

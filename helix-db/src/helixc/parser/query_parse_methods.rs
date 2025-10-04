@@ -20,9 +20,14 @@ impl HelixParser {
                 let built_in_macro = match pair.into_inner().next() {
                     Some(pair) => match pair.as_rule() {
                         Rule::mcp_macro => Some(BuiltInMacro::MCP),
-                        Rule::model_macro => Some(BuiltInMacro::Model(
-                            pair.into_inner().next().unwrap().as_str().to_string(),
-                        )),
+                        Rule::model_macro => {
+                            match pair.into_inner().next() {
+                                Some(model_name) => Some(BuiltInMacro::Model(
+                                    model_name.as_str().to_string(),
+                                )),
+                                None => return Err(ParserError::from("Model macro missing model name")),
+                            }
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -32,11 +37,18 @@ impl HelixParser {
             }
             _ => None,
         };
-        let name = pairs.next().unwrap().as_str().to_string();
-        let parameters = self.parse_parameters(pairs.next().unwrap())?;
-        let body = pairs.next().unwrap();
+        let name = pairs.next()
+            .ok_or_else(|| ParserError::from("Expected query name"))?
+            .as_str().to_string();
+        let parameters = self.parse_parameters(
+            pairs.next().ok_or_else(|| ParserError::from("Expected parameters block"))?
+        )?;
+        let body = pairs.next()
+            .ok_or_else(|| ParserError::from("Expected query body"))?;
         let statements = self.parse_query_body(body)?;
-        let return_values = self.parse_return_statement(pairs.next().unwrap())?;
+        let return_values = self.parse_return_statement(
+            pairs.next().ok_or_else(|| ParserError::from("Expected return statement"))?
+        )?;
 
         Ok(Query {
             built_in_macro,
@@ -56,7 +68,8 @@ impl HelixParser {
             .map(|p: Pair<'_, Rule>| -> Result<Parameter, ParserError> {
                 let mut inner = p.into_inner();
                 let name = {
-                    let pair = inner.next().unwrap();
+                    let pair = inner.next()
+                        .ok_or_else(|| ParserError::from("Expected parameter name"))?;
                     (pair.loc(), pair.as_str().to_string())
                 };
 
@@ -69,14 +82,15 @@ impl HelixParser {
                 }
 
                 // gets param type
-                let param_type_pair = inner
+                let param_type_outer = inner
                     .clone()
                     .next()
-                    .unwrap()
+                    .ok_or_else(|| ParserError::from("Expected parameter type"))?;
+                let param_type_pair = param_type_outer
                     .clone()
                     .into_inner()
                     .next()
-                    .unwrap();
+                    .ok_or_else(|| ParserError::from("Expected parameter type definition"))?;
                 let param_type_location = param_type_pair.loc();
                 let param_type = self.parse_field_type(
                     // unwraps the param type to get the rule (array, object, named_type, etc)
@@ -111,6 +125,7 @@ impl HelixParser {
     pub(super) fn parse_query_body(&self, pair: Pair<Rule>) -> Result<Vec<Statement>, ParserError> {
         pair.into_inner()
             .map(|p| match p.as_rule() {
+                // path_macro_stmt removed - now using distinct function names,
                 Rule::get_stmt => Ok(Statement {
                     loc: p.loc(),
                     statement: StatementType::Assignment(self.parse_assignment(p)?),
@@ -121,7 +136,8 @@ impl HelixParser {
                 }),
 
                 Rule::drop => {
-                    let inner = p.into_inner().next().unwrap();
+                    let inner = p.into_inner().next()
+                        .ok_or_else(|| ParserError::from("Drop statement missing expression"))?;
                     Ok(Statement {
                         loc: inner.loc(),
                         statement: StatementType::Drop(self.parse_expression(inner)?),

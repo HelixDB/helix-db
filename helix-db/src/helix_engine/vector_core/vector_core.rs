@@ -508,7 +508,12 @@ impl HNSW for VectorCore {
                 level,
                 None,
             )?;
-            curr_ep = nearest.peek().unwrap().clone();
+            curr_ep = nearest
+                .peek()
+                .ok_or(VectorError::VectorCoreError(
+                    "emtpy search result".to_string(),
+                ))?
+                .clone();
 
             let neighbors = self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
             self.set_neighbours(txn, query.get_id(), &neighbors, level)?;

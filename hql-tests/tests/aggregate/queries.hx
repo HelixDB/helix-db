@@ -1,6 +1,7 @@
 N::User {
     name: String,
-    age: I32,
+    age: U8,
+    email: String
 }
 
 
@@ -16,3 +17,15 @@ QUERY count(name: String, id: ID) =>
     users1 <- N<User>::COUNT::GROUP_BY(name, age)
     users2 <- N<User>::COUNT::AGGREGATE_BY(name, age)
     RETURN users1, users2
+
+QUERY GroupUsersByAge () =>
+    users <- N<User>
+    RETURN users::GROUP_BY(age)
+
+QUERY CreateUser (name: String, age: U8, email: String) =>
+    user <- AddN<User>({
+        name: name,
+        age: age,
+        email: email
+    })
+    RETURN user

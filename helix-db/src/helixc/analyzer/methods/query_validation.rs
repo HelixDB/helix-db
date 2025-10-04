@@ -77,7 +77,7 @@ pub(crate) fn validate_query<'a>(ctx: &mut Ctx<'a>, original_query: &'a Query) {
             query.statements.push(s);
         } else {
             // given all erroneous statements are caught by the analyzer, this should never happen
-            unreachable!()
+            return;
         }
     }
 
@@ -133,6 +133,10 @@ fn analyze_return_expr<'a>(
         ReturnType::Expression(expr) => {
             let (_, stmt) = infer_expr_type(ctx, expr, scope, original_query, None, query);
 
+            if stmt.is_none() {
+                return;
+            }
+
             match stmt.unwrap() {
                 GeneratedStatement::Traversal(traversal) => {
                     match &traversal.source_step.inner() {
@@ -153,8 +157,14 @@ fn analyze_return_expr<'a>(
                                         ReturnValueExpr::Traversal(traversal.clone()),
                                     ));
                                 }
-                                ShouldCollect::ToVal => {
+                                ShouldCollect::ToObj => {
                                     query.return_values.push(ReturnValue::new_single_named(
+                                        GeneratedValue::Literal(GenRef::Literal(v.inner().clone())),
+                                        ReturnValueExpr::Traversal(traversal.clone()),
+                                    ));
+                                }
+                                ShouldCollect::Try => {
+                                    query.return_values.push(ReturnValue::new_aggregate_traversal(
                                         GeneratedValue::Literal(GenRef::Literal(v.inner().clone())),
                                         ReturnValueExpr::Traversal(traversal.clone()),
                                     ));
@@ -279,7 +289,7 @@ fn process_return_object<'a>(
                                 ShouldCollect::ToVec => {
                                     ReturnValueExpr::Traversal(traversal.clone())
                                 }
-                                ShouldCollect::ToVal => {
+                                ShouldCollect::ToObj => {
                                     ReturnValueExpr::Traversal(traversal.clone())
                                 }
                                 _ => {

@@ -1,0 +1,9 @@
+[project]
+name = "nested_and_ors"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

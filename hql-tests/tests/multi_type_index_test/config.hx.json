@@ -1,0 +1,20 @@
+{
+  "db_max_size_gb": 2,
+  "graph_config": {
+    "secondary_indices": [
+      "str_field",
+      "i8_field",
+      "i16_field", 
+      "i32_field",
+      "i64_field",
+      "u8_field",
+      "u16_field",
+      "u32_field",
+      "u64_field",
+      "u128_field",
+      "f32_field",
+      "f64_field",
+      "bool_field"
+    ]
+  }
+}

@@ -177,6 +177,8 @@ graph_step = {
   | to_v
   | out
   | in_nodes
+  | shortest_path_dijkstras
+  | shortest_path_bfs
   | shortest_path
   | search_vector
 }
@@ -189,6 +191,8 @@ to_v ={ "ToV"}
 out ={ "Out" ~ ("<" ~ type_args ~ ">")?}
 in_nodes ={ "In" ~ ("<" ~ type_args ~ ">")?}
 shortest_path ={ "ShortestPath" ~ ("<" ~ type_args ~ ">")? ~ to_from}
+shortest_path_dijkstras ={ "ShortestPathDijkstras" ~ ("<" ~ type_args ~ ">")? ~ "(" ~ anonymous_traversal ~ ")" ~ to_from}
+shortest_path_bfs ={ "ShortestPathBFS" ~ ("<" ~ type_args ~ ">")? ~ to_from}
 
 
 // ---------------------------------------------------------------------

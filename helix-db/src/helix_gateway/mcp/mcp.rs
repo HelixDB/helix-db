@@ -360,7 +360,7 @@ pub fn schema_resource(input: &mut MCPToolInput) -> Result<Response, GraphError>
 
     if input.schema.is_some() {
         Ok(Format::Json.create_response(&ReturnValue::from(
-            input.schema.as_ref().unwrap().to_string(),
+            input.schema.as_ref().expect("Schema not found").to_string(),
         )))
     } else {
         Ok(Format::Json.create_response(&ReturnValue::from("no schema".to_string())))

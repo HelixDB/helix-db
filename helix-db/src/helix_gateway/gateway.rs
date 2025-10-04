@@ -1,6 +1,5 @@
 use std::sync::LazyLock;
 use std::sync::atomic::{self, AtomicUsize};
-use std::thread::available_parallelism;
 use std::time::Instant;
 use std::{collections::HashMap, sync::Arc};
 
@@ -8,7 +7,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use core_affinity::{CoreId, set_for_current};
+use core_affinity::CoreId;
 use helix_metrics::events::{EventType, QueryErrorEvent, QuerySuccessEvent};
 use sonic_rs::json;
 use tracing::{info, trace, warn};
@@ -33,7 +32,7 @@ use crate::{
 pub struct GatewayOpts {}
 
 impl GatewayOpts {
-    pub const DEFAULT_POOL_SIZE: usize = 8;
+    pub const DEFAULT_WORKERS_PER_CORE: usize = 5;
 }
 
 pub static HELIX_METRICS_CLIENT: LazyLock<helix_metrics::HelixMetricsClient> =
@@ -41,8 +40,7 @@ pub static HELIX_METRICS_CLIENT: LazyLock<helix_metrics::HelixMetricsClient> =
 
 pub struct HelixGateway {
     address: String,
-    worker_size: usize,
-    io_size: usize,
+    workers_per_core: usize,
     graph_access: Arc<HelixGraphEngine>,
     router: Arc<HelixRouter>,
     opts: Option<HelixGraphEngineOpts>,
@@ -53,8 +51,7 @@ impl HelixGateway {
     pub fn new(
         address: &str,
         graph_access: Arc<HelixGraphEngine>,
-        worker_size: usize,
-        io_size: usize,
+        workers_per_core: usize,
         routes: Option<HashMap<String, HandlerFn>>,
         mcp_routes: Option<HashMap<String, MCPHandlerFn>>,
         opts: Option<HelixGraphEngineOpts>,
@@ -65,8 +62,7 @@ impl HelixGateway {
             address: address.to_string(),
             graph_access,
             router,
-            worker_size,
-            io_size,
+            workers_per_core,
             opts,
             cluster_id,
         }
@@ -74,51 +70,28 @@ impl HelixGateway {
 
     pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         trace!("Starting Helix Gateway");
-        let (io_setter, worker_setter) = match core_affinity::get_core_ids() {
-            Some(all_cores) => {
-                let io_cores = CoreSetter::new(&all_cores[0..self.io_size]);
-                let worker_cores = CoreSetter::new(&all_cores[self.io_size..]);
-                (Some(io_cores), Some(worker_cores))
-            }
-            None => {
-                warn!("Failed to get core ids");
-                (None, None)
-            }
-        };
 
-        if let Ok(total_cores) = available_parallelism()
-            && total_cores.get() < self.worker_size + self.io_size
-        {
-            warn!(
-                "using more threads ({} io + {} worker = {}) than available cores ({}).",
-                self.io_size,
-                self.worker_size,
-                self.io_size + self.worker_size,
-                total_cores.get()
-            );
-        }
+        let all_core_ids = core_affinity::get_core_ids().expect("unable to get core IDs");
 
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(self.io_size)
-            .on_thread_start({
-                let local_setter = io_setter.clone();
-                move || {
-                    if let Some(s) = &local_setter {
-                        s.set_current();
-                    }
-                }
-            })
-            .enable_all()
-            .build()?;
+        let tokio_core_ids = all_core_ids.clone();
+        let tokio_core_setter = Arc::new(CoreSetter::new(tokio_core_ids, 1));
 
-        let rt = Arc::new(rt);
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(tokio_core_setter.num_threads())
+                .on_thread_start(move || Arc::clone(&tokio_core_setter).set_current())
+                .enable_all()
+                .build()?,
+        );
+
+        let worker_core_ids = all_core_ids.clone();
+        let worker_core_setter = Arc::new(CoreSetter::new(worker_core_ids, self.workers_per_core));
 
         let worker_pool = WorkerPool::new(
-            self.worker_size,
-            worker_setter,
-            self.graph_access.clone(),
-            self.router.clone(),
-            rt.clone(),
+            worker_core_setter,
+            Arc::clone(&self.graph_access),
+            Arc::clone(&self.router),
+            Arc::clone(&rt),
         );
 
         let mut axum_app = axum::Router::new();
@@ -143,12 +116,14 @@ impl HelixGateway {
         }));
 
         rt.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();
+            let listener = tokio::net::TcpListener::bind(self.address)
+                .await
+                .expect("Failed to bind listener");
             info!("Listener has been bound, starting server");
             axum::serve(listener, axum_app)
                 .with_graceful_shutdown(shutdown_signal())
                 .await
-                .unwrap()
+                .expect("Failed to serve")
         });
 
         Ok(())
@@ -157,29 +132,29 @@ impl HelixGateway {
 
 async fn shutdown_signal() {
     // Respond to either Ctrl-C (SIGINT) or SIGTERM (e.g. `kill` or systemd stop)
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl-C, starting graceful shutdown…");
-        }
-        // #[cfg(unix)]
-        _ = sigterm() => {
-            info!("Received SIGTERM, starting graceful shutdown…");
-        }
-    }
-}
-
-async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        term.recv().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl-C, starting graceful shutdown…");
+            }
+            _ = sigterm() => {
+                info!("Received SIGTERM, starting graceful shutdown…");
+            }
+        }
     }
     #[cfg(not(unix))]
     {
-        use tokio::signal::ctrl_c;
-        ctrl_c().await;
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Received Ctrl-C, starting graceful shutdown…");
     }
+}
+
+#[cfg(unix)]
+async fn sigterm() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    term.recv().await;
 }
 
 async fn post_handler(
@@ -230,31 +205,39 @@ pub struct AppState {
     pub cluster_id: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct CoreSetter(Arc<CoreSetterInner>);
-
-pub struct CoreSetterInner {
+pub struct CoreSetter {
     cores: Vec<CoreId>,
-    index: AtomicUsize,
+    threads_per_core: usize,
+    incrementing_index: AtomicUsize,
 }
 
 impl CoreSetter {
-    pub fn new(cores: &[CoreId]) -> Self {
-        Self(Arc::new(CoreSetterInner {
-            cores: cores.to_vec(),
-            index: AtomicUsize::new(0),
-        }))
+    pub fn new(cores: Vec<CoreId>, threads_per_core: usize) -> Self {
+        Self {
+            cores,
+            threads_per_core,
+            incrementing_index: AtomicUsize::new(0),
+        }
     }
 
-    pub fn set_current(&self) {
-        let inner = &self.0;
-        let idx = inner.index.fetch_add(1, atomic::Ordering::SeqCst);
-        match inner.cores.get(idx) {
+    pub fn num_threads(&self) -> usize {
+        self.cores.len() * self.threads_per_core
+    }
+
+    pub fn set_current(self: Arc<Self>) {
+        let curr_idx = self
+            .incrementing_index
+            .fetch_add(1, atomic::Ordering::SeqCst);
+
+        let core_index = curr_idx / self.threads_per_core;
+        match self.cores.get(core_index) {
             Some(c) => {
-                set_for_current(*c);
+                core_affinity::set_for_current(*c);
                 trace!("Set core affinity to: {c:?}");
             }
-            None => warn!("Tried to set core affinity, but all cores already used"),
+            None => warn!(
+                "CoreSetter::set_current called more times than cores.len() * threads_per_core. Core affinity not set"
+            ),
         };
     }
 }

@@ -1,0 +1,9 @@
+[project]
+name = "multiple_types"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

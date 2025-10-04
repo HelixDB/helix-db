@@ -9,6 +9,7 @@ use std::process::Command;
 use tokio::fs;
 
 #[derive(Debug, Clone)]
+#[allow(unused)]
 struct GitHubConfig {
     token: String,
     owner: String,
@@ -37,6 +38,7 @@ fn generate_error_hash(error_type: &str, error_message: &str, _test_name: &str) 
     general_purpose::STANDARD.encode(hash)[0..12].to_string()
 }
 
+#[allow(unused)]
 async fn check_issue_exists(github_config: &GitHubConfig, error_hash: &str) -> Result<bool> {
     println!("DEBUG: Checking if issue exists with hash: {error_hash}");
 
@@ -63,6 +65,7 @@ async fn check_issue_exists(github_config: &GitHubConfig, error_hash: &str) -> R
     Ok(count > 0)
 }
 
+#[allow(unused)]
 async fn create_github_issue(
     github_config: &GitHubConfig,
     error_type: &str,
@@ -141,51 +144,51 @@ async fn handle_error_with_github(
         "DEBUG: Handling error with GitHub - Type: {error_type}, Test: {test_name}, Hash: {error_hash}"
     );
 
-    match check_issue_exists(github_config, &error_hash).await {
-        Ok(exists) => {
-            println!("DEBUG: Issue exists check result: {exists}");
-            if !exists {
-                println!("DEBUG: Creating new GitHub issue...");
-                if let Err(e) = create_github_issue(
-                    github_config,
-                    error_type,
-                    error_message,
-                    test_name,
-                    &error_hash,
-                    query,
-                    schema,
-                    generated_rust_code,
-                )
-                .await
-                {
-                    eprintln!("Failed to create GitHub issue: {e}");
-                }
-            } else {
-                println!(
-                    "Issue already exists for {error_type} error in {test_name} (hash: {error_hash})"
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to check existing issues: {e}");
-            // Try to create the issue anyway if we can't check for duplicates
-            println!("DEBUG: Attempting to create issue despite check failure...");
-            if let Err(e) = create_github_issue(
-                github_config,
-                error_type,
-                error_message,
-                test_name,
-                &error_hash,
-                query,
-                schema,
-                generated_rust_code,
-            )
-            .await
-            {
-                eprintln!("Failed to create GitHub issue: {e}");
-            }
-        }
-    }
+    // match check_issue_exists(github_config, &error_hash).await {
+    //     Ok(exists) => {
+    //         println!("DEBUG: Issue exists check result: {exists}");
+    //         if !exists {
+    //             println!("DEBUG: Creating new GitHub issue...");
+    //             if let Err(e) = create_github_issue(
+    //                 github_config,
+    //                 error_type,
+    //                 error_message,
+    //                 test_name,
+    //                 &error_hash,
+    //                 query,
+    //                 schema,
+    //                 generated_rust_code,
+    //             )
+    //             .await
+    //             {
+    //                 eprintln!("Failed to create GitHub issue: {e}");
+    //             }
+    //         } else {
+    //             println!(
+    //                 "Issue already exists for {error_type} error in {test_name} (hash: {error_hash})"
+    //             );
+    //         }
+    //     }
+    //     Err(e) => {
+    //         eprintln!("Failed to check existing issues: {e}");
+    //         // Try to create the issue anyway if we can't check for duplicates
+    //         println!("DEBUG: Attempting to create issue despite check failure...");
+    //         if let Err(e) = create_github_issue(
+    //             github_config,
+    //             error_type,
+    //             error_message,
+    //             test_name,
+    //             &error_hash,
+    //             query,
+    //             schema,
+    //             generated_rust_code,
+    //         )
+    //         .await
+    //         {
+    //             eprintln!("Failed to create GitHub issue: {e}");
+    //         }
+    //     }
+    // }
 
     Ok(())
 }
@@ -306,7 +309,7 @@ async fn main() -> Result<()> {
 
     if !output.status.success() {
         bail!(
-            "❌ BUILD FAILED: helix-cli build.sh failed\nStderr: {}\nStdout: {}",
+            "[FAILED] BUILD FAILED: helix-cli build.sh failed\nStderr: {}\nStdout: {}",
             String::from_utf8_lossy(&output.stderr),
             String::from_utf8_lossy(&output.stdout)
         );
@@ -363,7 +366,7 @@ async fn main() -> Result<()> {
         }
 
         process_test_directory(test_name, &tests_dir, &temp_repo, &github_config).await?;
-        println!("✅ Successfully processed {test_name}");
+        println!("[SUCCESS] Successfully processed {test_name}");
     } else if let Some(batch_args) = matches.get_many::<u32>("batch") {
         // Process in batch mode
         let batch_values: Vec<u32> = batch_args.copied().collect();
@@ -444,14 +447,14 @@ async fn main() -> Result<()> {
 
         if !failed_tests.is_empty() {
             bail!(
-                "❌ BATCH PROCESSING FAILED: {} out of {} tests failed compilation/check: {:?}",
+                "[FAILED] BATCH PROCESSING FAILED: {} out of {} tests failed compilation/check: {:?}",
                 failed_tests.len(),
                 end_idx - start_idx,
                 failed_tests
             );
         }
 
-        println!("✅ Finished processing batch {current_batch}/{total_batches} successfully");
+        println!("[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully");
     } else {
         // Process all test directories in parallel (default behavior)
         println!(
@@ -493,7 +496,7 @@ async fn main() -> Result<()> {
 
         if !failed_tests.is_empty() {
             bail!(
-                "❌ PROCESSING FAILED: {} out of {} tests failed compilation/check: {:?}",
+                "[FAILED] PROCESSING FAILED: {} out of {} tests failed compilation/check: {:?}",
                 failed_tests.len(),
                 test_dirs.len(),
                 failed_tests
@@ -501,7 +504,7 @@ async fn main() -> Result<()> {
         }
 
         println!(
-            "✅ Finished processing all {} tests successfully",
+            "[SUCCESS] Finished processing all {} tests successfully",
             test_dirs.len()
         );
     }
@@ -521,6 +524,7 @@ async fn process_test_directory(
         // Skip non-existent directories silently in parallel mode
         return Ok(());
     }
+
 
     // Find the query file - could be queries.hx or file*.hx
     let mut query_file_path = None;
@@ -570,10 +574,46 @@ async fn process_test_directory(
         .await
         .context("Failed to create temp directory")?;
 
-    // Copy the file contents to temp directory
+    // Copy the test files (queries.hx, schema.hx, helix.toml, etc.) to temp directory
     copy_dir_recursive(&folder_path, &temp_dir).await?;
-    // copy repo to folder
-    copy_dir_recursive(temp_repo, &temp_dir).await?;
+
+    // Copy the entire helix-db project structure for cargo check
+    // But skip .helix directory to avoid conflicts
+    let helix_db_dir = temp_dir.join("helix-db");
+    fs::create_dir_all(&helix_db_dir).await?;
+
+    // Copy all project crates and dependencies (excluding hql-tests to avoid conflicts)
+    let crates_to_copy = vec![
+        "helix-container",
+        "helix-db",
+        "helix-macros",
+        "helix-cli",
+        "metrics",
+    ];
+
+    for crate_name in crates_to_copy {
+        let src = temp_repo.join(crate_name);
+        let dst = helix_db_dir.join(crate_name);
+        if src.exists() {
+            copy_dir_recursive(&src, &dst).await?;
+        }
+    }
+
+    // Copy root Cargo.toml and Cargo.lock, but remove hql-tests from workspace
+    let cargo_toml_src = temp_repo.join("Cargo.toml");
+    let cargo_toml_dst = helix_db_dir.join("Cargo.toml");
+    if cargo_toml_src.exists() {
+        // Read the Cargo.toml and remove hql-tests from workspace members
+        let cargo_content = fs::read_to_string(&cargo_toml_src).await?;
+        let modified_content = cargo_content.replace("    \"hql-tests\",\n", "");
+        fs::write(&cargo_toml_dst, modified_content).await?;
+    }
+
+    let cargo_lock_src = temp_repo.join("Cargo.lock");
+    let cargo_lock_dst = helix_db_dir.join("Cargo.lock");
+    if cargo_lock_src.exists() {
+        fs::copy(&cargo_lock_src, &cargo_lock_dst).await?;
+    }
 
     // Run helix compile command
     let compile_output_path = temp_dir.join("helix-db/helix-container/src");
@@ -604,7 +644,7 @@ async fn process_test_directory(
         let stdout = String::from_utf8_lossy(&output.stdout);
         // For helix compilation, we'll show the raw output since it's not cargo format
         let error_message =
-            format!("❌ HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}");
+            format!("[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}");
 
         // Create GitHub issue if configuration is available
         if let Some(config) = github_config {
@@ -654,7 +694,7 @@ async fn process_test_directory(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let _stdout = String::from_utf8_lossy(&output.stdout);
             // let filtered_errors = extract_cargo_errors(&stderr, &stdout);
-            let error_message = format!("❌ CARGO CHECK FAILED for {test_name}\n{stderr}");
+            let error_message = format!("[FAILED] CARGO CHECK FAILED for {test_name}\n{stderr}");
 
             // Create GitHub issue if configuration is available
             if let Some(config) = github_config {
@@ -732,4 +772,4 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-const IGNORE_DIRS: [&str; 2] = ["target", ".git"];
+const IGNORE_DIRS: [&str; 3] = ["target", ".git", ".helix"];

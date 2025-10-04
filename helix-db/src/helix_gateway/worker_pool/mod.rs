@@ -4,6 +4,7 @@ use crate::helix_gateway::gateway::CoreSetter;
 use crate::helix_gateway::mcp::mcp::MCPToolInput;
 use crate::protocol::{self, HelixError, Request};
 use flume::{Receiver, Selector, Sender};
+use std::iter;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use tokio::runtime::Runtime;
@@ -22,32 +23,27 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     pub fn new(
-        size: usize,
-        core_setter: Option<CoreSetter>,
+        workers_core_setter: Arc<CoreSetter>,
         graph_access: Arc<HelixGraphEngine>,
         router: Arc<HelixRouter>,
         io_rt: Arc<Runtime>,
     ) -> WorkerPool {
-        assert!(
-            size > 0,
-            "Expected number of threads in thread pool to be more than 0, got {size}"
-        );
+        let (req_tx, req_rx) = flume::bounded::<ReqMsg>(1000);
+        let (cont_tx, cont_rx) = flume::bounded::<ContMsg>(1000);
 
-        let (req_tx, req_rx) = flume::bounded::<ReqMsg>(1000); 
-        let (cont_tx, cont_rx) = flume::bounded::<ContMsg>(1000); 
-
-        let workers = (0..size)
-            .map(|_| {
+        let num_workers = workers_core_setter.num_threads();
+        let workers = iter::repeat_n(workers_core_setter, num_workers)
+            .map(|setter| {
                 Worker::start(
                     req_rx.clone(),
-                    core_setter.clone(),
-                    graph_access.clone(),
-                    router.clone(),
-                    io_rt.clone(),
+                    setter,
+                    Arc::clone(&graph_access),
+                    Arc::clone(&router),
+                    Arc::clone(&io_rt),
                     (cont_tx.clone(), cont_rx.clone()),
                 )
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         WorkerPool {
             tx: req_tx,
@@ -82,16 +78,14 @@ struct Worker {
 impl Worker {
     pub fn start(
         rx: Receiver<ReqMsg>,
-        core_setter: Option<CoreSetter>,
+        core_setter: Arc<CoreSetter>,
         graph_access: Arc<HelixGraphEngine>,
         router: Arc<HelixRouter>,
         io_rt: Arc<Runtime>,
         (cont_tx, cont_rx): (ContChan, Receiver<ContMsg>),
     ) -> Worker {
         let handle = std::thread::spawn(move || {
-            if let Some(cs) = core_setter {
-                cs.set_current();
-            }
+            core_setter.set_current();
 
             trace!("thread started");
 
@@ -160,9 +154,19 @@ fn request_mapper(
             if let Some(mcp_handler) = router.mcp_routes.get(&request.name) {
                 let mut mcp_input = MCPToolInput {
                     request,
-                    mcp_backend: Arc::clone(graph_access.mcp_backend.as_ref().unwrap()),
-                    mcp_connections: Arc::clone(graph_access.mcp_connections.as_ref().unwrap()),
-                    schema: Some(graph_access.storage.storage_config.schema.clone()),
+                    mcp_backend: Arc::clone(
+                        graph_access
+                            .mcp_backend
+                            .as_ref()
+                            .expect("MCP backend not found"),
+                    ),
+                    mcp_connections: Arc::clone(
+                        graph_access
+                            .mcp_connections
+                            .as_ref()
+                            .expect("MCP connections not found"),
+                    ),
+                    schema: graph_access.storage.storage_config.schema.clone(),
                 };
                 Some(mcp_handler(&mut mcp_input).map_err(Into::into))
             } else {

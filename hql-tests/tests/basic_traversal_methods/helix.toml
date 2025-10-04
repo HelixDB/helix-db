@@ -1,0 +1,9 @@
+[project]
+name = "basic_traversal_methods"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

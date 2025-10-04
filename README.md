@@ -55,48 +55,43 @@ The Helix CLI tool can be used to check, compile and deploy Helix locally.
    curl -sSL "https://install.helix-db.com" | bash
    ```
 
-2. Install Helix
+2. Setup
 
    ```bash
-   helix install
+   mkdir <path-to-project> && cd <path-to-project>
+   helix init
    ```
 
-3. Setup
-
-   ```bash
-   helix init --path <path-to-project>
-   ```
-
-4. Write queries
+3. Write queries
 
    Open your newly created `.hx` files and start writing your schema and queries.
-   Head over to [our docs](https://docs.helix-db.com/introduction/cookbook/basic) for more information about writing queries
+   Head over to [our docs](https://docs.helix-db.com/documentation/getting-started/intro) for more information about writing queries
+
+
 
    ```js
    QUERY addUser(name: String, age: I64) =>
-      user <- AddN<User({name: name, age: age})
+      user <- AddN<User>({name: name, age: age})
       RETURN user
 
    QUERY getUser(user_name: String) =>
-      user <- N<User::WHERE(_::{name}::EQ(user_name))
+      user <- N<User>::WHERE(_::{name}::EQ(user_name))
       RETURN user
    ```
 
-5. Check your queries compile before building them into API endpoints (optional)
+4. Check your queries compile before building them into API endpoints (optional)
 
    ```bash
-   # in ./<path-to-project>
    helix check
    ```
 
-6. Deploy your queries
+5. Deploy your queries
 
    ```bash
-   # in ./<path-to-project>
-   helix deploy
+   helix push dev
    ```
 
-7. Start calling them using our [TypeScript SDK](https://github.com/HelixDB/helix-ts) or [Python SDK](https://github.com/HelixDB/helix-py). For example:
+6. Start calling them using our [TypeScript SDK](https://github.com/HelixDB/helix-ts) or [Python SDK](https://github.com/HelixDB/helix-py). For example:
 
    ```typescript
    import HelixDB from "helix-ts";
@@ -119,24 +114,12 @@ The Helix CLI tool can be used to check, compile and deploy Helix locally.
    console.log(user);
    ```
 
-Other commands:
-
-- `helix instances` to see all your local instances.
-- `helix stop <instance-id>` to stop your local instance with specified id.
-- `helix stop --all` to stop all your local instances.
-- `helix dockerdev run` to start a Docker development instance.
-- `helix dockerdev status` to check the Docker development instance status.
-- `helix dockerdev logs` to view Docker container logs.
-- `helix dockerdev stop` to stop the Docker development instance.
-- `helix dockerdev delete` to remove the Docker development instance and data.
-
 ## Roadmap
 
 Our current focus areas include:
 
 - Organizational auth to manage teams, and Helix clusters.
 - Improvements to our server code to massively improve network IO performance and scalability.
-- More 3rd party integrations to make it easier to build with Helix.
 - Guides and educational content to help you get started with Helix.
 - Binary quantisation for even better performance.
 

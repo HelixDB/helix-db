@@ -144,7 +144,7 @@ impl HVector {
     // will make to use const param for type of encoding (f32, f64, etc)
     /// Converts a byte array into a HVector by chunking the bytes into f64 values
     pub fn from_bytes(id: u128, level: usize, bytes: &[u8]) -> Result<Self, VectorError> {
-        if bytes.len() % std::mem::size_of::<f64>() != 0 {
+        if !bytes.len().is_multiple_of(std::mem::size_of::<f64>()){
             return Err(VectorError::InvalidVectorData);
         }
 
@@ -152,7 +152,8 @@ impl HVector {
         let chunks = bytes.chunks_exact(std::mem::size_of::<f64>());
 
         for chunk in chunks {
-            let value = f64::from_be_bytes(chunk.try_into().unwrap());
+            // panic here because panic means corruption of some sort
+            let value = f64::from_be_bytes(chunk.try_into().expect("Invalid chunk"));
             data.push(value);
         }
 
@@ -277,6 +278,7 @@ impl Filterable for HVector {
             "data" => Ok(Cow::Owned(Value::Array(
                 self.data.iter().map(|f| Value::F64(*f)).collect(),
             ))),
+            "score" => Ok(Cow::Owned(Value::F64(self.score()))),
             _ => match &self.properties {
                 Some(properties) => properties
                     .get(key)

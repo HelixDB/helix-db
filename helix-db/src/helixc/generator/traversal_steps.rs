@@ -55,17 +55,19 @@ impl Debug for TraversalType {
 #[derive(Clone, Debug)]
 pub enum ShouldCollect {
     ToVec,
-    ToVal,
+    ToObj,
     No,
     Try,
+    ToValue
 }
 impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ShouldCollect::ToVec => write!(f, ".collect_to::<Vec<_>>()"),
-            ShouldCollect::ToVal => write!(f, ".collect_to_obj()"),
+            ShouldCollect::ToObj => write!(f, ".collect_to_obj()"),
             ShouldCollect::Try => write!(f, "?"),
             ShouldCollect::No => write!(f, ""),
+            ShouldCollect::ToValue => write!(f, ".collect_to_value()"),
         }
     }
 }
@@ -182,6 +184,8 @@ pub enum Step {
 
     // shortest path
     ShortestPath(ShortestPath),
+    ShortestPathDijkstras(ShortestPathDijkstras),
+    ShortestPathBFS(ShortestPathBFS),
 
     // search vector
     SearchVector(SearchVectorStep),
@@ -213,6 +217,8 @@ impl Display for Step {
             Step::BoolOp(bool_op) => write!(f, "{bool_op}"),
             Step::Remapping(remapping) => write!(f, "{remapping}"),
             Step::ShortestPath(shortest_path) => write!(f, "{shortest_path}"),
+            Step::ShortestPathDijkstras(shortest_path_dijkstras) => write!(f, "{shortest_path_dijkstras}"),
+            Step::ShortestPathBFS(shortest_path_bfs) => write!(f, "{shortest_path_bfs}"),
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
             Step::GroupBy(group_by) => write!(f, "{group_by}"),
             Step::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
@@ -240,6 +246,8 @@ impl Debug for Step {
             Step::BoolOp(_) => write!(f, "Bool"),
             Step::Remapping(_) => write!(f, "Remapping"),
             Step::ShortestPath(_) => write!(f, "ShortestPath"),
+            Step::ShortestPathDijkstras(_) => write!(f, "ShortestPathDijkstras"),
+            Step::ShortestPathBFS(_) => write!(f, "ShortestPathBFS"),
             Step::SearchVector(_) => write!(f, "SearchVector"),
             Step::GroupBy(_) => write!(f, "GroupBy"),
             Step::AggregateBy(_) => write!(f, "AggregateBy"),
@@ -391,12 +399,105 @@ pub struct ShortestPath {
     pub label: Option<GenRef<String>>,
     pub from: Option<GenRef<String>>,
     pub to: Option<GenRef<String>>,
+    pub algorithm: Option<PathAlgorithm>,
+}
+
+#[derive(Clone)]
+pub struct ShortestPathDijkstras {
+    pub label: Option<GenRef<String>>,
+    pub from: Option<GenRef<String>>,
+    pub to: Option<GenRef<String>>,
+    pub weight_property: Option<GenRef<String>>,
+}
+
+#[derive(Clone)]
+pub struct ShortestPathBFS {
+    pub label: Option<GenRef<String>>,
+    pub from: Option<GenRef<String>>,
+    pub to: Option<GenRef<String>>,
+}
+
+#[derive(Clone)]
+pub enum PathAlgorithm {
+    BFS,
+    Dijkstra,
 }
 impl Display for ShortestPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.algorithm {
+            Some(PathAlgorithm::Dijkstra) => {
+                write!(
+                    f,
+                    "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::Dijkstra)",
+                    self.label
+                        .clone()
+                        .map_or("None".to_string(), |label| format!("Some({label})")),
+                    self.from
+                        .clone()
+                        .map_or("None".to_string(), |from| format!("Some(&{from})")),
+                    self.to
+                        .clone()
+                        .map_or("None".to_string(), |to| format!("Some(&{to})"))
+                )
+            }
+            Some(PathAlgorithm::BFS) => {
+                write!(
+                    f,
+                    "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::BFS)",
+                    self.label
+                        .clone()
+                        .map_or("None".to_string(), |label| format!("Some({label})")),
+                    self.from
+                        .clone()
+                        .map_or("None".to_string(), |from| format!("Some(&{from})")),
+                    self.to
+                        .clone()
+                        .map_or("None".to_string(), |to| format!("Some(&{to})"))
+                )
+            }
+            None => {
+                // Default to BFS for backward compatibility
+                write!(
+                    f,
+                    "shortest_path({}, {}, {})",
+                    self.label
+                        .clone()
+                        .map_or("None".to_string(), |label| format!("Some({label})")),
+                    self.from
+                        .clone()
+                        .map_or("None".to_string(), |from| format!("Some(&{from})")),
+                    self.to
+                        .clone()
+                        .map_or("None".to_string(), |to| format!("Some(&{to})"))
+                )
+            }
+        }
+    }
+}
+
+impl Display for ShortestPathDijkstras {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "shortest_path({}, {}, {})",
+            "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::Dijkstra)",
+            self.label
+                .clone()
+                .map_or("None".to_string(), |label| format!("Some({label})")),
+            self.from
+                .clone()
+                .map_or("None".to_string(), |from| format!("Some(&{from})")),
+            self.to
+                .clone()
+                .map_or("None".to_string(), |to| format!("Some(&{to})"))
+        )
+    }
+}
+
+impl Display for ShortestPathBFS {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::BFS)",
             self.label
                 .clone()
                 .map_or("None".to_string(), |label| format!("Some({label})")),

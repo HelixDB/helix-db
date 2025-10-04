@@ -1,0 +1,9 @@
+[project]
+name = "custom_return_objects"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

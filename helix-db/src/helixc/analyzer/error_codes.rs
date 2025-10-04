@@ -16,6 +16,10 @@ pub enum ErrorCode {
     E105,
     /// `E106` – `use of undeclared node type in schema`
     E106,
+    /// `E107` – `duplicate schema definition`
+    E107,
+    /// `E108` – `invalid schema version`
+    E108,
 
     // TYPE ERRORS
     /// `E201` – `item type not in schema`
@@ -127,6 +131,8 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::E104 => write!(f, "E104"),
             ErrorCode::E105 => write!(f, "E105"),
             ErrorCode::E106 => write!(f, "E106"),
+            ErrorCode::E107 => write!(f, "E107"),
+            ErrorCode::E108 => write!(f, "E108"),
             ErrorCode::E201 => write!(f, "E201"),
             ErrorCode::E202 => write!(f, "E202"),
             ErrorCode::E203 => write!(f, "E203"),
@@ -200,6 +206,7 @@ implement_error_code!(E102, "unknown edge type `{} `" => { edge_type }, "check t
 implement_error_code!(E103, "unknown vector type `{}`" => { vector_type }, "check the schema field names or declare the vector type" => {});
 implement_error_code!(E105, "invalid identifier `{}`" => { identifier }, "check the identifier" => {});
 implement_error_code!(E106, "use of undeclared node or vector type `{}` in schema" => { item_type_name }, "declare `{}` in the schema before using it in an edge" => { item_type_name });
+implement_error_code!(E107, "duplicate {} definition `{}`" => { schema_type, name }, "rename the {} or remove the duplicate definition" => { schema_type });
 
 // Type errors
 implement_error_code!(E201, "item type not in schema `{}`" => { item_type }, "check the schema field names" => {});

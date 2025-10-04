@@ -15,7 +15,8 @@ use crate::{
     },
 };
 use core::fmt;
-use std::fmt::Display;
+use std::io::Write;
+use std::{fmt::Display, fs::File, io::Result, path::Path};
 
 pub mod bool_ops;
 pub mod migrations;
@@ -28,6 +29,14 @@ pub mod statements;
 pub mod traversal_steps;
 pub mod tsdisplay;
 pub mod utils;
+
+/// Source is analyzed source
+/// Path is directory to place the generated files
+pub fn generate(source: Source, path: &Path) -> Result<()> {
+    let mut file = File::create(path.join("queries.rs"))?;
+    write!(file, "{source}")?;
+    Ok(())
+}
 
 pub struct Source {
     pub nodes: Vec<NodeSchema>,

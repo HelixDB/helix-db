@@ -1,41 +1,30 @@
 [package]
 name = "helix-cli"
-version = "1.0.136"
+version = "2.0.4"
 edition = "2024"
 
 [dependencies]
 helix-metrics = { path = "../metrics" }
 helix-db = { path = "../helix-db" }
-clap = { version = "4.5.40", features = ["derive"] }
-tempfile = "3.19.1"
-dirs = "6.0.0"
+clap = { version = "4.5.47", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
-sonic-rs = "0.5.1"
-uuid = { version = "1.16.0", features = ["v4"] }
-chrono = "0.4"
-libc = "0.2.172"
-tokio = { version = "1.45.0", features = ["full"] }
-open = "5.0.1"
-spinners = "4"
-indicatif = "0.17.11"
-toml = "0.8"
-reqwest = { version = "0.12" }
-serde_json = "1.0"
-webbrowser = "1.0"
+tokio = { version = "1.47.1", features = ["full"] }
+eyre = "0.6.12"
+toml = "0.9.5"
+dirs = "6.0.0"
+reqwest = { version = "0.12.23", features = ["json"] }
+serde_json = "1.0.143"
+color-eyre = "0.6.5"
+async-trait = "0.1.89"
+iota = "0.2.3"
+self_update = "0.42.0"
+uuid = { version = "1.18.1", features = ["v4", "v6", "fast-rng"] }
+chrono = "0.4.42"
+flume = "0.11.1"
+dotenvy = "0.15.7"
 tokio-tungstenite = "0.27.0"
 futures-util = "0.3.31"
-anyhow = "1.0.98"
-dotenvy = "0.15.7"
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.30.1", features = ["process", "signal"] }
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.1", features = [
-    "Win32_System_Threading",
-    "Win32_Foundation",
-] }
-
+regex = "1.11.2"
 [[bin]]
 name = "helix"
 path = "src/main.rs"

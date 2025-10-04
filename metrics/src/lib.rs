@@ -15,17 +15,14 @@ static CONFIG: LazyLock<String> = LazyLock::new(|| {
 
 pub static HELIX_USER_ID: LazyLock<String> = LazyLock::new(|| {
     // read from credentials file
-    let user_id = {
-        for line in CONFIG.lines() {
-            if let Some((key, value)) = line.split_once("=")
-                && key.to_lowercase() == "helix_user_id"
-            {
-                return value.to_string();
-            }
+    for line in CONFIG.lines() {
+        if let Some((key, value)) = line.split_once("=")
+            && key.to_lowercase() == "helix_user_id"
+        {
+            return value.to_string();
         }
-        "".to_string()
-    };
-    user_id
+    }
+    "".to_string()
 });
 
 pub static METRICS_ENABLED: LazyLock<bool> = LazyLock::new(|| {
@@ -91,6 +88,11 @@ impl HelixMetricsClient {
             user_id,
             event_type,
             event_data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("Failed to get system time")
+                .as_secs(),
+            email: None,
         };
 
         // Spawn the request in the background for fire-and-forget behavior
@@ -98,7 +100,7 @@ impl HelixMetricsClient {
             let _ = METRICS_CLIENT
                 .post(METRICS_URL)
                 .header("Content-Type", "application/json")
-                .body(sonic_rs::to_vec(&raw_event).unwrap())
+                .body(sonic_rs::to_vec(&raw_event).expect("Failed to serialize event"))
                 .send()
                 .await;
         });

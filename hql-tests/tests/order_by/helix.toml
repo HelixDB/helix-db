@@ -1,0 +1,9 @@
+[project]
+name = "order_by"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

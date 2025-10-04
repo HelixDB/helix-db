@@ -1,6 +1,6 @@
 //! Semantic analyzer for Helix‑QL.
 use crate::helixc::analyzer::error_codes::ErrorCode;
-use crate::helixc::analyzer::utils::{FieldLookup, DEFAULT_VAR_NAME};
+use crate::helixc::analyzer::utils::{get_field_type_from_item_fields, FieldLookup, DEFAULT_VAR_NAME};
 use crate::helixc::generator::object_remappings::SingleFieldTraversalRemapping;
 use crate::{
     generate_error,
@@ -60,7 +60,7 @@ pub(crate) fn validate_object<'a>(
     gen_query: &mut GeneratedQuery,
     scope: &mut HashMap<&'a str, Type>,
     closure_variable: Option<Variable>,
-) {
+) -> Type {
     match &cur_ty {
         Type::Node(Some(node_ty)) | Type::Nodes(Some(node_ty)) => {
             validate_property_access(
@@ -73,7 +73,7 @@ pub(crate) fn validate_object<'a>(
                 gen_traversal,
                 cur_ty,
                 ctx.node_fields.get(node_ty.as_str()).cloned(),
-            );
+            )
         }
         Type::Edge(Some(edge_ty)) | Type::Edges(Some(edge_ty)) => {
             validate_property_access(
@@ -86,7 +86,7 @@ pub(crate) fn validate_object<'a>(
                 gen_traversal,
                 cur_ty,
                 ctx.edge_fields.get(edge_ty.as_str()).cloned(),
-            );
+            )
         }
         Type::Vector(Some(vector_ty)) | Type::Vectors(Some(vector_ty)) => {
             validate_property_access(
@@ -99,7 +99,7 @@ pub(crate) fn validate_object<'a>(
                 gen_traversal,
                 cur_ty,
                 ctx.vector_fields.get(vector_ty.as_str()).cloned(),
-            );
+            )
         }
         Type::Anonymous(ty) => {
             validate_object(
@@ -113,7 +113,7 @@ pub(crate) fn validate_object<'a>(
                 gen_query,
                 scope,
                 closure_variable,
-            );
+            )
         }
         _ => {
             generate_error!(
@@ -123,6 +123,7 @@ pub(crate) fn validate_object<'a>(
                 E203,
                 &obj.fields[0].value.loc.span
             );
+            Type::Unknown
         }
     }
 }
@@ -338,7 +339,7 @@ fn validate_property_access<'a>(
     gen_traversal: &mut GeneratedTraversal,
     cur_ty: &Type,
     fields: Option<HashMap<&'a str, Cow<'a, Field>>>,
-) {
+) -> Type {
     match fields {
         Some(_) => {
             // if there is only one field then it is a property access
@@ -369,12 +370,14 @@ fn validate_property_access<'a>(
                                 gen_traversal.should_collect = ShouldCollect::ToVec;
                             }
                             Type::Node(_) | Type::Edge(_) | Type::Vector(_) => {
-                                gen_traversal.should_collect = ShouldCollect::ToVal;
+                                gen_traversal.should_collect = ShouldCollect::ToObj;
                             }
                             _ => {
                                 unreachable!()
                             }
                         }
+                        let field_type = get_field_type_from_item_fields(ctx, cur_ty, lit.as_str());
+                        Type::Scalar(field_type.unwrap())
                     }
                     _ => unreachable!(),
                 }
@@ -409,9 +412,11 @@ fn validate_property_access<'a>(
                 gen_traversal
                     .steps
                     .push(Separator::Period(GeneratedStep::Remapping(remapping)));
+                Type::Unknown
             } else {
                 // error
                 generate_error!(ctx, original_query, obj.fields[0].value.loc.clone(), E645);
+                Type::Unknown
             }
         }
         None => {
@@ -422,6 +427,7 @@ fn validate_property_access<'a>(
                 E201,
                 &cur_ty.get_type_name()
             );
+            Type::Unknown
         }
     }
 }
@@ -534,7 +540,7 @@ fn parse_identifier_as_remapping_value<'a>(
                     steps: vec![Separator::Period(GeneratedStep::PropertyFetch(
                         GenRef::Literal(identifier.to_string()),
                     ))],
-                    should_collect: ShouldCollect::ToVal,
+                    should_collect: ShouldCollect::ToObj,
                 },
                 should_spread,
             }),

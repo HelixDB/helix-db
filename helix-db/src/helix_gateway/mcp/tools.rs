@@ -1,7 +1,9 @@
 use crate::{
     debug_println,
     helix_engine::{
-        bm25::bm25::{BM25Flatten, HBM25Config, BM25}, storage_core::HelixGraphStorage, traversal_core::{
+        bm25::bm25::{BM25, BM25Flatten, HBM25Config},
+        storage_core::HelixGraphStorage,
+        traversal_core::{
             ops::{
                 bm25::search_bm25::SearchBM25Adapter,
                 g::G,
@@ -18,10 +20,12 @@ use crate::{
                 vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter},
             },
             traversal_value::{Traversable, TraversalValue},
-        }, types::GraphError, vector_core::vector::HVector
+        },
+        types::GraphError,
+        vector_core::vector::HVector,
     },
     helix_gateway::{
-        embedding_providers::embedding_providers::{get_embedding_model, EmbeddingModel},
+        embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
         mcp::mcp::{MCPConnection, MCPHandler, MCPHandlerSubmission, MCPToolInput, McpBackend},
     },
     protocol::{response::Response, return_values::ReturnValue, value::Value},
@@ -385,12 +389,14 @@ impl<'a> McpTools<'a> for McpBackend {
     ) -> Result<Vec<TraversalValue>, GraphError> {
         let db = Arc::clone(&self.db);
 
+        let iter = db.nodes_db.lazily_decode_data().iter(txn).unwrap();
+
         let iter = NFromType {
-            iter: db.nodes_db.lazily_decode_data().iter(txn).unwrap(),
+            iter,
             label: &node_type,
         };
 
-        let result = iter.collect::<Result<Vec<_>, _>>();
+        let result = Ok(iter.filter_map(|item| item.ok()).collect::<Vec<_>>());
         debug_println!("result: {:?}", result);
         result
     }
@@ -408,7 +414,7 @@ impl<'a> McpTools<'a> for McpBackend {
             label: &edge_type,
         };
 
-        let result = iter.collect::<Result<Vec<_>, _>>();
+        let result = Ok(iter.filter_map(|item| item.ok()).collect::<Vec<_>>());
         debug_println!("result: {:?}", result);
         result
     }
@@ -794,10 +800,7 @@ fn _search_keyword(
                 "Error checking BM25 metadata: {:?} - returning empty results",
                 e
             );
-            println!(
-                "Error checking BM25 metadata: {e:?} - returning empty results",
-
-            );
+            println!("Error checking BM25 metadata: {e:?} - returning empty results",);
             Err(GraphError::from(
                 "Error checking BM25 metadata - returning empty results",
             ))

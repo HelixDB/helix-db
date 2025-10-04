@@ -252,8 +252,8 @@ pub(crate) fn infer_expr_type<'a>(
                                                 original_query,
                                                 loc.clone(),
                                                 E205,
-                                                value.as_str(),
-                                                &value.to_string(),
+                                                &value.inner_stringify(),
+                                                value.to_variant_string(),
                                                 &field_type.to_string(),
                                                 "node",
                                                 ty.as_str()
@@ -368,7 +368,7 @@ pub(crate) fn infer_expr_type<'a>(
                     source_step: Separator::Period(SourceStep::AddN(add_n)),
                     steps: vec![],
                     traversal_type: TraversalType::Mut,
-                    should_collect: ShouldCollect::ToVal,
+                    should_collect: ShouldCollect::ToObj,
                 });
                 gen_query.is_mut = true;
                 return (Type::Node(Some(ty.to_string())), Some(stmt));
@@ -469,8 +469,8 @@ pub(crate) fn infer_expr_type<'a>(
                                                 original_query,
                                                 loc.clone(),
                                                 E205,
-                                                value.as_str(),
-                                                &value.to_string(),
+                                                &value.inner_stringify(),
+                                                value.to_variant_string(),
                                                 &field_type.to_string(),
                                                 "edge",
                                                 ty.as_str()
@@ -593,7 +593,7 @@ pub(crate) fn infer_expr_type<'a>(
                     source_step: Separator::Period(SourceStep::AddE(add_e)),
                     steps: vec![],
                     traversal_type: TraversalType::Mut,
-                    should_collect: ShouldCollect::ToVal,
+                    should_collect: ShouldCollect::ToObj,
                 });
                 gen_query.is_mut = true;
                 return (Type::Edge(Some(ty.to_string())), Some(stmt));
@@ -692,7 +692,7 @@ pub(crate) fn infer_expr_type<'a>(
                                                 loc.clone(),
                                                 E205,
                                                 value.as_str(),
-                                                &value.to_string(),
+                                                &value.to_variant_string(),
                                                 &field_type.to_string(),
                                                 "vector",
                                                 ty.as_str()
@@ -818,7 +818,7 @@ pub(crate) fn infer_expr_type<'a>(
                         source_step: Separator::Period(SourceStep::AddV(add_v)),
                         steps: vec![],
                         traversal_type: TraversalType::Mut,
-                        should_collect: ShouldCollect::ToVal,
+                        should_collect: ShouldCollect::ToObj,
                     });
                     gen_query.is_mut = true;
                     return (Type::Vector(Some(ty.to_string())), Some(stmt));
@@ -964,7 +964,9 @@ pub(crate) fn infer_expr_type<'a>(
                     );
                     // Where/boolean ops don't change the element type,
                     // so `cur_ty` stays the same.
-                    assert!(stmt.is_some());
+                    if stmt.is_none() {
+                        return (Type::Vector(sv.vector_type.clone()), None);
+                    }
                     let stmt = stmt.unwrap();
                     let mut gen_traversal = GeneratedTraversal {
                         traversal_type: TraversalType::NestedFrom(GenRef::Std("v".to_string())),
@@ -1134,7 +1136,9 @@ pub(crate) fn infer_expr_type<'a>(
         Exists(expr) => {
             let (_, stmt) =
                 infer_expr_type(ctx, &expr.expr, scope, original_query, parent_ty, gen_query);
-            assert!(stmt.is_some());
+            if stmt.is_none() {
+                return (Type::Boolean, None);
+            }
             assert!(matches!(stmt, Some(GeneratedStatement::Traversal(_))));
             let traversal = match stmt.unwrap() {
                 GeneratedStatement::Traversal(mut tr) => {
@@ -1142,7 +1146,7 @@ pub(crate) fn infer_expr_type<'a>(
                         SourceStep::Identifier(id) => id.inner().clone(),
                         _ => DEFAULT_VAR_NAME.to_string(),
                     };
-                    tr.traversal_type = TraversalType::NestedFrom(GenRef::Std(source_variable));
+                    tr.traversal_type = TraversalType::FromVar(GenRef::Std(source_variable));
                     tr.should_collect = ShouldCollect::No;
                     tr
                 }
@@ -1168,7 +1172,7 @@ pub(crate) fn infer_expr_type<'a>(
             }
             let vec = match &bm25_search.data {
                 Some(ValueType::Literal { value, loc: _ }) => {
-                    GeneratedValue::Literal(GenRef::Std(value.to_string()))
+                    GeneratedValue::Literal(GenRef::Std(value.inner_stringify()))
                 }
                 Some(ValueType::Identifier { value: i, loc: _ }) => {
                     is_valid_identifier(ctx, original_query, bm25_search.loc.clone(), i.as_str());

@@ -272,15 +272,15 @@ pub fn get_embedding_model(
 macro_rules! embed {
     ($db:expr, $query:expr) => {{
         let embedding_model =
-            get_embedding_model(None, $db.storage_config.embedding_model.as_deref(), None)?;
+            get_embedding_model(None, $db.storage_config.embedding_model.as_deref(), None);
         embedding_model.fetch_embedding($query)?
     }};
     ($db:expr, $query:expr, $provider:expr) => {{
-        let embedding_model = get_embedding_model(None, Some($provider), None)?;
+        let embedding_model = get_embedding_model(None, Some($provider), None);
         embedding_model.fetch_embedding($query)?
     }};
     ($db:expr, $query:expr, $provider:expr, $url:expr) => {{
-        let embedding_model = get_embedding_model(None, Some($provider), Some($url))?;
+        let embedding_model = get_embedding_model(None, Some($provider), Some($url));
         embedding_model.fetch_embedding($query)?
     }};
 }
@@ -303,11 +303,11 @@ macro_rules! embed_async {
         embed_async!(INNER_MODEL: embedding_model, $query)
     }};
     ($db:expr, $query:expr, $provider:expr) => {{
-        let embedding_model = get_embedding_model(None, Some($provider), None)?;
+        let embedding_model = get_embedding_model(None, Some($provider), None);
         embed_async!(INNER_MODEL: embedding_model, $query)
     }};
     ($db:expr, $query:expr, $provider:expr, $url:expr) => {{
-        let embedding_model = get_embedding_model(None, Some($provider), Some($url))?;
+        let embedding_model = get_embedding_model(None, Some($provider), Some($url));
         embed_async!(INNER_MODEL: embedding_model, $query)
     }};
 }

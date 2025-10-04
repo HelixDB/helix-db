@@ -1,0 +1,85 @@
+name: Build and Upload Binaries
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write  
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create_release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v2.0.0
+          release_name: Release v2.0.0
+          draft: false
+          prerelease: false
+
+  build:
+    needs: create_release
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-13, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: helix-x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary_name: helix-aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: helix-x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: helix-aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: helix-x86_64-pc-windows-msvc.exe
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install OpenSSL, pkg-config, and GCC (Linux only)
+        if: matrix.os == 'ubuntu-20.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config gcc
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Build
+        run: |
+          cd helix-cli
+          cargo build --release --target ${{ matrix.target }}
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ needs.create_release.outputs.upload_url }}
+          asset_path: target/${{ matrix.target }}/release/${{ matrix.os == 'windows-latest' && 'helix.exe' || 'helix' }}
+          asset_name: ${{ matrix.binary_name }}
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

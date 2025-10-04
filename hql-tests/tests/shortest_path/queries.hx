@@ -11,6 +11,6 @@ E::EFile9 {
 
 
 QUERY file9(other_id: ID, id: ID) =>
-    path1 <- N<File9>(id)::ShortestPath<File9>::To(other_id)
-    path2 <- N<File9>(id)::ShortestPath<File9>::From(other_id)
+    path1 <- N<File9>(id)::ShortestPath<EFile9>::To(other_id)
+    path2 <- N<File9>(id)::ShortestPath<EFile9>::From(other_id)
     RETURN path1, path2

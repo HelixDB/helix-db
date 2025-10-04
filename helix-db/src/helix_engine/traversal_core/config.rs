@@ -88,6 +88,21 @@ impl Config {
         Ok(config)
     }
 
+    pub fn from_file(config_path: PathBuf) -> Result<Self, GraphError> {
+        if !config_path.exists() {
+            println!("no config path!");
+            return Err(GraphError::ConfigFileNotFound);
+        }
+
+        let config = std::fs::read_to_string(config_path)?;
+        let mut config = sonic_rs::from_str::<Config>(&config)?;
+        
+        // Schema will be populated from INTROSPECTION_DATA during code generation
+        config.schema = None;
+
+        Ok(config)
+    }
+
     pub fn init_config() -> String {
         r#"
 {

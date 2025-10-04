@@ -12,7 +12,7 @@ use sonic_rs::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    fmt::{self, Display},
+    fmt::{self},
 };
 
 /// A flexible value type that can represent various property values in nodes and edges.
@@ -64,10 +64,33 @@ impl Value {
                 .join(" "),
             Value::Object(obj) => obj
                 .iter()
-                .map(|(k, v)| format!("{k} {v}"))
+                .map(|(k, v)| format!("{k} {}", v.inner_stringify()))
                 .collect::<Vec<String>>()
                 .join(" "),
             _ => panic!("Not primitive"),
+        }
+    }
+
+    pub fn to_variant_string(&self) -> &str {
+        match self {
+            Value::String(_) => "String",
+            Value::F32(_) => "F32",
+            Value::F64(_) => "F64",
+            Value::I8(_) => "I8",
+            Value::I16(_) => "I16",
+            Value::I32(_) => "I32",
+            Value::I64(_) => "I64",
+            Value::U8(_) => "U8",
+            Value::U16(_) => "U16",
+            Value::U32(_) => "U32",
+            Value::U64(_) => "U64",
+            Value::U128(_) => "U128",
+            Value::Date(_) => "Date",
+            Value::Boolean(_) => "Boolean",
+            Value::Id(_) => "Id",
+            Value::Array(_) => "Array",
+            Value::Object(_) => "Object",
+            Value::Empty => "Empty",
         }
     }
 
@@ -95,30 +118,6 @@ impl Value {
         Value: IntoPrimitive<T> + Into<T>,
     {
         values.contains(self.into_primitive())
-    }
-}
-impl Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::String(_) => write!(f, "String"),
-            Value::F32(_) => write!(f, "F32"),
-            Value::F64(_) => write!(f, "F64"),
-            Value::I8(_) => write!(f, "I8"),
-            Value::I16(_) => write!(f, "I16"),
-            Value::I32(_) => write!(f, "I32"),
-            Value::I64(_) => write!(f, "I64"),
-            Value::U8(_) => write!(f, "U8"),
-            Value::U16(_) => write!(f, "U16"),
-            Value::U32(_) => write!(f, "U32"),
-            Value::U64(_) => write!(f, "U64"),
-            Value::U128(_) => write!(f, "U128"),
-            Value::Date(_) => write!(f, "Date"),
-            Value::Boolean(_) => write!(f, "Boolean"),
-            Value::Id(_) => write!(f, "Id"),
-            Value::Array(_) => write!(f, "Array"),
-            Value::Object(_) => write!(f, "Object"),
-            Value::Empty => write!(f, "Empty"),
-        }
     }
 }
 
@@ -241,20 +240,18 @@ impl PartialEq<Value> for Value {
             (Value::Empty, _) => false,
             (_, Value::Empty) => false,
 
-            (s, o) if is_numeric(s) && is_numeric(o) => {
-                match (to_f64(s), to_f64(o)) {
-                    (Some(s_val), Some(o_val)) => {
-                        if !matches!(self, Value::F32(_) | Value::F64(_))
-                            && !matches!(other, Value::F32(_) | Value::F64(_))
-                        {
-                            self.cmp(other) == Ordering::Equal
-                        } else {
-                            s_val == o_val
-                        }
+            (s, o) if is_numeric(s) && is_numeric(o) => match (to_f64(s), to_f64(o)) {
+                (Some(s_val), Some(o_val)) => {
+                    if !matches!(self, Value::F32(_) | Value::F64(_))
+                        && !matches!(other, Value::F32(_) | Value::F64(_))
+                    {
+                        self.cmp(other) == Ordering::Equal
+                    } else {
+                        s_val == o_val
                     }
-                    _ => false,
                 }
-            }
+                _ => false,
+            },
 
             _ => false,
         }
@@ -1403,7 +1400,7 @@ pub mod casting {
 
     pub fn cast(value: Value, cast_type: CastType) -> Value {
         match cast_type {
-            CastType::String => Value::String(value.to_string()),
+            CastType::String => Value::String(value.inner_stringify()),
             CastType::I8 => Value::I8(value.into()),
             CastType::I16 => Value::I16(value.into()),
             CastType::I32 => Value::I32(value.into()),

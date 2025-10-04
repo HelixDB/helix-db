@@ -55,6 +55,13 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> RoTraversalIter
         }
     }
 
+    pub fn collect_to_value(self) -> Value {
+        match self.inner.filter_map(|item| item.ok()).next() {
+            Some(TraversalValue::Value(val) ) => val,
+            _ => Value::Empty,
+        }
+    }
+
     pub fn map_value_or(
         mut self,
         default: bool,

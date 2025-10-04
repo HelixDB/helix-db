@@ -1,5 +1,6 @@
 [project]
 name = "date_comparisons"
+queries = "."
 
 [local.dev]
 port = 6969
