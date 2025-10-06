@@ -383,7 +383,6 @@ pub(crate) fn validate_traversal<'a>(
         }
         // anonymous will be the traversal type rather than the start type
         StartNode::Anonymous => {
-            let parent = parent_ty.clone().unwrap();
             gen_traversal.traversal_type =
                 TraversalType::FromVar(GenRef::Std(DEFAULT_VAR_NAME.to_string()));
             gen_traversal.source_step = Separator::Empty(SourceStep::Anonymous);
@@ -1516,7 +1515,7 @@ pub(crate) fn validate_traversal<'a>(
                         MatchType::SchemaType(schema_type) => {
                             // ensure current type = unknown
                             // if cur_ty != Type::Unknown {
-                            //     unreachable!("Cannot reach here"); // handle error 
+                            //     unreachable!("Cannot reach here"); // handle error
                             // }
                             match &schema_type {
                                 SchemaMatchType::Node {
@@ -1652,7 +1651,7 @@ pub(crate) fn validate_traversal<'a>(
                             &mut generated_traversal,
                             gen_query,
                         );
-                        generated_traversal.should_collect = ShouldCollect::ToVal;
+                        generated_traversal.should_collect = ShouldCollect::ToObj;
                         GeneratedMatchVariable::Traversal(Box::new(generated_traversal))
                     }
                     MatchVariableType::Anonymous => GeneratedMatchVariable::Anonymous,
