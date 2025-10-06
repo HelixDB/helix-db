@@ -610,13 +610,17 @@ pub struct GroupBy {
 #[derive(Debug, Clone, Default)]
 pub struct Match {
     pub loc: Loc,
+    /// signafies the thing being matched on
     pub variable: Option<MatchVariable>,
+
+    /// signafies the arms of the match
     pub statements: Vec<MatchStatement>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchVariable {
     pub loc: Loc,
+    /// signafies the thing being matched on
     pub variable: MatchVariableType,
 }
 
@@ -630,7 +634,9 @@ pub enum MatchVariableType {
 #[derive(Debug, Clone)]
 pub struct MatchStatement {
     pub loc: Loc,
+    /// signafies the LHS of the arm
     pub match_type: MatchType,
+    /// signafies the RHS of the arm
     pub match_value: MatchValueType,
 }
 

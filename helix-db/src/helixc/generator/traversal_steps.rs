@@ -58,7 +58,7 @@ pub enum ShouldCollect {
     ToObj,
     No,
     Try,
-    ToValue
+    ToValue,
 }
 impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -217,7 +217,9 @@ impl Display for Step {
             Step::BoolOp(bool_op) => write!(f, "{bool_op}"),
             Step::Remapping(remapping) => write!(f, "{remapping}"),
             Step::ShortestPath(shortest_path) => write!(f, "{shortest_path}"),
-            Step::ShortestPathDijkstras(shortest_path_dijkstras) => write!(f, "{shortest_path_dijkstras}"),
+            Step::ShortestPathDijkstras(shortest_path_dijkstras) => {
+                write!(f, "{shortest_path_dijkstras}")
+            }
             Step::ShortestPathBFS(shortest_path_bfs) => write!(f, "{shortest_path_bfs}"),
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
             Step::GroupBy(group_by) => write!(f, "{group_by}"),
@@ -524,7 +526,7 @@ impl Display for SearchVectorStep {
 
 #[derive(Clone, Debug)]
 pub struct GeneratedMatch {
-    pub variable: Option<GeneratedMatchVariable>,
+    pub variable: Option<GenRef<GeneratedMatchVariable>>,
     pub statements: Vec<GeneratedMatchStatement>,
     pub default: GeneratedMatchDefault,
 }
@@ -576,7 +578,7 @@ impl Display for GeneratedMatchVariable {
         match self {
             GeneratedMatchVariable::Identifier(identifier) => write!(f, "{identifier}"),
             GeneratedMatchVariable::Traversal(traversal) => write!(f, "{traversal}"),
-            GeneratedMatchVariable::Anonymous => write!(f, "_"),
+            GeneratedMatchVariable::Anonymous => write!(f, "val"),
         }
     }
 }
@@ -615,7 +617,9 @@ impl From<MatchType> for GeneratedMatchType {
             MatchType::Identifier(identifier) => GeneratedMatchType::Identifier(identifier.clone()),
             MatchType::Boolean(boolean) => GeneratedMatchType::Boolean(boolean),
             MatchType::Anonymous => GeneratedMatchType::Anonymous,
-            MatchType::SchemaType(schema_type) => GeneratedMatchType::SchemaType(schema_type.into()),
+            MatchType::SchemaType(schema_type) => {
+                GeneratedMatchType::SchemaType(schema_type.into())
+            }
         }
     }
 }
@@ -696,30 +700,30 @@ impl Display for GeneratedSchemaMatchType {
                 identifier,
             } => write!(
                 f,
-                "TraversalValue::Node({}) if node.label() == \"{type_arg}\"",
-                identifier
+                "TraversalValue::Node({var}) if {var}.label() == \"{type_arg}\"",
+                var = identifier
                     .as_ref()
-                    .map_or("None".to_string(), |i| format!("Some({i})"))
+                    .map_or("var".to_string(), |i| format!("{i}"))
             ),
             GeneratedSchemaMatchType::Edge {
                 type_arg,
                 identifier,
             } => write!(
                 f,
-                "TraversalValue::Edge({}) if edge.label() == \"{type_arg}\"",
-                identifier
+                "TraversalValue::Edge({var}) if {var}.label() == \"{type_arg}\"",
+                var = identifier
                     .as_ref()
-                    .map_or("None".to_string(), |i| format!("Some({i})"))
+                    .map_or("var".to_string(), |i| format!("{i}"))
             ),
             GeneratedSchemaMatchType::Vector {
                 type_arg,
                 identifier,
             } => write!(
                 f,
-                "TraversalValue::Vector({}) if vector.label() == \"{type_arg}\"",
-                identifier
+                "TraversalValue::Vector({var}) if {var}.label() == \"{type_arg}\"",
+                var = identifier
                     .as_ref()
-                    .map_or("None".to_string(), |i| format!("Some({i})"))
+                    .map_or("var".to_string(), |i| format!("{i}"))
             ),
         }
     }
@@ -737,9 +741,36 @@ impl Display for GeneratedMatchStatement {
 }
 
 #[derive(Clone, Debug)]
+pub enum GeneratedMatchValueTypeInnerWrapper {
+    Std(Statement),
+    Vec(Vec<Statement>),
+    Normal(Statement),
+}
+
+impl Display for GeneratedMatchValueTypeInnerWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GeneratedMatchValueTypeInnerWrapper::Std(statement) => {
+                writeln!(f, "{{")?;
+                writeln!(f, "    Some({statement})")?;
+                writeln!(f, "}}")?;
+                Ok(())
+            }
+            GeneratedMatchValueTypeInnerWrapper::Normal(statement) => write!(f, "{statement}"),
+            GeneratedMatchValueTypeInnerWrapper::Vec(statements) => {
+                writeln!(f, "{{")?;
+                for statement in statements {
+                    writeln!(f, "    {statement};")?;
+                }
+                writeln!(f, "}}")
+            }
+        }
+    }
+}
+#[derive(Clone, Debug)]
 pub enum GeneratedMatchValueType {
-    Expression(Statement),
-    Statements(Vec<Statement>),
+    Expression(GeneratedMatchValueTypeInnerWrapper),
+    Statements(GeneratedMatchValueTypeInnerWrapper),
     Anonymous,
     None,
 }
@@ -748,12 +779,7 @@ impl Display for GeneratedMatchValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GeneratedMatchValueType::Expression(expression) => write!(f, "{expression}"),
-            GeneratedMatchValueType::Statements(statements) => {
-                for statement in statements {
-                    writeln!(f, "    {statement};")?;
-                }
-                Ok(())
-            }
+            GeneratedMatchValueType::Statements(statements) => write!(f, "{statements}"),
             GeneratedMatchValueType::Anonymous => write!(f, "Some(val)"),
             GeneratedMatchValueType::None => write!(f, "None"),
         }

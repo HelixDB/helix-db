@@ -9,9 +9,8 @@ QUERY GetUser(user_id: ID) =>
     }
     RETURN user
     
-QUERY GetUser(user_id: ID) => 
+QUERY GetUserOther(user_id: ID) => 
     user <- N<User>::MATCH|_|{
-        N::User(u) => u,
-        _ => NONE,
+        N::User => _::{boolean},
     }
     RETURN user

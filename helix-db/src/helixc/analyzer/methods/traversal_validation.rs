@@ -5,7 +5,7 @@ use crate::helixc::generator::bool_ops::{Contains, IsIn};
 use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
 use crate::helixc::generator::traversal_steps::{
     AggregateBy, GeneratedMatch, GeneratedMatchDefault, GeneratedMatchStatement,
-    GeneratedMatchValueType, GeneratedMatchVariable, GroupBy,
+    GeneratedMatchValueType, GeneratedMatchValueTypeInnerWrapper, GeneratedMatchVariable, GroupBy,
 };
 use crate::helixc::generator::utils::{EmbedData, VecData};
 use crate::{
@@ -1579,23 +1579,57 @@ pub(crate) fn validate_traversal<'a>(
                                     }
                                 }
                             }
-                            default = GeneratedMatchDefault::TraversalValue;
+                            default = GeneratedMatchDefault::Optional;
                         }
                         _ => {}
                     }
 
-                    // validate (RHS) stmts
+                    println!("default: {:?}", default);
+                    // validate RHS of each arm
                     // validate return type of each arm is the same.
                     let mv = match &stmt.match_value {
                         MatchValueType::Expression(expression) => {
-                            let (ty, stmt) = infer_expr_type(
+                            let (ty, mut stmt) = infer_expr_type(
                                 ctx,
                                 expression,
                                 scope,
                                 original_query,
-                                None,
+                                Some(cur_ty.clone()),
                                 gen_query,
                             );
+
+                            match ty {
+                                Type::Node(_)
+                                | Type::Nodes(_)
+                                | Type::Edge(_)
+                                | Type::Edges(_)
+                                | Type::Vector(_)
+                                | Type::Vectors(_) => {
+                                    // OK
+                                }
+                                Type::Anonymous(_) => {
+                                    // OK
+                                }
+                                Type::Scalar(_) => {
+                                    // OK
+                                }
+                                _ => {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        expression.loc.clone(),
+                                        E601,
+                                        ty.kind_str()
+                                    );
+                                }
+                            };
+
+                            if let Some(stmt) = &mut stmt {
+                                if let GeneratedStatement::Traversal(tr) = stmt {
+                                    tr.should_collect = ShouldCollect::ToObj;
+                                }
+                            }
+
                             if let Some(arm_type) = &arm_type {
                                 if arm_type != &ty {
                                     unreachable!("Cannot reach here"); // handle error
@@ -1603,7 +1637,10 @@ pub(crate) fn validate_traversal<'a>(
                             } else {
                                 arm_type = Some(ty);
                             }
-                            GeneratedMatchValueType::Expression(stmt.unwrap())
+
+                            GeneratedMatchValueType::Expression(
+                                GeneratedMatchValueTypeInnerWrapper::Std(stmt.unwrap()),
+                            )
                         }
                         MatchValueType::Statements(statements) => {
                             let mut validated_statements = Vec::new();
@@ -1619,13 +1656,17 @@ pub(crate) fn validate_traversal<'a>(
                                     validated_statements.push(validated_statement);
                                 }
                             }
-                            GeneratedMatchValueType::Statements(validated_statements)
+                            GeneratedMatchValueType::Statements(
+                                GeneratedMatchValueTypeInnerWrapper::Vec(validated_statements),
+                            )
                         }
                         MatchValueType::Anonymous => {
+                            println!("Anonymous");
                             default = GeneratedMatchDefault::Optional;
                             GeneratedMatchValueType::Anonymous
                         }
                         MatchValueType::None => {
+                            println!("None");
                             default = GeneratedMatchDefault::Optional;
                             GeneratedMatchValueType::None
                         }
@@ -1638,7 +1679,7 @@ pub(crate) fn validate_traversal<'a>(
                 }
                 let variable = match_stmt.variable.as_ref().map(|v| match &v.variable {
                     MatchVariableType::Identifier(identifier) => {
-                        GeneratedMatchVariable::Identifier(identifier.clone())
+                        GenRef::Ref(GeneratedMatchVariable::Identifier(identifier.clone()))
                     }
                     MatchVariableType::Traversal(traversal) => {
                         let mut generated_traversal = GeneratedTraversal::default();
@@ -1652,9 +1693,11 @@ pub(crate) fn validate_traversal<'a>(
                             gen_query,
                         );
                         generated_traversal.should_collect = ShouldCollect::ToObj;
-                        GeneratedMatchVariable::Traversal(Box::new(generated_traversal))
+                        GenRef::Std(GeneratedMatchVariable::Traversal(Box::new(
+                            generated_traversal,
+                        )))
                     }
-                    MatchVariableType::Anonymous => GeneratedMatchVariable::Anonymous,
+                    MatchVariableType::Anonymous => GenRef::Ref(GeneratedMatchVariable::Anonymous),
                 });
                 gen_traversal
                     .steps

@@ -1,7 +1,14 @@
 use crate::helixc::parser::{
-    location::HasLoc, types::{
-        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, ExpressionType, FieldAddition, FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Match, MatchStatement, MatchType, MatchValueType, MatchVariable, MatchVariableType, Object, Optional, OrderBy, OrderByType, SchemaMatchType, ShortestPath, ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update
-    }, utils::{PairTools, PairsTools}, HelixParser, ParserError, Rule
+    HelixParser, ParserError, Rule,
+    location::HasLoc,
+    types::{
+        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, ExpressionType,
+        FieldAddition, FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType,
+        Match, MatchStatement, MatchType, MatchValueType, MatchVariable, MatchVariableType, Object,
+        Optional, OrderBy, OrderByType, SchemaMatchType, ShortestPath, ShortestPathBFS,
+        ShortestPathDijkstras, Step, StepType, Update,
+    },
+    utils::{PairTools, PairsTools},
 };
 use pest::iterators::Pair;
 
@@ -366,28 +373,23 @@ impl HelixParser {
             let stmt_loc = stmt.loc();
             let mut inner = stmt.into_inner();
             // .next for match_type
-            let match_type = inner
-                .next()
-                .ok_or(ParserError::Error)?
-                .into_inner()
-                .next()
-                .unwrap();
+            let match_type = inner.try_next().try_inner_next()?;
             // .inner then match for exact
             let mt = match match_type.as_rule() {
                 Rule::match_type_enum => {
                     let mut match_type_inner = match_type.into_inner();
-                    let prefix = match_type_inner.next().unwrap();
-                    let schema_type = match prefix.into_inner().next().unwrap().as_rule() {
+                    let prefix = match_type_inner.try_next()?;
+                    let schema_type = match prefix.try_inner_next()?.as_rule() {
                         Rule::node_type_prefix => SchemaMatchType::Node {
-                            type_arg: match_type_inner.next().unwrap().as_str().to_string(),
+                            type_arg: match_type_inner.try_next()?.as_str().to_string(),
                             identifier: match_type_inner.next().map(|i| i.as_str().to_string()),
                         },
                         Rule::edge_type_prefix => SchemaMatchType::Edge {
-                            type_arg: match_type_inner.next().unwrap().as_str().to_string(),
+                            type_arg: match_type_inner.try_next()?.as_str().to_string(),
                             identifier: match_type_inner.next().map(|i| i.as_str().to_string()),
                         },
                         Rule::vec_type_prefix => SchemaMatchType::Vector {
-                            type_arg: match_type_inner.next().unwrap().as_str().to_string(),
+                            type_arg: match_type_inner.try_next()?.as_str().to_string(),
                             identifier: match_type_inner.next().map(|i| i.as_str().to_string()),
                         },
                         _ => unreachable!(),
@@ -396,7 +398,7 @@ impl HelixParser {
                 }
                 Rule::boolean => MatchType::Boolean(match_type.as_str() == "true"),
                 Rule::optional_type => {
-                    let optional_inner = match_type.into_inner().next().unwrap();
+                    let optional_inner = match_type.into_inner().try_next()?;
                     MatchType::Optional(match optional_inner.as_rule() {
                         Rule::identifier => Optional::Some(optional_inner.as_str().to_string()),
                         Rule::none => Optional::None,
@@ -422,6 +424,18 @@ impl HelixParser {
                 Rule::identifier => MatchValueType::Expression(Expression {
                     loc: match_value.loc(),
                     expr: ExpressionType::Identifier(match_value.as_str().to_string()),
+                }),
+                Rule::traversal => MatchValueType::Expression(Expression {
+                    loc: match_value.loc(),
+                    expr: ExpressionType::Traversal(Box::new(self.parse_traversal(match_value)?)),
+                }),
+                Rule::id_traversal => MatchValueType::Expression(Expression {
+                    loc: match_value.loc(),
+                    expr: ExpressionType::Traversal(Box::new(self.parse_traversal(match_value)?)),
+                }),
+                Rule::anonymous_traversal => MatchValueType::Expression(Expression {
+                    loc: match_value.loc(),
+                    expr: ExpressionType::Traversal(Box::new(self.parse_anon_traversal(match_value)?)),
                 }),
                 _ => {
                     println!("match_value: {:?}", match_value.as_rule());
