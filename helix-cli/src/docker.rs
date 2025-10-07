@@ -1,4 +1,5 @@
 use crate::config::{BuildMode, InstanceInfo};
+use crate::env_utils::load_env_variables;
 use crate::project::ProjectContext;
 use crate::utils::print_status;
 use eyre::{Result, eyre};
@@ -44,25 +45,35 @@ impl<'a> DockerManager<'a> {
     }
 
     /// Get environment variables for an instance
-    pub(crate) fn environment_variables(&self, instance_name: &str) -> Vec<String> {
-        vec![
-            {
-                let port = self
-                    .project
-                    .config
-                    .get_instance(instance_name)
-                    .unwrap()
-                    .port()
-                    .unwrap_or(6969);
-                format!("HELIX_PORT={port}")
-            },
+    pub(crate) fn environment_variables(&self, instance_name: &str) -> Result<Vec<String>> {
+        let instance = self.project.config.get_instance(instance_name)?;
+
+        // Start with Helix built-in variables (highest priority)
+        let mut env_vars = vec![
+            format!("HELIX_PORT={}", instance.port().unwrap_or(6969)),
             format!("HELIX_DATA_DIR={HELIX_DATA_DIR}"),
             format!("HELIX_INSTANCE={instance_name}"),
-            {
-                let project_name = &self.project.config.project.name;
-                format!("HELIX_PROJECT={project_name}")
-            },
-        ]
+            format!("HELIX_PROJECT={}", self.project.config.project.name),
+        ];
+
+        // Load user-defined environment variables if this is a local instance
+        if let InstanceInfo::Local(local_config) = instance {
+            if let Some(env_file) = &local_config.env_file {
+                let user_vars = load_env_variables(
+                    Some(env_file.as_path()),
+                    &self.project.root,
+                )?;
+
+                // Add user variables that don't conflict with Helix built-ins
+                for (key, value) in user_vars {
+                    if !key.starts_with("HELIX_") {
+                        env_vars.push(format!("{key}={value}"));
+                    }
+                }
+            }
+        }
+
+        Ok(env_vars)
     }
 
     /// Get the container name for an instance
@@ -220,6 +231,14 @@ CMD ["helix-container"]
         let container_name = self.container_name(instance_name);
         let network_name = self.network_name(instance_name);
 
+        // Get environment variables including user-defined ones
+        let env_vars = self.environment_variables(instance_name)?;
+        let env_section = env_vars
+            .iter()
+            .map(|var| format!("      - {var}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let compose = format!(
             r#"# Generated docker-compose.yml for Helix instance: {instance_name}
 services:
@@ -235,10 +254,7 @@ services:
     volumes:
       - ../.volumes/{instance_name}:/data
     environment:
-      - HELIX_PORT={port}
-      - HELIX_DATA_DIR={data_dir}
-      - HELIX_INSTANCE={instance_name}
-      - HELIX_PROJECT={project_name}
+{env_section}
     restart: unless-stopped
     networks:
       - {network_name}
@@ -250,8 +266,6 @@ networks:
             platform = instance_config
                 .docker_build_target()
                 .map_or("".to_string(), |p| format!("platforms:\n        - {p}")),
-            project_name = self.project.config.project.name,
-            data_dir = HELIX_DATA_DIR,
         );
 
         Ok(compose)

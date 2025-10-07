@@ -422,7 +422,7 @@ impl<'a> FlyManager<'a> {
                 docker.push(image_name, FLY_REGISTRY_URL)?;
 
                 // Get environment variables first to ensure they live long enough
-                let env_vars = docker.environment_variables(instance_name);
+                let env_vars = docker.environment_variables(instance_name)?;
 
                 let mut deploy_args = vec![
                     "deploy",

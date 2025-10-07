@@ -122,6 +122,7 @@ pub async fn run(deployment_type: CloudDeploymentTypeCommand) -> Result<()> {
             let local_config = LocalInstanceConfig {
                 port: None, // Let the system assign a port
                 build_mode: BuildMode::Debug,
+                env_file: None,
                 db_config: DbConfig::default(),
             };
 

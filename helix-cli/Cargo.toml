@@ -33,3 +33,8 @@ path = "src/main.rs"
 normal = ["helix-db/server"]
 ingestion = ["helix-db/full"]
 default = ["normal"]
+
+
+[[bin]]
+name = "helix_test_env_parser"
+path = "src/test_env_parser.rs"

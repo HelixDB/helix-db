@@ -83,6 +83,8 @@ pub struct LocalInstanceConfig {
     pub port: Option<u16>,
     #[serde(default = "default_dev_build_mode")]
     pub build_mode: BuildMode,
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
     #[serde(flatten)]
     pub db_config: DbConfig,
 }
@@ -378,6 +380,7 @@ impl HelixConfig {
             LocalInstanceConfig {
                 port: Some(6969),
                 build_mode: BuildMode::Debug,
+                env_file: None,
                 db_config: DbConfig::default(),
             },
         );
