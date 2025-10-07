@@ -57,18 +57,15 @@ impl<'a> DockerManager<'a> {
         ];
 
         // Load user-defined environment variables if this is a local instance
-        if let InstanceInfo::Local(local_config) = instance {
-            if let Some(env_file) = &local_config.env_file {
-                let user_vars = load_env_variables(
-                    Some(env_file.as_path()),
-                    &self.project.root,
-                )?;
+        if let InstanceInfo::Local(local_config) = instance
+            && let Some(env_file) = &local_config.env_file
+        {
+            let user_vars = load_env_variables(Some(env_file.as_path()), &self.project.root)?;
 
-                // Add user variables that don't conflict with Helix built-ins
-                for (key, value) in user_vars {
-                    if !key.starts_with("HELIX_") {
-                        env_vars.push(format!("{key}={value}"));
-                    }
+            // Add user variables that don't conflict with Helix built-ins
+            for (key, value) in user_vars {
+                if !key.starts_with("HELIX_") {
+                    env_vars.push(format!("{key}={value}"));
                 }
             }
         }
