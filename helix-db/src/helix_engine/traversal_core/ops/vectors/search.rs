@@ -3,7 +3,7 @@ use heed3::RoTxn;
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+    vector_core::{VectorData, hnsw::HNSW, vector::HVector},
 };
 use helix_macros::debug_trace;
 use std::iter::once;
@@ -25,7 +25,7 @@ impl<I: Iterator<Item = Result<TraversalValue, GraphError>>> Iterator for Search
 pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalValue, GraphError>> {
     fn search_v<F, K>(
         self,
-        query: &[f64],
+        query: VectorData,
         k: K,
         label: &str,
         filter: Option<&[F]>,
@@ -41,7 +41,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
 {
     fn search_v<F, K>(
         self,
-        query: &[f64],
+        query: VectorData,
         k: K,
         label: &str,
         filter: Option<&[F]>,
@@ -51,10 +51,14 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let vectors =
-            self.storage
-                .vectors
-                .search(self.txn, query, k.try_into().unwrap(), label, filter, false);
+        let vectors = self.storage.vectors.search(
+            self.txn,
+            &query,
+            k.try_into().unwrap(),
+            label,
+            filter,
+            false,
+        );
 
         let iter = match vectors {
             Ok(vectors) => vectors
@@ -104,4 +108,3 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         }
     }
 }
-

@@ -7,7 +7,7 @@ mod tests {
             },
             storage_core::{HelixGraphStorage, version_info::VersionInfo},
             traversal_core::config::Config,
-            vector_core::{hnsw::HNSW, vector::HVector},
+            vector_core::{VectorData, hnsw::HNSW, vector::HVector},
         },
         protocol::value::Value,
     };
@@ -1424,9 +1424,11 @@ mod tests {
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let vectors = generate_random_vectors(800, 650);
         for vec in vectors {
-            let _ = storage
-                .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
+            let _ = storage.vectors.insert::<fn(&HVector, &RoTxn) -> bool>(
+                &mut wtxn,
+                VectorData::F64(vec),
+                None,
+            );
         }
         wtxn.commit().unwrap();
 
@@ -1466,9 +1468,11 @@ mod tests {
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let vectors = generate_random_vectors(800, 650);
         for vec in vectors {
-            let _ = storage
-                .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
+            let _ = storage.vectors.insert::<fn(&HVector, &RoTxn) -> bool>(
+                &mut wtxn,
+                VectorData::F64(vec),
+                None,
+            );
         }
         wtxn.commit().unwrap();
 
@@ -1509,9 +1513,11 @@ mod tests {
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let vectors = generate_random_vectors(800, 650);
         for vec in vectors {
-            let _ = storage
-                .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
+            let _ = storage.vectors.insert::<fn(&HVector, &RoTxn) -> bool>(
+                &mut wtxn,
+                VectorData::F64(vec),
+                None,
+            );
         }
         wtxn.commit().unwrap();
 

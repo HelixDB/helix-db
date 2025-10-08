@@ -60,12 +60,16 @@ where
             GenRef::Unknown => {
                 // This should have been caught during analysis
                 // For now, panic with a descriptive message
-                panic!("Code generation error: Unknown reference type encountered. This indicates a bug in the analyzer.")
+                panic!(
+                    "Code generation error: Unknown reference type encountered. This indicates a bug in the analyzer."
+                )
             }
             GenRef::Std(t) => t,
             GenRef::Id(_) => {
                 // Id doesn't have an inner T, it's just a String identifier
-                panic!("Code generation error: Cannot get inner value of Id type. Use the identifier directly.")
+                panic!(
+                    "Code generation error: Cannot get inner value of Id type. Use the identifier directly."
+                )
             }
         }
     }
@@ -97,7 +101,7 @@ impl From<GenRef<String>> for String {
             GenRef::Literal(s) => format!("\"{s}\""),
             GenRef::Std(s) => format!("\"{s}\""),
             GenRef::Ref(s) => format!("\"{s}\""),
-            GenRef::Id(s) => s,  // Identifiers don't need quotes
+            GenRef::Id(s) => s, // Identifiers don't need quotes
             GenRef::Unknown => {
                 // Generate a compile error in the output code
                 "compile_error!(\"Unknown value in code generation\")".to_string()
@@ -239,11 +243,15 @@ impl GeneratedValue {
             GeneratedValue::Traversal(_) => {
                 // This should not be called for traversals
                 // The caller should handle traversals specially
-                panic!("Code generation error: Cannot get inner value of Traversal. Traversals should be handled specially.")
+                panic!(
+                    "Code generation error: Cannot get inner value of Traversal. Traversals should be handled specially."
+                )
             }
             GeneratedValue::Unknown => {
                 // This indicates a bug in the analyzer
-                panic!("Code generation error: Unknown GeneratedValue encountered. This indicates incomplete type inference in the analyzer.")
+                panic!(
+                    "Code generation error: Unknown GeneratedValue encountered. This indicates incomplete type inference in the analyzer."
+                )
             }
         }
     }
@@ -309,6 +317,7 @@ pub enum RustType {
     U32,
     U64,
     U128,
+    F16,
     F32,
     F64,
     Bool,
@@ -328,6 +337,7 @@ impl Display for RustType {
             RustType::U32 => write!(f, "u32"),
             RustType::U64 => write!(f, "u64"),
             RustType::U128 => write!(f, "u128"),
+            RustType::F16 => write!(f, "f16"),
             RustType::F32 => write!(f, "f32"),
             RustType::F64 => write!(f, "f64"),
             RustType::Bool => write!(f, "bool"),
@@ -349,11 +359,12 @@ impl RustType {
             RustType::U32 => "number",
             RustType::U64 => "number",
             RustType::U128 => "number",
+            RustType::F16 => "number",
             RustType::F32 => "number",
             RustType::F64 => "number",
             RustType::Bool => "boolean",
-            RustType::Uuid => "string", // do thee
-            RustType::Date => "Date",   // do thee
+            RustType::Uuid => "string",
+            RustType::Date => "Date",
         };
         s.to_string()
     }
@@ -438,7 +449,7 @@ use helix_db::{
             traversal_value::{Traversable, TraversalValue},
         },
         types::GraphError,
-        vector_core::vector::HVector,
+        vector_core::{vector::HVector, VectorData},
     },
     helix_gateway::{
         embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
@@ -468,6 +479,24 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use chrono::{DateTime, Utc};
+use half::f16;
     "#
     .to_string()
+}
+
+#[derive(Clone)]
+pub enum Precision<T: Display> {
+    F64(T),
+    F32(T),
+    F16(T),
+}
+
+impl<T: Display> Display for Precision<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Precision::F64(v) => write!(f, "VectorData::F64({v})"),
+            Precision::F32(v) => write!(f, "VectorData::F32({v})"),
+            Precision::F16(v) => write!(f, "VectorData::F16({v})"),
+        }
+    }
 }

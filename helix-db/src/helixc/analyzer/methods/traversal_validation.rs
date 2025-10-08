@@ -1,9 +1,9 @@
 use crate::helixc::analyzer::error_codes::*;
-use crate::helixc::analyzer::utils::{check_identifier_is_fieldtype, DEFAULT_VAR_NAME};
+use crate::helixc::analyzer::utils::{DEFAULT_VAR_NAME, check_identifier_is_fieldtype};
 use crate::helixc::generator::bool_ops::{Contains, IsIn};
 use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
 use crate::helixc::generator::traversal_steps::{AggregateBy, GroupBy};
-use crate::helixc::generator::utils::{EmbedData, VecData};
+use crate::helixc::generator::utils::{EmbedData, Precision as GeneratedPrecision, VecData};
 use crate::{
     generate_error,
     helixc::{
@@ -413,19 +413,23 @@ pub(crate) fn validate_traversal<'a>(
                     is_valid_identifier(ctx, original_query, sv.loc.clone(), i.as_str());
                     // if is in params then use data.
                     let _ = type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str());
-                    VecData::Standard(gen_identifier_or_param(
-                        original_query,
-                        i.as_str(),
-                        true,
-                        false,
-                    ))
+                    let identifier =
+                        gen_identifier_or_param(original_query, i.as_str(), false, false);
+                    scope.remove(i.as_str());
+                    VecData::Standard(identifier)
                 }
                 Some(VectorData::Embed(e)) => {
                     let embed_data = match &e.value {
-                        EvaluatesToString::Identifier(i) => EmbedData {
-                            data: gen_identifier_or_param(original_query, i.as_str(), true, false),
-                            model_name: gen_query.embedding_model_to_use.clone(),
-                        },
+                        EvaluatesToString::Identifier(i) => {
+                            let data =
+                                gen_identifier_or_param(original_query, i.as_str(), false, false);
+                            scope.remove(i.as_str());
+                            EmbedData {
+                                data,
+                                model_name: gen_query.embedding_model_to_use.clone(),
+                            }
+                        }
+
                         EvaluatesToString::StringLiteral(s) => EmbedData {
                             data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                             model_name: gen_query.embedding_model_to_use.clone(),
@@ -548,6 +552,22 @@ pub(crate) fn validate_traversal<'a>(
             //     None => None,
             // };
             let pre_filter = None;
+
+            let vector_in_schema = ctx
+                .src
+                .get_latest_schema()
+                .unwrap()
+                .vector_schemas
+                .iter()
+                .find(|v| &v.name == sv.vector_type.as_ref().unwrap())
+                .cloned()
+                .unwrap();
+
+            let vec = match vector_in_schema.precision {
+                Precision::F64 => GenRef::Std(GeneratedPrecision::F64(vec)),
+                Precision::F32 => GenRef::Std(GeneratedPrecision::F32(vec)),
+                Precision::F16 => GenRef::Std(GeneratedPrecision::F16(vec)),
+            };
 
             gen_traversal.traversal_type = TraversalType::Ref;
             gen_traversal.should_collect = ShouldCollect::ToVec;

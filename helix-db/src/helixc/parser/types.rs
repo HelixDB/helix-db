@@ -1,6 +1,10 @@
 use super::location::Loc;
-use crate::{helixc::parser::{errors::ParserError, HelixParser}, protocol::value::Value};
+use crate::{
+    helixc::parser::{HelixParser, errors::ParserError},
+    protocol::value::Value,
+};
 use chrono::{DateTime, NaiveDate, Utc};
+use half::f16;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -86,7 +90,17 @@ pub struct NodeSchema {
 pub struct VectorSchema {
     pub name: String,
     pub fields: Vec<Field>,
+    pub precision: Precision,
     pub loc: Loc,
+}
+
+
+#[derive(Default, Debug, Clone)]
+pub enum Precision {
+    #[default]
+    F64,
+    F32,
+    F16,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +191,7 @@ pub enum DefaultValue {
     String(String),
     F32(f32),
     F64(f64),
+    F16(f16),
     I8(i8),
     I16(i16),
     I32(i32),
@@ -205,6 +220,7 @@ impl FieldPrefix {
 #[derive(Debug, Clone)]
 pub enum FieldType {
     String,
+    F16,
     F32,
     F64,
     I8,
@@ -229,7 +245,7 @@ impl PartialEq for FieldType {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (FieldType::String, FieldType::String) => true,
-            (FieldType::F32 | FieldType::F64, FieldType::F32 | FieldType::F64) => true,
+            (FieldType::F16 | FieldType::F32 | FieldType::F64, FieldType::F16 | FieldType::F32 | FieldType::F64) => true,
             (
                 FieldType::I8
                 | FieldType::I16
@@ -267,6 +283,7 @@ impl Display for FieldType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FieldType::String => write!(f, "String"),
+            FieldType::F16 => write!(f, "F16"),
             FieldType::F32 => write!(f, "F32"),
             FieldType::F64 => write!(f, "F64"),
             FieldType::I8 => write!(f, "I8"),
@@ -298,7 +315,7 @@ impl PartialEq<Value> for FieldType {
     fn eq(&self, other: &Value) -> bool {
         match (self, other) {
             (FieldType::String, Value::String(_)) => true,
-            (FieldType::F32 | FieldType::F64, Value::F32(_) | Value::F64(_)) => true,
+            (FieldType::F16 | FieldType::F32 | FieldType::F64, Value::F32(_) | Value::F64(_)) => true,
             (
                 FieldType::I8
                 | FieldType::I16
@@ -351,7 +368,7 @@ impl PartialEq<DefaultValue> for FieldType {
     fn eq(&self, other: &DefaultValue) -> bool {
         match (self, other) {
             (FieldType::String, DefaultValue::String(_)) => true,
-            (FieldType::F32 | FieldType::F64, DefaultValue::F32(_) | DefaultValue::F64(_)) => true,
+            (FieldType::F16 | FieldType::F32 | FieldType::F64, DefaultValue::F16(_) | DefaultValue::F32(_) | DefaultValue::F64(_)) => true,
             (
                 FieldType::I8
                 | FieldType::I16
@@ -598,13 +615,13 @@ pub struct OrderBy {
 #[derive(Debug, Clone)]
 pub struct Aggregate {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GroupBy {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -774,6 +791,8 @@ pub enum EvaluatesToString {
     Identifier(String),
     StringLiteral(String),
 }
+
+
 
 #[derive(Debug, Clone)]
 pub struct SearchVector {

@@ -6,6 +6,7 @@ use crate::{
             hnsw::HNSW,
             utils::{Candidate, HeapOps, VectorFilter},
             vector::HVector,
+            vector_data::VectorData,
         },
     },
     protocol::value::Value,
@@ -399,7 +400,7 @@ impl HNSW for VectorCore {
     fn search<F>(
         &self,
         txn: &RoTxn,
-        query: &[f64],
+        query: &VectorData,
         k: usize,
         label: &str,
         filter: Option<&[F]>,
@@ -408,7 +409,7 @@ impl HNSW for VectorCore {
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
-        let query = HVector::from_slice(0, query.to_vec());
+        let query = HVector::from_slice(0, query.clone());
 
         let mut entry_point = self.get_entry_point(txn)?;
 
@@ -455,7 +456,7 @@ impl HNSW for VectorCore {
     fn insert<F>(
         &self,
         txn: &mut RwTxn,
-        data: &[f64],
+        data: VectorData,
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
     where
@@ -463,7 +464,7 @@ impl HNSW for VectorCore {
     {
         let new_level = self.get_new_level();
 
-        let mut query = HVector::from_slice(0, data.to_vec());
+        let mut query = HVector::from_slice(0, data);
         self.put_vector(txn, &query)?;
         query.level = new_level;
         if new_level > 0 {

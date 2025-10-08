@@ -1,14 +1,9 @@
 use std::collections::HashMap;
 
 use crate::helixc::parser::{
-    HelixParser, ParserError, Rule,
-    location::HasLoc,
-    types::{
-        DefaultValue, EdgeSchema, Field, FieldPrefix, FieldType, Migration, MigrationItem,
-        MigrationItemMapping, MigrationPropertyMapping, NodeSchema, Source, ValueCast,
-        VectorSchema,
-    },
-    utils::{PairTools, PairsTools},
+    location::HasLoc, types::{
+        DefaultValue, EdgeSchema, Field, FieldPrefix, FieldType, Migration, MigrationItem, MigrationItemMapping, MigrationPropertyMapping, NodeSchema, Precision, Source, ValueCast, VectorSchema
+    }, utils::{PairTools, PairsTools}, HelixParser, ParserError, Rule
 };
 use pest::iterators::{Pair, Pairs};
 
@@ -35,10 +30,21 @@ impl HelixParser {
     ) -> Result<VectorSchema, ParserError> {
         let mut pairs = pair.clone().into_inner();
         let name = pairs.try_next()?.as_str().to_string();
+        let precision = match pairs.try_peek_matches(Rule::precision) {
+            Some(pair) => match pair.try_inner_next()?.as_rule() {
+                Rule::f64 => Precision::F64,
+                Rule::f32 => Precision::F32,
+                Rule::f16 => Precision::F16,
+                _ => unreachable!(),
+            },
+            None => Precision::default(),
+        };
+
         let fields = self.parse_node_body(pairs.try_next()?, filepath.clone())?;
         Ok(VectorSchema {
             name,
             fields,
+            precision,
             loc: pair.loc_with_filepath(filepath),
         })
     }
@@ -394,6 +400,7 @@ impl HelixParser {
                 match type_str {
                     "String" => Ok(FieldType::String),
                     "Boolean" => Ok(FieldType::Boolean),
+                    "F16" => Ok(FieldType::F16),
                     "F32" => Ok(FieldType::F32),
                     "F64" => Ok(FieldType::F64),
                     "I8" => Ok(FieldType::I8),
