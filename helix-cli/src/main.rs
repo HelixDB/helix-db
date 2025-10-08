@@ -4,6 +4,7 @@ use eyre::Result;
 mod commands;
 mod config;
 mod docker;
+mod env_utils;
 mod errors;
 mod metrics_sender;
 mod project;
