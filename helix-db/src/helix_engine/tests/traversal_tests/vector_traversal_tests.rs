@@ -23,7 +23,7 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::vector::HVector,
+        vector_core::{VectorData, vector::HVector},
     },
     props,
 };
@@ -55,7 +55,11 @@ fn test_from_v() {
         .collect_to_obj();
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 2.0, 3.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            VectorData::F64(vec![1.0, 2.0, 3.0]),
+            "vector",
+            None,
+        )
         .collect_to_obj();
 
     let _ = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -86,7 +90,11 @@ fn test_to_v() {
         .collect_to_obj();
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 2.0, 3.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            VectorData::F64(vec![1.0, 2.0, 3.0]),
+            "vector",
+            None,
+        )
         .collect_to_obj();
 
     let _ = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -127,7 +135,7 @@ fn test_brute_force_vector_search() {
     let mut vector_ids = Vec::new();
     for vector in vectors {
         let vector_id = G::new_mut(Arc::clone(&storage), &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(&vector, "vector", None)
+            .insert_v::<fn(&HVector, &RoTxn) -> bool>(VectorData::F64(vector), "vector", None)
             .collect_to_obj()
             .id();
         let _ = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -213,7 +221,11 @@ fn test_vector_search() {
             rng.random::<f64>(),
         ];
         let _ = G::new_mut(Arc::clone(&storage), &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(&random_vector, "vector", None)
+            .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+                VectorData::F64(random_vector),
+                "vector",
+                None,
+            )
             .collect_to_obj();
         println!("inserted vector: {i:?}");
         i += 1;
@@ -234,7 +246,7 @@ fn test_vector_search() {
 
     for vector in vectors {
         let node = G::new_mut(Arc::clone(&storage), &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(&vector, "vector", None)
+            .insert_v::<fn(&HVector, &RoTxn) -> bool>(VectorData::F64(vector), "vector", None)
             .collect_to_obj();
         inserted_vectors.push(node.id());
         println!("inserted vector: {i:?}");
@@ -246,7 +258,7 @@ fn test_vector_search() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             2000,
             "vector",
             None,
@@ -268,7 +280,11 @@ fn test_delete_vector() {
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            "vector",
+            None,
+        )
         .collect_to_obj();
     let node = G::new_mut(Arc::clone(&storage), &mut txn)
         .add_n("person", None, None)
@@ -282,7 +298,7 @@ fn test_delete_vector() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             2000,
             "vector",
             None,
@@ -298,7 +314,7 @@ fn test_delete_vector() {
     Drop::drop_traversal(
         G::new(Arc::clone(&storage), &txn)
             .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
-                &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
                 2000,
                 "vector",
                 None,
@@ -314,7 +330,7 @@ fn test_delete_vector() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             2000,
             "vector",
             None,
@@ -352,7 +368,11 @@ fn test_drop_vectors_then_add_them_back() {
         .collect_to_obj();
 
     let embedding = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            "vector",
+            None,
+        )
         .collect_to_obj();
 
     let _ = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -409,7 +429,7 @@ fn test_drop_vectors_then_add_them_back() {
 
     let embedding = G::new_mut(Arc::clone(&storage), &mut txn)
         .insert_v::<fn(&HVector, &RoTxn) -> bool>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             "Entity_Embedding",
             Some(props! { "name_embedding" => [1.0, 1.0, 1.0, 1.0, 1.0, 1.0].to_vec() }),
         )
@@ -430,7 +450,7 @@ fn test_drop_vectors_then_add_them_back() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             2000,
             "Entity_Embedding",
             None,
@@ -450,7 +470,11 @@ fn test_drop_vectors_then_add_them_back() {
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let embedding = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            "vector",
+            None,
+        )
         .collect_to_obj();
 
     let _ = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -487,7 +511,7 @@ fn test_drop_vectors_then_add_them_back() {
 
     let embedding = G::new_mut(Arc::clone(&storage), &mut txn)
         .insert_v::<fn(&HVector, &RoTxn) -> bool>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             "Entity_Embedding",
             Some(props! { "name_embedding" => [1.0, 1.0, 1.0, 1.0, 1.0, 1.0].to_vec() }),
         )
@@ -508,7 +532,7 @@ fn test_drop_vectors_then_add_them_back() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(Arc::clone(&storage), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, usize>(
-            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            VectorData::F64(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             2000,
             "Entity_Embedding",
             None,
