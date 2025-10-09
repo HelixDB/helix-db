@@ -29,6 +29,7 @@ tempfile = "3.20.0"
 paste = "1.0.15"
 rayon = "1.11.0"
 mimalloc = "0.1.48"
+half = { version = "2.4.1", features = ["serde", "std"] }
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }

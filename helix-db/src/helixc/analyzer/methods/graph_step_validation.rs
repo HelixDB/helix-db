@@ -1,7 +1,7 @@
 //! Semantic analyzer for Helix‑QL.
 use crate::helixc::analyzer::error_codes::ErrorCode;
 use crate::helixc::analyzer::utils::type_in_scope;
-use crate::helixc::generator::utils::EmbedData;
+use crate::helixc::generator::utils::{EmbedData, Precision as GeneratedPrecision};
 use crate::{
     generate_error,
     helix_engine::traversal_core::ops::source::add_e::EdgeType,
@@ -271,7 +271,7 @@ pub(crate) fn apply_graph_step<'a>(
             match cur_ty {
                 Type::Edges(_) => traversal.should_collect = ShouldCollect::ToVec,
                 Type::Edge(_) => traversal.should_collect = ShouldCollect::ToObj,
-                _ => {},
+                _ => {}
             }
             new_ty
         }
@@ -294,7 +294,7 @@ pub(crate) fn apply_graph_step<'a>(
             match cur_ty {
                 Type::Edges(_) => traversal.should_collect = ShouldCollect::ToVec,
                 Type::Edge(_) => traversal.should_collect = ShouldCollect::ToObj,
-                _ => {},
+                _ => {}
             }
             new_ty
         }
@@ -320,7 +320,7 @@ pub(crate) fn apply_graph_step<'a>(
             match cur_ty {
                 Type::Edges(_) => traversal.should_collect = ShouldCollect::ToVec,
                 Type::Edge(_) => traversal.should_collect = ShouldCollect::ToObj,
-                _ => {},
+                _ => {}
             }
             new_ty
         }
@@ -344,7 +344,7 @@ pub(crate) fn apply_graph_step<'a>(
             match cur_ty {
                 Type::Edges(_) => traversal.should_collect = ShouldCollect::ToVec,
                 Type::Edge(_) => traversal.should_collect = ShouldCollect::ToObj,
-                _ => {},
+                _ => {}
             }
             new_ty
         }
@@ -648,6 +648,21 @@ pub(crate) fn apply_graph_step<'a>(
                 }
             };
 
+            let vector_in_schema = ctx
+                .src
+                .get_latest_schema()
+                .unwrap()
+                .vector_schemas
+                .iter()
+                .find(|v| &v.name == sv.vector_type.as_ref().unwrap())
+                .cloned()
+                .unwrap();
+
+               let vec = match vector_in_schema.precision {
+                Precision::F64 => GenRef::Std(GeneratedPrecision::F64(vec)),
+                Precision::F32 => GenRef::Std(GeneratedPrecision::F32(vec)),
+                Precision::F16 => GenRef::Std(GeneratedPrecision::F16(vec)),
+            };
             // Search returns nodes that contain the vectors
 
             // Some(GeneratedStatement::Traversal(GeneratedTraversal {

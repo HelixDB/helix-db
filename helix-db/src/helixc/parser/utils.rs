@@ -96,6 +96,9 @@ pub trait PairsTools<'a> {
 
     /// Equivalent to next().into_inner()
     fn try_next_inner(&mut self) -> Result<Pairs<'a, Rule>, ParserError>;
+
+    /// equivalent to peek() then if some get next 
+    fn try_peek_matches(&mut self, rule: Rule) -> Option<Pair<'a, Rule>>;
 }
 use std::panic::Location;
 impl<'a> PairTools<'a> for Pair<'a, Rule> {
@@ -136,6 +139,20 @@ impl<'a> PairsTools<'a> for Pairs<'a, Rule> {
             None => Err(ParserError::from("Expected next inner")),
         }
     }
+
+    fn try_peek_matches(&mut self, rule: Rule) -> Option<Pair<'a, Rule>> {
+        match self.peek() {
+            Some(pair) => {
+                if pair.as_rule() == rule {
+                    self.next();
+                    Some(pair)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    }
 }
 
 impl<'a> PairsTools<'a> for Result<Pairs<'a, Rule>, ParserError> {
@@ -150,6 +167,13 @@ impl<'a> PairsTools<'a> for Result<Pairs<'a, Rule>, ParserError> {
         match self {
             Ok(pairs) => pairs.try_next_inner(),
             Err(e) => Err(e.clone()),
+        }
+    }
+
+    fn try_peek_matches(&mut self, rule: Rule) -> Option<Pair<'a, Rule>> {
+        match self {
+            Ok(pairs) => pairs.try_peek_matches(rule),
+            Err(_) => None,
         }
     }
 }

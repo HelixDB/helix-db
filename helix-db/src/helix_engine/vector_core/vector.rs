@@ -1,7 +1,7 @@
 use crate::{
     helix_engine::{
         types::{GraphError, VectorError},
-        vector_core::vector_distance::DistanceCalc,
+        vector_core::{vector_data::VectorData, vector_distance::DistanceCalc},
     },
     protocol::{return_values::ReturnValue, value::Value},
     utils::{
@@ -10,12 +10,16 @@ use crate::{
     },
 };
 use core::fmt;
+use half::f16;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, cmp::Ordering, collections::HashMap, fmt::Debug};
 
-// TODO: make this generic over the type of encoding (f32, f64, etc)
+// Type markers for serialization
+const F64_MARKER: u8 = 0x01;
+const F32_MARKER: u8 = 0x02;
+const F16_MARKER: u8 = 0x03;
+
 // TODO: use const param to set dimension
-// TODO: set level as u8
 
 #[repr(C, align(16))] // TODO: see performance impact of repr(C) and align(16)
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -30,9 +34,9 @@ pub struct HVector {
     /// The distance of the HVector
     #[serde(default)]
     pub distance: Option<f64>,
-    /// The actual vector
+    /// The actual vector data with precision support
     #[serde(default)]
-    pub data: Vec<f64>,
+    pub data: VectorData,
     /// The properties of the HVector
     #[serde(default)]
     pub properties: Option<HashMap<String, Value>>,
@@ -40,6 +44,12 @@ pub struct HVector {
     /// the version of the vector
     #[serde(default)]
     pub version: u8,
+}
+
+impl Default for VectorData {
+    fn default() -> Self {
+        VectorData::F64(Vec::new())
+    }
 }
 
 impl Eq for HVector {}
@@ -61,11 +71,12 @@ impl Debug for HVector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{{ \nid: {},\nlevel: {},\ndistance: {:?},\ndata: {:?},\nproperties: {:#?} }}",
+            "{{ \nid: {},\nlevel: {},\ndistance: {:?},\nprecision: {},\ndata: {:?},\nproperties: {:#?} }}",
             uuid::Uuid::from_u128(self.id),
             // self.is_deleted,
             self.level,
             self.distance,
+            self.data.precision(),
             self.data,
             self.properties
         )
@@ -74,7 +85,7 @@ impl Debug for HVector {
 
 impl HVector {
     #[inline(always)]
-    pub fn new(data: Vec<f64>) -> Self {
+    pub fn new(data: VectorData) -> Self {
         let id = v6_uuid();
         HVector {
             id,
@@ -88,7 +99,7 @@ impl HVector {
     }
 
     #[inline(always)]
-    pub fn from_slice(level: usize, data: Vec<f64>) -> Self {
+    pub fn from_slice(level: usize, data: VectorData) -> Self {
         let id = v6_uuid();
         HVector {
             id,
@@ -99,6 +110,12 @@ impl HVector {
             distance: None,
             properties: None,
         }
+    }
+
+    /// Create HVector from f64 slice (backwards compatibility)
+    #[inline(always)]
+    pub fn from_f64_slice(level: usize, data: Vec<f64>) -> Self {
+        Self::from_slice(level, VectorData::F64(data))
     }
 
     #[inline(always)]
@@ -112,9 +129,19 @@ impl HVector {
         Ok(vector)
     }
 
-    /// Returns the data of the HVector
+    /// Returns the data of the HVector as f64 vec (for calculations)
     #[inline(always)]
-    pub fn get_data(&self) -> &[f64] {
+    pub fn get_data_f64(&self) -> Vec<f64> {
+        match &self.data {
+            VectorData::F64(v) => v.clone(),
+            VectorData::F32(v) => v.iter().map(|&f| f as f64).collect(),
+            VectorData::F16(v) => v.iter().map(|&f| f.to_f32() as f64).collect(),
+        }
+    }
+
+    /// Returns a reference to the VectorData
+    #[inline(always)]
+    pub fn get_data(&self) -> &VectorData {
         &self.data
     }
 
@@ -130,36 +157,96 @@ impl HVector {
         self.level
     }
 
-    /// Converts the HVector to an vec of bytes by accessing the data field directly
-    /// and converting each f64 to a byte slice
+    /// Converts the HVector to a vec of bytes with type marker
+    /// Format: [type_marker: 1 byte][data: n bytes]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let size = self.data.len() * std::mem::size_of::<f64>();
+        let (marker, element_size) = match &self.data {
+            VectorData::F64(_) => (F64_MARKER, std::mem::size_of::<f64>()),
+            VectorData::F32(_) => (F32_MARKER, std::mem::size_of::<f32>()),
+            VectorData::F16(_) => (F16_MARKER, std::mem::size_of::<u16>()),
+        };
+
+        let size = 1 + self.data.len() * element_size;
         let mut bytes = Vec::with_capacity(size);
-        for &value in &self.data {
-            bytes.extend_from_slice(&value.to_be_bytes());
+        bytes.push(marker);
+
+        match &self.data {
+            VectorData::F64(vec) => {
+                for &value in vec {
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+            VectorData::F32(vec) => {
+                for &value in vec {
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+            VectorData::F16(vec) => {
+                for &value in vec {
+                    bytes.extend_from_slice(&value.to_bits().to_be_bytes());
+                }
+            }
         }
+
         bytes
     }
 
-    // will make to use const param for type of encoding (f32, f64, etc)
-    /// Converts a byte array into a HVector by chunking the bytes into f64 values
+    /// Converts a byte array into a HVector, detecting precision from type marker
+    /// Format: [type_marker: 1 byte][data: n bytes]
+    /// For backwards compatibility, assumes F64 if no marker present
     pub fn from_bytes(id: u128, level: usize, bytes: &[u8]) -> Result<Self, VectorError> {
-        if !bytes.len().is_multiple_of(std::mem::size_of::<f64>()){
+        if bytes.is_empty() {
             return Err(VectorError::InvalidVectorData);
         }
 
-        let mut data = Vec::with_capacity(bytes.len() / std::mem::size_of::<f64>());
-        let chunks = bytes.chunks_exact(std::mem::size_of::<f64>());
+        // Check if this is a new format with type marker
+        let (type_marker, data_bytes) =
+            if bytes[0] == F64_MARKER || bytes[0] == F32_MARKER || bytes[0] == F16_MARKER {
+                (bytes[0], &bytes[1..])
+            } else {
+                // Backwards compatibility: no marker means F64
+                (F64_MARKER, bytes)
+            };
 
-        for chunk in chunks {
-            // panic here because panic means corruption of some sort
-            let value = f64::from_be_bytes(chunk.try_into().expect("Invalid chunk"));
-            data.push(value);
-        }
+        let data = match type_marker {
+            F64_MARKER => {
+                if !data_bytes.len().is_multiple_of(std::mem::size_of::<f64>()) {
+                    return Err(VectorError::InvalidVectorData);
+                }
+                let mut vec = Vec::with_capacity(data_bytes.len() / std::mem::size_of::<f64>());
+                for chunk in data_bytes.chunks_exact(std::mem::size_of::<f64>()) {
+                    let value = f64::from_be_bytes(chunk.try_into().expect("Invalid chunk"));
+                    vec.push(value);
+                }
+                VectorData::F64(vec)
+            }
+            F32_MARKER => {
+                if !data_bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+                    return Err(VectorError::InvalidVectorData);
+                }
+                let mut vec = Vec::with_capacity(data_bytes.len() / std::mem::size_of::<f32>());
+                for chunk in data_bytes.chunks_exact(std::mem::size_of::<f32>()) {
+                    let value = f32::from_be_bytes(chunk.try_into().expect("Invalid chunk"));
+                    vec.push(value);
+                }
+                VectorData::F32(vec)
+            }
+            F16_MARKER => {
+                if !data_bytes.len().is_multiple_of(std::mem::size_of::<u16>()) {
+                    return Err(VectorError::InvalidVectorData);
+                }
+                let mut vec = Vec::with_capacity(data_bytes.len() / std::mem::size_of::<u16>());
+                for chunk in data_bytes.chunks_exact(std::mem::size_of::<u16>()) {
+                    let bits = u16::from_be_bytes(chunk.try_into().expect("Invalid chunk"));
+                    vec.push(f16::from_bits(bits));
+                }
+                VectorData::F16(vec)
+            }
+            _ => return Err(VectorError::InvalidVectorData),
+        };
 
         Ok(HVector {
             id,
-            // is_deleted: false,
             level,
             version: 1,
             data,
@@ -176,6 +263,11 @@ impl HVector {
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    /// Returns the precision of the vector data
+    pub fn precision(&self) -> &'static str {
+        self.data.precision()
     }
 
     #[inline(always)]
@@ -197,8 +289,8 @@ impl HVector {
     pub fn get_label(&self) -> Option<&Value> {
         match &self.properties {
             Some(p) => p.get("label"),
-            None => None
-        } 
+            None => None,
+        }
     }
 }
 
@@ -248,15 +340,24 @@ impl Filterable for HVector {
 
     fn properties(self) -> Option<HashMap<String, Value>> {
         let mut properties = self.properties.unwrap_or_default();
-        properties.insert(
-            "data".to_string(),
-            Value::Array(self.data.iter().map(|f| Value::F64(*f)).collect()),
-        );
+        let vec_values = match &self.data {
+            VectorData::F64(v) => v.iter().map(|&f| Value::F64(f)).collect(),
+            VectorData::F32(v) => v.iter().map(|&f| Value::F32(f)).collect(),
+            VectorData::F16(v) => v.iter().map(|&f| Value::F32(f.to_f32())).collect(),
+        };
+        properties.insert("data".to_string(), Value::Array(vec_values));
         Some(properties)
     }
 
     fn vector_data(&self) -> &[f64] {
-        &self.data
+        // For backwards compatibility, we need to return &[f64]
+        // This is a temporary workaround - ideally this method should be updated
+        // For now, we'll need to convert on the fly
+        // Note: This is inefficient and should be refactored later
+        match &self.data {
+            VectorData::F64(v) => v.as_slice(),
+            _ => &[], // Return empty slice for non-f64 data
+        }
     }
 
     fn score(&self) -> f64 {
@@ -275,9 +376,14 @@ impl Filterable for HVector {
         match key {
             "id" => Ok(Cow::Owned(Value::from(self.uuid()))),
             "label" => Ok(Cow::Owned(Value::from(self.label().to_string()))),
-            "data" => Ok(Cow::Owned(Value::Array(
-                self.data.iter().map(|f| Value::F64(*f)).collect(),
-            ))),
+            "data" => {
+                let vec_values = match &self.data {
+                    VectorData::F64(v) => v.iter().map(|&f| Value::F64(f)).collect(),
+                    VectorData::F32(v) => v.iter().map(|&f| Value::F32(f)).collect(),
+                    VectorData::F16(v) => v.iter().map(|&f| Value::F32(f.to_f32())).collect(),
+                };
+                Ok(Cow::Owned(Value::Array(vec_values)))
+            }
             "score" => Ok(Cow::Owned(Value::F64(self.score()))),
             _ => match &self.properties {
                 Some(properties) => properties

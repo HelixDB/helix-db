@@ -1,4 +1,8 @@
-use crate::helix_engine::{types::VectorError, vector_core::vector::HVector};
+use crate::helix_engine::{
+    types::VectorError,
+    vector_core::{vector::HVector, vector_data::VectorData},
+};
+use half::f16;
 
 pub const MAX_DISTANCE: f64 = 2.0;
 pub const ORTHOGONAL: f64 = 1.0;
@@ -7,6 +11,7 @@ pub const MIN_DISTANCE: f64 = 0.0;
 pub trait DistanceCalc {
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError>;
 }
+
 impl DistanceCalc for HVector {
     /// Calculates the distance between two vectors.
     ///
@@ -15,17 +20,163 @@ impl DistanceCalc for HVector {
     /// - 1.0 (most similar) → Distance 0.0 (closest)
     /// - 0.0 (orthogonal) → Distance 1.0
     /// - -1.0 (most dissimilar) → Distance 2.0 (furthest)
+    ///
+    /// Uses native precision when types match for optimal performance.
+    /// Mixed precision uses lazy conversion during calculation.
     #[inline(always)]
     #[cfg(feature = "cosine")]
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError> {
-        cosine_similarity(&from.data, &to.data).map(|sim| 1.0 - sim)
+        match (&from.data, &to.data) {
+            // Native f16 calculation (fastest for matching types)
+            (VectorData::F16(a), VectorData::F16(b)) => {
+                cosine_similarity_f16(a, b).map(|sim| 1.0 - sim)
+            }
+            // Native f32 calculation
+            (VectorData::F32(a), VectorData::F32(b)) => {
+                cosine_similarity_f32(a, b).map(|sim| (1.0 - sim) as f64)
+            }
+            // Native f64 calculation
+            (VectorData::F64(a), VectorData::F64(b)) => {
+                cosine_similarity_f64(a, b).map(|sim| 1.0 - sim)
+            }
+            // Mixed precision - use lazy conversion
+            _ => cosine_similarity_mixed(&from.data, &to.data).map(|sim| 1.0 - sim),
+        }
     }
 }
 
-
+/// Cosine similarity for f32 vectors (native precision)
 #[inline]
 #[cfg(feature = "cosine")]
-pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
+pub fn cosine_similarity_f32(from: &[f32], to: &[f32]) -> Result<f32, VectorError> {
+    let len = from.len();
+    let other_len = to.len();
+
+    if len != other_len {
+        return Err(VectorError::InvalidVectorLength);
+    }
+
+    let mut dot_product = 0.0f32;
+    let mut magnitude_a = 0.0f32;
+    let mut magnitude_b = 0.0f32;
+
+    const CHUNK_SIZE: usize = 8;
+    let chunks = len / CHUNK_SIZE;
+    let remainder = len % CHUNK_SIZE;
+
+    for i in 0..chunks {
+        let offset = i * CHUNK_SIZE;
+        let a_chunk = &from[offset..offset + CHUNK_SIZE];
+        let b_chunk = &to[offset..offset + CHUNK_SIZE];
+
+        let mut local_dot = 0.0f32;
+        let mut local_mag_a = 0.0f32;
+        let mut local_mag_b = 0.0f32;
+
+        for j in 0..CHUNK_SIZE {
+            let a_val = a_chunk[j];
+            let b_val = b_chunk[j];
+            local_dot += a_val * b_val;
+            local_mag_a += a_val * a_val;
+            local_mag_b += b_val * b_val;
+        }
+
+        dot_product += local_dot;
+        magnitude_a += local_mag_a;
+        magnitude_b += local_mag_b;
+    }
+
+    let remainder_offset = chunks * CHUNK_SIZE;
+    for i in 0..remainder {
+        let a_val = from[remainder_offset + i];
+        let b_val = to[remainder_offset + i];
+        dot_product += a_val * b_val;
+        magnitude_a += a_val * a_val;
+        magnitude_b += b_val * b_val;
+    }
+
+    if magnitude_a.abs() == 0.0 || magnitude_b.abs() == 0.0 {
+        return Ok(-1.0);
+    }
+
+    Ok(dot_product / (magnitude_a.sqrt() * magnitude_b.sqrt()))
+}
+
+/// Cosine similarity for f16 vectors (native precision)
+#[inline]
+#[cfg(feature = "cosine")]
+pub fn cosine_similarity_f16(from: &[f16], to: &[f16]) -> Result<f64, VectorError> {
+    let len = from.len();
+    let other_len = to.len();
+
+    if len != other_len {
+        return Err(VectorError::InvalidVectorLength);
+    }
+
+    // f16 doesn't have great arithmetic support, so we accumulate in f32
+    let mut dot_product = 0.0f32;
+    let mut magnitude_a = 0.0f32;
+    let mut magnitude_b = 0.0f32;
+
+    for i in 0..len {
+        let a_val = from[i].to_f32();
+        let b_val = to[i].to_f32();
+        dot_product += a_val * b_val;
+        magnitude_a += a_val * a_val;
+        magnitude_b += b_val * b_val;
+    }
+
+    if magnitude_a.abs() == 0.0 || magnitude_b.abs() == 0.0 {
+        return Ok(-1.0);
+    }
+
+    Ok((dot_product / (magnitude_a.sqrt() * magnitude_b.sqrt())) as f64)
+}
+
+/// Cosine similarity with lazy mixed-precision conversion
+/// Converts values to f64 on-the-fly without allocating intermediate collections
+#[inline]
+#[cfg(feature = "cosine")]
+pub fn cosine_similarity_mixed(from: &VectorData, to: &VectorData) -> Result<f64, VectorError> {
+    let len_from = from.len();
+    let len_to = to.len();
+
+    if len_from != len_to {
+        return Err(VectorError::InvalidVectorLength);
+    }
+
+    let mut dot_product = 0.0f64;
+    let mut magnitude_a = 0.0f64;
+    let mut magnitude_b = 0.0f64;
+
+    // Helper to get value at index as f64
+    let get_f64 = |data: &VectorData, idx: usize| -> f64 {
+        match data {
+            VectorData::F64(v) => v[idx],
+            VectorData::F32(v) => v[idx] as f64,
+            VectorData::F16(v) => v[idx].to_f64(),
+        }
+    };
+
+    for i in 0..len_from {
+        let a_val = get_f64(from, i);
+        let b_val = get_f64(to, i);
+        dot_product += a_val * b_val;
+        magnitude_a += a_val * a_val;
+        magnitude_b += b_val * b_val;
+    }
+
+    if magnitude_a.abs() == 0.0 || magnitude_b.abs() == 0.0 {
+        return Ok(-1.0);
+    }
+
+    Ok(dot_product / (magnitude_a.sqrt() * magnitude_b.sqrt()))
+}
+
+/// Cosine similarity for f64 vectors (original implementation)
+#[inline]
+#[cfg(feature = "cosine")]
+pub fn cosine_similarity_f64(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
     let len = from.len();
     let other_len = to.len();
 

@@ -1,7 +1,7 @@
 use core::fmt;
 use std::fmt::Display;
 
-use crate::helixc::generator::utils::{write_properties, write_secondary_indices, VecData};
+use crate::helixc::generator::utils::{write_properties, write_secondary_indices, Precision, VecData};
 
 use super::{
     bool_ops::BoExp,
@@ -88,7 +88,7 @@ impl Display for AddE {
 #[derive(Clone)]
 pub struct AddV {
     /// Vector to add
-    pub vec: VecData,
+    pub vec: GenRef<Precision<VecData>>,
     /// Label of vector
     pub label: GenRef<String>,
     /// Properties of vector
@@ -231,7 +231,7 @@ pub struct SearchVector {
     /// Label of vector to search for
     pub label: GenRef<String>,
     /// Vector to search for
-    pub vec: VecData,
+    pub vec: GenRef<Precision<VecData>>,
     /// Number of results to return
     pub k: GeneratedValue,
     /// Pre-filter to apply to the search - currently not implemented in grammar
