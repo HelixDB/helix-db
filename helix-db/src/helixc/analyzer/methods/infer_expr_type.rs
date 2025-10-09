@@ -799,10 +799,9 @@ pub(crate) fn infer_expr_type<'a>(
                                     let data = gen_identifier_or_param(
                                         original_query,
                                         i.as_str(),
-                                        false,
+                                        true,
                                         false,
                                     );
-                                    scope.remove(i.as_str());
                                     EmbedData {
                                         data,
                                         model_name: gen_query.embedding_model_to_use.clone(),
@@ -901,8 +900,7 @@ pub(crate) fn infer_expr_type<'a>(
                     let embed_data = match &e.value {
                         EvaluatesToString::Identifier(i) => {
                             let data =
-                                gen_identifier_or_param(original_query, i.as_str(), false, false);
-                            scope.remove(i.as_str());
+                                gen_identifier_or_param(original_query, i.as_str(), true, false);
                             EmbedData {
                                 data,
                                 model_name: gen_query.embedding_model_to_use.clone(),
