@@ -5,7 +5,7 @@ use crate::{
         types::GraphError,
     },
     protocol::value::Value,
-    utils::{items::Edge, label_hash::hash_label},
+    utils::{label_hash::hash_label}
 };
 use heed3::RoTxn;
 use std::{
@@ -93,12 +93,12 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> Iterator
 impl<'a, I> ShortestPathIterator<'a, I> {
     fn reconstruct_path(
         &self,
-        parent: &HashMap<u128, (u128, Edge)>,
+        parent: &HashMap<u128, (u128, u128)>,
         start_id: &u128,
         end_id: &u128,
     ) -> Result<TraversalValue, GraphError> {
         let mut nodes = Vec::with_capacity(parent.len());
-        let mut edges = Vec::with_capacity(parent.len() - 1);
+        let mut edges = Vec::with_capacity(parent.len().saturating_sub(1));
 
         let mut current = end_id;
 
@@ -106,7 +106,7 @@ impl<'a, I> ShortestPathIterator<'a, I> {
             nodes.push(self.storage.get_node(self.txn, current)?);
 
             let (prev_node, edge) = &parent[current];
-            edges.push(edge.clone());
+            edges.push(self.storage.get_edge(self.txn, edge)?);
             current = prev_node;
         }
 
@@ -125,9 +125,14 @@ impl<'a, I> ShortestPathIterator<'a, I> {
     ) -> Option<Result<TraversalValue, GraphError>> {
         let mut queue = VecDeque::with_capacity(32);
         let mut visited = HashSet::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, Edge)> = HashMap::with_capacity(32);
+        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
         queue.push_back(from);
         visited.insert(from);
+        
+        // find shortest-path from one node to itself
+        if from == to {
+            return Some(self.reconstruct_path(&parent, &from, &to));
+        }
 
         while let Some(current_id) = queue.pop_front() {
             let out_prefix = self.edge_label.map_or_else(
@@ -155,11 +160,7 @@ impl<'a, I> ShortestPathIterator<'a, I> {
 
                 if !visited.contains(&to_node) {
                     visited.insert(to_node);
-                    let edge = match self.storage.get_edge(self.txn, &edge_id) {
-                        Ok(edge) => edge,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    parent.insert(to_node, (current_id, edge));
+                    parent.insert(to_node, (current_id, edge_id));
 
                     if to_node == to {
                         return Some(self.reconstruct_path(&parent, &from, &to));
@@ -179,7 +180,7 @@ impl<'a, I> ShortestPathIterator<'a, I> {
     ) -> Option<Result<TraversalValue, GraphError>> {
         let mut heap = BinaryHeap::new();
         let mut distances = HashMap::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, Edge)> = HashMap::with_capacity(32);
+        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
 
         distances.insert(from, 0.0);
         heap.push(DijkstraState {
@@ -239,6 +240,7 @@ impl<'a, I> ShortestPathIterator<'a, I> {
                         Value::U16(i) => Some(*i as f64),
                         Value::U32(i) => Some(*i as f64),
                         Value::U64(i) => Some(*i as f64),
+                        Value::Boolean(i) => Some(*i as i8 as f64),
                         _ => None,
                     })
                     .unwrap_or(1.0);
@@ -258,7 +260,7 @@ impl<'a, I> ShortestPathIterator<'a, I> {
 
                 if should_update {
                     distances.insert(to_node, new_dist);
-                    parent.insert(to_node, (current_id, edge));
+                    parent.insert(to_node, (current_id, edge_id));
                     heap.push(DijkstraState {
                         node_id: to_node,
                         distance: new_dist,
