@@ -79,7 +79,7 @@ impl HelixGateway {
         let rt = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(tokio_core_setter.num_threads())
-                .on_thread_start(move || Arc::clone(&tokio_core_setter).set_current())
+                .on_thread_unpark(move || Arc::clone(&tokio_core_setter).set_current_once())
                 .enable_all()
                 .build()?,
         );
@@ -239,5 +239,28 @@ impl CoreSetter {
                 "CoreSetter::set_current called more times than cores.len() * threads_per_core. Core affinity not set"
             ),
         };
+    }
+
+    pub fn set_current_once(self: Arc<Self>) {
+        use std::sync::OnceLock;
+
+        thread_local! {
+            static CORE_SET: OnceLock<()> = OnceLock::new();
+        }
+
+        CORE_SET.with(|flag| {
+            flag.get_or_init(|| {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.set_current();
+                }));
+
+                if res.is_err() {
+                    warn!(
+                        "CoreSetter::set_current_once panicked on thread {:?}",
+                        std::thread::current().id()
+                    );
+                }
+            });
+        });
     }
 }
