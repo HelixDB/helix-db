@@ -404,6 +404,10 @@ use heed3::RoTxn;
 use helix_macros::{handler, tool_call, mcp_handler, migration};
 use helix_db::{
     helix_engine::{
+        reranker::{
+            RerankAdapter,
+            fusion::{RRFReranker, MMRReranker, DistanceMethod},
+        },
         traversal_core::{
             config::{Config, GraphConfig, VectorConfig},
             ops::{

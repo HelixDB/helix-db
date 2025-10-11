@@ -1,5 +1,5 @@
 [project]
-name = "add_n"
+name = "rerankers"
 queries = "."
 
 [local.dev]

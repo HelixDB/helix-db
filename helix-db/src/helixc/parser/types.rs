@@ -608,6 +608,27 @@ pub struct GroupBy {
 }
 
 #[derive(Debug, Clone)]
+pub struct RerankRRF {
+    pub loc: Loc,
+    pub k: Option<Expression>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RerankMMR {
+    pub loc: Loc,
+    pub lambda: Expression,
+    pub distance: Option<MMRDistance>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MMRDistance {
+    Cosine,
+    Euclidean,
+    DotProduct,
+    Identifier(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum StepType {
     Node(GraphStep),
     Edge(GraphStep),
@@ -624,6 +645,8 @@ pub enum StepType {
     GroupBy(GroupBy),
     AddEdge(AddEdge),
     First,
+    RerankRRF(RerankRRF),
+    RerankMMR(RerankMMR),
 }
 impl PartialEq<StepType> for StepType {
     fn eq(&self, other: &StepType) -> bool {
@@ -646,6 +669,8 @@ impl PartialEq<StepType> for StepType {
                 | (&StepType::AddEdge(_), &StepType::AddEdge(_))
                 | (&StepType::Aggregate(_), &StepType::Aggregate(_))
                 | (&StepType::GroupBy(_), &StepType::GroupBy(_))
+                | (&StepType::RerankRRF(_), &StepType::RerankRRF(_))
+                | (&StepType::RerankMMR(_), &StepType::RerankMMR(_))
         )
     }
 }
