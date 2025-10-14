@@ -20,7 +20,7 @@ use crate::{
             },
             traversal_value::{Traversable, TraversalValue},
         },
-        vector_core::vector::HVector,
+        vector_core::{vector::HVector, VectorData},
     },
     props,
     utils::filterable::Filterable,
@@ -408,7 +408,11 @@ fn test_add_e_between_node_and_vector() {
         .collect_to_obj();
 
     let vector = G::new_mut(Arc::clone(&storage), &mut txn)
-        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&[1.0, 2.0, 3.0], "vector", None)
+        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+            VectorData::F64(vec![1.0, 2.0, 3.0]),
+            "vector",
+            None,
+        )
         .collect_to_obj();
 
     let _ = G::new_mut(Arc::clone(&storage), &mut txn)
@@ -435,7 +439,12 @@ fn test_add_e_between_node_and_vector() {
     println!(
         "vectors: {:?}",
         G::new(Arc::clone(&storage), &txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&[1.0, 2.0, 3.0], 10, "vector", None)
+            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
+                VectorData::F64(vec![1.0, 2.0, 3.0]),
+                10,
+                "vector",
+                None
+            )
             .collect_to::<Vec<_>>()
     );
 

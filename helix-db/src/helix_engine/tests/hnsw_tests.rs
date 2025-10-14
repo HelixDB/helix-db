@@ -1,18 +1,14 @@
 // MAKE SURE TO --release
-use crate::{
-    helix_engine::vector_core::{
-        hnsw::HNSW,
-        vector::HVector,
-        vector_core::{HNSWConfig, VectorCore},
-    },
+use crate::helix_engine::vector_core::{
+    VectorData,
+    hnsw::HNSW,
+    vector::HVector,
+    vector_core::{HNSWConfig, VectorCore},
 };
 use heed3::{Env, EnvOpenOptions, RoTxn};
-use rand::{
-    seq::SliceRandom,
-    Rng,
-};
+use rand::{Rng, seq::SliceRandom};
 use std::{
-    collections::{HashSet, HashMap},
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     thread,
 };
@@ -53,7 +49,7 @@ fn calc_ground_truths(
                 let local_results: HashMap<usize, Vec<u128>> = chunk
                     .into_iter()
                     .map(|(query_id, query_vec)| {
-                        let query_hvector = HVector::from_slice(0, query_vec);
+                        let query_hvector = HVector::from_slice(0, VectorData::F64(query_vec));
 
                         let mut distances: Vec<(u128, f64)> = base_vectors
                             .iter()
@@ -63,26 +59,23 @@ fn calc_ground_truths(
                                     .map(|dist| (base_vec.id.clone(), dist))
                                     .ok()
                             })
-                        .collect();
+                            .collect();
 
                         distances.sort_by(|a, b| {
                             a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                         });
 
-                        let top_k_ids: Vec<u128> = distances
-                            .into_iter()
-                            .take(k)
-                            .map(|(id, _)| id)
-                            .collect();
+                        let top_k_ids: Vec<u128> =
+                            distances.into_iter().take(k).map(|(id, _)| id).collect();
 
                         (query_id, top_k_ids)
                     })
-                .collect();
+                    .collect();
 
                 results.lock().unwrap().extend(local_results);
             })
         })
-    .collect();
+        .collect();
 
     for handle in handles {
         handle.join().unwrap();
@@ -116,22 +109,14 @@ fn tests_hnsw_config_build() {
     let env = setup_temp_env();
     let mut txn = env.write_txn().unwrap();
 
-    let config = HNSWConfig::new(
-        Some(32),
-        Some(256),
-        Some(256),
-    );
+    let config = HNSWConfig::new(Some(32), Some(256), Some(256));
 
     let index = VectorCore::new(&env, &mut txn, config).unwrap();
     assert_eq!(index.config.m, 32);
     assert_eq!(index.config.ef_construct, 256);
     assert_eq!(index.config.ef, 256);
 
-    let config = HNSWConfig::new(
-        Some(6969),
-        Some(6969),
-        Some(6969),
-    );
+    let config = HNSWConfig::new(Some(6969), Some(6969), Some(6969));
     assert_eq!(config.m, 48);
     assert_eq!(config.ef_construct, 512);
     assert_eq!(config.ef, 512);
@@ -148,8 +133,10 @@ fn test_hnsw_insert() {
     let vectors = gen_sim_vecs(n_base, dims, 0.8);
 
     for data in vectors {
-        let vec = index.insert::<Filter>(&mut txn, &data, None).unwrap();
-        assert_eq!(vec.data, data);
+        let vec = index
+            .insert::<Filter>(&mut txn, VectorData::F64(data.to_vec()), None)
+            .unwrap();
+        assert_eq!(vec.data, VectorData::F64(data));
         assert!(vec.properties.is_none());
     }
 
@@ -169,7 +156,11 @@ fn test_get_vector() {
 
     let mut all_vectors: Vec<HVector> = Vec::with_capacity(n_base);
     for data in vectors {
-        all_vectors.push(index.insert::<Filter>(&mut txn, &data, None).unwrap());
+        all_vectors.push(
+            index
+                .insert::<Filter>(&mut txn, VectorData::F64(data), None)
+                .unwrap(),
+        );
     }
 
     for inserted_vec in all_vectors {
@@ -210,8 +201,12 @@ fn test_hnsw_search() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let mut base_all_vectors: Vec<HVector> = Vec::new();
-    for data in base_vectors.iter() {
-        base_all_vectors.push(index.insert::<Filter>(&mut txn, &data, None).unwrap());
+    for data in base_vectors.into_iter() {
+        base_all_vectors.push(
+            index
+                .insert::<Filter>(&mut txn, VectorData::F64(data.to_vec()), None)
+                .unwrap(),
+        );
     }
     txn.commit().unwrap();
 
@@ -225,7 +220,16 @@ fn test_hnsw_search() {
     let mut total_recall = 0.0;
     let mut total_precision = 0.0;
     for (qid, query) in query_vectors {
-        let results = index.search::<Filter>(&txn, &query, k, "vector", None, false).unwrap();
+        let results = index
+            .search::<Filter>(
+                &txn,
+                &VectorData::F64(query.to_vec()),
+                k,
+                "vector",
+                None,
+                false,
+            )
+            .unwrap();
 
         let result_indices = results
             .into_iter()
@@ -256,18 +260,14 @@ fn test_hnsw_search() {
         total_recall, total_precision
     );
     assert!(total_recall >= 0.8, "recall not high enough!");
-    assert!(total_precision>= 0.8, "precision not high enough!");
+    assert!(total_precision >= 0.8, "precision not high enough!");
 }
 
 #[test]
-fn test_hnsw_search_property_ordering() {
-}
+fn test_hnsw_search_property_ordering() {}
 
 #[test]
-fn test_hnsw_search_filter_ordering() {
-}
+fn test_hnsw_search_filter_ordering() {}
 
 #[test]
-fn test_hnsw_delete() {
-}
-
+fn test_hnsw_delete() {}

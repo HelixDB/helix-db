@@ -1459,6 +1459,7 @@ pub mod casting {
                 FieldType::U32 => CastType::U32,
                 FieldType::U64 => CastType::U64,
                 FieldType::U128 => CastType::U128,
+
                 FieldType::F32 => CastType::F32,
                 FieldType::F64 => CastType::F64,
                 FieldType::Date => CastType::Date,

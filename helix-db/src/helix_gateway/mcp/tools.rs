@@ -22,7 +22,7 @@ use crate::{
             traversal_value::{Traversable, TraversalValue},
         },
         types::GraphError,
-        vector_core::vector::HVector,
+        vector_core::{VectorData, vector::HVector},
     },
     helix_gateway::{
         embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
@@ -511,7 +511,12 @@ impl<'a> McpTools<'a> for McpBackend {
         let embedding = result?;
 
         let res = G::new(db, txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, k.unwrap_or(5), &label, None)
+            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
+                VectorData::F64(embedding),
+                k.unwrap_or(5),
+                &label,
+                None,
+            )
             .collect_to::<Vec<_>>();
 
         debug_println!("result: {res:?}");

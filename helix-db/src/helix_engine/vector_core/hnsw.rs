@@ -1,5 +1,6 @@
 use crate::{helix_engine::types::VectorError, protocol::value::Value};
 use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::vector_core::vector_data::VectorData;
 use heed3::{RoTxn, RwTxn};
 
 pub trait HNSW
@@ -9,7 +10,7 @@ pub trait HNSW
     /// # Arguments
     ///
     /// * `txn` - The transaction to use
-    /// * `query` - The query vector
+    /// * `query` - The query vector data
     /// * `k` - The number of nearest neighbors to search for
     ///
     /// # Returns
@@ -18,7 +19,7 @@ pub trait HNSW
     fn search<F>(
         &self,
         txn: &RoTxn,
-        query: &[f64],
+        query: &VectorData,
         k: usize,
         label: &str,
         filter: Option<&[F]>,
@@ -40,7 +41,7 @@ pub trait HNSW
     fn insert<F>(
         &self,
         txn: &mut RwTxn,
-        data: &[f64],
+        data: VectorData,
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
     where

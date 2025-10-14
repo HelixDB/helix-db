@@ -1,4 +1,4 @@
-use crate::helixc::generator::utils::{VecData, write_properties};
+use crate::helixc::generator::utils::{Precision, VecData, write_properties};
 
 use super::{
     bool_ops::{BoExp, BoolOp},
@@ -52,7 +52,7 @@ pub enum ShouldCollect {
     ToObj,
     No,
     Try,
-    ToValue
+    ToValue,
 }
 impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -209,7 +209,9 @@ impl Display for Step {
             Step::BoolOp(bool_op) => write!(f, "{bool_op}"),
             Step::Remapping(remapping) => write!(f, "{remapping}"),
             Step::ShortestPath(shortest_path) => write!(f, "{shortest_path}"),
-            Step::ShortestPathDijkstras(shortest_path_dijkstras) => write!(f, "{shortest_path_dijkstras}"),
+            Step::ShortestPathDijkstras(shortest_path_dijkstras) => {
+                write!(f, "{shortest_path_dijkstras}")
+            }
             Step::ShortestPathBFS(shortest_path_bfs) => write!(f, "{shortest_path_bfs}"),
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
             Step::GroupBy(group_by) => write!(f, "{group_by}"),
@@ -351,7 +353,16 @@ pub struct GroupBy {
 }
 impl Display for GroupBy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "group_by(&[{}], {})", self.properties.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","), self.should_count)
+        write!(
+            f,
+            "group_by(&[{}], {})",
+            self.properties
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.should_count
+        )
     }
 }
 
@@ -362,10 +373,18 @@ pub struct AggregateBy {
 }
 impl Display for AggregateBy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "aggregate_by(&[{}], {})", self.properties.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","), self.should_count)
+        write!(
+            f,
+            "aggregate_by(&[{}], {})",
+            self.properties
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.should_count
+        )
     }
 }
-
 
 #[derive(Clone)]
 pub struct ShortestPath {
@@ -486,7 +505,7 @@ impl Display for ShortestPathBFS {
 
 #[derive(Clone)]
 pub struct SearchVectorStep {
-    pub vec: VecData,
+    pub vec: GenRef<Precision<VecData>>,
     pub k: GeneratedValue,
 }
 impl Display for SearchVectorStep {

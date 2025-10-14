@@ -4,7 +4,7 @@ use crate::{
     helix_engine::{
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector},
+        vector_core::{VectorData, hnsw::HNSW, vector::HVector},
     },
     protocol::value::Value,
 };
@@ -24,7 +24,7 @@ impl Iterator for InsertVIterator {
 pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, GraphError>> {
     fn insert_v<F>(
         self,
-        query: &[f64],
+        query: VectorData,
         label: &str,
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
@@ -37,7 +37,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
 {
     fn insert_v<F>(
         self,
-        query: &[f64],
+        query: VectorData,
         label: &str,
         fields: Option<Vec<(String, Value)>>,
     ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
@@ -55,7 +55,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
                 (String::from("is_deleted"), Value::Boolean(false)),
             ]),
         };
-        let vector = self.storage.vectors.insert::<F>(self.txn, query, fields);
+        let vector =
+            self.storage
+                .vectors
+                .insert::<F>(self.txn, query, fields);
 
         let result = match vector {
             Ok(vector) => Ok(TraversalValue::Vector(vector)),

@@ -5,7 +5,7 @@ use crate::{
     helix_engine::{
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
-        vector_core::vector_distance::cosine_similarity,
+        vector_core::{vector_data::VectorData, vector_distance::cosine_similarity_mixed},
     },
     protocol::value::Value,
     utils::filterable::Filterable,
@@ -59,7 +59,9 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.get_data(), query).unwrap();
+                    let v_data = v.get_data();
+                    let d =
+                        cosine_similarity_mixed(v_data, &VectorData::F64(query.to_vec())).unwrap();
                     v.set_distance(d);
                     Some(v)
                 }
