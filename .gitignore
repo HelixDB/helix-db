@@ -6,3 +6,6 @@ test/
 .claude/
 hack/
 .DS_Store
+/tmp
+/data
+claude.md

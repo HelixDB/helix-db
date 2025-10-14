@@ -187,6 +187,10 @@ pub enum Step {
     GroupBy(GroupBy),
 
     AggregateBy(AggregateBy),
+
+    // rerankers
+    RerankRRF(RerankRRF),
+    RerankMMR(RerankMMR),
 }
 impl Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -214,6 +218,8 @@ impl Display for Step {
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
             Step::GroupBy(group_by) => write!(f, "{group_by}"),
             Step::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
+            Step::RerankRRF(rerank_rrf) => write!(f, "{rerank_rrf}"),
+            Step::RerankMMR(rerank_mmr) => write!(f, "{rerank_mmr}"),
         }
     }
 }
@@ -242,6 +248,8 @@ impl Debug for Step {
             Step::SearchVector(_) => write!(f, "SearchVector"),
             Step::GroupBy(_) => write!(f, "GroupBy"),
             Step::AggregateBy(_) => write!(f, "AggregateBy"),
+            Step::RerankRRF(_) => write!(f, "RerankRRF"),
+            Step::RerankMMR(_) => write!(f, "RerankMMR"),
         }
     }
 }
@@ -492,5 +500,51 @@ pub struct SearchVectorStep {
 impl Display for SearchVectorStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "brute_force_search_v({}, {})", self.vec, self.k)
+    }
+}
+
+#[derive(Clone)]
+pub struct RerankRRF {
+    pub k: Option<GeneratedValue>,
+}
+impl Display for RerankRRF {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.k {
+            Some(k) => write!(f, "rerank(&RRFReranker::with_k({k} as f64).unwrap(), None)"),
+            None => write!(f, "rerank(&RRFReranker::new(), None)"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum MMRDistanceMethod {
+    Cosine,
+    Euclidean,
+    DotProduct,
+    Identifier(String),
+}
+impl Display for MMRDistanceMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MMRDistanceMethod::Cosine => write!(f, "DistanceMethod::Cosine"),
+            MMRDistanceMethod::Euclidean => write!(f, "DistanceMethod::Euclidean"),
+            MMRDistanceMethod::DotProduct => write!(f, "DistanceMethod::DotProduct"),
+            MMRDistanceMethod::Identifier(id) => write!(f, "match {id}.as_str() {{ \"cosine\" => DistanceMethod::Cosine, \"euclidean\" => DistanceMethod::Euclidean, \"dotproduct\" => DistanceMethod::DotProduct, _ => DistanceMethod::Cosine }}"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RerankMMR {
+    pub lambda: Option<GeneratedValue>,
+    pub distance: Option<MMRDistanceMethod>,
+}
+impl Display for RerankMMR {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lambda = self.lambda.as_ref().map_or_else(|| "0.7".to_string(), |l| l.to_string());
+        match &self.distance {
+            Some(dist) => write!(f, "rerank(&MMRReranker::with_distance({lambda}, {dist}).unwrap(), None)"),
+            None => write!(f, "rerank(&MMRReranker::new({lambda}).unwrap(), None)"),
+        }
     }
 }

@@ -29,6 +29,7 @@ pub enum GraphError {
     EmbeddingError(String),
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
+    RerankerError(String),
 }
 
 impl std::error::Error for GraphError {}
@@ -65,6 +66,7 @@ impl fmt::Display for GraphError {
             GraphError::IoNeeded(_) => {
                 write!(f, "Asyncronous IO is needed to complete the DB operation")
             }
+            GraphError::RerankerError(msg) => write!(f, "Reranker error: {msg}"),
         }
     }
 }

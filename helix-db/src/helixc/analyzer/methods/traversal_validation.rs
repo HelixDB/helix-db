@@ -1510,6 +1510,74 @@ pub(crate) fn validate_traversal<'a>(
                 // gen_traversal.traversal_type =
                 //     TraversalType::Nested(GenRef::Std(var));
             }
+            StepType::RerankRRF(rerank_rrf) => {
+                // Generate k parameter if provided
+                let k = rerank_rrf.k.as_ref().map(|k_expr| {
+                    match &k_expr.expr {
+                        ExpressionType::Identifier(id) => {
+                            is_valid_identifier(ctx, original_query, k_expr.loc.clone(), id.as_str());
+                            gen_identifier_or_param(original_query, id.as_str(), false, true)
+                        }
+                        ExpressionType::IntegerLiteral(val) => {
+                            GeneratedValue::Primitive(GenRef::Std(val.to_string()))
+                        }
+                        ExpressionType::FloatLiteral(val) => {
+                            GeneratedValue::Primitive(GenRef::Std(val.to_string()))
+                        }
+                        _ => {
+                            generate_error!(ctx, original_query, k_expr.loc.clone(), E206, &k_expr.expr.to_string());
+                            GeneratedValue::Unknown
+                        }
+                    }
+                });
+
+                gen_traversal
+                    .steps
+                    .push(Separator::Period(GeneratedStep::RerankRRF(
+                        crate::helixc::generator::traversal_steps::RerankRRF { k }
+                    )));
+            }
+            StepType::RerankMMR(rerank_mmr) => {
+                // Generate lambda parameter
+                let lambda = match &rerank_mmr.lambda.expr {
+                    ExpressionType::Identifier(id) => {
+                        is_valid_identifier(ctx, original_query, rerank_mmr.lambda.loc.clone(), id.as_str());
+                        Some(gen_identifier_or_param(original_query, id.as_str(), false, true))
+                    }
+                    ExpressionType::FloatLiteral(val) => {
+                        Some(GeneratedValue::Primitive(GenRef::Std(val.to_string())))
+                    }
+                    ExpressionType::IntegerLiteral(val) => {
+                        Some(GeneratedValue::Primitive(GenRef::Std(val.to_string())))
+                    }
+                    _ => {
+                        generate_error!(ctx, original_query, rerank_mmr.lambda.loc.clone(), E206, &rerank_mmr.lambda.expr.to_string());
+                        None
+                    }
+                };
+
+                // Generate distance parameter if provided
+                let distance = if let Some(MMRDistance::Identifier(id)) = &rerank_mmr.distance {
+                    is_valid_identifier(ctx, original_query, rerank_mmr.loc.clone(), id.as_str());
+                    Some(crate::helixc::generator::traversal_steps::MMRDistanceMethod::Identifier(id.clone()))
+                } else {
+                    rerank_mmr.distance.as_ref().map(|d| match d {
+                        MMRDistance::Cosine => crate::helixc::generator::traversal_steps::MMRDistanceMethod::Cosine,
+                        MMRDistance::Euclidean => crate::helixc::generator::traversal_steps::MMRDistanceMethod::Euclidean,
+                        MMRDistance::DotProduct => crate::helixc::generator::traversal_steps::MMRDistanceMethod::DotProduct,
+                        MMRDistance::Identifier(_) => unreachable!(),
+                    })
+                };
+
+                gen_traversal
+                    .steps
+                    .push(Separator::Period(GeneratedStep::RerankMMR(
+                        crate::helixc::generator::traversal_steps::RerankMMR {
+                            lambda,
+                            distance,
+                        }
+                    )));
+            }
         }
         previous_step = Some(step.clone());
     }
