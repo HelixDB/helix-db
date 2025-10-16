@@ -370,7 +370,9 @@ impl BM25 for HBM25Config {
         }
 
         // Sort by score and return top results
-        let mut results: Vec<(u128, f32)> = doc_scores.into_iter().collect();
+        // Pre-allocate with exact capacity to avoid reallocation during collection
+        let mut results: Vec<(u128, f32)> = Vec::with_capacity(doc_scores.len());
+        results.extend(doc_scores);
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 
@@ -450,7 +452,9 @@ impl HybridSearch for HelixGraphStorage {
                 }
         }
 
-        let mut results = combined_scores.into_iter().collect::<Vec<(u128, f32)>>();
+        // Pre-allocate with exact capacity to avoid reallocation during collection
+        let mut results = Vec::with_capacity(combined_scores.len());
+        results.extend(combined_scores);
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 

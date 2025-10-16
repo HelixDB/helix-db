@@ -21,12 +21,16 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> AggregateAdapte
     fn aggregate_by(self, properties: &[String], should_count: bool) -> Result<Aggregate, GraphError> {
         let mut groups: HashMap<String, AggregateItem> = HashMap::new();
 
+        // Pre-calculate capacity outside the loop since properties length is constant
+        let properties_len = properties.len();
+
         for item in self.inner {
             let item = item?;
 
             // TODO HANDLE COUNT
-            let mut kvs = Vec::new();
-            let mut key_parts = Vec::new();
+            // Pre-allocate with exact capacity - size is known from properties.len()
+            let mut kvs = Vec::with_capacity(properties_len);
+            let mut key_parts = Vec::with_capacity(properties_len);
 
             for property in properties {
                 match item.check_property(property) {

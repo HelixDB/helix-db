@@ -41,11 +41,15 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>> Updat
     {
         let storage = self.storage.clone();
 
+        // Optimize vector allocation based on iterator size hints
         let mut vec = match self.inner.size_hint() {
+            // Use upper bound if available
             (_, Some(upper)) => Vec::with_capacity(upper),
-            // no upper bound means infinite size
-            // don't want to allocate usize::MAX sized vector
-            _ => Vec::new(), // default vector capacity
+            // Use lower bound if available and reasonable
+            (lower, None) if lower > 0 => Vec::with_capacity(lower),
+            // Use reasonable default for mutation operations (most updates affect 1-100 items)
+            // 16 is a good balance: small enough to not waste memory, large enough to avoid early reallocations
+            _ => Vec::with_capacity(16),
         };
 
         for item in self.inner {
@@ -57,20 +61,21 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>> Updat
                         if let Some(ref props) = props {
                             for (key, _new_value) in props.iter() {
                                 if let Some(db) = storage.secondary_indices.get(key)
-                                    && let Some(old_value) = properties.get(key) {
-                                        match bincode::serialize(old_value) {
-                                            Ok(old_serialized) => {
-                                                if let Err(e) = db.delete_one_duplicate(
-                                                    self.txn,
-                                                    &old_serialized,
-                                                    &node.id,
-                                                ) {
-                                                    vec.push(Err(GraphError::from(e)));
-                                                }
+                                    && let Some(old_value) = properties.get(key)
+                                {
+                                    match bincode::serialize(old_value) {
+                                        Ok(old_serialized) => {
+                                            if let Err(e) = db.delete_one_duplicate(
+                                                self.txn,
+                                                &old_serialized,
+                                                &node.id,
+                                            ) {
+                                                vec.push(Err(GraphError::from(e)));
                                             }
-                                            Err(e) => vec.push(Err(GraphError::from(e))),
                                         }
+                                        Err(e) => vec.push(Err(GraphError::from(e))),
                                     }
+                                }
                             }
                         }
 

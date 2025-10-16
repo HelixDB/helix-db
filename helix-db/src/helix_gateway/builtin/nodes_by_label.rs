@@ -79,7 +79,14 @@ pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, G
 
     let label = label.ok_or_else(|| GraphError::New("label is required".to_string()))?;
 
-    let mut nodes_json = Vec::new();
+    // Pre-allocate based on limit parameter (if provided) or reasonable default
+    // Cap at 100_000 for DoS protection while allowing legitimate large queries
+    let initial_capacity = match limit {
+        Some(n) if n <= 100_000 => n, // Trust reasonable limits
+        Some(_) => 100_000,           // Cap excessive limits
+        None => 100,                  // Reasonable default for unlimited queries
+    };
+    let mut nodes_json = Vec::with_capacity(initial_capacity);
     let mut count = 0;
 
     for result in db.nodes_db.iter(&txn)? {

@@ -77,3 +77,7 @@ path = "benches/bm25_benches.rs"
 [[test]]
 name = "hnsw_benches"
 path = "benches/hnsw_benches.rs"
+
+[[test]]
+name = "capacity_optimization_benches"
+path = "benches/capacity_optimization_benches.rs"

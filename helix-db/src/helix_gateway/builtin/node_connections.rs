@@ -84,8 +84,10 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
         ));
     };
 
-    let mut connected_node_ids = HashSet::new();
-    let mut connected_nodes = Vec::new();
+    // Pre-allocate with reasonable capacity for typical graph nodes
+    // Most nodes have 5-50 connections; 32 is a good middle ground (power of 2 for efficient allocation)
+    let mut connected_node_ids = HashSet::with_capacity(32);
+    let mut connected_nodes = Vec::with_capacity(32);
 
     let incoming_edges = db
         .in_edges_db
