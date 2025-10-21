@@ -1,5 +1,5 @@
 use crate::helixc::analyzer::error_codes::*;
-use crate::helixc::analyzer::utils::{check_identifier_is_fieldtype, DEFAULT_VAR_NAME};
+use crate::helixc::analyzer::utils::{DEFAULT_VAR_NAME, check_identifier_is_fieldtype};
 use crate::helixc::generator::bool_ops::{Contains, IsIn};
 use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
 use crate::helixc::generator::traversal_steps::{AggregateBy, GroupBy};
@@ -719,8 +719,7 @@ pub(crate) fn validate_traversal<'a>(
                     | BooleanOpType::GreaterThan(expr)
                     | BooleanOpType::Equal(expr)
                     | BooleanOpType::NotEqual(expr)
-                    | BooleanOpType::Contains(expr)
-                    | BooleanOpType::IsIn(expr) => {
+                    | BooleanOpType::Contains(expr) => {
                         match infer_expr_type(
                             ctx,
                             expr,
@@ -731,6 +730,42 @@ pub(crate) fn validate_traversal<'a>(
                         ) {
                             (Type::Scalar(ft), _) => ft.clone(),
                             (Type::Boolean, _) => FieldType::Boolean,
+                            (field_type, _) => {
+                                generate_error!(
+                                    ctx,
+                                    original_query,
+                                    b_op.loc.clone(),
+                                    E621,
+                                    &b_op.loc.span,
+                                    field_type.kind_str()
+                                );
+                                return Some(field_type);
+                            }
+                        }
+                    }
+                    BooleanOpType::IsIn(expr) => {
+                        match infer_expr_type(
+                            ctx,
+                            expr,
+                            scope,
+                            original_query,
+                            Some(cur_ty.clone()),
+                            gen_query,
+                        ) {
+                            (Type::Array(boxed_ty), _) => match *boxed_ty {
+                                Type::Scalar(ft) => ft,
+                                _ => {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        b_op.loc.clone(),
+                                        E621,
+                                        &b_op.loc.span,
+                                        "Array elements must be of a scalar type (e.g., ID, String, F32, I32, etc.)"
+                                    );
+                                    return Some(Type::Unknown);
+                                }
+                            },
                             (field_type, _) => {
                                 generate_error!(
                                     ctx,
