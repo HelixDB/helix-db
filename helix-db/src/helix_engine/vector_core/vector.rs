@@ -6,7 +6,7 @@ use crate::{
     protocol::{return_values::ReturnValue, value::Value},
     utils::{
         filterable::{Filterable, FilterableType},
-        id::v6_uuid,
+        id::{v6_uuid, ID},
     },
 };
 use core::fmt;
@@ -273,7 +273,7 @@ impl Filterable for HVector {
 
     fn check_property(&self, key: &str) -> Result<Cow<'_, Value>, GraphError> {
         match key {
-            "id" => Ok(Cow::Owned(Value::from(self.uuid()))),
+            "id" => Ok(Cow::Owned(Value::Id(ID::from(self.id)))),
             "label" => Ok(Cow::Owned(Value::from(self.label().to_string()))),
             "data" => Ok(Cow::Owned(Value::Array(
                 self.data.iter().map(|f| Value::F64(*f)).collect(),
