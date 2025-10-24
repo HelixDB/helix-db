@@ -1,7 +1,7 @@
 use crate::helix_engine::{
     bm25::bm25::BM25,
-    traversal_core::traversal_value::TraversalValue,
     storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+    traversal_core::traversal_value::TraversalValue,
     types::GraphError,
 };
 use heed3::RwTxn;
@@ -26,8 +26,9 @@ where
                     TraversalValue::Node(node) => match storage.drop_node(txn, &node.id) {
                         Ok(_) => {
                             if let Some(bm25) = &storage.bm25
-                                && let Err(e) = bm25.delete_doc(txn, node.id) {
-                                    println!("failed to delete doc from bm25: {e}");
+                                && let Err(e) = bm25.delete_doc(txn, node.id)
+                            {
+                                println!("failed to delete doc from bm25: {e}");
                             }
                             println!("Dropped node: {:?}", node.id);
                             Ok(())
@@ -42,6 +43,7 @@ where
                         Ok(_) => Ok(()),
                         Err(e) => Err(e),
                     },
+                    TraversalValue::Empty => Ok(()),
                     _ => Err(GraphError::ConversionError(format!(
                         "Incorrect Type: {item:?}"
                     ))),
