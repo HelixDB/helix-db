@@ -16,6 +16,7 @@ use crate::{
         count::Count,
         filterable::{Filterable, FilterableType},
         group_by::GroupBy,
+        id::ID,
         items::{Edge, Node},
     },
 };
@@ -549,6 +550,12 @@ impl From<f64> for ReturnValue {
 impl From<f32> for ReturnValue {
     fn from(float: f32) -> Self {
         ReturnValue::Value(Value::F32(float))
+    }
+}
+
+impl From<ID> for ReturnValue {
+    fn from(id: ID) -> Self {
+        ReturnValue::Value(Value::Id(id))
     }
 }
 
