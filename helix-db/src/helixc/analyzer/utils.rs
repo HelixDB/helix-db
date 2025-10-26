@@ -97,7 +97,7 @@ pub(super) fn gen_id_access_or_param(original_query: &Query, name: &str) -> Gene
             false => GenRef::DeRef(format!("data.{name}")),
         })
     } else {
-        GeneratedValue::Identifier(GenRef::Std(format!("{name}.inner()")))
+        GeneratedValue::Identifier(GenRef::Std(format!("{name}.id()")))
     }
 }
 
