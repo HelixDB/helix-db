@@ -1620,6 +1620,15 @@ impl IntoPrimitive<Date> for Value {
     }
 }
 
+impl IntoPrimitive<String> for Value {
+    fn into_primitive(&self) -> &String {
+        match self {
+            Value::String(s) => s,
+            _ => panic!("Value is not a String"),
+        }
+    }
+}
+
 #[test]
 fn test_value_eq() {
     assert_eq!(Value::I64(1), Value::I64(1));
