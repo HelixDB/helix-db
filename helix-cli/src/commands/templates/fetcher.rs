@@ -162,7 +162,9 @@ impl TemplateFetcher {
     }
 
     fn validate_template(template_path: &Path) -> Result<()> {
-        if !template_path.join("helix.toml").exists() {
+        if !template_path.join("helix.toml").exists()
+            && !template_path.join("helix.toml.hbs").exists()
+        {
             return Err(eyre::eyre!("Invalid template: missing helix.toml"));
         }
         Ok(())
