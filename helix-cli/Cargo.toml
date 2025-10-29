@@ -25,6 +25,8 @@ dotenvy = "0.15.7"
 tokio-tungstenite = "0.27.0"
 futures-util = "0.3.31"
 regex = "1.11.2"
+handlebars = "6.3.2"
+
 [[bin]]
 name = "helix"
 path = "src/main.rs"
