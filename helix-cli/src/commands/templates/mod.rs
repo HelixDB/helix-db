@@ -4,7 +4,7 @@ pub mod processor;
 pub use fetcher::TemplateFetcher;
 pub use processor::TemplateProcessor;
 
-const OFFICIAL_TEMPLATES_ORG: &str = "helix-db";
+const OFFICIAL_TEMPLATES_ORG: &str = "HelixDB";
 
 /// Represents different ways to reference a template
 #[derive(Debug, Clone, PartialEq, Eq)]
