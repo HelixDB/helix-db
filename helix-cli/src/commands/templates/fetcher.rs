@@ -2,8 +2,8 @@ use super::{TemplateProcessor, TemplateSource};
 use crate::project::get_helix_cache_dir;
 use crate::utils::print_status;
 use eyre::Result;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,18 +67,18 @@ impl TemplateFetcher {
                 if cache_path.exists() {
                     return Ok(CacheStatus::Valid(cache_path));
                 }
-                return Ok(CacheStatus::Invalid);
+
+                Ok(CacheStatus::Invalid)
             }
             Ok(None) => {
                 if let Some(cached_commit) = Self::get_latest_cached_commit(&cache_base)? {
                     let cache_path = cache_base.join(&cached_commit);
                     return Ok(CacheStatus::NetworkError(cache_path));
                 }
-                return Ok(CacheStatus::NetworkErrorNoCache);
+
+                Ok(CacheStatus::NetworkErrorNoCache)
             }
-            Err(e) => {
-                return Err(e);
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -229,10 +229,10 @@ impl TemplateFetcher {
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
         });
 
-        if let Some(latest) = entries.last() {
-            if let Some(name) = latest.file_name().to_str() {
-                return Ok(Some(name.to_string()));
-            }
+        if let Some(latest) = entries.last()
+            && let Some(name) = latest.file_name().to_str()
+        {
+            return Ok(Some(name.to_string()));
         }
 
         Ok(None)

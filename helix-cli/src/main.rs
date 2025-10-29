@@ -26,8 +26,9 @@ enum Commands {
         #[clap(short, long)]
         path: Option<String>,
 
-        #[clap(short, long, default_value = "empty")]
-        template: String,
+        /// Template to use for project initialization
+        #[clap(short, long)]
+        template: Option<String>,
 
         /// Queries directory path (defaults to ./db/)
         #[clap(short = 'q', long = "queries-path", default_value = "./db/")]
