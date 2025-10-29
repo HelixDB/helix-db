@@ -80,6 +80,11 @@ impl TemplateProcessor {
                 continue;
             }
 
+            // Skip symlinks
+            if path.is_symlink() {
+                continue;
+            }
+
             match path.is_dir() {
                 true => {
                     let dest_dir = dst.join(&file_name);
