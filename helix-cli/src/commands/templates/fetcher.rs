@@ -96,27 +96,7 @@ impl TemplateFetcher {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-
-            if stderr.contains("Could not resolve host")
-                || stderr.contains("Connection timed out")
-                || stderr.contains("unable to access")
-            {
-                return Ok(None);
-            }
-
-            if stderr.contains("Repository not found")
-                || stderr.contains("not found")
-                || stderr.contains("could not read Username")
-                || stderr.contains("Authentication failed")
-                || stderr.contains("denied")
-            {
-                return Err(eyre::eyre!(
-                    "Template '{}' not found or it's private. Check the name or URL.",
-                    git_url
-                ));
-            }
-
-            return Err(eyre::eyre!("Failed to resolve template: {}", stderr));
+            return Self::parse_git_error(&stderr, &git_url);
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -142,6 +122,8 @@ impl TemplateFetcher {
         let temp_dir = Self::create_temp_dir()?;
 
         Self::clone_to_temp(source, &temp_dir)?;
+
+        Self::validate_template(&temp_dir)?;
 
         let cache_path = Self::get_cache_path_for_commit(&git_url, &commit_hash)?;
 
@@ -172,23 +154,17 @@ impl TemplateFetcher {
             .map_err(|e| eyre::eyre!("Failed to execute git clone: {}", e))?;
 
         if !output.status.success() {
-            // TODO: duplicate logic move to separate function
             let stderr = String::from_utf8_lossy(&output.stderr);
-
-            if stderr.contains("could not read Username")
-                || stderr.contains("Authentication failed")
-                || stderr.contains("denied")
-                || stderr.contains("not found")
-            {
-                return Err(eyre::eyre!(
-                    "Template '{}' not found or it's private. Check the name or URL.",
-                    git_url
-                ));
-            }
-
-            return Err(eyre::eyre!("Git clone failed: {}", stderr));
+            return Self::parse_git_error(&stderr, &git_url).map(|_| ());
         }
 
+        Ok(())
+    }
+
+    fn validate_template(template_path: &Path) -> Result<()> {
+        if !template_path.join("helix.toml").exists() {
+            return Err(eyre::eyre!("Invalid template: missing helix.toml"));
+        }
         Ok(())
     }
 
@@ -261,6 +237,26 @@ impl TemplateFetcher {
         }
 
         Ok(())
+    }
+
+    fn parse_git_error(stderr: &str, git_url: &str) -> Result<Option<String>> {
+        if stderr.contains("Could not resolve host")
+            || stderr.contains("Connection timed out")
+            || stderr.contains("unable to access")
+        {
+            return Ok(None);
+        }
+
+        if stderr.contains("Repository not found")
+            || stderr.contains("not found")
+            || stderr.contains("could not read Username")
+            || stderr.contains("Authentication failed")
+            || stderr.contains("denied")
+        {
+            return Err(eyre::eyre!("Template '{}' not found or private", git_url));
+        }
+
+        Err(eyre::eyre!("Git operation failed: {}", stderr))
     }
 }
 
