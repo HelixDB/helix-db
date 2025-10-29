@@ -7,6 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 
 /// Result of cache validation check
 enum CacheStatus {
@@ -119,20 +120,44 @@ impl TemplateFetcher {
         let commit_hash = Self::resolve_commit_hash(source)?
             .ok_or_else(|| eyre::eyre!("Network error: cannot fetch template"))?;
 
-        let temp_dir = Self::create_temp_dir()?;
+        let template_dir = TempDir::new()?;
 
-        Self::clone_to_temp(source, &temp_dir)?;
+        // Clone the template to a temporary directory
+        Self::clone_to_temp(source, template_dir.path())?;
 
-        Self::validate_template(&temp_dir)?;
+        // Validate the template
+        Self::validate_template(template_dir.path())?;
 
-        let cache_path = Self::get_cache_path_for_commit(&git_url, &commit_hash)?;
+        // Render the templates and save to cache
+        Self::render_and_cache(template_dir.path(), &git_url, &commit_hash, variables)
+    }
+
+    /// Atomically save rendered template to cache
+    fn render_and_cache(
+        template_dir: &Path,
+        git_url: &str,
+        commit_hash: &str,
+        variables: &HashMap<String, String>,
+    ) -> Result<PathBuf> {
+        let base_cache_dir = Self::get_cache_dir(git_url)?;
+        let temp_cache_dir = TempDir::new_in(&base_cache_dir)?;
 
         print_status("TEMPLATE", "Rendering template...");
-        TemplateProcessor::render_to_cache(&temp_dir, &cache_path, variables)?;
+        TemplateProcessor::render_to_cache(template_dir, temp_cache_dir.path(), variables)?;
 
-        std::fs::remove_dir_all(&temp_dir).ok();
+        let final_cache_path = base_cache_dir.join(commit_hash);
+        let temp_path = temp_cache_dir.keep();
+        std::fs::rename(&temp_path, &final_cache_path)?;
 
-        Ok(cache_path)
+        Ok(final_cache_path)
+    }
+
+    /// Get or create the cache base directory for a Git URL
+    fn get_cache_dir(git_url: &str) -> Result<PathBuf> {
+        let url_hash = Self::hash_url(git_url);
+        let cache_base = get_helix_cache_dir()?.join("templates").join(&url_hash);
+        std::fs::create_dir_all(&cache_base)?;
+        Ok(cache_base)
     }
 
     fn clone_to_temp(source: &TemplateSource, temp_dir: &Path) -> Result<()> {
@@ -170,17 +195,6 @@ impl TemplateFetcher {
         Ok(())
     }
 
-    /// Get cache path for a specific commit hash
-    fn get_cache_path_for_commit(url: &str, commit_hash: &str) -> Result<PathBuf> {
-        let cache_base = get_helix_cache_dir()?;
-        let templates_dir = cache_base.join("templates");
-        let url_hash = Self::hash_url(url);
-
-        let cache_path = templates_dir.join(url_hash).join(commit_hash);
-
-        Ok(cache_path)
-    }
-
     /// Hash a URL to create a directory name
     fn hash_url(url: &str) -> String {
         let mut hasher = DefaultHasher::new();
@@ -214,15 +228,6 @@ impl TemplateFetcher {
         }
 
         Ok(None)
-    }
-
-    /// Create a temporary directory for cloning
-    fn create_temp_dir() -> Result<PathBuf> {
-        let temp_base = std::env::temp_dir();
-        let unique_name = format!("helix-template-{}", uuid::Uuid::new_v4());
-        let temp_dir = temp_base.join(unique_name);
-        std::fs::create_dir_all(&temp_dir)?;
-        Ok(temp_dir)
     }
 
     fn check_git_available() -> Result<()> {
@@ -268,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_url_hash_consistent() {
-        let url = "https://github.com/helix-db/basic";
+        let url = "https://github.com/HelixDB/basic";
         assert_eq!(
             TemplateFetcher::hash_url(url),
             TemplateFetcher::hash_url(url)
@@ -277,19 +282,8 @@ mod tests {
 
     #[test]
     fn test_url_hash_unique() {
-        let hash1 = TemplateFetcher::hash_url("https://github.com/helix-db/basic");
-        let hash2 = TemplateFetcher::hash_url("https://github.com/helix-db/advanced");
+        let hash1 = TemplateFetcher::hash_url("https://github.com/HelixDB/basic");
+        let hash2 = TemplateFetcher::hash_url("https://github.com/HelixDB/advanced");
         assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_cache_path_structure() {
-        let path = TemplateFetcher::get_cache_path_for_commit(
-            "https://github.com/helix-db/basic",
-            "abc123",
-        )
-        .unwrap();
-        assert!(path.to_string_lossy().contains("templates"));
-        assert!(path.to_string_lossy().ends_with("abc123"));
     }
 }
