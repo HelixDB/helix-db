@@ -1,4 +1,3 @@
-use crate::utils::print_status;
 use eyre::Result;
 use handlebars::Handlebars;
 use std::collections::HashMap;
@@ -9,19 +8,8 @@ use std::path::Path;
 pub struct TemplateProcessor;
 
 impl TemplateProcessor {
-    /// Copy already-rendered template files from cache to destination
-    pub fn process(cache_dir: &Path, project_dir: &Path) -> Result<()> {
-        print_status("TEMPLATE", "Copying template files...");
-
-        Self::copy_to_dir(cache_dir, project_dir)?;
-
-        print_status("TEMPLATE", "Template applied successfully");
-
-        Ok(())
-    }
-
-    /// Render template from source to cache directory
-    pub fn render_to_cache(
+    /// Render template from cache to destination
+    pub fn render_to_dir(
         template_dir: &Path,
         cache_dir: &Path,
         variables: &HashMap<String, String>,
@@ -29,33 +17,6 @@ impl TemplateProcessor {
         // Create Handlebars instance
         let hbs = Handlebars::new();
         Self::render_dir_recursive(template_dir, cache_dir, &hbs, variables)?;
-
-        Ok(())
-    }
-
-    /// copy cached template files to destination
-    fn copy_to_dir(src: &Path, dst: &Path) -> Result<()> {
-        fs::create_dir_all(dst)?;
-
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_name = entry.file_name();
-            let file_name_str = file_name.to_string_lossy();
-
-            // Skip .git directory
-            if file_name_str == ".git" {
-                continue;
-            }
-
-            if path.is_dir() {
-                let dest_dir = dst.join(&file_name);
-                Self::copy_to_dir(&path, &dest_dir)?;
-            } else {
-                let dest_file = dst.join(&file_name);
-                fs::copy(&path, &dest_file)?;
-            }
-        }
 
         Ok(())
     }

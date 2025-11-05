@@ -216,16 +216,17 @@ fn process_template(
     // Parse template source
     let template_source = TemplateSource::parse(template_str)?;
 
-    // Prepare template variables
+    // Prepare template variables for rendering
     let mut variables = HashMap::new();
     variables.insert("project_name".to_string(), project_name.to_string());
 
-    // Fetch and render template from git (with caching)
+    // Fetch raw template from git (with caching)
     print_status("TEMPLATE", &format!("Resolving template: {}", template_str));
-    let cache_dir = TemplateFetcher::fetch(&template_source, &variables)?;
+    let raw_template_path = TemplateFetcher::fetch(&template_source)?;
 
-    // Copy rendered template to project directory
-    TemplateProcessor::process(&cache_dir, project_dir)?;
+    // Render and apply template to project directory.
+    print_status("TEMPLATE", "Rendering template...");
+    TemplateProcessor::render_to_dir(&raw_template_path, project_dir, &variables)?;
 
     Ok(())
 }

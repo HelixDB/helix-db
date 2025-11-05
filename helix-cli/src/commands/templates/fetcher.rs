@@ -1,8 +1,7 @@
-use super::{TemplateProcessor, TemplateSource};
+use super::TemplateSource;
 use crate::project::get_helix_cache_dir;
 use crate::utils::print_status;
 use eyre::Result;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -26,8 +25,8 @@ pub struct TemplateFetcher;
 
 impl TemplateFetcher {
     /// Fetch a template from the given source, using cache when available
-    /// Returns a path to a fully rendered template ready to copy
-    pub fn fetch(source: &TemplateSource, variables: &HashMap<String, String>) -> Result<PathBuf> {
+    /// Returns a path to the unrendered cached template repository ready for rendering
+    pub fn fetch(source: &TemplateSource) -> Result<PathBuf> {
         Self::check_git_available()?;
 
         let cache_status = Self::check_cache_validity(source)?;
@@ -39,7 +38,7 @@ impl TemplateFetcher {
             }
             CacheStatus::Invalid => {
                 print_status("TEMPLATE", "Fetching template from git...");
-                Self::fetch_and_render(source, variables)
+                Self::fetch_and_cache(source)
             }
             CacheStatus::NetworkError(path) => {
                 print_status(
@@ -110,44 +109,35 @@ impl TemplateFetcher {
         Ok(Some(commit_hash))
     }
 
-    /// Fetch template, render it, and cache the rendered version
-    fn fetch_and_render(
-        source: &TemplateSource,
-        variables: &HashMap<String, String>,
-    ) -> Result<PathBuf> {
+    /// Fetch template from git and cache the raw unrendered repository
+    fn fetch_and_cache(source: &TemplateSource) -> Result<PathBuf> {
         let git_url = source.to_git_url();
 
         let commit_hash = Self::resolve_commit_hash(source)?
             .ok_or_else(|| eyre::eyre!("Network error: cannot fetch template"))?;
 
-        let template_dir = TempDir::new()?;
+        let base_cache_dir = Self::get_cache_dir(&git_url)?;
+        let final_cache_path = base_cache_dir.join(&commit_hash);
 
-        // Clone the template to a temporary directory
-        Self::clone_to_temp(source, template_dir.path())?;
+        if final_cache_path.exists() {
+            return Ok(final_cache_path);
+        }
+
+        // Create temporary directory in the same parent to ensure atomic cache.
+        let temp_dir = TempDir::new_in(&base_cache_dir)
+            .map_err(|e| eyre::eyre!("Failed to create temporary cache directory: {}", e))?;
+
+        // Clone the template directly into the temp directory
+        Self::clone_to_temp(source, temp_dir.path())?;
 
         // Validate the template
-        Self::validate_template(template_dir.path())?;
+        Self::validate_template(temp_dir.path())?;
 
-        // Render the templates and save to cache
-        Self::render_and_cache(template_dir.path(), &git_url, &commit_hash, variables)
-    }
+        // Keep the temporary directory in-place
+        let temp_path = temp_dir.keep();
 
-    /// Atomically save rendered template to cache
-    fn render_and_cache(
-        template_dir: &Path,
-        git_url: &str,
-        commit_hash: &str,
-        variables: &HashMap<String, String>,
-    ) -> Result<PathBuf> {
-        let base_cache_dir = Self::get_cache_dir(git_url)?;
-        let temp_cache_dir = TempDir::new_in(&base_cache_dir)?;
-
-        print_status("TEMPLATE", "Rendering template...");
-        TemplateProcessor::render_to_cache(template_dir, temp_cache_dir.path(), variables)?;
-
-        let final_cache_path = base_cache_dir.join(commit_hash);
-        let temp_path = temp_cache_dir.keep();
-        std::fs::rename(&temp_path, &final_cache_path)?;
+        // Attempt atomic rename
+        std::fs::rename(temp_path, &final_cache_path)?;
 
         Ok(final_cache_path)
     }
