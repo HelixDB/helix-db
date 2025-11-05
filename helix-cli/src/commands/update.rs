@@ -1,15 +1,35 @@
 use eyre::Result;
+
+#[cfg(feature = "self_update")]
 use self_update::cargo_crate_version;
 
+#[cfg(feature = "self_update")]
 use crate::utils::{print_error_with_hint, print_status, print_success};
 
-pub async fn run(force: bool) -> Result<()> {
-    // We're using the self_update crate which is very handy but doesn't support async.
-    // Still, this is good enough, but because it panics in an async context we must
-    // do a spawn_blocking
-    tokio::task::spawn_blocking(move || run_sync(force)).await?
+#[cfg(not(feature = "self_update"))]
+use crate::utils::print_error_with_hint;
+
+pub async fn run(_force: bool) -> Result<()> {
+    #[cfg(feature = "self_update")]
+    {
+        // We're using the self_update crate which is very handy but doesn't support async.
+        // Still, this is good enough, but because it panics in an async context we must
+        // do a spawn_blocking
+        tokio::task::spawn_blocking(move || run_sync(_force)).await?
+    }
+
+    #[cfg(not(feature = "self_update"))]
+    {
+        print_error_with_hint(
+            "Self-update is not available in this build",
+            "This binary was built with rustls-tls feature which doesn't support self-update. \
+             Please update manually or rebuild with default features.",
+        );
+        Err(eyre::eyre!("Self-update not available"))
+    }
 }
 
+#[cfg(feature = "self_update")]
 fn run_sync(force: bool) -> Result<()> {
     print_status("UPDATE", "Checking for updates...");
 

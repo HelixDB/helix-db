@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-helix-db = { path = "../helix-db" }
+helix-db = { path = "../helix-db", default-features = false }
 helix-macros = { path = "../helix-macros" }
 
 inventory = "0.3.16"
@@ -24,3 +24,6 @@ dotenvy = "0.15.7"
 
 [features]
 dev = ["helix-db/dev-instance"]
+rustls-tls = ["helix-db/rustls-tls", "helix-db/server"]
+default-tls = ["helix-db/default-tls", "helix-db/server-default-tls"]
+default = ["default-tls"]

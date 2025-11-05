@@ -11,8 +11,8 @@ path = "src/main.rs"
 tokio = { version = "1.0", features = ["full"] }
 clap = { version = "4.0", features = ["derive"] }
 anyhow = "1.0"
-futures = "0.3" 
-octocrab = "0.44.1"
+futures = "0.3"
+octocrab = { version = "0.44.1", default-features = false, features = ["rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
-base64 = "0.22" 
+base64 = "0.22"

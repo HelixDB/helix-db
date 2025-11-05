@@ -49,6 +49,15 @@ HelixDB primarily operates with a graph + vector data model, but it can also sup
 
 Start by installing the Helix CLI tool to deploy Helix locally.
 
+> **Building from Source without OpenSSL**: If you prefer to build HelixDB without OpenSSL dependencies using pure Rust TLS (rustls), use the `rustls-tls` feature flag:
+> ```bash
+> # For helix-cli
+> cd helix-cli && cargo build --no-default-features --features normal-rustls
+> # For helix-db
+> cd helix-db && cargo build --no-default-features --features server,rustls-tls
+> ```
+> Note: Self-update functionality is not available when built with rustls.
+
 1. Install CLI
 
    ```bash
