@@ -4,20 +4,20 @@ version = "2.0.5"
 edition = "2024"
 
 [dependencies]
-helix-metrics = { path = "../metrics" }
-helix-db = { path = "../helix-db" }
+helix-metrics = { path = "../metrics", default-features = false }
+helix-db = { path = "../helix-db", default-features = false }
 clap = { version = "4.5.47", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.47.1", features = ["full"] }
 eyre = "0.6.12"
 toml = "0.9.5"
 dirs = "6.0.0"
-reqwest = { version = "0.12.23", features = ["json"] }
+reqwest = { version = "0.12.23", default-features = false }
 serde_json = "1.0.143"
 color-eyre = "0.6.5"
 async-trait = "0.1.89"
 iota = "0.2.3"
-self_update = "0.42.0"
+self_update = { version = "0.42.0", optional = true }
 uuid = { version = "1.18.1", features = ["v4", "v6", "fast-rng"] }
 chrono = "0.4.42"
 flume = "0.11.1"
@@ -30,6 +30,11 @@ name = "helix"
 path = "src/main.rs"
 
 [features]
-normal = ["helix-db/server"]
+# TLS features
+rustls-tls = ["reqwest/rustls-tls-webpki-roots", "reqwest/json", "helix-db/rustls-tls", "helix-metrics/rustls-tls", "helix-db/server"]
+default-tls = ["reqwest/default-tls", "reqwest/json", "helix-db/default-tls", "helix-metrics/default-tls", "self_update"]
+
+normal = ["helix-db/server-default-tls", "default-tls"]
+normal-rustls = ["helix-db/server", "rustls-tls"]
 ingestion = ["helix-db/full"]
 default = ["normal"]

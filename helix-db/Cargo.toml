@@ -10,7 +10,7 @@ repository = "https://github.com/HelixDB/helix-db"
 [dependencies]
 # HelixDB dependencies
 helix-macros = { path = "../helix-macros" }
-helix-metrics = { path = "../metrics" }
+helix-metrics = { path = "../metrics", default-features = false }
 
 # external dependencies
 tokio = { version = "1.44.2", features = ["full"] }
@@ -35,10 +35,7 @@ pest = { version = "2.7", optional = true }
 pest_derive = { version = "2.7", optional = true }
 
 # embedding dependencies
-reqwest = { version = "0.12.15", features = [
-    "json",
-    "blocking",
-], optional = true }
+reqwest = { version = "0.12.15", default-features = false, optional = true }
 url = { version = "2.5", optional = true }
 tokio-util = { version = "0.7.15", features = ["compat"] }
 axum = "0.8.4"
@@ -61,13 +58,19 @@ compiler = ["pest", "pest_derive"]
 # vector features
 cosine = []
 
+# TLS features
+rustls-tls = ["reqwest?/rustls-tls-webpki-roots", "reqwest?/json", "reqwest?/blocking", "helix-metrics/rustls-tls"]
+default-tls = ["reqwest?/default-tls", "reqwest?/json", "reqwest?/blocking", "helix-metrics/default-tls"]
+
 build = ["compiler"]
 vectors = ["cosine", "url"]
 server = ["build", "compiler", "vectors", "reqwest"]
+server-rustls-tls = ["server", "rustls-tls"]
+server-default-tls = ["server", "default-tls"]
 full = ["build", "compiler", "vectors"]
-dev = ["debug-output", "server"]
+dev = ["debug-output", "server-default-tls"]
 dev-instance = []
-default = ["server"]
+default = ["server-default-tls"]
 
 # benches/tests
 [[test]]
