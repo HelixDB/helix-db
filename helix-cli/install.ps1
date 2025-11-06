@@ -12,7 +12,6 @@ param(
     [switch]$Force
 )
 
-
 # Version and configuration
 $SCRIPT_VERSION = "1.0.0"
 $BINARY_NAME = "helix"
@@ -104,7 +103,7 @@ function Get-Architecture {
         Write-Error "ARM64 architecture detected but is not supported in current releases."
         Write-ColorOutput "Currently available architectures: x86_64 (amd64)" "Yellow"
         Write-ColorOutput "If you need ARM64 support, please open a feature request:" "White"
-        Write-ColorOutput "👉 https://github.com/$Repo/issues" "Cyan"
+        Write-ColorOutput "https://github.com/$Repo/issues" "Cyan"
 
         exit 1
     }
@@ -261,8 +260,6 @@ function Install-HelixCli {
     if (-not (Start-FileDownload -Url $AssetInfo.DownloadUrl -OutputPath $tempBinaryPath)) {
         throw "Failed to download helix"
     }
-    
-
 
     # Download and verify checksum if available
     if ($AssetInfo.ChecksumUrl) {
