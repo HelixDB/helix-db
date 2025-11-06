@@ -4,10 +4,12 @@ pub mod storage_migration;
 pub mod version_info;
 
 #[cfg(test)]
-mod storage_migration_tests;
-#[cfg(test)]
 mod storage_concurrent_tests;
+#[cfg(test)]
+mod storage_migration_tests;
 
+#[cfg(feature = "rocks")]
+use crate::helix_engine::traversal_core::txn::RTxn;
 use crate::{
     helix_engine::{
         bm25::bm25::HBM25Config,
@@ -28,6 +30,8 @@ use crate::{
     },
 };
 use heed3::{Database, DatabaseFlags, Env, EnvOpenOptions, RoTxn, RwTxn, byteorder::BE, types::*};
+#[cfg(feature = "rocks")]
+use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -50,6 +54,21 @@ pub struct StorageConfig {
     pub embedding_model: Option<String>,
 }
 
+impl StorageConfig {
+    pub fn new(
+        schema: Option<String>,
+        graphvis_node_label: Option<String>,
+        embedding_model: Option<String>,
+    ) -> StorageConfig {
+        Self {
+            schema,
+            graphvis_node_label,
+            embedding_model,
+        }
+    }
+}
+
+#[cfg(feature = "lmdb")]
 pub struct HelixGraphStorage {
     pub graph_env: Env,
 
@@ -66,6 +85,8 @@ pub struct HelixGraphStorage {
     pub storage_config: StorageConfig,
 }
 
+/// For LMDB
+#[cfg(feature = "lmdb")]
 impl HelixGraphStorage {
     pub fn new(
         path: &str,
@@ -274,20 +295,7 @@ impl HelixGraphStorage {
     }
 }
 
-impl StorageConfig {
-    pub fn new(
-        schema: Option<String>,
-        graphvis_node_label: Option<String>,
-        embedding_model: Option<String>,
-    ) -> StorageConfig {
-        Self {
-            schema,
-            graphvis_node_label,
-            embedding_model,
-        }
-    }
-}
-
+#[cfg(feature = "lmdb")]
 impl DBMethods for HelixGraphStorage {
     /// Creates a secondary index lmdb db (table) for a given index name
     fn create_secondary_index(&mut self, name: &str) -> Result<(), GraphError> {
@@ -312,6 +320,7 @@ impl DBMethods for HelixGraphStorage {
     }
 }
 
+#[cfg(feature = "lmdb")]
 impl StorageMethods for HelixGraphStorage {
     #[inline]
     fn get_node<'arena>(
@@ -543,3 +552,235 @@ impl StorageMethods for HelixGraphStorage {
         Ok(())
     }
 }
+
+#[cfg(feature = "rocks")]
+pub struct HelixGraphStorage<'db> {
+    pub graph_env: rocksdb::TransactionDB<rocksdb::MultiThreaded>,
+
+    pub nodes_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+    pub edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+    pub out_edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+    pub in_edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+    pub secondary_indices: HashMap<String, Arc<rocksdb::BoundColumnFamily<'db>>>,
+    pub vectors: VectorCore,
+    pub bm25: Option<HBM25Config>,
+    pub metadata_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+    pub version_info: VersionInfo,
+
+    pub storage_config: StorageConfig,
+}
+
+#[cfg(feature = "rocks")]
+impl<'db> HelixGraphStorage<'db> {
+    pub fn new(
+        path: &str,
+        config: Config,
+        version_info: VersionInfo,
+    ) -> Result<HelixGraphStorage, GraphError> {
+        use std::sync::Arc;
+
+        use rocksdb::MultiThreaded;
+
+        fs::create_dir_all(path)?;
+
+        // Base options
+        let mut db_opts = rocksdb::Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+
+        // Optimize for concurrent writes
+        db_opts.set_max_background_jobs(6);
+        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
+        db_opts.set_max_write_buffer_number(4);
+        db_opts.set_allow_concurrent_memtable_write(true);
+        db_opts.set_enable_write_thread_adaptive_yield(true);
+        db_opts.increase_parallelism(num_cpus::get() as i32);
+
+        // Compression
+        db_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Set up column families
+        let mut cf_descriptors = vec![
+            rocksdb::ColumnFamilyDescriptor::new("nodes", Self::nodes_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new("edges", Self::edges_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new("out_edges", Self::edges_index_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new("in_edges", Self::edges_index_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new("metadata", rocksdb::Options::default()),
+        ];
+
+        // Add secondary index column families
+        // if let Some(indexes) = config.get_graph_config().secondary_indices.as_ref() {
+        //     for index in indexes {
+        //         cf_descriptors.push(ColumnFamilyDescriptor::new(
+        //             format!("idx_{}", index),
+        //             Self::secondary_index_cf_options(),
+        //         ));
+        //     }
+        // }
+
+        let txn_db_opts = rocksdb::TransactionDBOptions::new();
+
+        // Open database with optimistic transactions
+        let db = rocksdb::TransactionDB::<rocksdb::MultiThreaded>::open_cf_descriptors(
+            &db_opts,
+            &txn_db_opts,
+            path,
+            cf_descriptors,
+        )
+        .unwrap();
+
+        // Get column family handles
+        let nodes_db: Arc<rocksdb::BoundColumnFamily<'_>> = db.cf_handle("nodes").unwrap();
+        let edges_db = db.cf_handle("edges").unwrap();
+        let out_edges_db = db.cf_handle("out_edges").unwrap();
+        let in_edges_db = db.cf_handle("in_edges").unwrap();
+        let metadata_db = db.cf_handle("metadata").unwrap();
+
+        let mut secondary_indices = HashMap::new();
+        if let Some(indexes) = config.get_graph_config().secondary_indices.as_ref() {
+            for index in indexes {
+                let cf_name = format!("idx_{}", index);
+                secondary_indices.insert(index.clone(), db.cf_handle(&cf_name).unwrap());
+            }
+        }
+
+        // Initialize vector storage (needs migration to RocksDB too)
+        let vector_config = config.get_vector_config();
+        let vectors = VectorCore::new(
+            Arc::clone(&db),
+            HNSWConfig::new(
+                vector_config.m,
+                vector_config.ef_construction,
+                vector_config.ef_search,
+            ),
+        )?;
+
+        // let bm25 = config
+        //     .get_bm25()
+        //     .then(|| HBM25Config::new_rocksdb(Arc::clone(&db)))
+        //     .transpose()?;
+        let bm25 = None;
+
+        let storage_config = StorageConfig::new(
+            config.schema,
+            config.graphvis_node_label,
+            config.embedding_model,
+        );
+
+        let mut storage = Self {
+            graph_env: db,
+            nodes_db,
+            edges_db,
+            out_edges_db,
+            in_edges_db,
+            metadata_db,
+            secondary_indices,
+            vectors,
+            bm25,
+            storage_config,
+            version_info,
+        };
+
+        storage_migration::migrate(&mut storage)?;
+
+        Ok(storage)
+    }
+
+    fn nodes_cf_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16)); // u128 = 16 bytes
+        opts
+    }
+
+    fn edges_cf_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16)); // u128 = 16 bytes
+        opts
+    }
+
+    fn edges_index_cf_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        // For DUP_SORT replacement: use prefix for node_id+label (24 bytes)
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(24));
+        opts
+    }
+
+    fn secondary_index_cf_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        opts.set_merge_operator_associative("append", Self::merge_append);
+        opts
+    }
+
+    // Merge operator for secondary indices (replaces DUP_SORT)
+    fn merge_append(
+        _key: &[u8],
+        existing: Option<&[u8]>,
+        operands: &rocksdb::MergeOperands,
+    ) -> Option<Vec<u8>> {
+        let mut result = existing.map(|v| v.to_vec()).unwrap_or_default();
+        for op in operands {
+            result.extend_from_slice(op);
+        }
+        Some(result)
+    }
+
+    /// Used because in the case the key changes in the future.
+    /// Believed to not introduce any overhead being inline and using a reference.
+    #[must_use]
+    #[inline(always)]
+    pub fn node_key(id: &u128) -> [u8; 16] {
+        id.to_be_bytes()
+    }
+
+    /// Used because in the case the key changes in the future.
+    /// Believed to not introduce any overhead being inline and using a reference.
+    #[must_use]
+    #[inline(always)]
+    pub fn edge_key(id: &u128) -> [u8; 16] {
+        id.to_be_bytes()
+    }
+
+    #[inline]
+    pub fn get_node<'arena>(
+        &self,
+        txn: &RTxn,
+        id: &u128,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<Node<'arena>, GraphError> {
+        let node = match txn
+            .txn
+            .get_pinned_cf(&self.nodes_db, Self::node_key(id))
+            .unwrap()
+        {
+            Some(data) => data,
+            None => return Err(GraphError::NodeNotFound),
+        };
+        let node: Node = Node::from_bincode_bytes(*id, &node, arena)?;
+        let node = self.version_info.upgrade_to_node_latest(node);
+        Ok(node)
+    }
+}
+
+// impl DBMethods for HelixGraphStorage {
+//     /// Creates a secondary index lmdb db (table) for a given index name
+//     fn create_secondary_index(&mut self, name: &str) -> Result<(), GraphError> {
+//         let mut wtxn = self.graph_env.write_txn()?;
+//         let db = self.graph_env.create_database(&mut wtxn, Some(name))?;
+//         wtxn.commit()?;
+//         self.secondary_indices.insert(name.to_string(), db);
+//         Ok(())
+//     }
+
+//     /// Drops a secondary index lmdb db (table) for a given index name
+//     fn drop_secondary_index(&mut self, name: &str) -> Result<(), GraphError> {
+//         let mut wtxn = self.graph_env.write_txn()?;
+//         let db = self
+//             .secondary_indices
+//             .get(name)
+//             .ok_or(GraphError::New(format!("Secondary Index {name} not found")))?;
+//         db.clear(&mut wtxn)?;
+//         wtxn.commit()?;
+//         self.secondary_indices.remove(name);
+//         Ok(())
+//     }
+// }

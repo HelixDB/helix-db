@@ -19,7 +19,6 @@ bincode = "1.3.3" # TODO: Figure out bincode 2 impl with current serde impl
 sonic-rs = "0.5.0"
 inventory = "0.3.16"
 twox-hash = "2.1.0"
-heed3 = "0.22.0"
 uuid = { version = "1.12.1", features = ["serde", "v4", "v6", "fast-rng"] }
 rand = "0.9.0"
 chrono = "0.4.39"
@@ -35,6 +34,10 @@ rayon = "1.11.0"
 mimalloc = "0.1.48"
 bumpalo = { version = "3.19.0", features = ["collections", "boxed", "serde"] }
 bytemuck = "1.24.0"
+num_cpus = "1.17.0"
+
+heed3 = { version = "0.22.0"}
+rocksdb = { version = "0.24.0",  features = ["multi-threaded-cf"]  }
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }
@@ -61,7 +64,7 @@ polars = { version = "0.46.0", features = [
 [dev-dependencies]
 rand = "0.9.0"
 lazy_static = "1.4.0"
-num_cpus = "1.17"     # TODO: write ourselves
+num_cpus = "1.17.0"     # TODO: write ourselves
 proptest = "1.4"
 criterion = "0.5"
 loom = "0.7"          # Concurrency model checking
@@ -81,7 +84,9 @@ full = ["build", "compiler", "vectors"]
 bench = ["polars"]
 dev = ["debug-output", "server", "bench"]
 dev-instance = []
-default = ["server"]
+lmdb = []
+rocks = []
+default = ["server", "rocks"]
 
 # benches/tests
 [[test]]

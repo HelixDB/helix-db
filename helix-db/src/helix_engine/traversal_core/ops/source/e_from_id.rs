@@ -14,7 +14,7 @@ where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub storage: &'db HelixGraphStorage,
+    pub storage: &'db HelixGraphStorage<'db>,
     pub arena: &'arena bumpalo::Bump,
     pub txn: &'txn RoTxn<'db>,
     pub iter: Once<Result<TraversalValue<'arena>, GraphError>>,

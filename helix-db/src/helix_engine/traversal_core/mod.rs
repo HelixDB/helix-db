@@ -2,6 +2,7 @@ pub mod config;
 pub mod ops;
 pub mod traversal_iter;
 pub mod traversal_value;
+pub mod txn;
 
 use crate::helix_engine::storage_core::{HelixGraphStorage, version_info::VersionInfo};
 use crate::helix_engine::traversal_core::config::Config;

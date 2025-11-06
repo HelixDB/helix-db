@@ -1,6 +1,6 @@
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage, traversal_core::traversal_value::TraversalValue,
+        storage_core::HelixGraphStorage, traversal_core::{traversal_value::TraversalValue, txn::RTxn},
         types::GraphError,
     },
     protocol::value::Value,
@@ -15,7 +15,7 @@ where
 {
     pub storage: &'db HelixGraphStorage,
     pub arena: &'arena bumpalo::Bump,
-    pub txn: &'txn RoTxn<'db>,
+    pub txn: &'txn RTxn<'db>,
     pub inner: I,
 }
 
