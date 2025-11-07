@@ -1,5 +1,5 @@
 [project]
-name = "count"
+name = "contains"
 queries = "."
 
 [local.dev]

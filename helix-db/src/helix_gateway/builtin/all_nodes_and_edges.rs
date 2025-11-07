@@ -129,7 +129,6 @@ fn get_all_nodes_edges_json(
     txn: &RoTxn,
     node_label: Option<String>,
 ) -> Result<String, GraphError> {
-    use crate::utils::filterable::Filterable;
     use sonic_rs::json;
 
     let nodes_length = db.nodes_db.len(txn)?;
@@ -185,4 +184,218 @@ inventory::submit! {
     HandlerSubmission(
         Handler::new("nodes_edges", nodes_edges_inner)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use axum::body::Bytes;
+    use crate::helix_engine::traversal_core::traversal_value::Traversable;
+    use crate::{
+        helix_engine::{
+            storage_core::version_info::VersionInfo,
+            traversal_core::{
+                HelixGraphEngine, HelixGraphEngineOpts,
+                config::Config,
+                ops::{
+                    g::G,
+                    source::{
+                        add_e::{AddEAdapter, EdgeType},
+                        add_n::AddNAdapter,
+                    },
+                },
+            },
+        },
+        protocol::{request::Request, request::RequestType, Format},
+    };
+
+    fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        let opts = HelixGraphEngineOpts {
+            path: db_path.to_string(),
+            config: Config::default(),
+            version_info: VersionInfo::default(),
+        };
+        let engine = HelixGraphEngine::new(opts).unwrap();
+        (engine, temp_dir)
+    }
+
+    #[test]
+    fn test_nodes_edges_empty_database() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let request = Request {
+            name: "nodes_edges".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = nodes_edges_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert!(!response.body.is_empty());
+
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("\"data\""));
+        assert!(body_str.contains("\"vectors\""));
+        assert!(body_str.contains("\"stats\""));
+    }
+
+    #[test]
+    fn test_nodes_edges_with_data() {
+        use crate::protocol::value::Value;
+
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", Some(vec![("name".to_string(), Value::String("Alice".to_string()))]), None)
+            .collect_to_obj()?;
+
+        let node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", Some(vec![("name".to_string(), Value::String("Bob".to_string()))]), None)
+            .collect_to_obj()?;
+
+        let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let request = Request {
+            name: "nodes_edges".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = nodes_edges_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("\"nodes\""));
+        assert!(body_str.contains("\"edges\""));
+    }
+
+    #[test]
+    fn test_nodes_edges_with_limit() {
+        use crate::protocol::value::Value;
+
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let mut nodes = Vec::new();
+        for i in 0..10 {
+            let node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+                .add_n("person", Some(vec![("index".to_string(), Value::I64(i))]), None)
+                .collect_to_obj()?;
+            nodes.push(node);
+        }
+
+        // Add some edges to satisfy the nodes_edges_to_json method
+        for i in 0..5 {
+            let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+                .add_e("connects", None, nodes[i].id(), nodes[i+1].id(), false, EdgeType::Node)
+                .collect_to_obj()?;
+        }
+
+        txn.commit().unwrap();
+
+        let params_json = sonic_rs::to_vec(&json!({"limit": 5})).unwrap();
+        let request = Request {
+            name: "nodes_edges".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+
+        };
+
+        let result = nodes_edges_inner(input);
+        if let Err(e) = &result {
+            eprintln!("Error in test_nodes_edges_with_limit: {:?}", e);
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_nodes_edges_with_node_label() {
+        use crate::protocol::value::Value;
+
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let _node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", Some(vec![("name".to_string(), Value::String("Test".to_string()))]), None)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let params_json = sonic_rs::to_vec(&json!({"node_label": "name"})).unwrap();
+        let request = Request {
+            name: "nodes_edges".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = nodes_edges_inner(input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_nodes_edges_stats_included() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let request = Request {
+            name: "nodes_edges".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = nodes_edges_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("\"stats\""));
+    }
 }

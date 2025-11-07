@@ -43,7 +43,6 @@ impl HelixParser {
         &self,
         pair: Pair<Rule>,
     ) -> Result<Vec<Expression>, ParserError> {
-        println!("pair: {pair:?}");
         pair.into_inner()
             .map(|p| self.parse_expression(p))
             .collect()
@@ -97,28 +96,25 @@ pub trait PairsTools<'a> {
     /// Equivalent to next().into_inner()
     fn try_next_inner(&mut self) -> Result<Pairs<'a, Rule>, ParserError>;
 }
-use std::panic::Location;
+
 impl<'a> PairTools<'a> for Pair<'a, Rule> {
     #[track_caller]
     fn try_inner_next(self) -> Result<Pair<'a, Rule>, ParserError> {
         let err_msg = format!("Expected inner next got {self:?}");
-        let loc = Location::caller();
-        self.into_inner().next().ok_or_else(|| {
-            eprintln!("try inner_next failed at {}:{}", loc.file(), loc.line());
-            ParserError::from(err_msg)
-        })
+        self.into_inner()
+            .next()
+            .ok_or_else(|| ParserError::from(err_msg))
     }
 }
 
 impl<'a> PairTools<'a> for Result<Pair<'a, Rule>, ParserError> {
     #[track_caller]
     fn try_inner_next(self) -> Result<Pair<'a, Rule>, ParserError> {
-        let loc = Location::caller();
         match self {
-            Ok(pair) => pair.into_inner().next().ok_or_else(|| {
-                eprintln!("try inner_next failed at {}:{}", loc.file(), loc.line());
-                ParserError::from("Expected inner next")
-            }),
+            Ok(pair) => pair
+                .into_inner()
+                .next()
+                .ok_or_else(|| ParserError::from("Expected inner next")),
             Err(e) => Err(e),
         }
     }

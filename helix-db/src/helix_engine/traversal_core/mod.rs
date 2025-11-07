@@ -9,6 +9,8 @@ use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::mcp::mcp::{McpBackend, McpConnections};
 use std::sync::{Arc, Mutex};
 
+pub const LMDB_STRING_HEADER_LENGTH: usize = 8;
+
 #[derive(Debug)]
 pub enum QueryInput {
     StringValue { value: String },

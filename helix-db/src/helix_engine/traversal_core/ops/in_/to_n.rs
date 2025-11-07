@@ -1,66 +1,49 @@
 use crate::helix_engine::{
-    traversal_core::{traversal_value::TraversalValue, traversal_iter::RoTraversalIterator},
-    storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+    storage_core::storage_methods::StorageMethods,
+    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
 };
-use helix_macros::debug_trace;
-use heed3::RoTxn;
-use std::sync::Arc;
 
-pub struct ToNIterator<'a, I, T> {
-    iter: I,
-    storage: Arc<HelixGraphStorage>,
-    txn: &'a T,
-}
-
-// implementing iterator for OutIterator
-impl<'a, I> Iterator for ToNIterator<'a, I, RoTxn<'a>>
-where
-    I: Iterator<Item = Result<TraversalValue, GraphError>>,
+pub trait ToNAdapter<'db, 'arena, 'txn, I>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("TO_N")]
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(item) => match item {
-                Ok(TraversalValue::Edge(item)) => Some(Ok(TraversalValue::Node(
-                    match self.storage.get_node(self.txn, &item.to_node) {
-                        Ok(node) => node,
-                        Err(e) => {
-                            println!("Error getting node: {e:?}");
-                            return Some(Err(e));
-                        }
-                    },
-                ))),
-                _ => return None,
-            },
-            None => None,
-        }
-    }
-}
-pub trait ToNAdapter<'a, T>: Iterator<Item = Result<TraversalValue, GraphError>> {
     fn to_n(
         self,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>;
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> ToNAdapter<'a, RoTxn<'a>>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    ToNAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
     #[inline(always)]
     fn to_n(
         self,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>> {
-        let iter = ToNIterator {
-            iter: self.inner,
-            storage: Arc::clone(&self.storage),
-            txn: self.txn,
-        };
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self.inner.filter_map(move |item| {
+            if let Ok(TraversalValue::Edge(item)) = item {
+                match self.storage.get_node(self.txn, &item.to_node, self.arena) {
+                    Ok(node) => Some(Ok(TraversalValue::Node(node))),
+                    Err(e) => Some(Err(e)),
+                }
+            } else {
+                None
+            }
+        });
         RoTraversalIterator {
-            inner: iter,
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: iter,
         }
     }
 }

@@ -23,7 +23,7 @@ async fn enable_full_metrics() -> Result<()> {
     let email = ask_for_email();
     let mut config = load_metrics_config().unwrap_or_default();
     config.level = MetricsLevel::Full;
-    config.email = Some(email);
+    config.email = Some(email.leak());
     config.last_updated = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();

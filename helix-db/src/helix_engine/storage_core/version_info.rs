@@ -1,22 +1,21 @@
+use crate::utils::{
+    items::{Edge, Node},
+    properties::ImmutablePropertiesMap,
+};
 use std::collections::HashMap;
 
-use crate::{
-    protocol::value::Value,
-    utils::items::{Edge, Node},
-};
-
 #[derive(Default, Clone)]
-pub struct VersionInfo(pub HashMap<String, ItemInfo>);
+pub struct VersionInfo(pub HashMap<&'static str, ItemInfo>);
 
-impl VersionInfo {
-    pub fn upgrade_to_node_latest(&self, node: Node) -> Node {
+impl<'arena> VersionInfo {
+    pub fn upgrade_to_node_latest(&self, node: Node<'arena>) -> Node<'arena> {
         match self.0.get(&node.label) {
             Some(item_info) => item_info.upgrade_node_to_latest(node),
             None => node,
         }
     }
 
-    pub fn upgrade_to_edge_latest(&self, node: Edge) -> Edge {
+    pub fn upgrade_to_edge_latest(&self, node: Edge<'arena>) -> Edge<'arena> {
         match self.0.get(&node.label) {
             Some(item_info) => item_info.upgrade_edge_to_latest(node),
             None => node,
@@ -31,7 +30,7 @@ impl VersionInfo {
     }
 }
 
-type Props = HashMap<String, Value>;
+type Props<'arena> = ImmutablePropertiesMap<'arena>;
 #[derive(Clone, Debug)]
 pub struct TransitionFn {
     pub from_version: u8,
@@ -48,8 +47,8 @@ pub struct ItemInfo {
     pub transition_fns: Vec<TransitionFn>,
 }
 
-impl ItemInfo {
-    fn upgrade_node_to_latest(&self, mut node: Node) -> Node {
+impl<'arena> ItemInfo {
+    fn upgrade_node_to_latest(&self, mut node: Node<'arena>) -> Node<'arena> {
         if node.version < self.latest
             && let Some(mut node_props) = node.properties.take()
         {
@@ -65,7 +64,7 @@ impl ItemInfo {
         node
     }
 
-    fn upgrade_edge_to_latest(&self, mut edge: Edge) -> Edge {
+    fn upgrade_edge_to_latest(&self, mut edge: Edge<'arena>) -> Edge<'arena> {
         if edge.version < self.latest
             && let Some(mut edge_props) = edge.properties.take()
         {
@@ -149,6 +148,7 @@ macro_rules! field_addition_from_value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::value::Value;
 
     #[test]
     fn test_field_renaming() {

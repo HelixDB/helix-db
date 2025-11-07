@@ -73,7 +73,7 @@ QUERY createLinkedinCompany (user_id: ID, name: String, domain: String, industry
     metadata <- user::Out<User_to_Metadata>
     linkedin_info <- metadata::Out<Metadata_to_LinkedinInfo>
     linkedin_content <- linkedin_info::Out<LinkedinInfo_to_LinkedinContent>
-    linkedin_content_linkedin_company <- AddE<LinkedinContent_to_LinkedinCompany>()::From(linkedin_content)::To(linkedin_company)
+    linkedin_content_linkedin_company <- AddE<LinkedinContent_to_LinkedinCompany>::From(linkedin_content)::To(linkedin_company)
     RETURN linkedin_company
 
 QUERY addLinkedinCompany (user_id: ID, linkedin_company_id: ID) =>

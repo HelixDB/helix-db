@@ -3,8 +3,8 @@ use crate::helixc::parser::{
     location::HasLoc,
     types::{
         Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition,
-        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, Object, OrderBy,
-        OrderByType, ShortestPath, ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update,
+        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, MMRDistance, Object, OrderBy,
+        OrderByType, RerankMMR, RerankRRF, ShortestPath, ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update,
     },
     utils::{PairTools, PairsTools},
 };
@@ -147,6 +147,10 @@ impl HelixParser {
                     Rule::anonymous_traversal => FieldValue {
                         loc: p.loc(),
                         value: FieldValueType::Traversal(Box::new(self.parse_anon_traversal(p)?)),
+                    },
+                    Rule::id_traversal => FieldValue {
+                        loc: p.loc(),
+                        value: FieldValueType::Traversal(Box::new(self.parse_traversal(p)?)),
                     },
                     Rule::mapping_field => FieldValue {
                         loc: p.loc(),
@@ -314,6 +318,14 @@ impl HelixParser {
             Rule::first => Ok(Step {
                 loc: step_pair.loc(),
                 step: StepType::First,
+            }),
+            Rule::rerank_rrf => Ok(Step {
+                loc: step_pair.loc(),
+                step: StepType::RerankRRF(self.parse_rerank_rrf(step_pair)?),
+            }),
+            Rule::rerank_mmr => Ok(Step {
+                loc: step_pair.loc(),
+                step: StepType::RerankMMR(self.parse_rerank_mmr(step_pair)?),
             }),
             _ => Err(ParserError::from(format!(
                 "Unexpected step type: {:?}",
@@ -541,5 +553,71 @@ impl HelixParser {
             }
         };
         Ok(step)
+    }
+
+    /// Parses a RerankRRF step
+    ///
+    /// #### Example
+    /// ```rs
+    /// ::RerankRRF(k: 60)
+    /// ::RerankRRF()
+    /// ```
+    pub(super) fn parse_rerank_rrf(&self, pair: Pair<Rule>) -> Result<RerankRRF, ParserError> {
+        let loc = pair.loc();
+        let mut k = None;
+
+        // Parse optional k parameter
+        for inner in pair.into_inner() {
+            // The grammar is: "k" ~ ":" ~ evaluates_to_number
+            // We need to parse the evaluates_to_number part
+            k = Some(self.parse_expression(inner)?);
+        }
+
+        Ok(RerankRRF { loc, k })
+    }
+
+    /// Parses a RerankMMR step
+    ///
+    /// #### Example
+    /// ```rs
+    /// ::RerankMMR(lambda: 0.7)
+    /// ::RerankMMR(lambda: 0.5, distance: "euclidean")
+    /// ```
+    pub(super) fn parse_rerank_mmr(&self, pair: Pair<Rule>) -> Result<RerankMMR, ParserError> {
+        let loc = pair.loc();
+        let mut lambda = None;
+        let mut distance = None;
+
+        // Parse parameters
+        let mut inner = pair.into_inner();
+
+        // First parameter is always lambda (required)
+        if let Some(lambda_expr) = inner.next() {
+            lambda = Some(self.parse_expression(lambda_expr)?);
+        }
+
+        // Second parameter is optional distance
+        if let Some(distance_pair) = inner.next() {
+            let dist_str = match distance_pair.as_rule() {
+                Rule::string_literal => {
+                    // Remove quotes from string literal
+                    let s = distance_pair.as_str();
+                    s.trim_matches('"').to_string()
+                }
+                Rule::identifier => distance_pair.as_str().to_string(),
+                _ => distance_pair.as_str().to_string(),
+            };
+
+            distance = Some(match dist_str.as_str() {
+                "cosine" => MMRDistance::Cosine,
+                "euclidean" => MMRDistance::Euclidean,
+                "dotproduct" => MMRDistance::DotProduct,
+                _ => MMRDistance::Identifier(dist_str),
+            });
+        }
+
+        let lambda = lambda.ok_or_else(|| ParserError::from("lambda parameter required for RerankMMR"))?;
+
+        Ok(RerankMMR { loc, lambda, distance })
     }
 }

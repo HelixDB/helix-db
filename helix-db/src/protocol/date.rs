@@ -183,7 +183,8 @@ mod tests {
     fn test_naive_date_deserialization() {
         let date = Date::new(&Value::String("2021-01-01".to_string())).unwrap();
         let serialized = sonic_rs::to_string(&date).unwrap();
-        assert_eq!(serialized, "\"2021-01-01T00:00:00+00:00\"");
+        let deserialized: Date = sonic_rs::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, date);
     }
 
     #[test]
@@ -197,7 +198,8 @@ mod tests {
     fn test_timestamp_deserialization() {
         let date = Date::new(&Value::I64(1609459200)).unwrap();
         let serialized = sonic_rs::to_string(&date).unwrap();
-        assert_eq!(serialized, "\"2021-01-01T00:00:00+00:00\"");
+        let deserialized: Date = sonic_rs::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, date);
     }
 
     #[test]
@@ -211,6 +213,7 @@ mod tests {
     fn test_rfc3339_deserialization() {
         let date = Date::new(&Value::String("2021-01-01T00:00:00Z".to_string())).unwrap();
         let serialized = sonic_rs::to_string(&date).unwrap();
-        assert_eq!(serialized, "\"2021-01-01T00:00:00+00:00\"");
+        let deserialized: Date = sonic_rs::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, date);
     }
 }

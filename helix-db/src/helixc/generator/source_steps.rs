@@ -1,14 +1,14 @@
 use core::fmt;
 use std::fmt::Display;
 
-use crate::helixc::generator::utils::{write_properties, write_secondary_indices, VecData};
+use crate::helixc::generator::utils::{VecData, write_properties, write_secondary_indices};
 
 use super::{
     bool_ops::BoExp,
     utils::{GenRef, GeneratedValue},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SourceStep {
     /// Traversal starts from an identifier
     Identifier(GenRef<String>),
@@ -41,7 +41,7 @@ pub enum SourceStep {
     Empty,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddN {
     /// Label of node
     pub label: GenRef<String>,
@@ -62,7 +62,7 @@ impl Display for AddN {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddE {
     /// Label of edge
     pub label: GenRef<String>,
@@ -72,20 +72,63 @@ pub struct AddE {
     pub from: GeneratedValue,
     /// To node ID
     pub to: GeneratedValue,
+    /// Whether from is a plural variable (needs iteration)
+    pub from_is_plural: bool,
+    /// Whether to is a plural variable (needs iteration)
+    pub to_is_plural: bool,
 }
 impl Display for AddE {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "add_e({}, {}, {}, {}, true, EdgeType::Node)",
-            self.label,
-            write_properties(&self.properties),
-            self.from,
-            self.to
-        )
+        // If either from or to is plural, we need to generate iteration code
+        match (self.from_is_plural, self.to_is_plural) {
+            (false, false) => {
+                // Both singular - from and to already have .id() appended
+                write!(
+                    f,
+                    "add_edge({}, {}, {}, {}, false)",
+                    self.label,
+                    write_properties(&self.properties),
+                    self.from,
+                    self.to
+                )
+            }
+            (true, false) => {
+                // From is plural - iterate over from, to already has .id()
+                write!(
+                    f,
+                    "{}.iter().map(|from_val| {{\n        G::new_mut(&db, &arena, &mut txn)\n        .add_edge({}, {}, from_val.id(), {}, false)\n        .collect_to_obj()\n    }}).collect::<Result<Vec<_>,_>>()?",
+                    self.from,
+                    self.label,
+                    write_properties(&self.properties),
+                    self.to
+                )
+            }
+            (false, true) => {
+                // To is plural - iterate over to, from already has .id()
+                write!(
+                    f,
+                    "{}.iter().map(|to_val| {{\n        G::new_mut(&db, &arena, &mut txn)\n        .add_edge({}, {}, {}, to_val.id(), false)\n        .collect_to_obj()\n    }}).collect::<Result<Vec<_>,_>>()?",
+                    self.to,
+                    self.label,
+                    write_properties(&self.properties),
+                    self.from
+                )
+            }
+            (true, true) => {
+                // Both plural - nested iteration
+                write!(
+                    f,
+                    "{}.iter().flat_map(|from_val| {{\n        {}.iter().map(move |to_val| {{\n            G::new_mut(&db, &arena, &mut txn)\n            .add_edge({}, {}, from_val.id(), to_val.id(), false)\n            .collect_to_obj()\n        }})\n    }}).collect::<Result<Vec<_>,_>>()?",
+                    self.from,
+                    self.to,
+                    self.label,
+                    write_properties(&self.properties)
+                )
+            }
+        }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AddV {
     /// Vector to add
     pub vec: VecData,
@@ -106,15 +149,14 @@ impl Display for AddV {
     }
 }
 
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NFromID {
     /// ID of node
     pub id: GenRef<String>,
-    /// Label of node 
-    /// 
+    /// Label of node
+    ///
     /// - unused currently but kept in the case ID lookups need to be from specific table based on type
-    pub label: GenRef<String>, 
+    pub label: GenRef<String>,
 }
 impl Display for NFromID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -122,7 +164,7 @@ impl Display for NFromID {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NFromType {
     /// Label of nodes to lookup
     pub label: GenRef<String>,
@@ -133,14 +175,14 @@ impl Display for NFromType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EFromID {
     /// ID of edge
     pub id: GenRef<String>,
-    /// Label of edge 
-    /// 
+    /// Label of edge
+    ///
     /// - unused currently but kept in the case ID lookups need to be from specific table based on type
-    pub label: GenRef<String>, 
+    pub label: GenRef<String>,
 }
 impl Display for EFromID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,7 +190,7 @@ impl Display for EFromID {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EFromType {
     /// Label of edges to lookup
     pub label: GenRef<String>,
@@ -159,36 +201,38 @@ impl Display for EFromType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VFromID {
     /// ID of vector
     pub id: GenRef<String>,
     /// Label of vector
     pub label: GenRef<String>,
+
+    /// Whether to get the vector data
+    pub get_vector_data: bool,
 }
 
 impl Display for VFromID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v_from_id({})", self.id)
+        write!(f, "v_from_id({}, {})", self.id, self.get_vector_data)
     }
 }
 
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VFromType {
     /// Label of vectors to lookup
     pub label: GenRef<String>,
+    /// Whether to get the vector data
+    pub get_vector_data: bool,
 }
-
 
 impl Display for VFromType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v_from_type({})", self.label)
+        write!(f, "v_from_type({}, {})", self.label, self.get_vector_data)
     }
 }
 
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SearchBM25 {
     /// Type of node to search for
     pub type_arg: GenRef<String>,
@@ -200,7 +244,11 @@ pub struct SearchBM25 {
 
 impl Display for SearchBM25 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "search_bm25({}, {}, {})?", self.type_arg, self.query, self.k)
+        write!(
+            f,
+            "search_bm25({}, {}, {})?",
+            self.type_arg, self.query, self.k
+        )
     }
 }
 
@@ -226,7 +274,7 @@ impl Display for SourceStep {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SearchVector {
     /// Label of vector to search for
     pub label: GenRef<String>,
@@ -256,15 +304,13 @@ impl Display for SearchVector {
             None => write!(
                 f,
                 "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, None)",
-                self.vec,
-                self.k,
-                self.label,
+                self.vec, self.k, self.label,
             ),
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NFromIndex {
     /// Index to search against
     pub index: GenRef<String>,
@@ -276,7 +322,10 @@ pub struct NFromIndex {
 
 impl Display for NFromIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "n_from_index({}, {}, {})", self.label, self.index, self.key)
+        write!(
+            f,
+            "n_from_index({}, {}, {})",
+            self.label, self.index, self.key
+        )
     }
 }
-

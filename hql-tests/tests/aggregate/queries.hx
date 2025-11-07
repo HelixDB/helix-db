@@ -19,8 +19,8 @@ QUERY count(name: String, id: ID) =>
     RETURN users1, users2
 
 QUERY GroupUsersByAge () =>
-    users <- N<User>
-    RETURN users::GROUP_BY(age)
+    users <- N<User>::GROUP_BY(age)
+    RETURN users
 
 QUERY CreateUser (name: String, age: U8, email: String) =>
     user <- AddN<User>({

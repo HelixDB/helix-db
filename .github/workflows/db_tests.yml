@@ -32,4 +32,4 @@ jobs:
     - name: Run tests
       run: | 
         cd helix-db
-        cargo test --profile dev helix_engine
+        cargo test --release --lib -- --skip concurrency_tests

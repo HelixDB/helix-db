@@ -1,4 +1,3 @@
-use std::sync::LazyLock;
 use std::sync::atomic::{self, AtomicUsize};
 use std::time::Instant;
 use std::{collections::HashMap, sync::Arc};
@@ -8,8 +7,6 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use core_affinity::CoreId;
-use helix_metrics::events::{EventType, QueryErrorEvent, QuerySuccessEvent};
-use sonic_rs::json;
 use tracing::{info, trace, warn};
 
 use super::router::router::{HandlerFn, HelixRouter};
@@ -32,19 +29,16 @@ use crate::{
 pub struct GatewayOpts {}
 
 impl GatewayOpts {
-    pub const DEFAULT_WORKERS_PER_CORE: usize = 5;
+    pub const DEFAULT_WORKERS_PER_CORE: usize = 8;
 }
 
-pub static HELIX_METRICS_CLIENT: LazyLock<helix_metrics::HelixMetricsClient> =
-    LazyLock::new(helix_metrics::HelixMetricsClient::new);
-
 pub struct HelixGateway {
-    address: String,
-    workers_per_core: usize,
-    graph_access: Arc<HelixGraphEngine>,
-    router: Arc<HelixRouter>,
-    opts: Option<HelixGraphEngineOpts>,
-    cluster_id: Option<String>,
+    pub(crate) address: String,
+    pub(crate) workers_per_core: usize,
+    pub(crate) graph_access: Arc<HelixGraphEngine>,
+    pub(crate) router: Arc<HelixRouter>,
+    pub(crate) opts: Option<HelixGraphEngineOpts>,
+    pub(crate) cluster_id: Option<String>,
 }
 
 impl HelixGateway {
@@ -116,6 +110,9 @@ impl HelixGateway {
         }));
 
         rt.block_on(async move {
+            // Initialize metrics system
+            helix_metrics::init_metrics_system();
+
             let listener = tokio::net::TcpListener::bind(self.address)
                 .await
                 .expect("Failed to bind listener");
@@ -161,7 +158,6 @@ async fn post_handler(
     State(state): State<Arc<AppState>>,
     req: protocol::request::Request,
 ) -> axum::http::Response<Body> {
-    // #[cfg(feature = "metrics")]
     let start_time = Instant::now();
     let body = req.body.to_vec();
     let query_name = req.name.clone();
@@ -169,28 +165,25 @@ async fn post_handler(
 
     match res {
         Ok(r) => {
-            // #[cfg(feature = "metrics")]
-            {
-                HELIX_METRICS_CLIENT.send_event(
-                    EventType::QuerySuccess,
-                    QuerySuccessEvent {
-                        cluster_id: state.cluster_id.clone(),
-                        query_name,
-                        time_taken_usec: start_time.elapsed().as_micros() as u32,
-                    },
-                );
-            }
+            helix_metrics::log_event(
+                helix_metrics::events::EventType::QuerySuccess,
+                helix_metrics::events::QuerySuccessEvent {
+                    cluster_id: state.cluster_id.clone(),
+                    query_name,
+                    time_taken_usec: start_time.elapsed().as_micros() as u32,
+                },
+            );
             r.into_response()
         }
         Err(e) => {
             info!(?e, "Got error");
-            HELIX_METRICS_CLIENT.send_event(
-                EventType::QueryError,
-                QueryErrorEvent {
+            helix_metrics::log_event(
+                helix_metrics::events::EventType::QueryError,
+                helix_metrics::events::QueryErrorEvent {
                     cluster_id: state.cluster_id.clone(),
                     query_name,
                     input_json: sonic_rs::to_string(&body).ok(),
-                    output_json: sonic_rs::to_string(&json!({ "error": e.to_string() })).ok(),
+                    output_json: Some(format!(r#"{{"error":"{e}"}}"#)),
                     time_taken_usec: start_time.elapsed().as_micros() as u32,
                 },
             );
@@ -206,9 +199,9 @@ pub struct AppState {
 }
 
 pub struct CoreSetter {
-    cores: Vec<CoreId>,
-    threads_per_core: usize,
-    incrementing_index: AtomicUsize,
+    pub(crate) cores: Vec<CoreId>,
+    pub(crate) threads_per_core: usize,
+    pub(crate) incrementing_index: AtomicUsize,
 }
 
 impl CoreSetter {

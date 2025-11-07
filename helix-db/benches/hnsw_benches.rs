@@ -1,5 +1,5 @@
 /// cargo test --test hnsw_benches --release -- --no-capture
-#[cfg(test)]
+#[cfg(feature = "bench")]
 mod tests {
     use heed3::{Env, EnvOpenOptions, RoTxn};
     use helix_db::{
@@ -291,8 +291,8 @@ mod tests {
     /// Test the precision of the HNSW search algorithm
     #[test]
     fn bench_hnsw_search_long() {
-        let n_base = 50_000;
-        let n_query = 8_000; // 10-20%
+        let n_base = 5_000;
+        let n_query = 1000; // 10-20%
         let k = 10;
         let mut vectors = load_dbpedia_vectors(n_base).unwrap();
 

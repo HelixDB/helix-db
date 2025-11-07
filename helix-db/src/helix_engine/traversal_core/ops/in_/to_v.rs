@@ -1,66 +1,68 @@
 use crate::helix_engine::{
-    traversal_core::{traversal_value::TraversalValue, traversal_iter::RoTraversalIterator},
-    storage_core::HelixGraphStorage,
+    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
 };
-use heed3::RoTxn;
-use std::sync::Arc;
-use helix_macros::debug_trace;
 
-pub struct ToVIterator<'a, I, T> {
-    iter: I,
-    storage: Arc<HelixGraphStorage>,
-    txn: &'a T,
-}
-
-// implementing iterator for OutIterator
-impl<'a, I> Iterator for ToVIterator<'a, I, RoTxn<'a>>
-where
-    I: Iterator<Item = Result<TraversalValue, GraphError>>,
+pub trait ToVAdapter<'db, 'arena, 'txn, I>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("TO_V")]
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(item) => match item {
-                Ok(TraversalValue::Edge(item)) => Some(Ok(TraversalValue::Vector(
-                    match self.storage.get_vector(self.txn, &item.to_node) {
-                        Ok(vector) => vector,
-                        Err(e) => {
-                            println!("Error getting vector: {e:?}");
-                            return Some(Err(e));
-                        }
-                    },
-                ))),
-                _ => return None,
-            },
-            None => None,
-        }
-    }
-}
-pub trait ToVAdapter<'a, T>: Iterator<Item = Result<TraversalValue, GraphError>> {
     fn to_v(
         self,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>;
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> ToVAdapter<'a, RoTxn<'a>>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    ToVAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
     #[inline(always)]
     fn to_v(
         self,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>> {
-        let iter = ToVIterator {
-            iter: self.inner,
-            storage: Arc::clone(&self.storage),
-            txn: self.txn,
-        };
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self.inner.filter_map(move |item| {
+            if let Ok(TraversalValue::Edge(item)) = item {
+                if get_vector_data {
+                    match self
+                        .storage
+                        .vectors
+                        .get_full_vector(self.txn, item.to_node, self.arena)
+                    {
+                        Ok(vector) => Some(Ok(TraversalValue::Vector(vector))),
+                        Err(e) => Some(Err(GraphError::from(e))),
+                    }
+                } else {
+                    match self.storage.vectors.get_vector_properties(
+                        self.txn,
+                        item.to_node,
+                        self.arena,
+                    ) {
+                        Ok(Some(vector)) => {
+                            Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vector)))
+                        }
+                        Ok(None) => None,
+                        Err(e) => Some(Err(GraphError::from(e))),
+                    }
+                }
+            } else {
+                None
+            }
+        });
         RoTraversalIterator {
-            inner: iter,
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: iter,
         }
     }
 }

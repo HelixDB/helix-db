@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum EventType {
     #[serde(rename = "cli_install")]
     CliInstall,
@@ -41,17 +41,17 @@ impl EventType {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RawEvent<D: Serialize + std::fmt::Debug> {
-    pub os: String,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RawEvent<D: Serialize + std::fmt::Debug + Clone> {
+    pub os: &'static str,
     pub event_type: EventType,
     pub event_data: D,
-    pub user_id: Option<String>,
-    pub email: Option<String>,
+    pub user_id: Option<&'static str>,
+    pub email: Option<&'static str>,
     pub timestamp: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum EventData {
     CliInstall,
@@ -66,7 +66,61 @@ pub enum EventData {
     Test(TestEvent),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl From<CompileEvent> for EventData {
+    fn from(e: CompileEvent) -> Self {
+        EventData::Compile(e)
+    }
+}
+
+impl From<DeployLocalEvent> for EventData {
+    fn from(e: DeployLocalEvent) -> Self {
+        EventData::DeployLocal(e)
+    }
+}
+
+impl From<DeployCloudEvent> for EventData {
+    fn from(e: DeployCloudEvent) -> Self {
+        EventData::DeployCloud(e)
+    }
+}
+
+impl From<RedeployLocalEvent> for EventData {
+    fn from(e: RedeployLocalEvent) -> Self {
+        EventData::RedeployLocal(e)
+    }
+}
+
+impl From<QuerySuccessEvent> for EventData {
+    fn from(e: QuerySuccessEvent) -> Self {
+        EventData::QuerySuccess(e)
+    }
+}
+
+impl From<QueryErrorEvent> for EventData {
+    fn from(e: QueryErrorEvent) -> Self {
+        EventData::QueryError(e)
+    }
+}
+
+impl From<WriteErrorEvent> for EventData {
+    fn from(e: WriteErrorEvent) -> Self {
+        EventData::WriteError(e)
+    }
+}
+
+impl From<ReadErrorEvent> for EventData {
+    fn from(e: ReadErrorEvent) -> Self {
+        EventData::ReadError(e)
+    }
+}
+
+impl From<TestEvent> for EventData {
+    fn from(e: TestEvent) -> Self {
+        EventData::Test(e)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TestEvent {
     pub cluster_id: String,
     pub queries_string: String,
@@ -74,7 +128,7 @@ pub struct TestEvent {
     pub time_taken_sec: u32,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_messages: Option<String>, 
+    pub error_messages: Option<String>,
 }
 
 impl Default for TestEvent {
@@ -90,7 +144,7 @@ impl Default for TestEvent {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CompileEvent {
     pub cluster_id: String,
     pub queries_string: String,
@@ -101,7 +155,7 @@ pub struct CompileEvent {
     pub error_messages: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeployLocalEvent {
     pub cluster_id: String,
     pub queries_string: String,
@@ -112,7 +166,7 @@ pub struct DeployLocalEvent {
     pub error_messages: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RedeployLocalEvent {
     pub cluster_id: String,
     pub queries_string: String,
@@ -123,7 +177,7 @@ pub struct RedeployLocalEvent {
     pub error_messages: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeployCloudEvent {
     pub cluster_id: String,
     pub queries_string: String,
@@ -133,7 +187,7 @@ pub struct DeployCloudEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_messages: Option<String>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WriteErrorEvent {
     pub cluster_id: String,
     pub key: Vec<u8>,
@@ -146,7 +200,7 @@ pub struct WriteErrorEvent {
     pub error_messages: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReadErrorEvent {
     pub cluster_id: String,
     pub key: Vec<u8>,
@@ -159,7 +213,7 @@ pub struct ReadErrorEvent {
     pub error_messages: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QueryErrorEvent {
     pub query_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,7 +225,7 @@ pub struct QueryErrorEvent {
     pub time_taken_usec: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QuerySuccessEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_id: Option<String>,

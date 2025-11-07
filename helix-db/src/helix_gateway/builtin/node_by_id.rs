@@ -12,7 +12,6 @@ use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
 use crate::protocol::{self, request::RequestType};
-use crate::utils::filterable::Filterable;
 use crate::utils::id::ID;
 
 // get node details by ID
@@ -122,4 +121,192 @@ inventory::submit! {
     HandlerSubmission(
         Handler::new("node_details", node_details_inner)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use axum::body::Bytes;
+    use crate::helix_engine::traversal_core::traversal_value::Traversable;
+    use crate::{
+        helix_engine::{
+            storage_core::version_info::VersionInfo,
+            traversal_core::{
+                HelixGraphEngine, HelixGraphEngineOpts,
+                config::Config,
+                ops::{
+                    g::G,
+                    source::add_n::AddNAdapter,
+                },
+            },
+        },
+        protocol::{request::Request, request::RequestType, Format, value::Value},
+        helix_gateway::router::router::HandlerInput,
+        utils::id::ID,
+    };
+
+    fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        let opts = HelixGraphEngineOpts {
+            path: db_path.to_string(),
+            config: Config::default(),
+            version_info: VersionInfo::default(),
+        };
+        let engine = HelixGraphEngine::new(opts).unwrap();
+        (engine, temp_dir)
+    }
+
+    #[test]
+    fn test_node_details_found() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", Some(vec![("name".to_string(), Value::String("Alice".to_string()))]), None)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let node_id_str = ID::from(node.id()).stringify();
+        let params_json = sonic_rs::to_vec(&json!({"id": node_id_str})).unwrap();
+
+        let request = Request {
+            name: "node_details".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_details_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("\"found\":true"));
+    }
+
+    #[test]
+    fn test_node_details_not_found() {
+        let (engine, _temp_dir) = setup_test_engine();
+
+        let fake_id = uuid::Uuid::new_v4().to_string();
+        let params_json = sonic_rs::to_vec(&json!({"id": fake_id})).unwrap();
+
+        let request = Request {
+            name: "node_details".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_details_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("\"found\":false"));
+    }
+
+    #[test]
+    fn test_node_details_invalid_id_format() {
+        let (engine, _temp_dir) = setup_test_engine();
+
+        let params_json = sonic_rs::to_vec(&json!({"id": "not-a-valid-id"})).unwrap();
+
+        let request = Request {
+            name: "node_details".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_details_inner(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_details_missing_id() {
+        let (engine, _temp_dir) = setup_test_engine();
+
+        let request = Request {
+            name: "node_details".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_details_inner(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_details_with_properties() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", Some(vec![
+                ("name".to_string(), Value::String("Alice".to_string())),
+                ("age".to_string(), Value::I64(30)),
+            ]), None)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let node_id_str = ID::from(node.id()).stringify();
+        let params_json = sonic_rs::to_vec(&json!({"id": node_id_str})).unwrap();
+
+        let request = Request {
+            name: "node_details".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_details_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("Alice"));
+        assert!(body_str.contains("30"));
+    }
 }

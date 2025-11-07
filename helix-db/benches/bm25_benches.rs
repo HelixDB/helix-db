@@ -1,5 +1,5 @@
 /// cargo test --test bm25_benches --features dev -- --no-capture
-#[cfg(test)]
+#[cfg(feature = "bench")]
 mod tests {
     use helix_db::{
         debug_println,

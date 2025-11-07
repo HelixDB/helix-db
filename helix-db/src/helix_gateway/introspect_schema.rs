@@ -18,3 +18,4 @@ pub async fn introspect_schema_handler(
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "Could not find schema").into_response(),
     }
 }
+

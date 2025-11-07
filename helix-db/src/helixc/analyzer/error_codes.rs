@@ -2,7 +2,7 @@ use paste::paste;
 use std::fmt::{Debug};
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ErrorCode {
     /// `E101` – `unknown node type`
     E101,

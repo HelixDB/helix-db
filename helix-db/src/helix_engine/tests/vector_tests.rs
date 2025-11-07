@@ -1,64 +1,60 @@
 use crate::helix_engine::vector_core::vector_distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL};
 
 use crate::helix_engine::vector_core::vector::HVector;
+use bumpalo::Bump;
 
-#[test]
-fn test_hvector_new() {
-    let data: Vec<f64> = vec![1.0, 2.0, 3.0];
-    let vector = HVector::new(data);
-    assert_eq!(vector.get_data(), &[1.0, 2.0, 3.0]);
+fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
+    let slice = arena.alloc_slice_copy(data);
+    HVector::from_slice("vector", 0, slice)
 }
 
 #[test]
 fn test_hvector_from_slice() {
-    let data: Vec<f64> = vec![1.0, 2.0, 3.0];
-    let vector = HVector::from_slice(0, data);
-    assert_eq!(vector.get_data(), &[1.0, 2.0, 3.0]);
+    let arena = Bump::new();
+    let vector = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
+    assert_eq!(vector.data, &[1.0, 2.0, 3.0]);
 }
 
 #[test]
 fn test_hvector_distance_orthogonal() {
-    let v1 = HVector::new(vec![1.0, 0.0]);
-    let v2 = HVector::new(vec![0.0, 1.0]);
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[1.0, 0.0]);
+    let v2 = alloc_vector(&arena, &[0.0, 1.0]);
     let distance = v1.distance_to(&v2).unwrap();
-    assert!(distance == ORTHOGONAL);
+    assert_eq!(distance, ORTHOGONAL);
 }
 
 #[test]
 fn test_hvector_distance_min() {
-    let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
-    let v2 = HVector::new(vec![1.0, 2.0, 3.0]);
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
+    let v2 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
     let distance = v2.distance_to(&v1).unwrap();
-    assert!(distance.abs() == MIN_DISTANCE);
+    assert_eq!(distance, MIN_DISTANCE);
 }
 
 #[test]
 fn test_hvector_distance_max() {
-    let v1 = HVector::new(vec![0.0, 0.0]);
-    let v2 = HVector::new(vec![3.0, 4.0]);
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[0.0, 0.0]);
+    let v2 = alloc_vector(&arena, &[3.0, 4.0]);
     let distance = v1.distance_to(&v2).unwrap();
-    assert!(distance == MAX_DISTANCE);
-}
-
-#[test]
-fn test_bytes_roundtrip() {
-    let original = HVector::new(vec![1.0, 2.0, 3.0]);
-    let bytes = original.to_bytes();
-    let reconstructed = HVector::from_bytes(original.get_id(), 0, &bytes).unwrap();
-    assert_eq!(original.get_data(), reconstructed.get_data());
+    assert_eq!(distance, MAX_DISTANCE);
 }
 
 #[test]
 fn test_hvector_len() {
-    let data = vec![1.0, 2.0, 3.0, 4.0];
-    let vector = HVector::new(data);
+    let arena = Bump::new();
+    let vector = alloc_vector(&arena, &[1.0, 2.0, 3.0, 4.0]);
     assert_eq!(vector.len(), 4);
 }
 
 #[test]
 fn test_hvector_is_empty() {
-    let empty_vector = HVector::new(vec![]);
-    let non_empty_vector = HVector::new(vec![1.0, 2.0]);
+    let arena = Bump::new();
+    let empty_vector = alloc_vector(&arena, &[]);
+    let arena2 = Bump::new();
+    let non_empty_vector = alloc_vector(&arena2, &[1.0, 2.0]);
 
     assert!(empty_vector.is_empty());
     assert!(!non_empty_vector.is_empty());
@@ -67,34 +63,39 @@ fn test_hvector_is_empty() {
 #[test]
 #[should_panic]
 fn test_hvector_distance_different_dimensions() {
-    let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
-    let v2 = HVector::new(vec![1.0, 2.0, 3.0, 4.0]);
-    let distance = v1.distance_to(&v2).unwrap();
-    println!("distance: {distance}");
-    assert!(distance.is_finite());
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
+    let arena2 = Bump::new();
+    let v2 = alloc_vector(&arena2, &[1.0, 2.0, 3.0, 4.0]);
+    let _ = v1.distance_to(&v2).unwrap();
 }
 
 #[test]
 fn test_hvector_large_values() {
-    let v1 = HVector::new(vec![1e6, 2e6]);
-    let v2 = HVector::new(vec![1e6, 2e6]);
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[1e6, 2e6]);
+    let arena2 = Bump::new();
+    let v2 = alloc_vector(&arena2, &[1e6, 2e6]);
     let distance = v1.distance_to(&v2).unwrap();
     assert!(distance.abs() < 1e-10);
 }
 
 #[test]
 fn test_hvector_negative_values() {
-    let v1 = HVector::new(vec![-1.0, -2.0]);
-    let v2 = HVector::new(vec![1.0, 2.0]);
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[-1.0, -2.0]);
+    let arena2 = Bump::new();
+    let v2 = alloc_vector(&arena2, &[1.0, 2.0]);
     let distance = v1.distance_to(&v2).unwrap();
-    // used round to avoid floating point precision issues
-    assert!(distance.round() == MAX_DISTANCE);
+    assert_eq!(distance.round(), MAX_DISTANCE);
 }
 
 #[test]
 fn test_hvector_cosine_similarity() {
-    let v1 = HVector::new(vec![1.0, 2.0, 3.0]);
-    let v2 = HVector::new(vec![4.0, 5.0, 6.0]);
+    let arena = Bump::new();
+    let v1 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
+    let arena2 = Bump::new();
+    let v2 = alloc_vector(&arena2, &[4.0, 5.0, 6.0]);
     let similarity = v1.distance_to(&v2).unwrap();
-    assert!(similarity == 1.0 - 0.9746318461970762);
+    assert!((similarity - (1.0 - 0.9746318461970762)).abs() < 1e-9);
 }

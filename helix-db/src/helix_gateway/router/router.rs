@@ -13,7 +13,7 @@ use crate::{
     protocol::request::RetChan,
 };
 use core::fmt;
-use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, future::Future, pin::Pin, sync::Arc};
 
 use crate::protocol::{Request, Response};
 

@@ -4,9 +4,9 @@ pub struct Exist<I> {
     pub iter: I,
 }
 
-impl<I> Exist<I>
+impl<'arena, I> Exist<I>
 where
-    I: Iterator<Item = Result<TraversalValue, GraphError>>,
+    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
 {
     pub fn exists(iter: &mut I) -> bool {
         for item in iter.by_ref() {

@@ -22,7 +22,7 @@ pub struct Request {
     pub out_fmt: Format,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RequestType {
     Query,
     MCP,
@@ -88,5 +88,148 @@ where
         };
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // Request Construction Tests
+    // ============================================================================
+
+    #[test]
+    fn test_request_construction() {
+        let body = Bytes::from("test body");
+        let request = Request {
+            name: "test_query".to_string(),
+            req_type: RequestType::Query,
+            body: body.clone(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert_eq!(request.name, "test_query");
+        assert!(matches!(request.req_type, RequestType::Query));
+        assert_eq!(request.body, body);
+    }
+
+    #[test]
+    fn test_request_clone() {
+        let body = Bytes::from("clone test");
+        let request = Request {
+            name: "original".to_string(),
+            req_type: RequestType::MCP,
+            body: body.clone(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let cloned = request.clone();
+        assert_eq!(cloned.name, request.name);
+        assert_eq!(cloned.body, request.body);
+    }
+
+    #[test]
+    fn test_request_debug() {
+        let request = Request {
+            name: "debug_test".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let debug_str = format!("{:?}", request);
+        assert!(debug_str.contains("debug_test"));
+        assert!(debug_str.contains("Query"));
+    }
+
+    // ============================================================================
+    // RequestType Tests
+    // ============================================================================
+
+    #[test]
+    fn test_request_type_query() {
+        let rt = RequestType::Query;
+        assert!(matches!(rt, RequestType::Query));
+
+        let debug_str = format!("{:?}", rt);
+        assert!(debug_str.contains("Query"));
+    }
+
+    #[test]
+    fn test_request_type_mcp() {
+        let rt = RequestType::MCP;
+        assert!(matches!(rt, RequestType::MCP));
+
+        let debug_str = format!("{:?}", rt);
+        assert!(debug_str.contains("MCP"));
+    }
+
+    #[test]
+    fn test_request_type_copy() {
+        let rt1 = RequestType::Query;
+        let rt2 = rt1; // Copy trait
+
+        // Both should be usable
+        assert!(matches!(rt1, RequestType::Query));
+        assert!(matches!(rt2, RequestType::Query));
+    }
+
+    #[test]
+    fn test_request_type_clone() {
+        let rt1 = RequestType::MCP;
+        let rt2 = rt1.clone();
+
+        assert!(matches!(rt1, RequestType::MCP));
+        assert!(matches!(rt2, RequestType::MCP));
+    }
+
+    // ============================================================================
+    // Request with Different Content
+    // ============================================================================
+
+    #[test]
+    fn test_request_empty_body() {
+        let request = Request {
+            name: "empty_body".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert!(request.body.is_empty());
+    }
+
+    #[test]
+    fn test_request_large_body() {
+        let large_data = vec![0u8; 10_000];
+        let body = Bytes::from(large_data.clone());
+
+        let request = Request {
+            name: "large_body".to_string(),
+            req_type: RequestType::Query,
+            body: body.clone(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert_eq!(request.body.len(), 10_000);
+    }
+
+    #[test]
+    fn test_request_utf8_name() {
+        let request = Request {
+            name: "test_世界_query".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert!(request.name.contains("世界"));
     }
 }

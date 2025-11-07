@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use eyre::Result;
+use helix_cli::{AuthAction, CloudDeploymentTypeCommand, MetricsAction};
 
 mod commands;
 mod config;
@@ -155,92 +156,6 @@ enum Commands {
         #[clap(long)]
         no_backup: bool,
     },
-}
-
-#[derive(Subcommand)]
-enum AuthAction {
-    /// Login to Helix cloud
-    Login,
-    /// Logout from Helix cloud
-    Logout,
-    /// Create a new API key
-    CreateKey {
-        /// Cluster ID
-        cluster: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum MetricsAction {
-    /// Enable metrics collection
-    Full,
-    /// Disable metrics collection
-    Basic,
-    /// Disable metrics collection
-    Off,
-    /// Show metrics status
-    Status,
-}
-
-#[derive(Subcommand)]
-enum CloudDeploymentTypeCommand {
-    /// Initialize Helix Cloud deployment
-    #[clap(name = "cloud")]
-    Helix {
-        /// Region for Helix cloud instance (default: us-east-1)
-        #[clap(long, default_value = "us-east-1")]
-        region: Option<String>,
-
-        /// Instance name
-        #[clap(short, long)]
-        name: Option<String>,
-    },
-    /// Initialize ECR deployment
-    Ecr {
-        /// Instance name
-        #[clap(short, long)]
-        name: Option<String>,
-    },
-    /// Initialize Fly.io deployment
-    Fly {
-        /// Authentication type
-        #[clap(long, default_value = "cli")]
-        auth: String,
-
-        /// volume size
-        #[clap(long, default_value = "20")]
-        volume_size: u16,
-
-        /// vm size
-        #[clap(long, default_value = "shared-cpu-4x")]
-        vm_size: String,
-
-        /// privacy
-        #[clap(long, default_value = "false")]
-        private: bool,
-
-        /// Instance name
-        #[clap(short, long)]
-        name: Option<String>,
-    },
-
-    /// Initialize Local deployment
-    Local {
-        /// Instance name
-        #[clap(short, long)]
-        name: Option<String>,
-    },
-}
-
-impl CloudDeploymentTypeCommand {
-    fn name(&self) -> Option<String> {
-        match self {
-            CloudDeploymentTypeCommand::Helix { name, .. } => name.clone(),
-            CloudDeploymentTypeCommand::Ecr { name } => name.clone(),
-            CloudDeploymentTypeCommand::Fly { name, .. } => name.clone(),
-            CloudDeploymentTypeCommand::Local { name } => name.clone(),
-        }
-    }
 }
 
 #[tokio::main]

@@ -1,6 +1,6 @@
 //! Semantic analyzer for Helix‑QL.
 use crate::helixc::analyzer::error_codes::ErrorCode;
-use crate::helixc::analyzer::utils::{DEFAULT_VAR_NAME, is_in_scope};
+use crate::helixc::analyzer::utils::{DEFAULT_VAR_NAME, VariableInfo, is_in_scope, is_param};
 use crate::helixc::generator::utils::EmbedData;
 use crate::{
     generate_error,
@@ -53,7 +53,7 @@ use std::collections::HashMap;
 pub(crate) fn infer_expr_type<'a>(
     ctx: &mut Ctx<'a>,
     expression: &'a Expression,
-    scope: &mut HashMap<&'a str, Type>,
+    scope: &mut HashMap<&'a str, VariableInfo>,
     original_query: &'a Query,
     parent_ty: Option<Type>,
     gen_query: &mut GeneratedQuery,
@@ -64,8 +64,8 @@ pub(crate) fn infer_expr_type<'a>(
         Identifier(name) => {
             is_valid_identifier(ctx, original_query, expression.loc.clone(), name.as_str());
             match scope.get(name.as_str()) {
-                Some(t) => (
-                    t.clone(),
+                Some(var_info) => (
+                    var_info.ty.clone(),
                     Some(GeneratedStatement::Identifier(GenRef::Std(name.clone()))),
                 ),
 
@@ -212,7 +212,9 @@ pub(crate) fn infer_expr_type<'a>(
                                                 value.as_str()
                                             );
                                         } else {
-                                            let variable_type = scope.get(value.as_str()).unwrap();
+                                            
+                                            let variable_type =
+                                            &scope.get(value.as_str()).unwrap().ty;
                                             if variable_type
                                                 != &Type::from(
                                                     field_set
@@ -372,6 +374,7 @@ pub(crate) fn infer_expr_type<'a>(
                     steps: vec![],
                     traversal_type: TraversalType::Mut,
                     should_collect: ShouldCollect::ToObj,
+                    ..Default::default()
                 });
                 gen_query.is_mut = true;
                 return (Type::Node(Some(ty.to_string())), Some(stmt));
@@ -428,7 +431,8 @@ pub(crate) fn infer_expr_type<'a>(
                                                 value.as_str()
                                             );
                                         } else {
-                                            let variable_type = scope.get(value.as_str()).unwrap();
+                                            let variable_type =
+                                                &scope.get(value.as_str()).unwrap().ty;
                                             if variable_type
                                                 != &Type::from(
                                                     field_set
@@ -554,36 +558,80 @@ pub(crate) fn infer_expr_type<'a>(
                     None => None,
                 };
 
-                let to = match &add.connection.to_id {
+                let (to, to_is_plural) = match &add.connection.to_id {
                     Some(id) => match id {
                         IdType::Identifier { value, loc } => {
                             is_valid_identifier(ctx, original_query, loc.clone(), value.as_str());
-                            gen_id_access_or_param(original_query, value.as_str())
+                            // Check if this variable is plural
+                            let is_plural = scope
+                                .get(value.as_str())
+                                .map(|var_info| !var_info.is_single)
+                                .unwrap_or(false);
+                            let gen_value = if is_plural {
+                                // For plural variables, just use the variable name without .id()
+                                if let Some(param) = is_param(original_query, value.as_str()) {
+                                    GeneratedValue::Parameter(match param.is_optional {
+                                        true => GenRef::DeRef(format!(
+                                            "data.{}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{}\"))?",
+                                            value, value
+                                        )),
+                                        false => GenRef::DeRef(format!("data.{}", value)),
+                                    })
+                                } else {
+                                    GeneratedValue::Identifier(GenRef::Std(value.clone()))
+                                }
+                            } else {
+                                gen_id_access_or_param(original_query, value.as_str())
+                            };
+                            (gen_value, is_plural)
                         }
-                        IdType::Literal { value, loc: _ } => {
-                            GeneratedValue::Literal(GenRef::Literal(value.clone()))
-                        }
+                        IdType::Literal { value, loc: _ } => (
+                            GeneratedValue::Literal(GenRef::Literal(value.clone())),
+                            false,
+                        ),
                         _ => unreachable!(),
                     },
                     _ => {
                         generate_error!(ctx, original_query, add.loc.clone(), E611);
-                        GeneratedValue::Unknown
+                        (GeneratedValue::Unknown, false)
                     }
                 };
-                let from = match &add.connection.from_id {
+                let (from, from_is_plural) = match &add.connection.from_id {
                     Some(id) => match id {
                         IdType::Identifier { value, loc } => {
                             is_valid_identifier(ctx, original_query, loc.clone(), value.as_str());
-                            gen_id_access_or_param(original_query, value.as_str())
+                            // Check if this variable is plural
+                            let is_plural = scope
+                                .get(value.as_str())
+                                .map(|var_info| !var_info.is_single)
+                                .unwrap_or(false);
+                            let gen_value = if is_plural {
+                                // For plural variables, just use the variable name without .id()
+                                if let Some(param) = is_param(original_query, value.as_str()) {
+                                    GeneratedValue::Parameter(match param.is_optional {
+                                        true => GenRef::DeRef(format!(
+                                            "data.{}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{}\"))?",
+                                            value, value
+                                        )),
+                                        false => GenRef::DeRef(format!("data.{}", value)),
+                                    })
+                                } else {
+                                    GeneratedValue::Identifier(GenRef::Std(value.clone()))
+                                }
+                            } else {
+                                gen_id_access_or_param(original_query, value.as_str())
+                            };
+                            (gen_value, is_plural)
                         }
-                        IdType::Literal { value, loc: _ } => {
-                            GeneratedValue::Literal(GenRef::Literal(value.clone()))
-                        }
+                        IdType::Literal { value, loc: _ } => (
+                            GeneratedValue::Literal(GenRef::Literal(value.clone())),
+                            false,
+                        ),
                         _ => unreachable!(),
                     },
                     _ => {
                         generate_error!(ctx, original_query, add.loc.clone(), E612);
-                        GeneratedValue::Unknown
+                        (GeneratedValue::Unknown, false)
                     }
                 };
                 let add_e = AddE {
@@ -591,15 +639,36 @@ pub(crate) fn infer_expr_type<'a>(
                     from,
                     label,
                     properties,
+                    from_is_plural,
+                    to_is_plural,
                 };
+                // If either from or to is plural, use Standalone (no G::new_mut wrapper),
+                // Empty separator (no period before it), and No collection (already done in iteration)
+                let (final_traversal_result_type, traversal_type, separator, should_collect) =
+                    if from_is_plural || to_is_plural {
+                        (
+                            Type::Edges(Some(ty.to_string())),
+                            TraversalType::Standalone,
+                            Separator::Empty(SourceStep::AddE(add_e)),
+                            ShouldCollect::No,
+                        )
+                    } else {
+                        (
+                            Type::Edge(Some(ty.to_string())),
+                            TraversalType::Mut,
+                            Separator::Period(SourceStep::AddE(add_e)),
+                            ShouldCollect::ToObj,
+                        )
+                    };
                 let stmt = GeneratedStatement::Traversal(GeneratedTraversal {
-                    source_step: Separator::Period(SourceStep::AddE(add_e)),
+                    source_step: separator,
                     steps: vec![],
-                    traversal_type: TraversalType::Mut,
-                    should_collect: ShouldCollect::ToObj,
+                    traversal_type,
+                    should_collect,
+                    ..Default::default()
                 });
                 gen_query.is_mut = true;
-                return (Type::Edge(Some(ty.to_string())), Some(stmt));
+                return (final_traversal_result_type, Some(stmt));
             }
             generate_error!(
                 ctx,
@@ -650,7 +719,8 @@ pub(crate) fn infer_expr_type<'a>(
                                                 value.as_str()
                                             );
                                         } else {
-                                            let variable_type = scope.get(value.as_str()).unwrap();
+                                            let variable_type =
+                                                &scope.get(value.as_str()).unwrap().ty;
                                             if variable_type
                                                 != &Type::from(
                                                     field_set
@@ -822,6 +892,7 @@ pub(crate) fn infer_expr_type<'a>(
                         steps: vec![],
                         traversal_type: TraversalType::Mut,
                         should_collect: ShouldCollect::ToObj,
+                        ..Default::default()
                     });
                     gen_query.is_mut = true;
                     return (Type::Vector(Some(ty.to_string())), Some(stmt));
@@ -972,10 +1043,11 @@ pub(crate) fn infer_expr_type<'a>(
                     }
                     let stmt = stmt.unwrap();
                     let mut gen_traversal = GeneratedTraversal {
-                        traversal_type: TraversalType::NestedFrom(GenRef::Std("v".to_string())),
+                        traversal_type: TraversalType::FromIter(GenRef::Std("v".to_string())),
                         steps: vec![],
                         should_collect: ShouldCollect::ToVec,
                         source_step: Separator::Empty(SourceStep::Anonymous),
+                        ..Default::default()
                     };
                     match stmt {
                         GeneratedStatement::Traversal(tr) => {
@@ -1022,6 +1094,7 @@ pub(crate) fn infer_expr_type<'a>(
                             pre_filter,
                         },
                     )),
+                    ..Default::default()
                 })),
             )
         }
@@ -1149,7 +1222,17 @@ pub(crate) fn infer_expr_type<'a>(
                         SourceStep::Identifier(id) => id.inner().clone(),
                         _ => DEFAULT_VAR_NAME.to_string(),
                     };
-                    tr.traversal_type = TraversalType::FromVar(GenRef::Std(source_variable));
+                    // Check if the variable is single or plural to determine traversal type
+                    let is_single = scope
+                        .get(source_variable.as_str())
+                        .map(|var_info| var_info.is_single)
+                        .unwrap_or(false);
+
+                    tr.traversal_type = if is_single {
+                        TraversalType::FromSingle(GenRef::Std(source_variable))
+                    } else {
+                        TraversalType::FromIter(GenRef::Std(source_variable))
+                    };
                     tr.should_collect = ShouldCollect::No;
                     tr
                 }
@@ -1280,8 +1363,210 @@ pub(crate) fn infer_expr_type<'a>(
                     steps: vec![],
                     should_collect: ShouldCollect::ToVec,
                     source_step: Separator::Period(SourceStep::SearchBM25(search_bm25)),
+                    ..Default::default()
                 })),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::helixc::analyzer::error_codes::ErrorCode;
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
+
+    // ============================================================================
+    // AddNode Expression Tests
+    // ============================================================================
+
+    #[test]
+    fn test_add_node_valid() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY test(personName: String, personAge: U32) =>
+                person <- AddN<Person>({name: personName, age: personAge})
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_add_node_undeclared_type() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                company <- AddN<Company>({name: "Acme"})
+                RETURN company
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E101));
+    }
+
+    // ============================================================================
+    // AddEdge Expression Tests
+    // ============================================================================
+
+    #[test]
+    fn test_add_edge_valid() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id1: ID, id2: ID) =>
+                person1 <- N<Person>(id1)
+                person2 <- N<Person>(id2)
+                edge <- AddE<Knows>::From(person1)::To(person2)
+                RETURN edge
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_add_edge_undeclared_type() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test(id1: ID, id2: ID) =>
+                edge <- AddE<UndeclaredEdge>::From(id1)::To(id2)
+                RETURN edge
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E102));
+    }
+
+    // ============================================================================
+    // Array Literal Tests
+    // ============================================================================
+
+    #[test]
+    fn test_array_literal_homogeneous() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                names <- ["Alice", "Bob", "Charlie"]
+                RETURN names
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_array_literal_mixed_types() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                mixed <- ["string", 123]
+                RETURN mixed
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E306));
+    }
+
+    // ============================================================================
+    // Identifier Scope Tests
+    // ============================================================================
+
+    #[test]
+    fn test_identifier_in_scope() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                person <- N<Person>
+                samePerson <- person
+                RETURN samePerson
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_identifier_out_of_scope() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                person <- unknownVariable
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    // ============================================================================
+    // Creation with Type Mismatch Tests
+    // ============================================================================
+
+    #[test]
+    fn test_add_node_type_mismatch() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY test() =>
+                person <- AddN<Person>({name: "Alice", age: "not a number"})
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E205));
     }
 }

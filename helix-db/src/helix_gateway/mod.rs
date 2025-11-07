@@ -6,3 +6,6 @@ pub mod introspect_schema;
 pub mod mcp;
 pub mod router;
 pub mod worker_pool;
+
+#[cfg(test)]
+pub mod tests;

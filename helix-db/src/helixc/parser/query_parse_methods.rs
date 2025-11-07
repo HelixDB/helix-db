@@ -156,3 +156,383 @@ impl HelixParser {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+
+    // ============================================================================
+    // Basic Query Parsing Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_simple_query() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY getUser(id: ID) =>
+                user <- N<Person>(id)
+                RETURN user
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries.len(), 1);
+        assert_eq!(parsed.queries[0].name, "getUser");
+        assert_eq!(parsed.queries[0].parameters.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_query_with_multiple_parameters() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY findPerson(name: String, age: U32) =>
+                person <- N<Person>
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].parameters.len(), 2);
+        assert_eq!(parsed.queries[0].parameters[0].name.1, "name");
+        assert_eq!(parsed.queries[0].parameters[1].name.1, "age");
+    }
+
+    #[test]
+    fn test_parse_query_with_optional_parameter() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY findPerson(name?: String) =>
+                person <- N<Person>
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(parsed.queries[0].parameters[0].is_optional);
+    }
+
+    #[test]
+    fn test_parse_query_with_array_parameter() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY findPeople(names: [String]) =>
+                people <- N<Person>
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(matches!(
+            parsed.queries[0].parameters[0].param_type.1,
+            crate::helixc::parser::types::FieldType::Array(_)
+        ));
+    }
+
+    // ============================================================================
+    // Built-in Macro Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_query_with_mcp_macro() {
+        let source = r#"
+            N::Person { name: String }
+
+            #[mcp]
+            QUERY getUser(id: ID) =>
+                user <- N<Person>(id)
+                RETURN user
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(matches!(
+            parsed.queries[0].built_in_macro,
+            Some(BuiltInMacro::MCP)
+        ));
+    }
+
+    #[test]
+    fn test_parse_query_with_model_macro() {
+        let source = r#"
+            N::Person { name: String }
+
+            #[model("gpt-4")]
+            QUERY generateResponse(prompt: String) =>
+                response <- N<Person>
+                RETURN response
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(matches!(
+            parsed.queries[0].built_in_macro,
+            Some(BuiltInMacro::Model(_))
+        ));
+    }
+
+    // ============================================================================
+    // Query Body and Statements Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_query_with_multiple_statements() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY complexQuery(id: ID) =>
+                user <- N<Person>(id)
+                friends <- user::Out<Knows>
+                RETURN friends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].statements.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_query_with_creation_statement() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY createPerson(name: String) =>
+                person <- AddN<Person>({name: name})
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].statements.len(), 1);
+    }
+
+    // ============================================================================
+    // Return Statement Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_query_with_multiple_return_values() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY getUsers() =>
+                user1 <- N<Person>
+                user2 <- N<Person>
+                RETURN user1, user2
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].return_values.len(), 2);
+    }
+
+    // ============================================================================
+    // Error Cases
+    // ============================================================================
+
+    #[test]
+    fn test_parse_query_duplicate_parameter_names() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY badQuery(name: String, name: String) =>
+                person <- N<Person>
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_string = err.to_string();
+        assert!(err_string.contains("Duplicate"));
+    }
+
+    #[test]
+    fn test_parse_query_missing_return() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY badQuery(id: ID) =>
+                user <- N<Person>(id)
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_query_missing_parameters() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY badQuery =>
+                user <- N<Person>
+                RETURN user
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+    }
+
+    // ============================================================================
+    // Edge Cases
+    // ============================================================================
+
+    #[test]
+    fn test_parse_query_no_parameters() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY getAllUsers() =>
+                users <- N<Person>
+                RETURN users
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].parameters.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_multiple_queries() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY query1() =>
+                users <- N<Person>
+                RETURN users
+
+            QUERY query2() =>
+                users <- N<Person>
+                RETURN users
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_query_with_drop_statement() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY removeConnection(id: ID) =>
+                person <- N<Person>(id)
+                DROP person::Out<Knows>
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].statements.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_query_with_for_loop() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY processPeople(ids: [ID]) =>
+                FOR id IN ids {
+                    person <- N<Person>(id)
+                }
+                RETURN "done"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].statements.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_query_mixed_optional_required_parameters() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY findPerson(name: String, age?: U32, email?: String) =>
+                person <- N<Person>
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.queries[0].parameters.len(), 3);
+        assert!(!parsed.queries[0].parameters[0].is_optional);
+        assert!(parsed.queries[0].parameters[1].is_optional);
+        assert!(parsed.queries[0].parameters[2].is_optional);
+    }
+
+    #[test]
+    fn test_parse_query_with_object_parameter() {
+        let source = r#"
+            N::Person { name: String, details: {age: U32, city: String} }
+
+            QUERY createPerson(details: {age: U32, city: String}) =>
+                person <- AddN<Person>({details: details})
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(matches!(
+            parsed.queries[0].parameters[0].param_type.1,
+            crate::helixc::parser::types::FieldType::Object(_)
+        ));
+    }
+}

@@ -1,67 +1,78 @@
 use crate::helix_engine::{
-    traversal_core::{traversal_value::TraversalValue, traversal_iter::RoTraversalIterator},
-    storage_core::HelixGraphStorage,
-    types::GraphError,
+    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
+    types::{GraphError, VectorError},
 };
-use helix_macros::debug_trace;
-use heed3::RoTxn;
-use std::sync::Arc;
 
-pub struct FromVIterator<'a, I, T> {
-    iter: I,
-    storage: Arc<HelixGraphStorage>,
-    txn: &'a T,
-}
-
-// implementing iterator for OutIterator
-impl<'a, I> Iterator for FromVIterator<'a, I, RoTxn<'a>>
+pub trait FromVAdapter<'db, 'arena, 'txn, I>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 where
-    I: Iterator<Item = Result<TraversalValue, GraphError>>,
+    'db: 'arena,
+    'arena: 'txn,
 {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("FROM_V")]
-    fn next(&mut self) -> Option<Self::Item> {
-
-        match self.iter.next() {
-            Some(item) => match item {
-                Ok(TraversalValue::Edge(item)) => Some(Ok(TraversalValue::Vector(
-                    match self.storage.get_vector(self.txn, &item.from_node) {
-                        Ok(vector) => vector,
-                        Err(e) => {
-                            println!("Error getting vector: {e:?}");
-                            return Some(Err(e));
-                        }
-                    },
-                ))),
-                _ => return None,
-            },
-            None => None,
-        }
-    }
-}
-pub trait FromVAdapter<'a, T>: Iterator<Item = Result<TraversalValue, GraphError>> {
     fn from_v(
         self,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>;
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> FromVAdapter<'a, RoTxn<'a>>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    FromVAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
+where
+    'db: 'arena,
+    'arena: 'txn,
 {
     #[inline(always)]
     fn from_v(
         self,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>> {
-        let iter = FromVIterator {
-            iter: self.inner,
-            storage: Arc::clone(&self.storage),
-            txn: self.txn,
-        };
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self.inner.filter_map(move |item| {
+            if let Ok(TraversalValue::Edge(item)) = item {
+                let vector = if get_vector_data {
+                    match self
+                        .storage
+                        .vectors
+                        .get_full_vector(self.txn, item.from_node, self.arena)
+                    {
+                        Ok(vector) => TraversalValue::Vector(vector),
+                        Err(e) => return Some(Err(GraphError::from(e))),
+                    }
+                } else {
+                    match self.storage.vectors.get_vector_properties(
+                        self.txn,
+                        item.from_node,
+                        self.arena,
+                    ) {
+                        Ok(Some(vector)) => TraversalValue::VectorNodeWithoutVectorData(vector),
+                        Ok(None) => {
+                            return Some(Err(GraphError::from(VectorError::VectorNotFound(
+                                item.from_node.to_string(),
+                            ))));
+                        }
+                        Err(e) => return Some(Err(GraphError::from(e))),
+                    }
+                };
+
+                Some(Ok(vector))
+            } else {
+                None
+            }
+        });
         RoTraversalIterator {
-            inner: iter,
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: iter,
         }
     }
 }

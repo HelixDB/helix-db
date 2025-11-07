@@ -520,3 +520,560 @@ impl HelixParser {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+
+    // ============================================================================
+    // Node Definition Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_node_definition_basic() {
+        let source = r#"
+            N::Person {
+                name: String,
+                age: U32
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.schema.len(), 1);
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas.len(), 1);
+        assert_eq!(schema.node_schemas[0].name.1, "Person");
+        assert_eq!(schema.node_schemas[0].fields.len(), 2);
+        assert_eq!(schema.node_schemas[0].fields[0].name, "name");
+        assert_eq!(schema.node_schemas[0].fields[1].name, "age");
+    }
+
+    #[test]
+    fn test_parse_node_definition_with_index() {
+        let source = r#"
+            N::Person {
+                INDEX email: String,
+                name: String
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert!(matches!(schema.node_schemas[0].fields[0].prefix, FieldPrefix::Index));
+        assert!(matches!(schema.node_schemas[0].fields[1].prefix, FieldPrefix::Empty));
+    }
+
+    #[test]
+    fn test_parse_node_definition_all_types() {
+        let source = r#"
+            N::AllTypes {
+                str_field: String,
+                bool_field: Boolean,
+                f32_field: F32,
+                f64_field: F64,
+                i8_field: I8,
+                i16_field: I16,
+                i32_field: I32,
+                i64_field: I64,
+                u8_field: U8,
+                u16_field: U16,
+                u32_field: U32,
+                u64_field: U64,
+                u128_field: U128
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas[0].fields.len(), 13);
+    }
+
+    #[test]
+    fn test_parse_node_definition_with_default_values() {
+        let source = r#"
+            N::Person {
+                name: String DEFAULT "Unknown",
+                age: U32 DEFAULT 0,
+                active: Boolean DEFAULT true,
+                score: F64 DEFAULT 0.0
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas[0].fields.len(), 4);
+        assert!(schema.node_schemas[0].fields[0].defaults.is_some());
+        assert!(schema.node_schemas[0].fields[1].defaults.is_some());
+        assert!(schema.node_schemas[0].fields[2].defaults.is_some());
+        assert!(schema.node_schemas[0].fields[3].defaults.is_some());
+    }
+
+    #[test]
+    fn test_parse_node_definition_array_type() {
+        let source = r#"
+            N::Person {
+                tags: [String],
+                scores: [I32]
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas[0].fields.len(), 2);
+        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Array(_)));
+        assert!(matches!(schema.node_schemas[0].fields[1].field_type, FieldType::Array(_)));
+    }
+
+    #[test]
+    fn test_parse_node_definition_object_type() {
+        let source = r#"
+            N::Person {
+                address: { street: String, city: String, zip: U32 }
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas[0].fields.len(), 1);
+        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Object(_)));
+    }
+
+    #[test]
+    fn test_parse_node_definition_empty_body() {
+        let source = r#"
+            N::EmptyNode {}
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas[0].fields.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_node_definition_invalid_syntax_missing_colon() {
+        let source = r#"
+            N::Person {
+                name String
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_node_definition_invalid_syntax_missing_brace() {
+        let source = r#"
+            N::Person {
+                name: String
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_node_definition_invalid_type() {
+        let source = r#"
+            N::Person {
+                name: InvalidType
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        // Note: This may succeed parsing but fail during analysis
+        // The parser allows custom types that get validated later
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Edge Definition Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_edge_definition_basic() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { name: String }
+
+            E::WorksAt {
+                From: Person,
+                To: Company
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.edge_schemas.len(), 1);
+        assert_eq!(schema.edge_schemas[0].name.1, "WorksAt");
+        assert_eq!(schema.edge_schemas[0].from.1, "Person");
+        assert_eq!(schema.edge_schemas[0].to.1, "Company");
+    }
+
+    #[test]
+    fn test_parse_edge_definition_with_properties() {
+        let source = r#"
+            N::Person { name: String }
+
+            E::Knows {
+                From: Person,
+                To: Person,
+                Properties: {
+                    since: String,
+                    strength: F64
+                }
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.edge_schemas.len(), 1);
+        assert!(schema.edge_schemas[0].properties.is_some());
+        let props = schema.edge_schemas[0].properties.as_ref().unwrap();
+        assert_eq!(props.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_edge_definition_self_referential() {
+        let source = r#"
+            N::Person { name: String }
+
+            E::Knows {
+                From: Person,
+                To: Person
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.edge_schemas[0].from.1, "Person");
+        assert_eq!(schema.edge_schemas[0].to.1, "Person");
+    }
+
+    #[test]
+    fn test_parse_edge_definition_invalid_missing_from_to() {
+        let source = r#"
+            N::Person { name: String }
+
+            E::Knows {
+                Person, Person
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+    }
+
+    // ============================================================================
+    // Vector Definition Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_vector_definition() {
+        let source = r#"
+            V::Document {
+                content: String,
+                embedding: [F32]
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.vector_schemas.len(), 1);
+        assert_eq!(schema.vector_schemas[0].name, "Document");
+        assert_eq!(schema.vector_schemas[0].fields.len(), 2);
+    }
+
+    // ============================================================================
+    // Multiple Schemas Test
+    // ============================================================================
+
+    #[test]
+    fn test_parse_multiple_nodes() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { name: String }
+            N::Location { city: String }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.node_schemas.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_multiple_edges() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { name: String }
+
+            E::WorksAt { From: Person, To: Company }
+            E::Manages { From: Person, To: Person }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert_eq!(schema.edge_schemas.len(), 2);
+    }
+
+    // ============================================================================
+    // Schema Versioning Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_schema_with_version() {
+        let source = r#"
+            schema::2 {
+                N::Person { name: String }
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(parsed.schema.contains_key(&2));
+        assert_eq!(parsed.schema.get(&2).unwrap().node_schemas.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_schema_default_version() {
+        let source = r#"
+            N::Person { name: String }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert!(parsed.schema.contains_key(&1));
+    }
+
+    // ============================================================================
+    // Edge Cases and Whitespace Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_with_extra_whitespace() {
+        let source = r#"
+            N::Person    {
+                name   :   String   ,
+                age    :   U32
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_with_trailing_comma() {
+        let source = r#"
+            N::Person {
+                name: String,
+                age: U32,
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_compact_format() {
+        let source = r#"N::Person{name:String,age:U32}"#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Complex Nested Structure Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_nested_arrays() {
+        let source = r#"
+            N::Data {
+                matrix: [[I32]]
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Array(_)));
+    }
+
+    #[test]
+    fn test_parse_nested_objects() {
+        let source = r#"
+            N::Person {
+                address: {
+                    home: { street: String, city: String },
+                    work: { street: String, city: String }
+                }
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_array_of_objects() {
+        let source = r#"
+            N::Company {
+                employees: [{ name: String, role: String }]
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Default Value Edge Cases
+    // ============================================================================
+
+    #[test]
+    fn test_parse_default_now() {
+        let source = r#"
+            N::Event {
+                created_at: String DEFAULT NOW
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        let schema = parsed.schema.get(&1).unwrap();
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].defaults,
+            Some(DefaultValue::Now)
+        ));
+    }
+
+    #[test]
+    fn test_parse_default_various_numeric_types() {
+        let source = r#"
+            N::Config {
+                i8_val: I8 DEFAULT 127,
+                i16_val: I16 DEFAULT 32767,
+                i32_val: I32 DEFAULT 2147483647,
+                i64_val: I64 DEFAULT 9223372036854775807,
+                u8_val: U8 DEFAULT 255,
+                u16_val: U16 DEFAULT 65535,
+                u32_val: U32 DEFAULT 4294967295,
+                u64_val: U64 DEFAULT 18446744073709551615,
+                f32_val: F32 DEFAULT 3.14,
+                f64_val: F64 DEFAULT 2.718281828
+            }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Error Message Quality Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_error_message_contains_context() {
+        let source = r#"
+            N::Person { invalid }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_string = err.to_string();
+        // Error should provide helpful context
+        assert!(!err_string.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_input() {
+        let source = "";
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        assert_eq!(parsed.schema.len(), 0);
+    }
+}

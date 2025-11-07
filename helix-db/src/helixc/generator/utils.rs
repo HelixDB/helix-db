@@ -60,12 +60,16 @@ where
             GenRef::Unknown => {
                 // This should have been caught during analysis
                 // For now, panic with a descriptive message
-                panic!("Code generation error: Unknown reference type encountered. This indicates a bug in the analyzer.")
+                panic!(
+                    "Code generation error: Unknown reference type encountered. This indicates a bug in the analyzer."
+                )
             }
             GenRef::Std(t) => t,
             GenRef::Id(_) => {
                 // Id doesn't have an inner T, it's just a String identifier
-                panic!("Code generation error: Cannot get inner value of Id type. Use the identifier directly.")
+                panic!(
+                    "Code generation error: Cannot get inner value of Id type. Use the identifier directly."
+                )
             }
         }
     }
@@ -97,14 +101,13 @@ impl From<GenRef<String>> for String {
             GenRef::Literal(s) => format!("\"{s}\""),
             GenRef::Std(s) => format!("\"{s}\""),
             GenRef::Ref(s) => format!("\"{s}\""),
-            GenRef::Id(s) => s,  // Identifiers don't need quotes
+            GenRef::Id(s) => s, // Identifiers don't need quotes
             GenRef::Unknown => {
                 // Generate a compile error in the output code
                 "compile_error!(\"Unknown value in code generation\")".to_string()
             }
             _ => {
                 // For other ref types, try to use the inner value
-                eprintln!("Warning: Unexpected GenRef variant in String conversion: {value:?}");
                 "compile_error!(\"Unsupported GenRef variant in code generation\")".to_string()
             }
         }
@@ -115,15 +118,12 @@ impl From<IdType> for GenRef<String> {
         match value {
             IdType::Literal { value: s, .. } => GenRef::Literal(s),
             IdType::Identifier { value: s, .. } => GenRef::Id(s),
-            _ => {
-                eprintln!("Warning: Unexpected IdType variant in GenRef conversion: {value:?}");
-                GenRef::Unknown
-            }
+            _ => GenRef::Unknown,
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum VecData {
     Standard(GeneratedValue),
     // Embed {
@@ -189,15 +189,35 @@ impl Display for Order {
 
 pub fn write_properties(properties: &Option<Vec<(String, GeneratedValue)>>) -> String {
     match properties {
-        Some(properties) => format!(
-            "Some(props! {{ {} }})",
-            properties
+        Some(properties) => {
+            let prop_count = properties.len();
+            let props_str = properties
                 .iter()
-                .map(|(name, value)| format!("\"{name}\" => {value}"))
+                .map(|(name, value)| format!("(\"{name}\", Value::from({value}))"))
                 .collect::<Vec<String>>()
-                .join(", ")
-        ),
+                .join(", ");
+            format!(
+                "Some(ImmutablePropertiesMap::new({}, vec![{}].into_iter(), &arena))",
+                prop_count, props_str
+            )
+        }
         None => "None".to_string(),
+    }
+}
+
+pub fn write_properties_slice(properties: &Option<Vec<(String, GeneratedValue)>>) -> String {
+    match properties {
+        Some(properties) => {
+            format!(
+                "&[{}]",
+                properties
+                    .iter()
+                    .map(|(name, value)| format!("(\"{name}\", Value::from({value}))"))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            )
+        }
+        None => unreachable!(),
     }
 }
 
@@ -239,11 +259,15 @@ impl GeneratedValue {
             GeneratedValue::Traversal(_) => {
                 // This should not be called for traversals
                 // The caller should handle traversals specially
-                panic!("Code generation error: Cannot get inner value of Traversal. Traversals should be handled specially.")
+                panic!(
+                    "Code generation error: Cannot get inner value of Traversal. Traversals should be handled specially."
+                )
             }
             GeneratedValue::Unknown => {
                 // This indicates a bug in the analyzer
-                panic!("Code generation error: Unknown GeneratedValue encountered. This indicates incomplete type inference in the analyzer.")
+                panic!(
+                    "Code generation error: Unknown GeneratedValue encountered. This indicates incomplete type inference in the analyzer."
+                )
             }
         }
     }
@@ -400,10 +424,15 @@ pub fn write_headers() -> String {
 
 
 
+use bumpalo::Bump;
 use heed3::RoTxn;
 use helix_macros::{handler, tool_call, mcp_handler, migration};
 use helix_db::{
     helix_engine::{
+        reranker::{
+            RerankAdapter,
+            fusion::{RRFReranker, MMRReranker, DistanceMethod},
+        },
         traversal_core::{
             config::{Config, GraphConfig, VectorConfig},
             ops::{
@@ -414,7 +443,7 @@ use helix_db::{
                     from_n::FromNAdapter, from_v::FromVAdapter, out::OutAdapter, out_e::OutEdgesAdapter,
                 },
                 source::{
-                    add_e::{AddEAdapter, EdgeType},
+                    add_e::AddEAdapter,
                     add_n::AddNAdapter,
                     e_from_id::EFromIdAdapter,
                     e_from_type::EFromTypeAdapter,
@@ -427,7 +456,7 @@ use helix_db::{
                 util::{
                     dedup::DedupAdapter, drop::Drop, exist::Exist, filter_mut::FilterMut,
                     filter_ref::FilterRefAdapter, map::MapAdapter, paths::{PathAlgorithm, ShortestPathAdapter},
-                    props::PropsAdapter, range::RangeAdapter, update::UpdateAdapter, order::OrderByAdapter,
+                    range::RangeAdapter, update::UpdateAdapter, order::OrderByAdapter,
                     aggregate::AggregateAdapter, group_by::GroupByAdapter, count::CountAdapter,
                 },
                 vectors::{
@@ -435,39 +464,317 @@ use helix_db::{
                     search::SearchVAdapter,
                 },
             },
-            traversal_value::{Traversable, TraversalValue},
+            traversal_value::TraversalValue,
         },
         types::GraphError,
         vector_core::vector::HVector,
     },
     helix_gateway::{
-        embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
+        embedding_providers::{EmbeddingModel, get_embedding_model},
         router::router::{HandlerInput, IoContFn},
         mcp::mcp::{MCPHandlerSubmission, MCPToolInput, MCPHandler}
     },
     node_matches, props, embed, embed_async,
-    field_remapping, identifier_remapping, 
-    traversal_remapping, exclude_field, value_remapping, 
     field_addition_from_old_field, field_type_cast, field_addition_from_value,
     protocol::{
-        remapping::{Remapping, RemappingMap, ResponseRemapping},
         response::Response,
-        return_values::ReturnValue,
         value::{casting::{cast, CastType}, Value},
         format::Format,
     },
     utils::{
-        count::Count,
-        filterable::Filterable,
-        id::ID,
+        id::{ID, uuid_str},
         items::{Edge, Node},
+        properties::ImmutablePropertiesMap,
     },
 };
-use sonic_rs::{Deserialize, Serialize};
+use sonic_rs::{Deserialize, Serialize, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use chrono::{DateTime, Utc};
+
+// Re-export scalar types for generated code
+type I8 = i8;
+type I16 = i16;
+type I32 = i32;
+type I64 = i64;
+type U8 = u8;
+type U16 = u16;
+type U32 = u32;
+type U64 = u64;
+type U128 = u128;
+type F32 = f32;
+type F64 = f64;
     "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // GenRef Tests
+    // ============================================================================
+
+    #[test]
+    fn test_genref_literal_display() {
+        let genref = GenRef::Literal("test".to_string());
+        assert_eq!(format!("{}", genref), "\"test\"");
+    }
+
+    #[test]
+    fn test_genref_std_display() {
+        let genref = GenRef::Std("variable".to_string());
+        assert_eq!(format!("{}", genref), "variable");
+    }
+
+    #[test]
+    fn test_genref_mut_display() {
+        let genref = GenRef::Mut("x".to_string());
+        assert_eq!(format!("{}", genref), "mut x");
+    }
+
+    #[test]
+    fn test_genref_ref_display() {
+        let genref = GenRef::Ref("data".to_string());
+        assert_eq!(format!("{}", genref), "&data");
+    }
+
+    #[test]
+    fn test_genref_ref_with_lifetime() {
+        let genref = GenRef::RefLT("a".to_string(), "value".to_string());
+        assert_eq!(format!("{}", genref), "&'a value");
+    }
+
+    #[test]
+    fn test_genref_deref_display() {
+        let genref = GenRef::DeRef("ptr".to_string());
+        assert_eq!(format!("{}", genref), "*ptr");
+    }
+
+    #[test]
+    fn test_genref_mut_ref_display() {
+        let genref = GenRef::MutRef("item".to_string());
+        assert_eq!(format!("{}", genref), "& mut item");
+    }
+
+    #[test]
+    fn test_genref_id_display() {
+        let genref = GenRef::<String>::Id("user_id".to_string());
+        assert_eq!(format!("{}", genref), "data.user_id");
+    }
+
+    // ============================================================================
+    // RustType Tests
+    // ============================================================================
+
+    #[test]
+    fn test_rust_type_string_display() {
+        assert_eq!(format!("{}", RustType::String), "String");
+    }
+
+    #[test]
+    fn test_rust_type_numeric_display() {
+        assert_eq!(format!("{}", RustType::I32), "i32");
+        assert_eq!(format!("{}", RustType::U64), "u64");
+        assert_eq!(format!("{}", RustType::F64), "f64");
+    }
+
+    #[test]
+    fn test_rust_type_bool_display() {
+        assert_eq!(format!("{}", RustType::Bool), "bool");
+    }
+
+    #[test]
+    fn test_rust_type_uuid_display() {
+        assert_eq!(format!("{}", RustType::Uuid), "ID");
+    }
+
+    #[test]
+    fn test_rust_type_to_typescript_primitives() {
+        assert_eq!(RustType::String.to_ts(), "string");
+        assert_eq!(RustType::Bool.to_ts(), "boolean");
+        assert_eq!(RustType::I32.to_ts(), "number");
+        assert_eq!(RustType::F64.to_ts(), "number");
+    }
+
+    #[test]
+    fn test_rust_type_to_typescript_special() {
+        assert_eq!(RustType::Uuid.to_ts(), "string");
+        assert_eq!(RustType::Date.to_ts(), "Date");
+    }
+
+    // ============================================================================
+    // GeneratedType Tests
+    // ============================================================================
+
+    #[test]
+    fn test_generated_type_rust_type() {
+        let gen_type = GeneratedType::RustType(RustType::String);
+        assert_eq!(format!("{}", gen_type), "String");
+    }
+
+    #[test]
+    fn test_generated_type_vec() {
+        let gen_type = GeneratedType::Vec(Box::new(GeneratedType::RustType(RustType::I32)));
+        assert_eq!(format!("{}", gen_type), "Vec<i32>");
+    }
+
+    #[test]
+    fn test_generated_type_nested_vec() {
+        let gen_type = GeneratedType::Vec(Box::new(GeneratedType::Vec(Box::new(
+            GeneratedType::RustType(RustType::String),
+        ))));
+        assert_eq!(format!("{}", gen_type), "Vec<Vec<String>>");
+    }
+
+    #[test]
+    fn test_generated_type_variable() {
+        let gen_type = GeneratedType::Variable(GenRef::Std("T".to_string()));
+        assert_eq!(format!("{}", gen_type), "T");
+    }
+
+    // ============================================================================
+    // GeneratedValue Tests
+    // ============================================================================
+
+    #[test]
+    fn test_generated_value_literal() {
+        let value = GeneratedValue::Literal(GenRef::Literal("hello".to_string()));
+        assert_eq!(format!("{}", value), "\"hello\"");
+    }
+
+    #[test]
+    fn test_generated_value_identifier() {
+        let value = GeneratedValue::Identifier(GenRef::Std("var_name".to_string()));
+        assert_eq!(format!("{}", value), "var_name");
+    }
+
+    #[test]
+    fn test_generated_value_parameter() {
+        let value = GeneratedValue::Parameter(GenRef::Std("param".to_string()));
+        assert_eq!(format!("{}", value), "param");
+    }
+
+    #[test]
+    fn test_generated_value_array() {
+        let value = GeneratedValue::Array(GenRef::Std("1, 2, 3".to_string()));
+        assert_eq!(format!("{}", value), "&[1, 2, 3]");
+    }
+
+    // ============================================================================
+    // Order Tests
+    // ============================================================================
+
+    #[test]
+    fn test_order_asc_display() {
+        assert_eq!(format!("{}", Order::Asc), "Asc");
+    }
+
+    #[test]
+    fn test_order_desc_display() {
+        assert_eq!(format!("{}", Order::Desc), "Desc");
+    }
+
+    // ============================================================================
+    // VecData Tests
+    // ============================================================================
+
+    #[test]
+    fn test_vecdata_standard_display() {
+        let vec_data = VecData::Standard(GeneratedValue::Identifier(GenRef::Std(
+            "embedding".to_string(),
+        )));
+        assert_eq!(format!("{}", vec_data), "embedding");
+    }
+
+    #[test]
+    fn test_vecdata_hoisted_display() {
+        let vec_data = VecData::Hoisted("vec_var".to_string());
+        assert_eq!(format!("{}", vec_data), "&vec_var");
+    }
+
+    // ============================================================================
+    // Helper Function Tests
+    // ============================================================================
+
+    #[test]
+    fn test_write_properties_some() {
+        let props = Some(vec![
+            (
+                "name".to_string(),
+                GeneratedValue::Literal(GenRef::Literal("Alice".to_string())),
+            ),
+            (
+                "age".to_string(),
+                GeneratedValue::Primitive(GenRef::Std("30".to_string())),
+            ),
+        ]);
+        let output = write_properties(&props);
+        assert!(output.contains("Some(ImmutablePropertiesMap::new("));
+        assert!(output.contains("(\"name\", Value::from(\"Alice\"))"));
+        assert!(output.contains("(\"age\", Value::from(30))"));
+    }
+
+    #[test]
+    fn test_write_properties_none() {
+        let output = write_properties(&None);
+        assert_eq!(output, "None");
+    }
+
+    #[test]
+    fn test_write_secondary_indices_some() {
+        let indices = Some(vec!["email".to_string(), "username".to_string()]);
+        let output = write_secondary_indices(&indices);
+        assert!(output.contains("Some(&["));
+        assert!(output.contains("\"email\""));
+        assert!(output.contains("\"username\""));
+    }
+
+    #[test]
+    fn test_write_secondary_indices_none() {
+        let output = write_secondary_indices(&None);
+        assert_eq!(output, "None");
+    }
+
+    // ============================================================================
+    // Separator Tests
+    // ============================================================================
+
+    #[test]
+    fn test_separator_comma() {
+        let sep = Separator::Comma("item".to_string());
+        assert_eq!(format!("{}", sep), ",\nitem");
+    }
+
+    #[test]
+    fn test_separator_semicolon() {
+        let sep = Separator::Semicolon("stmt".to_string());
+        assert_eq!(format!("{}", sep), "stmt;\n");
+    }
+
+    #[test]
+    fn test_separator_period() {
+        let sep = Separator::Period("method".to_string());
+        assert_eq!(format!("{}", sep), "\n.method");
+    }
+
+    #[test]
+    fn test_separator_newline() {
+        let sep = Separator::Newline("line".to_string());
+        assert_eq!(format!("{}", sep), "\nline");
+    }
+
+    #[test]
+    fn test_separator_empty() {
+        let sep = Separator::Empty("content".to_string());
+        assert_eq!(format!("{}", sep), "content");
+    }
+
+    #[test]
+    fn test_separator_inner() {
+        let sep = Separator::Comma("value".to_string());
+        assert_eq!(sep.inner(), "value");
+    }
 }

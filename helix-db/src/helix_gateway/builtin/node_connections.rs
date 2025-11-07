@@ -15,7 +15,6 @@ use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
 use crate::protocol::{self, request::RequestType};
-use crate::utils::filterable::Filterable;
 use crate::utils::id::ID;
 
 // get all nodes connected to a specific node
@@ -204,4 +203,217 @@ inventory::submit! {
     HandlerSubmission(
         Handler::new("node_connections", node_connections_inner)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use axum::body::Bytes;
+    use crate::helix_engine::traversal_core::traversal_value::Traversable;
+    use crate::{
+        helix_engine::{
+            storage_core::version_info::VersionInfo,
+            traversal_core::{
+                HelixGraphEngine, HelixGraphEngineOpts,
+                config::Config,
+                ops::{
+                    g::G,
+                    source::{
+                        add_e::{AddEAdapter, EdgeType},
+                        add_n::AddNAdapter,
+                    },
+                },
+            },
+        },
+        protocol::{request::Request, request::RequestType, Format},
+        helix_gateway::router::router::HandlerInput,
+        utils::id::ID,
+    };
+
+    fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        let opts = HelixGraphEngineOpts {
+            path: db_path.to_string(),
+            config: Config::default(),
+            version_info: VersionInfo::default(),
+        };
+        let engine = HelixGraphEngine::new(opts).unwrap();
+        (engine, temp_dir)
+    }
+
+    #[test]
+    fn test_node_connections_with_outgoing() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", None, None)
+            .collect_to_obj()?;
+
+        let node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", None, None)
+            .collect_to_obj()?;
+
+        let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let node_id_str = ID::from(node1.id()).stringify();
+        let params_json = sonic_rs::to_vec(&json!({"node_id": node_id_str})).unwrap();
+
+        let request = Request {
+            name: "node_connections".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_connections_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("outgoing_edges"));
+        assert!(body_str.contains("connected_nodes"));
+    }
+
+    #[test]
+    fn test_node_connections_with_incoming() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", None, None)
+            .collect_to_obj()?;
+
+        let node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", None, None)
+            .collect_to_obj()?;
+
+        let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let node_id_str = ID::from(node2.id()).stringify();
+        let params_json = sonic_rs::to_vec(&json!({"node_id": node_id_str})).unwrap();
+
+        let request = Request {
+            name: "node_connections".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_connections_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("incoming_edges"));
+    }
+
+    #[test]
+    fn test_node_connections_no_connections() {
+        let (engine, _temp_dir) = setup_test_engine();
+        let mut txn = engine.storage.graph_env.write_txn().unwrap();
+
+        let node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
+            .add_n("person", None, None)
+            .collect_to_obj()?;
+
+        txn.commit().unwrap();
+
+        let node_id_str = ID::from(node.id()).stringify();
+        let params_json = sonic_rs::to_vec(&json!({"node_id": node_id_str})).unwrap();
+
+        let request = Request {
+            name: "node_connections".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_connections_inner(input);
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_str = String::from_utf8(response.body).unwrap();
+        assert!(body_str.contains("connected_nodes"));
+        assert!(body_str.contains("incoming_edges"));
+        assert!(body_str.contains("outgoing_edges"));
+    }
+
+    #[test]
+    fn test_node_connections_invalid_id() {
+        let (engine, _temp_dir) = setup_test_engine();
+
+        let params_json = sonic_rs::to_vec(&json!({"node_id": "invalid"})).unwrap();
+
+        let request = Request {
+            name: "node_connections".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::from(params_json),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_connections_inner(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_connections_missing_node_id() {
+        let (engine, _temp_dir) = setup_test_engine();
+
+        let request = Request {
+            name: "node_connections".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let input = HandlerInput {
+            graph: Arc::new(engine),
+            request,
+            
+        };
+
+        let result = node_connections_inner(input);
+        assert!(result.is_err());
+    }
 }

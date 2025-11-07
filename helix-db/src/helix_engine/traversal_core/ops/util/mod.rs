@@ -9,6 +9,5 @@ pub mod group_by;
 pub mod map;
 pub mod order;
 pub mod paths;
-pub mod props;
 pub mod range;
 pub mod update;

@@ -489,3 +489,449 @@ impl HelixParser {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+
+    // ============================================================================
+    // Literal Expression Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_integer_literal() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                value <- 42
+                RETURN value
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_float_literal() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                value <- 3.14
+                RETURN value
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_boolean_literal_true() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                value <- true
+                RETURN value
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_boolean_literal_false() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                value <- false
+                RETURN value
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_string_literal() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                value <- "Hello World"
+                RETURN value
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_array_literal() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                values <- [1, 2, 3]
+                RETURN values
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Boolean Expression Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_and_in_where_clause() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY testQuery(targetName: String, targetAge: U32) =>
+                person <- N<Person>::WHERE(
+                    AND(
+                        _::{name}::EQ(targetName),
+                        _::{age}::EQ(targetAge)
+                    )
+                )
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_or_in_where_clause() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery(name1: String, name2: String) =>
+                person <- N<Person>::WHERE(
+                    OR(
+                        _::{name}::EQ(name1),
+                        _::{name}::EQ(name2)
+                    )
+                )
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_exists_expression() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY testQuery(id: ID) =>
+                person <- N<Person>(id)
+                hasFriends <- EXISTS(person::Out<Knows>)
+                RETURN hasFriends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_not_exists_expression() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY testQuery(id: ID) =>
+                person <- N<Person>(id)
+                hasNoFriends <- !EXISTS(person::Out<Knows>)
+                RETURN hasNoFriends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_negated_and_in_where() {
+        let source = r#"
+            N::Person { name: String, active: Boolean }
+
+            QUERY testQuery(targetName: String) =>
+                person <- N<Person>::WHERE(
+                    !AND(
+                        _::{name}::EQ(targetName),
+                        _::{active}::EQ(true)
+                    )
+                )
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // For Loop Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_for_loop_with_identifier() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                people <- N<Person>
+                FOR person IN people {
+                    name <- person
+                }
+                RETURN "done"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_for_loop_with_destructuring() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY testQuery() =>
+                people <- N<Person>
+                FOR {name, age} IN people {
+                    value <- name
+                }
+                RETURN "done"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_for_loop_with_object_access() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                people <- N<Person>
+                FOR person.name IN people {
+                    value <- person
+                }
+                RETURN "done"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // BM25 Search Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_bm25_search_with_string_literal() {
+        let source = r#"
+            V::Document { content: String }
+
+            QUERY searchDocs() =>
+                docs <- SearchBM25<Document>("search query", 10)
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_bm25_search_with_identifier() {
+        let source = r#"
+            V::Document { content: String }
+
+            QUERY searchDocs(query: String) =>
+                docs <- SearchBM25<Document>(query, 10)
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_bm25_search_with_variable_k() {
+        let source = r#"
+            V::Document { content: String }
+
+            QUERY searchDocs(query: String, limit: I32) =>
+                docs <- SearchBM25<Document>(query, limit)
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Vector Search Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_vector_search_with_identifier() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY searchSimilar(queryVec: [F32]) =>
+                docs <- SearchV<Document>(queryVec, 10)
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_vector_search_with_embed() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY searchSimilar(query: String) =>
+                docs <- SearchV<Document>(Embed(query), 10)
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_vector_search_with_string_embed() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY searchSimilar() =>
+                docs <- SearchV<Document>(Embed("search query"), 10)
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Assignment Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_assignment_with_identifier() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery(inputName: String) =>
+                name <- inputName
+                RETURN name
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_assignment_with_traversal() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery(id: ID) =>
+                person <- N<Person>(id)
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // Edge Cases and Complex Expressions
+    // ============================================================================
+
+    #[test]
+    fn test_parse_none_expression() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                value <- NONE
+                RETURN value
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_nested_boolean_in_where() {
+        let source = r#"
+            N::Person { name: String, age: U32, active: Boolean }
+
+            QUERY testQuery(name1: String, name2: String, minAge: U32) =>
+                person <- N<Person>::WHERE(
+                    AND(
+                        OR(
+                            _::{name}::EQ(name1),
+                            _::{name}::EQ(name2)
+                        ),
+                        _::{age}::GT(minAge)
+                    )
+                )
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_multiple_assignments() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY testQuery() =>
+                val1 <- 10
+                val2 <- 20
+                val3 <- 30
+                RETURN val1
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+}

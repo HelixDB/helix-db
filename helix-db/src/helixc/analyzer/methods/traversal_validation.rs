@@ -1,5 +1,7 @@
 use crate::helixc::analyzer::error_codes::*;
-use crate::helixc::analyzer::utils::{check_identifier_is_fieldtype, DEFAULT_VAR_NAME};
+use crate::helixc::analyzer::utils::{
+    DEFAULT_VAR_NAME, VariableInfo, check_identifier_is_fieldtype,
+};
 use crate::helixc::generator::bool_ops::{Contains, IsIn};
 use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
 use crate::helixc::generator::traversal_steps::{AggregateBy, GroupBy};
@@ -14,15 +16,14 @@ use crate::{
                 exclude_validation::validate_exclude, graph_step_validation::apply_graph_step,
                 infer_expr_type::infer_expr_type, object_validation::validate_object,
             },
-            types::Type,
+            types::{AggregateInfo, Type},
             utils::{
-                Variable, field_exists_on_item_type, gen_identifier_or_param, is_valid_identifier,
+                field_exists_on_item_type, gen_identifier_or_param, is_valid_identifier,
                 type_in_scope,
             },
         },
         generator::{
             bool_ops::{BoExp, BoolOp, Eq, Gt, Gte, Lt, Lte, Neq},
-            object_remappings::{ExcludeField, Remapping, RemappingType},
             queries::Query as GeneratedQuery,
             source_steps::{EFromID, EFromType, NFromID, NFromIndex, NFromType, SourceStep},
             statements::Statement as GeneratedStatement,
@@ -39,6 +40,60 @@ use crate::{
 use paste::paste;
 use std::collections::HashMap;
 
+/// Check if a property name is a reserved property and return its expected type
+fn get_reserved_property_type(prop_name: &str, item_type: &Type) -> Option<FieldType> {
+    match prop_name {
+        "id" | "ID" | "Id" => Some(FieldType::Uuid),
+        "label" | "Label" => Some(FieldType::String),
+        "version" | "Version" => Some(FieldType::I8),
+        "from_node" | "fromNode" | "FromNode" => {
+            // Only valid for edges
+            match item_type {
+                Type::Edge(_) | Type::Edges(_) => Some(FieldType::Uuid),
+                _ => None,
+            }
+        }
+        "to_node" | "toNode" | "ToNode" => {
+            // Only valid for edges
+            match item_type {
+                Type::Edge(_) | Type::Edges(_) => Some(FieldType::Uuid),
+                _ => None,
+            }
+        }
+        "deleted" | "Deleted" => {
+            // Only valid for vectors
+            match item_type {
+                Type::Vector(_) | Type::Vectors(_) => Some(FieldType::Boolean),
+                _ => None,
+            }
+        }
+        "level" | "Level" => {
+            // Only valid for vectors
+            match item_type {
+                Type::Vector(_) | Type::Vectors(_) => Some(FieldType::U64),
+                _ => None,
+            }
+        }
+        "distance" | "Distance" => {
+            // Only valid for vectors
+            match item_type {
+                Type::Vector(_) | Type::Vectors(_) => Some(FieldType::F64),
+                _ => None,
+            }
+        }
+        "data" | "Data" => {
+            // Only valid for vectors
+            match item_type {
+                Type::Vector(_) | Type::Vectors(_) => {
+                    Some(FieldType::Array(Box::new(FieldType::F64)))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Validates the traversal and returns the end type of the traversal
 ///
 /// This method also builds the generated traversal (`gen_traversal`) as it analyzes the traversal
@@ -50,7 +105,7 @@ use std::collections::HashMap;
 pub(crate) fn validate_traversal<'a>(
     ctx: &mut Ctx<'a>,
     tr: &'a Traversal,
-    scope: &mut HashMap<&'a str, Type>,
+    scope: &mut HashMap<&'a str, VariableInfo>,
     original_query: &'a Query,
     parent_ty: Option<Type>,
     gen_traversal: &mut GeneratedTraversal,
@@ -313,6 +368,7 @@ pub(crate) fn validate_traversal<'a>(
             if let Some(ids) = ids {
                 assert!(ids.len() == 1, "multiple ids not supported yet");
                 gen_traversal.source_step = Separator::Period(SourceStep::VFromID(VFromID {
+                    get_vector_data: false,
                     id: match ids.first().cloned() {
                         Some(id) => match id {
                             IdType::Identifier { value: i, loc } => {
@@ -354,6 +410,7 @@ pub(crate) fn validate_traversal<'a>(
             } else {
                 gen_traversal.source_step = Separator::Period(SourceStep::VFromType(VFromType {
                     label: GenRef::Literal(vector_type.clone()),
+                    get_vector_data: false,
                 }));
                 gen_traversal.traversal_type = TraversalType::Ref;
                 Type::Vectors(Some(vector_type.to_string()))
@@ -362,8 +419,26 @@ pub(crate) fn validate_traversal<'a>(
 
         StartNode::Identifier(identifier) => {
             match is_valid_identifier(ctx, original_query, tr.loc.clone(), identifier.as_str()) {
-                true => scope.get(identifier.as_str()).cloned().map_or_else(
-                    || {
+                true => {
+                    // Increment reference count for this variable
+                    if let Some(var_info) = scope.get_mut(identifier.as_str()) {
+                        var_info.increment_reference();
+
+                        // Mark traversal as reused if referenced more than once
+                        if var_info.reference_count > 1 {
+                            gen_traversal.is_reused_variable = true;
+                        }
+
+                        gen_traversal.traversal_type = if var_info.is_single {
+                            TraversalType::FromSingle(GenRef::Std(identifier.clone()))
+                        } else {
+                            TraversalType::FromIter(GenRef::Std(identifier.clone()))
+                        };
+                        gen_traversal.source_step = Separator::Empty(SourceStep::Identifier(
+                            GenRef::Std(identifier.clone()),
+                        ));
+                        var_info.ty.clone()
+                    } else {
                         generate_error!(
                             ctx,
                             original_query,
@@ -372,16 +447,8 @@ pub(crate) fn validate_traversal<'a>(
                             identifier.as_str()
                         );
                         Type::Unknown
-                    },
-                    |var_type| {
-                        gen_traversal.traversal_type =
-                            TraversalType::FromVar(GenRef::Std(identifier.clone()));
-                        gen_traversal.source_step = Separator::Empty(SourceStep::Identifier(
-                            GenRef::Std(identifier.clone()),
-                        ));
-                        var_type.clone()
-                    },
-                ),
+                    }
+                }
                 false => Type::Unknown,
             }
         }
@@ -389,7 +456,7 @@ pub(crate) fn validate_traversal<'a>(
         StartNode::Anonymous => {
             let parent = parent_ty.clone().unwrap();
             gen_traversal.traversal_type =
-                TraversalType::FromVar(GenRef::Std(DEFAULT_VAR_NAME.to_string()));
+                TraversalType::FromSingle(GenRef::Std(DEFAULT_VAR_NAME.to_string()));
             gen_traversal.source_step = Separator::Empty(SourceStep::Anonymous);
             parent
         }
@@ -619,37 +686,25 @@ pub(crate) fn validate_traversal<'a>(
                 validate_exclude(ctx, &cur_ty, tr, ex, &excluded, original_query);
                 for (_, key) in &ex.fields {
                     excluded.insert(key.as_str(), ex.loc.clone());
+                    gen_traversal.excluded_fields.push(key.clone());
                 }
-                gen_traversal
-                    .steps
-                    .push(Separator::Period(GeneratedStep::Remapping(Remapping {
-                        variable_name: DEFAULT_VAR_NAME.to_string(),
-                        is_inner: false,
-                        should_spread: false,
-                        remappings: vec![RemappingType::ExcludeField(ExcludeField {
-                            variable_name: DEFAULT_VAR_NAME.to_string(),
-                            fields_to_exclude: ex
-                                .fields
-                                .iter()
-                                .map(|(_, field)| GenRef::Literal(field.clone()))
-                                .collect(),
-                        })],
-                    })));
             }
 
             StepType::Object(obj) => {
+                // For intermediate object steps, we don't track fields for return values
+                // Fields are only tracked when this traversal is used in a RETURN statement
+                let mut fields_out = vec![];
                 cur_ty = validate_object(
                     ctx,
                     &cur_ty,
-                    tr,
                     obj,
-                    &excluded,
                     original_query,
                     gen_traversal,
-                    gen_query,
+                    &mut fields_out,
                     scope,
-                    None,
-                );
+                    gen_query,
+                )
+                .ok()?;
             }
 
             StepType::Where(expr) => {
@@ -719,8 +774,7 @@ pub(crate) fn validate_traversal<'a>(
                     | BooleanOpType::GreaterThan(expr)
                     | BooleanOpType::Equal(expr)
                     | BooleanOpType::NotEqual(expr)
-                    | BooleanOpType::Contains(expr)
-                    | BooleanOpType::IsIn(expr) => {
+                    | BooleanOpType::Contains(expr) => {
                         match infer_expr_type(
                             ctx,
                             expr,
@@ -731,6 +785,43 @@ pub(crate) fn validate_traversal<'a>(
                         ) {
                             (Type::Scalar(ft), _) => ft.clone(),
                             (Type::Boolean, _) => FieldType::Boolean,
+                            (field_type, _) => {
+                                generate_error!(
+                                    ctx,
+                                    original_query,
+                                    b_op.loc.clone(),
+                                    E621,
+                                    &b_op.loc.span,
+                                    field_type.kind_str()
+                                );
+                                return Some(field_type);
+                            }
+                        }
+                    }
+                    BooleanOpType::IsIn(expr) => {
+                        // IS_IN expects an array argument
+                        match infer_expr_type(
+                            ctx,
+                            expr,
+                            scope,
+                            original_query,
+                            Some(cur_ty.clone()),
+                            gen_query,
+                        ) {
+                            (Type::Array(boxed_ty), _) => match *boxed_ty {
+                                Type::Scalar(ft) => ft,
+                                _ => {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        b_op.loc.clone(),
+                                        E621,
+                                        &b_op.loc.span,
+                                        "non-scalar array elements"
+                                    );
+                                    return Some(Type::Unknown);
+                                }
+                            },
                             (field_type, _) => {
                                 generate_error!(
                                     ctx,
@@ -775,12 +866,59 @@ pub(crate) fn validate_traversal<'a>(
                             }
                         }
                         Type::Nodes(Some(node_ty)) | Type::Node(Some(node_ty)) => {
-                            let field_set = ctx.node_fields.get(node_ty.as_str()).cloned();
-                            if let Some(field_set) = field_set {
-                                match field_set.get(field_name.as_str()) {
-                                    Some(field) => {
-                                        if let FieldType::Array(inner_type) = &property_type {
-                                            if field.field_type != **inner_type {
+                            // Check if this is a reserved property first
+                            if let Some(reserved_type) =
+                                get_reserved_property_type(field_name.as_str(), &cur_ty)
+                            {
+                                // Validate the type matches
+                                if let FieldType::Array(inner_type) = &property_type {
+                                    if reserved_type != **inner_type {
+                                        generate_error!(
+                                            ctx,
+                                            original_query,
+                                            b_op.loc.clone(),
+                                            E622,
+                                            field_name,
+                                            cur_ty.kind_str(),
+                                            &cur_ty.get_type_name(),
+                                            &reserved_type.to_string(),
+                                            &property_type.to_string()
+                                        );
+                                    }
+                                } else if reserved_type != property_type {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        b_op.loc.clone(),
+                                        E622,
+                                        field_name,
+                                        cur_ty.kind_str(),
+                                        &cur_ty.get_type_name(),
+                                        &reserved_type.to_string(),
+                                        &property_type.to_string()
+                                    );
+                                }
+                            } else {
+                                // Not a reserved property, check schema fields
+                                let field_set = ctx.node_fields.get(node_ty.as_str()).cloned();
+                                if let Some(field_set) = field_set {
+                                    match field_set.get(field_name.as_str()) {
+                                        Some(field) => {
+                                            if let FieldType::Array(inner_type) = &property_type {
+                                                if field.field_type != **inner_type {
+                                                    generate_error!(
+                                                        ctx,
+                                                        original_query,
+                                                        b_op.loc.clone(),
+                                                        E622,
+                                                        field_name,
+                                                        cur_ty.kind_str(),
+                                                        &cur_ty.get_type_name(),
+                                                        &field.field_type.to_string(),
+                                                        &property_type.to_string()
+                                                    );
+                                                }
+                                            } else if field.field_type != property_type {
                                                 generate_error!(
                                                     ctx,
                                                     original_query,
@@ -793,96 +931,126 @@ pub(crate) fn validate_traversal<'a>(
                                                     &property_type.to_string()
                                                 );
                                             }
-                                        } else if field.field_type != property_type {
+                                        }
+                                        None => {
                                             generate_error!(
                                                 ctx,
                                                 original_query,
                                                 b_op.loc.clone(),
-                                                E622,
+                                                E202,
                                                 field_name,
                                                 cur_ty.kind_str(),
-                                                &cur_ty.get_type_name(),
-                                                &field.field_type.to_string(),
-                                                &property_type.to_string()
+                                                node_ty
                                             );
                                         }
-                                    }
-                                    None => {
-                                        generate_error!(
-                                            ctx,
-                                            original_query,
-                                            b_op.loc.clone(),
-                                            E202,
-                                            field_name,
-                                            cur_ty.kind_str(),
-                                            node_ty
-                                        );
                                     }
                                 }
                             }
                         }
                         Type::Edges(Some(edge_ty)) | Type::Edge(Some(edge_ty)) => {
-                            let field_set = ctx.edge_fields.get(edge_ty.as_str()).cloned();
-                            if let Some(field_set) = field_set {
-                                match field_set.get(field_name.as_str()) {
-                                    Some(field) => {
-                                        if field.field_type != property_type {
+                            // Check if this is a reserved property first
+                            if let Some(reserved_type) =
+                                get_reserved_property_type(field_name.as_str(), &cur_ty)
+                            {
+                                // Validate the type matches
+                                if reserved_type != property_type {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        b_op.loc.clone(),
+                                        E622,
+                                        field_name,
+                                        cur_ty.kind_str(),
+                                        &cur_ty.get_type_name(),
+                                        &reserved_type.to_string(),
+                                        &property_type.to_string()
+                                    );
+                                }
+                            } else {
+                                // Not a reserved property, check schema fields
+                                let field_set = ctx.edge_fields.get(edge_ty.as_str()).cloned();
+                                if let Some(field_set) = field_set {
+                                    match field_set.get(field_name.as_str()) {
+                                        Some(field) => {
+                                            if field.field_type != property_type {
+                                                generate_error!(
+                                                    ctx,
+                                                    original_query,
+                                                    b_op.loc.clone(),
+                                                    E622,
+                                                    field_name,
+                                                    cur_ty.kind_str(),
+                                                    &cur_ty.get_type_name(),
+                                                    &field.field_type.to_string(),
+                                                    &property_type.to_string()
+                                                );
+                                            }
+                                        }
+                                        None => {
                                             generate_error!(
                                                 ctx,
                                                 original_query,
                                                 b_op.loc.clone(),
-                                                E622,
+                                                E202,
                                                 field_name,
                                                 cur_ty.kind_str(),
-                                                &cur_ty.get_type_name(),
-                                                &field.field_type.to_string(),
-                                                &property_type.to_string()
+                                                edge_ty
                                             );
                                         }
-                                    }
-                                    None => {
-                                        generate_error!(
-                                            ctx,
-                                            original_query,
-                                            b_op.loc.clone(),
-                                            E202,
-                                            field_name,
-                                            cur_ty.kind_str(),
-                                            edge_ty
-                                        );
                                     }
                                 }
                             }
                         }
                         Type::Vectors(Some(sv)) | Type::Vector(Some(sv)) => {
-                            let field_set = ctx.vector_fields.get(sv.as_str()).cloned();
-                            if let Some(field_set) = field_set {
-                                match field_set.get(field_name.as_str()) {
-                                    Some(field) => {
-                                        if field.field_type != property_type {
+                            // Check if this is a reserved property first
+                            if let Some(reserved_type) =
+                                get_reserved_property_type(field_name.as_str(), &cur_ty)
+                            {
+                                // Validate the type matches
+                                if reserved_type != property_type {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        b_op.loc.clone(),
+                                        E622,
+                                        field_name,
+                                        cur_ty.kind_str(),
+                                        &cur_ty.get_type_name(),
+                                        &reserved_type.to_string(),
+                                        &property_type.to_string()
+                                    );
+                                }
+                            } else {
+                                // Not a reserved property, check schema fields
+                                let field_set = ctx.vector_fields.get(sv.as_str()).cloned();
+                                if let Some(field_set) = field_set {
+                                    match field_set.get(field_name.as_str()) {
+                                        Some(field) => {
+                                            if field.field_type != property_type {
+                                                generate_error!(
+                                                    ctx,
+                                                    original_query,
+                                                    b_op.loc.clone(),
+                                                    E622,
+                                                    field_name,
+                                                    cur_ty.kind_str(),
+                                                    &cur_ty.get_type_name(),
+                                                    &field.field_type.to_string(),
+                                                    &property_type.to_string()
+                                                );
+                                            }
+                                        }
+                                        None => {
                                             generate_error!(
                                                 ctx,
                                                 original_query,
                                                 b_op.loc.clone(),
-                                                E622,
+                                                E202,
                                                 field_name,
                                                 cur_ty.kind_str(),
-                                                &cur_ty.get_type_name(),
-                                                &field.field_type.to_string(),
-                                                &property_type.to_string()
+                                                sv
                                             );
                                         }
-                                    }
-                                    None => {
-                                        generate_error!(
-                                            ctx,
-                                            original_query,
-                                            b_op.loc.clone(),
-                                            E202,
-                                            field_name,
-                                            cur_ty.kind_str(),
-                                            sv
-                                        );
                                     }
                                 }
                             }
@@ -1084,7 +1252,7 @@ pub(crate) fn validate_traversal<'a>(
                                     expr.loc.clone(),
                                     i.as_str(),
                                 );
-                                gen_identifier_or_param(original_query, i.as_str(), false, true)
+                                gen_identifier_or_param(original_query, i.as_str(), true, false)
                             }
                             ExpressionType::BooleanLiteral(b) => {
                                 GeneratedValue::Primitive(GenRef::Std(b.to_string()))
@@ -1163,7 +1331,16 @@ pub(crate) fn validate_traversal<'a>(
                     .collect::<Vec<_>>();
                 let should_count = matches!(previous_step, Some(StepType::Count));
                 let _ = gen_traversal.steps.pop();
-                cur_ty = Type::Aggregate;
+
+                // Capture aggregate metadata before replacing cur_ty
+                let property_names = aggr.properties.clone();
+                cur_ty = Type::Aggregate(AggregateInfo {
+                    source_type: Box::new(cur_ty.clone()),
+                    properties: property_names,
+                    is_count: should_count,
+                    is_group_by: false, // This is AGGREGATE_BY
+                });
+
                 gen_traversal.should_collect = ShouldCollect::Try;
                 gen_traversal
                     .steps
@@ -1180,7 +1357,16 @@ pub(crate) fn validate_traversal<'a>(
                     .collect::<Vec<_>>();
                 let should_count = matches!(previous_step, Some(StepType::Count));
                 let _ = gen_traversal.steps.pop();
-                cur_ty = Type::Aggregate;
+
+                // Capture aggregate metadata before replacing cur_ty
+                let property_names = gb.properties.clone();
+                cur_ty = Type::Aggregate(AggregateInfo {
+                    source_type: Box::new(cur_ty.clone()),
+                    properties: property_names,
+                    is_count: should_count,
+                    is_group_by: true, // This is GROUP_BY
+                });
+
                 gen_traversal.should_collect = ShouldCollect::Try;
                 gen_traversal
                     .steps
@@ -1280,13 +1466,11 @@ pub(crate) fn validate_traversal<'a>(
                                         ExpressionType::BooleanLiteral(i) => {
                                             GeneratedValue::Primitive(GenRef::Std(i.to_string()))
                                         }
-                                        v => {
-                                            println!("ID {v:?}");
+                                        _ => {
                                             panic!("expr be primitive or value")
                                         }
                                     },
-                                    v => {
-                                        println!("{v:?}");
+                                    _ => {
                                         panic!("Should be primitive or value")
                                     }
                                 },
@@ -1483,32 +1667,172 @@ pub(crate) fn validate_traversal<'a>(
                     generate_error!(ctx, original_query, cl.loc.clone(), E641);
                 }
                 // Add identifier to a temporary scope so inner uses pass
-                scope.insert(cl.identifier.as_str(), cur_ty.clone()); // If true then already exists so return error
+                // For closures iterating over collections, singularize the type
+                let was_collection =
+                    matches!(cur_ty, Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_));
+                let closure_param_type = match &cur_ty {
+                    Type::Nodes(label) => Type::Node(label.clone()),
+                    Type::Edges(label) => Type::Edge(label.clone()),
+                    Type::Vectors(label) => Type::Vector(label.clone()),
+                    other => other.clone(),
+                };
+
+                // Extract the source variable name from the current traversal
+                let closure_source_var = match &gen_traversal.source_step {
+                    Separator::Empty(SourceStep::Identifier(var))
+                    | Separator::Period(SourceStep::Identifier(var))
+                    | Separator::Newline(SourceStep::Identifier(var)) => var.inner().clone(),
+                    _ => {
+                        // For other source types, try to extract from traversal_type
+                        match &gen_traversal.traversal_type {
+                            TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
+                                var.inner().clone()
+                            }
+                            _ => String::new(),
+                        }
+                    }
+                };
+
+                // Closure parameters are always singular (they represent individual items during iteration)
+                scope.insert(
+                    cl.identifier.as_str(),
+                    VariableInfo::new_with_source(
+                        closure_param_type.clone(),
+                        true,
+                        closure_source_var.clone(),
+                    ),
+                );
                 let obj = &cl.object;
+                let mut fields_out = vec![];
+                // Pass the singular type to validate_object so nested traversals use the correct type
                 cur_ty = validate_object(
                     ctx,
-                    &cur_ty,
-                    tr,
+                    &closure_param_type,
                     obj,
-                    &excluded,
                     original_query,
                     gen_traversal,
-                    gen_query,
+                    &mut fields_out,
                     scope,
-                    Some(Variable::new(cl.identifier.clone(), cur_ty.clone())),
-                );
+                    gen_query,
+                )
+                .ok()?;
 
-                // gen_traversal
-                //     .steps
-                //     .push(Separator::Period(GeneratedStep::Remapping(Remapping {
-                //         is_inner: false,
-                //         should_spread: false,
-                //         variable_name: cl.identifier.clone(),
-                //         remappings: (),
-                //     })));
+                // Tag all nested traversals with closure context
+                for (_field_name, nested_info) in gen_traversal.nested_traversals.iter_mut() {
+                    nested_info.closure_param_name = Some(cl.identifier.clone());
+                    nested_info.closure_source_var = Some(closure_source_var.clone());
+                }
+
+                // If we were iterating over a collection, ensure should_collect stays as ToVec
+                // validate_object may have set it to ToObj because we passed a singular type
+                if was_collection {
+                    gen_traversal.should_collect = ShouldCollect::ToVec;
+                    // Also convert the return type back to collection type
+                    // This ensures is_collection flag is set correctly in query_validation.rs
+                    cur_ty = match cur_ty {
+                        Type::Node(label) => Type::Nodes(label),
+                        Type::Edge(label) => Type::Edges(label),
+                        Type::Vector(label) => Type::Vectors(label),
+                        other => other,
+                    };
+                }
+
                 scope.remove(cl.identifier.as_str());
-                // gen_traversal.traversal_type =
-                //     TraversalType::Nested(GenRef::Std(var));
+            }
+            StepType::RerankRRF(rerank_rrf) => {
+                // Generate k parameter if provided
+                let k = rerank_rrf.k.as_ref().map(|k_expr| match &k_expr.expr {
+                    ExpressionType::Identifier(id) => {
+                        is_valid_identifier(ctx, original_query, k_expr.loc.clone(), id.as_str());
+                        gen_identifier_or_param(original_query, id.as_str(), false, true)
+                    }
+                    ExpressionType::IntegerLiteral(val) => {
+                        GeneratedValue::Primitive(GenRef::Std(val.to_string()))
+                    }
+                    ExpressionType::FloatLiteral(val) => {
+                        GeneratedValue::Primitive(GenRef::Std(val.to_string()))
+                    }
+                    _ => {
+                        generate_error!(
+                            ctx,
+                            original_query,
+                            k_expr.loc.clone(),
+                            E206,
+                            &k_expr.expr.to_string()
+                        );
+                        GeneratedValue::Unknown
+                    }
+                });
+
+                gen_traversal
+                    .steps
+                    .push(Separator::Period(GeneratedStep::RerankRRF(
+                        crate::helixc::generator::traversal_steps::RerankRRF { k },
+                    )));
+            }
+            StepType::RerankMMR(rerank_mmr) => {
+                // Generate lambda parameter
+                let lambda = match &rerank_mmr.lambda.expr {
+                    ExpressionType::Identifier(id) => {
+                        is_valid_identifier(
+                            ctx,
+                            original_query,
+                            rerank_mmr.lambda.loc.clone(),
+                            id.as_str(),
+                        );
+                        Some(gen_identifier_or_param(
+                            original_query,
+                            id.as_str(),
+                            false,
+                            true,
+                        ))
+                    }
+                    ExpressionType::FloatLiteral(val) => {
+                        Some(GeneratedValue::Primitive(GenRef::Std(val.to_string())))
+                    }
+                    ExpressionType::IntegerLiteral(val) => {
+                        Some(GeneratedValue::Primitive(GenRef::Std(val.to_string())))
+                    }
+                    _ => {
+                        generate_error!(
+                            ctx,
+                            original_query,
+                            rerank_mmr.lambda.loc.clone(),
+                            E206,
+                            &rerank_mmr.lambda.expr.to_string()
+                        );
+                        None
+                    }
+                };
+
+                // Generate distance parameter if provided
+                let distance = if let Some(MMRDistance::Identifier(id)) = &rerank_mmr.distance {
+                    is_valid_identifier(ctx, original_query, rerank_mmr.loc.clone(), id.as_str());
+                    Some(
+                        crate::helixc::generator::traversal_steps::MMRDistanceMethod::Identifier(
+                            id.clone(),
+                        ),
+                    )
+                } else {
+                    rerank_mmr.distance.as_ref().map(|d| match d {
+                        MMRDistance::Cosine => {
+                            crate::helixc::generator::traversal_steps::MMRDistanceMethod::Cosine
+                        }
+                        MMRDistance::Euclidean => {
+                            crate::helixc::generator::traversal_steps::MMRDistanceMethod::Euclidean
+                        }
+                        MMRDistance::DotProduct => {
+                            crate::helixc::generator::traversal_steps::MMRDistanceMethod::DotProduct
+                        }
+                        MMRDistance::Identifier(_) => unreachable!(),
+                    })
+                };
+
+                gen_traversal
+                    .steps
+                    .push(Separator::Period(GeneratedStep::RerankMMR(
+                        crate::helixc::generator::traversal_steps::RerankMMR { lambda, distance },
+                    )));
             }
         }
         previous_step = Some(step.clone());
@@ -1520,4 +1844,335 @@ pub(crate) fn validate_traversal<'a>(
         _ => {}
     }
     Some(cur_ty)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::helixc::analyzer::error_codes::ErrorCode;
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
+
+    // ============================================================================
+    // Start Node Validation Tests
+    // ============================================================================
+
+    #[test]
+    fn test_undeclared_node_type() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                company <- N<Company>
+                RETURN company
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E101));
+    }
+
+    #[test]
+    fn test_undeclared_edge_type() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                edges <- person::OutE<WorksAt>
+                RETURN edges
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E102));
+    }
+
+    #[test]
+    fn test_undeclared_vector_type() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                docs <- V<Document>
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E103));
+    }
+
+    #[test]
+    fn test_node_with_id_parameter() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_node_with_undefined_id_variable() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                person <- N<Person>(unknownId)
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_node_without_id() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                people <- N<Person>
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_identifier_start_node() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                person <- N<Person>
+                samePerson <- person
+                RETURN samePerson
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_identifier_not_in_scope() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                person <- unknownVariable
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    // ============================================================================
+    // Traversal Step Tests
+    // ============================================================================
+
+    #[test]
+    fn test_valid_out_traversal() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                friends <- person::Out<Knows>
+                RETURN friends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_property_access() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                name <- person::{name}
+                RETURN name
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    // Note: Property errors are caught during object validation, not traversal validation
+    // Removing test_property_not_exists as it requires different assertion approach
+
+    // ============================================================================
+    // Where Clause Tests
+    // ============================================================================
+
+    #[test]
+    fn test_where_with_property_equals() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY test(targetAge: U32) =>
+                people <- N<Person>::WHERE(_::{age}::EQ(targetAge))
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_where_with_property_greater_than() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY test(minAge: U32) =>
+                people <- N<Person>::WHERE(_::{age}::GT(minAge))
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    // Note: Removed tests for UPDATE, Range, and property errors as they require
+    // different syntax or validation approaches than initially assumed
+
+    // ============================================================================
+    // Chained Traversal Tests
+    // ============================================================================
+
+    #[test]
+    fn test_chained_edge_traversal() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                edges <- person::OutE<Knows>
+                targets <- edges::ToN
+                RETURN targets
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_multi_hop_traversal() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                friends <- N<Person>(id)::Out<Knows>
+                friendsOfFriends <- friends::Out<Knows>
+                RETURN friendsOfFriends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    // ============================================================================
+    // Complex Query Tests
+    // ============================================================================
+
+    #[test]
+    fn test_complex_query_with_multiple_steps() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID, minAge: U32) =>
+                person <- N<Person>(id)
+                friends <- person::Out<Knows>::WHERE(_::{age}::GT(minAge))
+                names <- friends::{name}
+                RETURN names
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
 }

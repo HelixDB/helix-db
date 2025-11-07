@@ -5,7 +5,7 @@ extern crate syn;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream}, parse_macro_input, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem
+    parse::{Parse, ParseStream}, parse_macro_input, Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem
 };
 
 #[proc_macro_attribute]
@@ -98,49 +98,6 @@ pub fn get_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-#[proc_macro_attribute]
-pub fn debug_trace(args: TokenStream, input: TokenStream) -> TokenStream {
-    let prefix = if args.is_empty() {
-        "DEBUG".to_string()
-    } else {
-        args.to_string().trim_matches('"').to_string()
-    };
-
-    let input_fn = parse_macro_input!(input as ItemFn);
-
-    let fn_name = &input_fn.sig.ident;
-    let fn_vis = &input_fn.vis;
-    let fn_sig = &input_fn.sig;
-    let fn_block = &input_fn.block;
-    let fn_attrs = &input_fn.attrs;
-
-    let expanded = quote! {
-        #(#fn_attrs)*
-        #fn_vis #fn_sig {
-            let __debug_result = (|| #fn_block)();
-
-            #[cfg(feature = "debug-output")]
-            {
-                println!("[{} @ line: {}]", #prefix, line!());
-                let lhs = format!("  └── {}() -> ", stringify!(#fn_name));
-                let debug_str = format!("{:?}", __debug_result);
-                let lines: Vec<&str> = debug_str.lines().collect();
-
-                if lines.len() > 1 {
-                    println!("{}{}", lhs, lines[0]);
-                }
-                // Add padding equal to lhs length to all subsequent lines
-                let padding = " ".repeat(lhs.len());
-                for line in lines.iter().skip(1) {
-                    println!("{}{}", padding, line);
-                }
-            }
-            __debug_result
-        }
-    };
-
-    TokenStream::from(expanded)
-}
 
 #[proc_macro_attribute]
 pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -402,6 +359,50 @@ pub fn helix_node(_attr: TokenStream, input: TokenStream) -> TokenStream {
         pub struct #name {
             id: String,
             #(#fields),*
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(Traversable)]
+pub fn traversable_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    // Verify that the struct has an 'id' field
+    let has_id_field = match &input.data {
+        Data::Struct(data) => {
+            data.fields.iter().any(|field| {
+                field.ident.as_ref().map(|i| i == "id").unwrap_or(false)
+            })
+        }
+        _ => false,
+    };
+
+    if !has_id_field {
+        return TokenStream::from(
+            quote! {
+                compile_error!("Traversable can only be derived for structs with an 'id: &'a str' field");
+            }
+        );
+    }
+
+    // Extract lifetime parameter if present
+    let lifetime = if let Some(param) = input.generics.lifetimes().next() {
+        let lifetime = &param.lifetime;
+        quote! { #lifetime }
+    } else {
+        quote! { 'a }
+    };
+
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let expanded = quote! {
+        impl #impl_generics #name #ty_generics #where_clause {
+            pub fn id(&self) -> &#lifetime str {
+                self.id
+            }
         }
     };
 

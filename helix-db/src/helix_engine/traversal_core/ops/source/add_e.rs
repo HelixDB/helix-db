@@ -1,122 +1,81 @@
-use std::fmt::Display;
-
 use crate::{
     helix_engine::{
-        traversal_core::traversal_iter::RwTraversalIterator,
-        traversal_core::traversal_value::TraversalValue, storage_core::HelixGraphStorage,
-        types::GraphError, vector_core::hnsw::HNSW,
+        storage_core::HelixGraphStorage,
+        traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
+        types::GraphError,
     },
-    protocol::value::Value,
-    utils::{id::v6_uuid, items::Edge, label_hash::hash_label},
+    utils::{id::v6_uuid, items::Edge, label_hash::hash_label, properties::ImmutablePropertiesMap},
 };
-use heed3::PutFlags;
-use serde::{Deserialize, Serialize};
+use heed3::{PutFlags, RwTxn};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeType {
-    #[serde(rename = "vec")]
-    Vec,
-    #[serde(rename = "node")]
-    Node,
-}
-impl Display for EdgeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EdgeType::Vec => write!(f, "EdgeType::Vec"),
-            EdgeType::Node => write!(f, "EdgeType::Node"),
-        }
-    }
-}
-pub struct AddE {
-    inner: std::iter::Once<Result<TraversalValue, GraphError>>,
+pub struct AddE<'db, 'arena, 'txn>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    pub storage: &'db HelixGraphStorage,
+    pub arena: &'arena bumpalo::Bump,
+    pub txn: &'txn RwTxn<'db>,
+    inner: std::iter::Once<Result<TraversalValue<'arena>, GraphError>>,
 }
 
-impl Iterator for AddE {
-    type Item = Result<TraversalValue, GraphError>;
+impl<'db, 'arena, 'txn> Iterator for AddE<'db, 'arena, 'txn> {
+    type Item = Result<TraversalValue<'arena>, GraphError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
     }
 }
 
-pub trait AddEAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, GraphError>> {
-    fn add_e(
+pub trait AddEAdapter<'db, 'arena, 'txn, 's>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
+{
+    fn add_edge(
         self,
-        label: &'a str,
-        properties: Option<Vec<(String, Value)>>,
+        label: &'arena str,
+        properties: Option<ImmutablePropertiesMap<'arena>>,
         from_node: u128,
         to_node: u128,
         should_check: bool,
-        edge_type: EdgeType,
-    ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>;
-
-    fn node_vec_exists(&self, node_vec_id: &u128, edge_type: EdgeType) -> bool;
+    ) -> RwTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
-impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> AddEAdapter<'a, 'b>
-    for RwTraversalIterator<'a, 'b, I>
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    AddEAdapter<'db, 'arena, 'txn, 's> for RwTraversalIterator<'db, 'arena, 'txn, I>
 {
     #[inline(always)]
     #[allow(unused_variables)]
-    fn add_e(
+    fn add_edge(
         self,
-        label: &'a str,
-        properties: Option<Vec<(String, Value)>>,
+        label: &'arena str,
+        properties: Option<ImmutablePropertiesMap<'arena>>,
         from_node: u128,
         to_node: u128,
         should_check: bool,
-        // edge_types: (EdgeType, EdgeType),
-        edge_type: EdgeType,
-    ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>> {
+    ) -> RwTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
         let version = self.storage.version_info.get_latest(label);
         let edge = Edge {
             id: v6_uuid(),
-            label: label.to_string(),
+            label,
             version,
-            properties: properties.map(|props| props.into_iter().collect()),
+            properties,
             from_node,
             to_node,
         };
 
         let mut result: Result<TraversalValue, GraphError> = Ok(TraversalValue::Empty);
 
-        /*
-        if should_check {
-            match edge_types {
-                (EdgeType::Node, EdgeType::Node) => {
-                    if !(self.node_vec_exists(&from_node, EdgeType::Node)
-                        && self.node_vec_exists(&to_node, EdgeType::Node))
-                    {
-                        result = Err(GraphError::NodeNotFound);
-                    }
-                }
-                (EdgeType::Vec, EdgeType::Vec) => {
-                    if !(self.node_vec_exists(&from_node, EdgeType::Vec)
-                        && self.node_vec_exists(&to_node, EdgeType::Vec))
-                    {
-                        result = Err(GraphError::NodeNotFound);
-                    }
-                }
-                (EdgeType::Node, EdgeType::Vec) => {
-                    if !(self.node_vec_exists(&from_node, EdgeType::Node)
-                        && self.node_vec_exists(&to_node, EdgeType::Vec))
-                    {
-                        result = Err(GraphError::NodeNotFound);
-                    }
-                }
-                (EdgeType::Vec, EdgeType::Node) => {
-                    if !(self.node_vec_exists(&from_node, EdgeType::Vec)
-                        && self.node_vec_exists(&to_node, EdgeType::Node))
-                    {
-                        result = Err(GraphError::NodeNotFound);
-                    }
-                }
-            }
-        }
-        */
-
-        match edge.encode_edge() {
+        match edge.to_bincode_bytes() {
             Ok(bytes) => {
                 if let Err(e) = self.storage.edges_db.put_with_flags(
                     self.txn,
@@ -127,10 +86,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> AddEAdapter
                     result = Err(GraphError::from(e));
                 }
             }
-            Err(e) => result = Err(e),
+            Err(e) => result = Err(GraphError::from(e)),
         }
 
-        let label_hash = hash_label(edge.label.as_str(), None);
+        let label_hash = hash_label(edge.label, None);
 
         match self.storage.out_edges_db.put_with_flags(
             self.txn,
@@ -164,34 +123,14 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> AddEAdapter
 
         let result = match result {
             Ok(_) => Ok(TraversalValue::Edge(edge)),
-            Err(_) => Err(GraphError::EdgeNotFound),
+            Err(e) => Err(e),
         };
 
         RwTraversalIterator {
-            inner: std::iter::once(result), // TODO: change to support adding multiple edges
+            arena: self.arena,
             storage: self.storage,
             txn: self.txn,
+            inner: std::iter::once(result), // TODO: change to support adding multiple edges
         }
-    }
-
-    fn node_vec_exists(&self, node_vec_id: &u128, edge_type: EdgeType) -> bool {
-        let exists = match edge_type {
-            EdgeType::Node => self
-                .storage
-                .nodes_db
-                .get(self.txn, HelixGraphStorage::node_key(node_vec_id))
-                .is_ok_and(|node| node.is_some()),
-            EdgeType::Vec => self
-                .storage
-                .vectors
-                .get_vector(self.txn, *node_vec_id, 0, false)
-                .is_ok(),
-        };
-
-        if !exists {
-            return false;
-        }
-
-        true
     }
 }

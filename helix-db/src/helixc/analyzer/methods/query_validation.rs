@@ -2,26 +2,533 @@
 
 use crate::generate_error;
 use crate::helixc::analyzer::error_codes::ErrorCode;
+use crate::helixc::generator::utils::GenRef;
 use crate::helixc::{
     analyzer::{
         Ctx,
         errors::{push_query_err, push_query_warn},
         methods::{infer_expr_type::infer_expr_type, statement_validation::validate_statements},
         types::Type,
-        utils::{gen_identifier_or_param, is_valid_identifier},
+        utils::{VariableInfo, is_valid_identifier},
     },
     generator::{
         queries::{Parameter as GeneratedParameter, Query as GeneratedQuery},
-        return_values::{ReturnValue, ReturnValueExpr},
+        return_values::{
+            ReturnFieldInfo, ReturnFieldSource, ReturnFieldType, ReturnValue, ReturnValueStruct,
+        },
         source_steps::SourceStep,
         statements::Statement as GeneratedStatement,
-        traversal_steps::ShouldCollect,
-        utils::{GenRef, GeneratedValue},
+        traversal_steps::{ShouldCollect, Traversal as GeneratedTraversal},
     },
     parser::{location::Loc, types::*},
 };
 use paste::paste;
 use std::collections::HashMap;
+
+/// Helper to capitalize first letter of a string
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+/// Build unified field list for return types
+/// This handles all cases: simple schema, projections, spread, nested traversals
+fn build_return_fields(
+    ctx: &Ctx,
+    inferred_type: &Type,
+    traversal: &GeneratedTraversal,
+    struct_name_prefix: &str,
+) -> Vec<ReturnFieldInfo> {
+    let mut fields = Vec::new();
+
+    // Handle aggregate types specially
+    if let Type::Aggregate(info) = inferred_type {
+        // All aggregates have a key field (the grouping key from HashMap)
+        fields.push(ReturnFieldInfo::new_implicit(
+            "key".to_string(),
+            "String".to_string(),
+        ));
+
+        // Add fields for each grouped property
+        // We need to get the source type's schema to determine property types
+        let (_schema_fields, _item_type) = match info.source_type.as_ref() {
+            Type::Node(Some(label)) | Type::Nodes(Some(label)) => {
+                (ctx.node_fields.get(label.as_str()), "node")
+            }
+            Type::Edge(Some(label)) | Type::Edges(Some(label)) => {
+                (ctx.edge_fields.get(label.as_str()), "edge")
+            }
+            Type::Vector(Some(label)) | Type::Vectors(Some(label)) => {
+                (ctx.vector_fields.get(label.as_str()), "vector")
+            }
+            _ => (None, "unknown"),
+        };
+
+        // Add each grouped property as a field
+        for prop_name in &info.properties {
+            fields.push(ReturnFieldInfo::new_schema(
+                prop_name.clone(),
+                "Option<&'a Value>".to_string(),
+            ));
+        }
+
+        // Add count field
+        fields.push(ReturnFieldInfo::new_implicit(
+            "count".to_string(),
+            "i32".to_string(),
+        ));
+
+        // For non-COUNT aggregates, add items field with nested struct
+        if !info.is_count {
+            // Build nested struct for the items
+            let items_struct_name = format!("{}Items", struct_name_prefix);
+            // Recursively build fields for the source type
+            let item_fields = build_return_fields(
+                ctx,
+                info.source_type.as_ref(),
+                traversal,
+                &items_struct_name,
+            );
+
+            // Create field with proper nested_struct_name to avoid conflicts
+            fields.push(ReturnFieldInfo {
+                name: "items".to_string(),
+                field_type: ReturnFieldType::Nested(item_fields),
+                source: ReturnFieldSource::NestedTraversal {
+                    traversal_expr: String::new(),
+                    traversal_code: None,
+                    nested_struct_name: Some(format!("{}ReturnType", items_struct_name)),
+                    traversal_type: None,
+                    closure_param_name: None,
+                    closure_source_var: None,
+                    accessed_field_name: None,
+                },
+            });
+        }
+
+        return fields;
+    }
+
+    // Get schema type name if this is a schema type
+    let schema_type = match inferred_type {
+        Type::Node(Some(label)) | Type::Nodes(Some(label)) => Some((label.as_str(), "node")),
+        Type::Edge(Some(label)) | Type::Edges(Some(label)) => Some((label.as_str(), "edge")),
+        Type::Vector(Some(label)) | Type::Vectors(Some(label)) => Some((label.as_str(), "vector")),
+        _ => None,
+    };
+
+    // Step 1: Add implicit fields if this is a schema type
+    if let Some((label, item_type)) = schema_type {
+        // If has_object_step, only add implicit fields if they're explicitly selected
+        // Otherwise, add all implicit fields (default behavior)
+        let should_add_field = |field_name: &str| {
+            // Exclude if field is in excluded_fields
+            if traversal.excluded_fields.contains(&field_name.to_string()) {
+                return false;
+            }
+            // If has object step, only include if explicitly selected
+            !traversal.has_object_step || traversal.object_fields.contains(&field_name.to_string())
+        };
+
+        // Add id and label if no object step OR if explicitly selected
+        if should_add_field("id") {
+            fields.push(ReturnFieldInfo::new_implicit(
+                "id".to_string(),
+                "&'a str".to_string(),
+            ));
+        }
+        if should_add_field("label") {
+            fields.push(ReturnFieldInfo::new_implicit(
+                "label".to_string(),
+                "&'a str".to_string(),
+            ));
+        }
+
+        // Add type-specific implicit fields
+        if item_type == "edge" {
+            if should_add_field("from_node") {
+                fields.push(ReturnFieldInfo::new_implicit(
+                    "from_node".to_string(),
+                    "&'a str".to_string(),
+                ));
+            }
+            if should_add_field("to_node") {
+                fields.push(ReturnFieldInfo::new_implicit(
+                    "to_node".to_string(),
+                    "&'a str".to_string(),
+                ));
+            }
+        } else if item_type == "vector" {
+            if should_add_field("data") {
+                fields.push(ReturnFieldInfo::new_implicit(
+                    "data".to_string(),
+                    "&'a [f64]".to_string(),
+                ));
+            }
+            if should_add_field("score") {
+                fields.push(ReturnFieldInfo::new_implicit(
+                    "score".to_string(),
+                    "f64".to_string(),
+                ));
+            }
+        }
+
+        // Step 2: Add schema fields based on projection mode
+        let schema_fields = match item_type {
+            "node" => ctx.node_fields.get(label),
+            "edge" => ctx.edge_fields.get(label),
+            "vector" => ctx.vector_fields.get(label),
+            _ => None,
+        };
+
+        if let Some(schema_fields) = schema_fields {
+            if traversal.has_object_step {
+                // Projection mode - only include selected fields
+                for field_name in &traversal.object_fields {
+                    // Skip if it's a nested traversal (handled separately)
+                    if traversal.nested_traversals.contains_key(field_name) {
+                        continue;
+                    }
+
+                    // Skip implicit fields (already added)
+                    if field_name == "id"
+                        || field_name == "label"
+                        || field_name == "from_node"
+                        || field_name == "to_node"
+                        || field_name == "data"
+                        || field_name == "score"
+                    {
+                        continue;
+                    }
+
+                    if let Some(_field) = schema_fields.get(field_name.as_str()) {
+                        fields.push(ReturnFieldInfo::new_schema(
+                            field_name.clone(),
+                            "Option<&'a Value>".to_string(),
+                        ));
+                    }
+                }
+
+                // If has_spread, add all remaining schema fields
+                if traversal.has_spread {
+                    for (field_name, _field) in schema_fields.iter() {
+                        // Skip if already added
+                        let already_exists = fields.iter().any(|f| f.name == *field_name);
+                        if already_exists {
+                            continue;
+                        }
+                        // Skip if excluded
+                        if traversal.excluded_fields.contains(&field_name.to_string()) {
+                            continue;
+                        }
+
+                        // Check if this is an implicit field - if so, use the correct type
+                        let is_implicit_field = matches!(
+                            *field_name,
+                            "id" | "label" | "from_node" | "to_node" | "data" | "score"
+                        );
+
+                        if is_implicit_field {
+                            let rust_type = match *field_name {
+                                "data" => "&'a [f64]".to_string(),
+                                "score" => "f64".to_string(),
+                                _ => "&'a str".to_string(),
+                            };
+                            fields.push(ReturnFieldInfo::new_implicit(
+                                field_name.to_string(),
+                                rust_type,
+                            ));
+                        } else {
+                            fields.push(ReturnFieldInfo::new_schema(
+                                field_name.to_string(),
+                                "Option<&'a Value>".to_string(),
+                            ));
+                        }
+                    }
+                }
+            } else {
+                // No projection - include all schema fields except excluded ones
+                for (field_name, _field) in schema_fields.iter() {
+                    // Skip implicit fields (already added)
+                    if *field_name == "id"
+                        || *field_name == "label"
+                        || *field_name == "from_node"
+                        || *field_name == "to_node"
+                        || *field_name == "data"
+                        || *field_name == "score"
+                    {
+                        continue;
+                    }
+                    // Skip if excluded
+                    if traversal.excluded_fields.contains(&field_name.to_string()) {
+                        continue;
+                    }
+                    fields.push(ReturnFieldInfo::new_schema(
+                        field_name.to_string(),
+                        "Option<&'a Value>".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Step 3: Add nested traversals
+    for (field_name, nested_info) in &traversal.nested_traversals {
+        // For nested traversals, extract the return type and build nested fields
+        if let Some(ref return_type) = nested_info.return_type {
+            // Check if this is a scalar type or needs a struct
+            match return_type {
+                Type::Scalar(_scalar_ty) => {
+                    // Check if the traversal is accessing an implicit field
+                    // For nested traversals like usr::ID, we need to check what field is actually accessed
+                    let accessed_field = nested_info.traversal.object_fields.first(); // Get the first (and usually only) field being accessed
+                    let is_implicit = accessed_field
+                        .map(|f| {
+                            matches!(
+                                f.as_str(),
+                                "id" | "label"
+                                    | "from_node"
+                                    | "to_node"
+                                    | "data"
+                                    | "score"
+                                    | "ID"
+                                    | "Label" // Also check capitalized versions
+                            )
+                        })
+                        .unwrap_or(!nested_info.traversal.has_object_step);
+
+                    let rust_type = if is_implicit {
+                        // Use the appropriate type based on the implicit field
+                        match accessed_field.map(|s| s.as_str()) {
+                            Some("data") => "&'a [f64]".to_string(),
+                            Some("score") => "f64".to_string(),
+                            Some("id") | Some("ID") | Some("label") | Some("Label")
+                            | Some("from_node") | Some("to_node") | None => "&'a str".to_string(),
+                            _ => "Option<&'a Value>".to_string(),
+                        }
+                    } else {
+                        "Option<&'a Value>".to_string()
+                    };
+
+                    let trav_code = nested_info.traversal.format_steps_only();
+                    // Extract the accessed field name from object_fields
+                    let accessed_field_name = nested_info.traversal.object_fields.first().cloned();
+                    fields.push(ReturnFieldInfo {
+                        name: field_name.clone(),
+                        field_type: ReturnFieldType::Simple(rust_type),
+                        source: ReturnFieldSource::NestedTraversal {
+                            traversal_expr: format!("nested_traversal_{}", field_name),
+                            traversal_code: Some(trav_code),
+                            nested_struct_name: None,
+                            traversal_type: Some(nested_info.traversal.traversal_type.clone()),
+                            closure_param_name: nested_info.closure_param_name.clone(),
+                            closure_source_var: nested_info.closure_source_var.clone(),
+                            accessed_field_name,
+                        },
+                    });
+                }
+                Type::Node(_)
+                | Type::Edge(_)
+                | Type::Vector(_)
+                | Type::Nodes(_)
+                | Type::Edges(_)
+                | Type::Vectors(_) => {
+                    // Complex types need nested structs
+                    let nested_prefix =
+                        format!("{}{}", struct_name_prefix, capitalize_first(field_name));
+                    let nested_fields = build_return_fields(
+                        ctx,
+                        return_type,
+                        &nested_info.traversal,
+                        &nested_prefix,
+                    );
+                    let nested_struct_name = format!("{}ReturnType", nested_prefix);
+
+                    fields.push(ReturnFieldInfo {
+                        name: field_name.clone(),
+                        field_type: ReturnFieldType::Nested(nested_fields),
+                        source: ReturnFieldSource::NestedTraversal {
+                            traversal_expr: format!("nested_traversal_{}", field_name),
+                            traversal_code: Some(nested_info.traversal.format_steps_only()),
+                            nested_struct_name: Some(nested_struct_name),
+                            traversal_type: Some(nested_info.traversal.traversal_type.clone()),
+                            closure_param_name: nested_info.closure_param_name.clone(),
+                            closure_source_var: nested_info.closure_source_var.clone(),
+                            accessed_field_name: None,
+                        },
+                    });
+                }
+                _ => {
+                    // Other types - use placeholder
+                    fields.push(ReturnFieldInfo {
+                        name: field_name.clone(),
+                        field_type: ReturnFieldType::Simple("Value".to_string()),
+                        source: ReturnFieldSource::NestedTraversal {
+                            traversal_expr: format!("nested_traversal_{}", field_name),
+                            traversal_code: Some(nested_info.traversal.format_steps_only()),
+                            nested_struct_name: None,
+                            traversal_type: Some(nested_info.traversal.traversal_type.clone()),
+                            closure_param_name: nested_info.closure_param_name.clone(),
+                            closure_source_var: nested_info.closure_source_var.clone(),
+                            accessed_field_name: None,
+                        },
+                    });
+                }
+            }
+        } else {
+            // Type not yet determined - create placeholder
+            // This will be filled in during a later pass
+            fields.push(ReturnFieldInfo {
+                name: field_name.clone(),
+                field_type: ReturnFieldType::Simple("Value".to_string()),
+                source: ReturnFieldSource::NestedTraversal {
+                    traversal_expr: format!("nested_traversal_{}", field_name),
+                    traversal_code: None,
+                    nested_struct_name: None,
+                    traversal_type: None,
+                    closure_param_name: None,
+                    closure_source_var: None,
+                    accessed_field_name: None,
+                },
+            });
+        }
+    }
+
+    fields
+}
+
+/// Helper function to get Rust type string from analyzer Type and populate return value fields
+fn type_to_rust_string_and_fields(
+    ty: &Type,
+    should_collect: &ShouldCollect,
+    ctx: &Ctx,
+    _field_name: &str,
+) -> (
+    String,
+    Vec<crate::helixc::generator::return_values::ReturnValueField>,
+) {
+    match (ty, should_collect) {
+        // For single nodes/vectors/edges, generate a proper struct based on schema
+        (Type::Node(Some(label)), ShouldCollect::ToObj | ShouldCollect::No) => {
+            let type_name = format!("{}ReturnType", label);
+            let mut fields = vec![
+                crate::helixc::generator::return_values::ReturnValueField::new(
+                    "id".to_string(),
+                    "ID".to_string(),
+                )
+                .with_implicit(true),
+                crate::helixc::generator::return_values::ReturnValueField::new(
+                    "label".to_string(),
+                    "String".to_string(),
+                )
+                .with_implicit(true),
+            ];
+
+            // Add properties from schema (skip id and label as they're already added)
+            if let Some(node_fields) = ctx.node_fields.get(label.as_str()) {
+                for (prop_name, field) in node_fields {
+                    if *prop_name != "id" && *prop_name != "label" {
+                        fields.push(
+                            crate::helixc::generator::return_values::ReturnValueField::new(
+                                prop_name.to_string(),
+                                format!("{}", field.field_type),
+                            ),
+                        );
+                    }
+                }
+            }
+            (type_name, fields)
+        }
+        (Type::Edge(Some(label)), ShouldCollect::ToObj | ShouldCollect::No) => {
+            let type_name = format!("{}ReturnType", label);
+            let mut fields = vec![
+                crate::helixc::generator::return_values::ReturnValueField::new(
+                    "id".to_string(),
+                    "ID".to_string(),
+                )
+                .with_implicit(true),
+                crate::helixc::generator::return_values::ReturnValueField::new(
+                    "label".to_string(),
+                    "String".to_string(),
+                )
+                .with_implicit(true),
+            ];
+
+            if let Some(edge_fields) = ctx.edge_fields.get(label.as_str()) {
+                for (prop_name, field) in edge_fields {
+                    if *prop_name != "id" && *prop_name != "label" {
+                        fields.push(
+                            crate::helixc::generator::return_values::ReturnValueField::new(
+                                prop_name.to_string(),
+                                format!("{}", field.field_type),
+                            ),
+                        );
+                    }
+                }
+            }
+            (type_name, fields)
+        }
+        (Type::Vector(Some(label)), ShouldCollect::ToObj | ShouldCollect::No) => {
+            let type_name = format!("{}ReturnType", label);
+            let mut fields = vec![
+                crate::helixc::generator::return_values::ReturnValueField::new(
+                    "id".to_string(),
+                    "ID".to_string(),
+                )
+                .with_implicit(true),
+                crate::helixc::generator::return_values::ReturnValueField::new(
+                    "label".to_string(),
+                    "String".to_string(),
+                )
+                .with_implicit(true),
+            ];
+
+            if let Some(vector_fields) = ctx.vector_fields.get(label.as_str()) {
+                for (prop_name, field) in vector_fields {
+                    if *prop_name != "id" && *prop_name != "label" {
+                        fields.push(
+                            crate::helixc::generator::return_values::ReturnValueField::new(
+                                prop_name.to_string(),
+                                format!("{}", field.field_type),
+                            ),
+                        );
+                    }
+                }
+            }
+            (type_name, fields)
+        }
+        // For Vec types, we still need Vec<TypeName>
+        (Type::Node(Some(label)), ShouldCollect::ToVec) => {
+            (format!("Vec<{}ReturnType>", label), vec![])
+        }
+        (Type::Edge(Some(label)), ShouldCollect::ToVec) => {
+            (format!("Vec<{}ReturnType>", label), vec![])
+        }
+        (Type::Vector(Some(label)), ShouldCollect::ToVec) => {
+            (format!("Vec<{}ReturnType>", label), vec![])
+        }
+        // Fallbacks for None labels
+        (Type::Node(None), _) | (Type::Edge(None), _) | (Type::Vector(None), _) => {
+            ("".to_string(), vec![])
+        }
+        (Type::Scalar(s), _) => (format!("{}", s), vec![]),
+        (Type::Boolean, _) => ("bool".to_string(), vec![]),
+        (Type::Array(inner), _) => {
+            let (inner_type, _) =
+                type_to_rust_string_and_fields(inner, &ShouldCollect::No, ctx, _field_name);
+            (format!("Vec<{}>", inner_type), vec![])
+        }
+        (Type::Aggregate(_info), _) => {
+            // For aggregates, return HashMap type since that's what group_by/aggregate_by returns
+            // The actual struct fields will be generated later in build_return_fields
+            ("HashMap<String, AggregateItem>".to_string(), vec![])
+        }
+        _ => ("".to_string(), vec![]),
+    }
+}
 
 pub(crate) fn validate_query<'a>(ctx: &mut Ctx<'a>, original_query: &'a Query) {
     let mut query = GeneratedQuery {
@@ -64,11 +571,17 @@ pub(crate) fn validate_query<'a>(ctx: &mut Ctx<'a>, original_query: &'a Query) {
     // -------------------------------------------------
     // Statement‑by‑statement walk
     // -------------------------------------------------
-    let mut scope: HashMap<&str, Type> = HashMap::new();
+    let mut scope: HashMap<&str, VariableInfo> = HashMap::new();
     for param in &original_query.parameters {
+        let param_type = Type::from(param.param_type.1.clone());
+        // Parameters are singular unless they're array types (Nodes, Edges, Vectors, etc.)
+        let is_single = !matches!(
+            param_type,
+            Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_)
+        );
         scope.insert(
             param.name.1.as_str(),
-            Type::from(param.param_type.1.clone()),
+            VariableInfo::new(param_type, is_single),
         );
     }
     for stmt in &original_query.statements {
@@ -115,7 +628,7 @@ pub(crate) fn validate_query<'a>(ctx: &mut Ctx<'a>, original_query: &'a Query) {
                 &query.return_values.len().to_string()
             );
         }
-        let return_name = query.return_values.first().unwrap().get_name();
+        let return_name = query.return_values.first().unwrap().0.clone();
         query.mcp_handler = Some(return_name);
     }
 
@@ -125,13 +638,14 @@ pub(crate) fn validate_query<'a>(ctx: &mut Ctx<'a>, original_query: &'a Query) {
 fn analyze_return_expr<'a>(
     ctx: &mut Ctx<'a>,
     original_query: &'a Query,
-    scope: &mut HashMap<&'a str, Type>,
+    scope: &mut HashMap<&'a str, VariableInfo>,
     query: &mut GeneratedQuery,
     ret: &'a ReturnType,
 ) {
     match ret {
         ReturnType::Expression(expr) => {
-            let (_, stmt) = infer_expr_type(ctx, expr, scope, original_query, None, query);
+            let (inferred_type, stmt) =
+                infer_expr_type(ctx, expr, scope, original_query, None, query);
 
             if stmt.is_none() {
                 return;
@@ -148,43 +662,190 @@ fn analyze_return_expr<'a>(
                                 v.inner().as_str(),
                             );
 
-                            // if is single object, need to handle it as a single object
-                            // if is array, need to handle it as an array
-                            match traversal.should_collect {
-                                ShouldCollect::ToVec => {
-                                    query.return_values.push(ReturnValue::new_named(
-                                        GeneratedValue::Literal(GenRef::Literal(v.inner().clone())),
-                                        ReturnValueExpr::Traversal(traversal.clone()),
+                            let field_name = v.inner().clone();
+
+                            // Legacy approach
+                            let (rust_type, fields) = type_to_rust_string_and_fields(
+                                &inferred_type,
+                                &traversal.should_collect,
+                                ctx,
+                                &field_name,
+                            );
+
+                            // For Scalar types with field access (e.g., dataset_id::{value} or files::ID),
+                            // generate the property access code
+                            let literal_value = if matches!(inferred_type, Type::Scalar(_))
+                                && !traversal.object_fields.is_empty()
+                            {
+                                let property_name = &traversal.object_fields[0];
+
+                                match traversal.should_collect {
+                                    ShouldCollect::ToObj => {
+                                        // Single item - use literal_value
+                                        if property_name == "id" {
+                                            Some(GenRef::Std(format!(
+                                                "uuid_str({}.id(), &arena)",
+                                                field_name
+                                            )))
+                                        } else if property_name == "label" {
+                                            Some(GenRef::Std(format!("{}.label()", field_name)))
+                                        } else {
+                                            Some(GenRef::Std(format!(
+                                                "{}.get_property(\"{}\")",
+                                                field_name, property_name
+                                            )))
+                                        }
+                                    }
+                                    ShouldCollect::ToVec => {
+                                        // Collection - generate iteration code
+                                        let iter_code = if property_name == "id" {
+                                            format!("{}.iter().map(|item| uuid_str(item.id(), &arena)).collect::<Vec<_>>()", field_name)
+                                        } else if property_name == "label" {
+                                            format!("{}.iter().map(|item| item.label()).collect::<Vec<_>>()", field_name)
+                                        } else {
+                                            format!("{}.iter().map(|item| item.get_property(\"{}\")).collect::<Vec<_>>()", field_name, property_name)
+                                        };
+                                        Some(GenRef::Std(iter_code))
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+
+                            query.return_values.push((
+                                field_name.clone(),
+                                ReturnValue {
+                                    name: rust_type,
+                                    fields,
+                                    literal_value,
+                                },
+                            ));
+
+                            // New unified approach
+                            // Skip struct generation for primitive types (Boolean, Scalar) - they use legacy path only
+                            if !matches!(inferred_type, Type::Boolean | Type::Scalar(_)) {
+                                let struct_name_prefix = format!(
+                                    "{}{}",
+                                    capitalize_first(&query.name),
+                                    capitalize_first(&field_name)
+                                );
+                                let return_fields = build_return_fields(
+                                    ctx,
+                                    &inferred_type,
+                                    &traversal,
+                                    &struct_name_prefix,
+                                );
+                                let struct_name = format!("{}ReturnType", struct_name_prefix);
+                                let is_collection = matches!(
+                                    inferred_type,
+                                    Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_)
+                                );
+                                let (
+                                    is_aggregate,
+                                    is_group_by,
+                                    aggregate_properties,
+                                    is_count_aggregate,
+                                ) = match inferred_type {
+                                    Type::Aggregate(info) => (
+                                        true,
+                                        info.is_group_by,
+                                        info.properties.clone(),
+                                        info.is_count,
+                                    ),
+                                    _ => (false, false, Vec::new(), false),
+                                };
+                                query
+                                    .return_structs
+                                    .push(ReturnValueStruct::from_return_fields(
+                                        struct_name.clone(),
+                                        return_fields.clone(),
+                                        field_name.clone(),
+                                        is_collection,
+                                        traversal.is_reused_variable,
+                                        is_aggregate,
+                                        is_group_by,
+                                        aggregate_properties,
+                                        is_count_aggregate,
                                     ));
-                                }
-                                ShouldCollect::ToObj => {
-                                    query.return_values.push(ReturnValue::new_single_named(
-                                        GeneratedValue::Literal(GenRef::Literal(v.inner().clone())),
-                                        ReturnValueExpr::Traversal(traversal.clone()),
-                                    ));
-                                }
-                                ShouldCollect::Try => {
-                                    query.return_values.push(ReturnValue::new_aggregate_traversal(
-                                        GeneratedValue::Literal(GenRef::Literal(v.inner().clone())),
-                                        ReturnValueExpr::Traversal(traversal.clone()),
-                                    ));
-                                }
-                                _ => {
-                                    unreachable!()
-                                }
                             }
+
+                            // Note: Map closures are no longer injected here.
+                            // Mapping will happen at response construction time instead.
                         }
                         _ => {
-                            query.return_values.push(ReturnValue::new_unnamed(
-                                ReturnValueExpr::Traversal(traversal.clone()),
+                            let field_name = "data".to_string();
+
+                            // Legacy approach
+                            let (rust_type, fields) = type_to_rust_string_and_fields(
+                                &inferred_type,
+                                &traversal.should_collect,
+                                ctx,
+                                &field_name,
+                            );
+                            query.return_values.push((
+                                field_name.clone(),
+                                ReturnValue {
+                                    name: rust_type,
+                                    fields,
+                                    literal_value: None,
+                                },
                             ));
+
+                            // New unified approach
+                            let struct_name_prefix = format!(
+                                "{}{}",
+                                capitalize_first(&query.name),
+                                capitalize_first(&field_name)
+                            );
+                            let return_fields = build_return_fields(
+                                ctx,
+                                &inferred_type,
+                                &traversal,
+                                &struct_name_prefix,
+                            );
+                            let struct_name = format!("{}ReturnType", struct_name_prefix);
+                            let is_collection = matches!(
+                                inferred_type,
+                                Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_)
+                            );
+                            let (
+                                is_aggregate,
+                                is_group_by,
+                                aggregate_properties,
+                                is_count_aggregate,
+                            ) = match inferred_type {
+                                Type::Aggregate(info) => (
+                                    true,
+                                    info.is_group_by,
+                                    info.properties.clone(),
+                                    info.is_count,
+                                ),
+                                _ => (false, false, Vec::new(), false),
+                            };
+                            query
+                                .return_structs
+                                .push(ReturnValueStruct::from_return_fields(
+                                    struct_name.clone(),
+                                    return_fields.clone(),
+                                    field_name.clone(),
+                                    is_collection,
+                                    traversal.is_reused_variable,
+                                    is_aggregate,
+                                    is_group_by,
+                                    aggregate_properties,
+                                    is_count_aggregate,
+                                ));
+
+                            // Generate map closure (direct return, no variable assignment to update)
+                            // Map closure will be used during return generation phase
                         }
                     }
                 }
                 GeneratedStatement::Identifier(id) => {
                     is_valid_identifier(ctx, original_query, expr.loc.clone(), id.inner().as_str());
                     let identifier_end_type = match scope.get(id.inner().as_str()) {
-                        Some(t) => t.clone(),
+                        Some(var_info) => var_info.ty.clone(),
                         None => {
                             generate_error!(
                                 ctx,
@@ -196,40 +857,86 @@ fn analyze_return_expr<'a>(
                             Type::Unknown
                         }
                     };
-                    let value =
-                        gen_identifier_or_param(original_query, id.inner().as_str(), false, true);
 
-                    match identifier_end_type {
-                        Type::Aggregate => {
-                            query.return_values.push(ReturnValue::new_aggregate(
-                                GeneratedValue::Aggregate(GenRef::Literal(id.inner().clone())),
-                                value,
+                    let field_name = id.inner().clone();
+
+                    // Legacy approach
+                    let (rust_type, fields) = type_to_rust_string_and_fields(
+                        &identifier_end_type,
+                        &ShouldCollect::No,
+                        ctx,
+                        &field_name,
+                    );
+                    query.return_values.push((
+                        field_name.clone(),
+                        ReturnValue {
+                            name: rust_type,
+                            fields,
+                            literal_value: None,
+                        },
+                    ));
+
+                    // New unified approach
+                    // Skip struct generation for primitive types (Boolean, Scalar) - they use legacy path only
+                    if !matches!(identifier_end_type, Type::Boolean | Type::Scalar(_)) {
+                        // For identifier returns, we need to create a traversal to build fields from
+                        let var_info = scope.get(id.inner().as_str());
+                        let is_reused = var_info.is_some_and(|v| v.reference_count > 1);
+                        let is_collection = var_info.is_some_and(|v| !v.is_single);
+                        let traversal = GeneratedTraversal {
+                            is_reused_variable: is_reused,
+                            ..Default::default()
+                        };
+                        let struct_name_prefix = format!(
+                            "{}{}",
+                            capitalize_first(&query.name),
+                            capitalize_first(&field_name)
+                        );
+                        let return_fields = build_return_fields(
+                            ctx,
+                            &identifier_end_type,
+                            &traversal,
+                            &struct_name_prefix,
+                        );
+                        let struct_name = format!("{}ReturnType", struct_name_prefix);
+                        let (is_aggregate, is_group_by) = match identifier_end_type {
+                            Type::Aggregate(info) => (true, info.is_group_by),
+                            _ => (false, false),
+                        };
+                        // For GeneratedStatement::Identifier, the variable is already transformed
+                        // (no transformation code needed)
+                        let aggregate_properties = Vec::new();
+                        let is_count_aggregate = false;
+
+                        query
+                            .return_structs
+                            .push(ReturnValueStruct::from_return_fields(
+                                struct_name.clone(),
+                                return_fields.clone(),
+                                field_name.clone(),
+                                is_collection,
+                                is_reused,
+                                is_aggregate,
+                                is_group_by,
+                                aggregate_properties,
+                                is_count_aggregate,
                             ));
-                        }
-                        Type::Scalar(_) | Type::Boolean  => {
-                            query.return_values.push(ReturnValue::new_named_literal(
-                                GeneratedValue::Literal(GenRef::Literal(id.inner().clone())),
-                                value,
-                            ));
-                        }
-                        Type::Node(_) | Type::Vector(_) | Type::Edge(_) => {
-                            query.return_values.push(ReturnValue::new_single_named(
-                                GeneratedValue::Literal(GenRef::Literal(id.inner().clone())),
-                                ReturnValueExpr::Identifier(value),
-                            ));
-                        }
-                        _ => {
-                            query.return_values.push(ReturnValue::new_named(
-                                GeneratedValue::Literal(GenRef::Literal(id.inner().clone())),
-                                ReturnValueExpr::Identifier(value),
-                            ));
-                        }
                     }
+
+                    // Note: Map closures are no longer injected here.
+                    // Mapping will happen at response construction time instead.
                 }
                 GeneratedStatement::Literal(l) => {
-                    query.return_values.push(ReturnValue::new_literal(
-                        GeneratedValue::Literal(l.clone()),
-                        GeneratedValue::Literal(l.clone()),
+                    let field_name = "data".to_string();
+                    let rust_type = "Value".to_string();
+
+                    query.return_values.push((
+                        field_name,
+                        ReturnValue {
+                            name: rust_type,
+                            fields: vec![],
+                            literal_value: Some(l.clone()),
+                        },
                     ));
                 }
                 GeneratedStatement::Empty => query.return_values = vec![],
@@ -240,117 +947,400 @@ fn analyze_return_expr<'a>(
             }
         }
         ReturnType::Array(values) => {
-            let values = values
+            // For arrays, check if they contain simple expressions (identifiers/traversals)
+            // or complex nested structures
+            let is_simple_array = values
                 .iter()
-                .map(|object| process_return_object(ctx, original_query, scope, object, query))
-                .collect::<Vec<ReturnValueExpr>>();
-            query.return_values.push(ReturnValue::new_array(values));
+                .all(|v| matches!(v, ReturnType::Expression(_)));
+
+            if is_simple_array {
+                // Process each element as a separate return value
+                for return_expr in values {
+                    analyze_return_expr(ctx, original_query, scope, query, return_expr);
+                }
+            } else {
+                // Complex nested array/object structure - not yet supported
+                // TODO: Implement proper nested structure serialization
+                // For now, this will result in an empty return which the user needs to handle manually
+            }
         }
         ReturnType::Object(values) => {
-            let values = values
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        process_return_object(ctx, original_query, scope, value, query),
-                    )
-                })
-                .collect::<HashMap<String, ReturnValueExpr>>();
-            query.return_values.push(ReturnValue::new_object(values));
+            // Check if this is a simple object with only expression values
+            let is_simple_object = values
+                .values()
+                .all(|v| matches!(v, ReturnType::Expression(_)));
+
+            if is_simple_object {
+                // Process each field in the object
+                for return_expr in values.values() {
+                    // Recursively analyze each field's return expression
+                    analyze_return_expr(ctx, original_query, scope, query, return_expr);
+                }
+            } else {
+                // Complex nested object - not yet supported
+                // TODO: Implement proper nested structure serialization
+                // For now, this will result in an empty return which the user needs to handle manually
+            }
         }
         ReturnType::Empty => {}
     }
 }
 
-fn process_return_object<'a>(
-    ctx: &mut Ctx<'a>,
-    original_query: &'a Query,
-    scope: &mut HashMap<&'a str, Type>,
-    return_type: &'a ReturnType,
-    query: &mut GeneratedQuery,
-) -> ReturnValueExpr {
-    match return_type {
-        ReturnType::Expression(expr) => {
-            let (_, stmt) = infer_expr_type(ctx, expr, scope, original_query, None, query);
-            match stmt.unwrap() {
-                GeneratedStatement::Traversal(traversal) => {
-                    match &traversal.source_step.inner() {
-                        SourceStep::Identifier(v) => {
-                            is_valid_identifier(
-                                ctx,
-                                original_query,
-                                expr.loc.clone(),
-                                v.inner().as_str(),
-                            );
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
-                            // if is single object, need to handle it as a single object
-                            // if is array, need to handle it as an array
-                            match traversal.should_collect {
-                                ShouldCollect::ToVec => {
-                                    ReturnValueExpr::Traversal(traversal.clone())
-                                }
-                                ShouldCollect::ToObj => {
-                                    ReturnValueExpr::Traversal(traversal.clone())
-                                }
-                                _ => {
-                                    unreachable!()
-                                }
-                            }
-                        }
-                        _ => ReturnValueExpr::Traversal(traversal.clone()),
-                    }
-                }
-                GeneratedStatement::Identifier(id) => {
-                    is_valid_identifier(ctx, original_query, expr.loc.clone(), id.inner().as_str());
-                    let identifier_end_type = match scope.get(id.inner().as_str()) {
-                        Some(t) => t.clone(),
-                        None => {
-                            generate_error!(
-                                ctx,
-                                original_query,
-                                expr.loc.clone(),
-                                E301,
-                                id.inner().as_str()
-                            );
-                            Type::Unknown
-                        }
-                    };
-                    let value =
-                        gen_identifier_or_param(original_query, id.inner().as_str(), false, true);
+    // ============================================================================
+    // Parameter Validation Tests
+    // ============================================================================
 
-                    match identifier_end_type {
-                        Type::Scalar(_) | Type::Boolean => ReturnValueExpr::Identifier(value),
-                        Type::Node(_) | Type::Vector(_) | Type::Edge(_) => {
-                            ReturnValueExpr::Identifier(value)
-                        }
-                        _ => ReturnValueExpr::Identifier(value),
-                    }
-                }
-                GeneratedStatement::Literal(l) => {
-                    ReturnValueExpr::Value(GeneratedValue::Literal(l.clone()))
-                }
-                _ => unreachable!(),
-            }
-        }
-        ReturnType::Array(values) => {
-            let values = values
+    #[test]
+    fn test_unknown_parameter_type() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test(data: UnknownType) =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E209));
+        assert!(
+            diagnostics
                 .iter()
-                .map(|value| process_return_object(ctx, original_query, scope, value, query))
-                .collect::<Vec<ReturnValueExpr>>();
-            ReturnValueExpr::Array(values)
-        }
-        ReturnType::Object(values) => {
-            let values = values
+                .any(|d| d.message.contains("unknown type") && d.message.contains("UnknownType"))
+        );
+    }
+
+    #[test]
+    fn test_valid_array_parameter_type() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY createPeople(names: [String]) =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not have E209 errors for valid array parameter type
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E209));
+    }
+
+    // ============================================================================
+    // Variable Scope Tests
+    // ============================================================================
+
+    #[test]
+    fn test_variable_not_in_scope() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN unknownVar
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+        assert!(
+            diagnostics
                 .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        process_return_object(ctx, original_query, scope, value, query),
-                    )
-                })
-                .collect::<HashMap<String, ReturnValueExpr>>();
-            ReturnValueExpr::Object(values)
-        }
-        _ => unreachable!(),
+                .any(|d| d.message.contains("not in scope") && d.message.contains("unknownVar"))
+        );
+    }
+
+    #[test]
+    fn test_parameter_in_scope() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test(id: ID) =>
+                p <- N<Person>(id)
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_assigned_variable_in_scope() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                result <- p::{name}
+                RETURN result
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    // ============================================================================
+    // MCP Macro Validation Tests
+    // ============================================================================
+
+    #[test]
+    fn test_mcp_query_single_return_valid() {
+        let source = r#"
+            N::Person { name: String }
+
+            #[mcp]
+            QUERY getPerson(id: ID) =>
+                person <- N<Person>(id)
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E401));
+    }
+
+    #[test]
+    fn test_mcp_query_multiple_returns_invalid() {
+        let source = r#"
+            N::Person { name: String }
+
+            #[mcp]
+            QUERY getPerson() =>
+                p1 <- N<Person>
+                p2 <- N<Person>
+                RETURN p1, p2
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E401));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("MCP query must return a single value"))
+        );
+    }
+
+    #[test]
+    fn test_non_mcp_query_multiple_returns_valid() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY getPeople() =>
+                p1 <- N<Person>
+                p2 <- N<Person>
+                RETURN p1, p2
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Non-MCP queries can return multiple values
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E401));
+    }
+
+    // ============================================================================
+    // Return Value Tests
+    // ============================================================================
+
+    #[test]
+    fn test_return_literal_value() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN "success"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not have errors for returning literal
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_return_multiple_values() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p1 <- N<Person>
+                p2 <- N<Person>
+                RETURN p1, p2
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_return_object() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN {person: p, status: "found"}
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    // ============================================================================
+    // Model Macro Tests
+    // ============================================================================
+
+    #[test]
+    fn test_model_macro_sets_embedding_model() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            #[model("gpt-4")]
+            QUERY addDoc(text: String) =>
+                doc <- AddV<Document>(Embed(text), {content: text})
+                RETURN doc
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, generated) = result.unwrap();
+        // Model macro should be processed without errors
+        assert!(
+            diagnostics.is_empty() || !diagnostics.iter().any(|d| d.error_code == ErrorCode::E301)
+        );
+
+        // Check that the generated query has the embedding model set
+        assert_eq!(generated.queries.len(), 1);
+        // Model name includes quotes from parsing
+        assert_eq!(
+            generated.queries[0].embedding_model_to_use,
+            Some("\"gpt-4\"".to_string())
+        );
+    }
+
+    // ============================================================================
+    // Complex Query Tests
+    // ============================================================================
+
+    #[test]
+    fn test_query_with_traversal_and_filtering() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+            E::Knows { From: Person, To: Person }
+
+            QUERY getFriends(id: ID, minAge: U32) =>
+                person <- N<Person>(id)
+                friends <- person::Out<Knows>::WHERE(_::{age}::GT(minAge))
+                RETURN friends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Complex queries should not have scope errors
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_query_with_multiple_assignments() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { name: String }
+            E::WorksAt { From: Person, To: Company }
+
+            QUERY getEmployees(companyId: ID) =>
+                company <- N<Company>(companyId)
+                edges <- company::InE<WorksAt>
+                people <- edges::FromN
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_query_returning_property_access() {
+        let source = r#"
+            N::Person { name: String, email: String }
+
+            QUERY getEmail(id: ID) =>
+                person <- N<Person>(id)
+                email <- person::{email}
+                RETURN email
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
     }
 }

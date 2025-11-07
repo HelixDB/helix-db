@@ -292,7 +292,7 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
         }
         if let Some(v) = edge.properties.as_ref() {
             v.iter().for_each(|f| {
-                if RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
+                if NODE_RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
                     push_schema_err(
                         ctx,
                         f.loc.clone(),
@@ -316,7 +316,7 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
     }
     for node in &ctx.src.get_latest_schema()?.node_schemas {
         node.fields.iter().for_each(|f| {
-            if RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
+            if EDGE_RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
                 push_schema_err(
                     ctx,
                     f.loc.clone(),
@@ -339,7 +339,7 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
     }
     for vector in &ctx.src.get_latest_schema()?.vector_schemas {
         vector.fields.iter().for_each(|f: &Field| {
-            if RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
+            if VEC_RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
                 push_schema_err(
                     ctx,
                     f.loc.clone(),
@@ -372,4 +372,481 @@ fn is_valid_schema_field_type(ft: &FieldType) -> bool {
     }
 }
 
-const RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "to_node", "from_node", "data", "score"];
+const NODE_RESERVED_FIELD_NAMES: &[&str] = &["id", "label"];
+const EDGE_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "to_node", "from_node"];
+const VEC_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "data", "score"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
+
+    // ============================================================================
+    // Duplicate Schema Definition Tests
+    // ============================================================================
+
+    #[test]
+    fn test_duplicate_node_definition() {
+        let source = r#"
+            N::Person { name: String }
+            N::Person { age: U32 }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E107));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate node definition"))
+        );
+    }
+
+    #[test]
+    fn test_duplicate_edge_definition() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+            E::Knows { From: Person, To: Person, Properties: { since: String } }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E107));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate edge definition"))
+        );
+    }
+
+    #[test]
+    fn test_duplicate_vector_definition() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+            V::Document { title: String, embedding: [F32] }
+
+            QUERY test() =>
+                d <- V<Document>
+                RETURN d
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E107));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate vector definition"))
+        );
+    }
+
+    // ============================================================================
+    // Undeclared Type Reference Tests
+    // ============================================================================
+
+    #[test]
+    fn test_edge_references_undeclared_from_node() {
+        let source = r#"
+            N::Person { name: String }
+            E::Works { From: Company, To: Person }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E106));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("undeclared node or vector type")
+                    && d.message.contains("Company"))
+        );
+    }
+
+    #[test]
+    fn test_edge_references_undeclared_to_node() {
+        let source = r#"
+            N::Person { name: String }
+            E::Likes { From: Person, To: Product }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E106));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("undeclared node or vector type")
+                    && d.message.contains("Product"))
+        );
+    }
+
+    #[test]
+    fn test_edge_with_valid_node_references() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { name: String }
+            E::WorksAt { From: Person, To: Company }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E106));
+    }
+
+    #[test]
+    fn test_edge_references_vector_type() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+            N::Person { name: String }
+            E::References { From: Person, To: Document }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not error - vectors can be referenced in edges
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E106 && d.message.contains("Document"))
+        );
+    }
+
+    // ============================================================================
+    // Reserved Field Name Tests
+    // ============================================================================
+
+    #[test]
+    fn test_reserved_field_name_id_in_node() {
+        let source = r#"
+            N::Person { id: String, name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved field name") && d.message.contains("id"))
+        );
+    }
+
+    #[test]
+    fn test_reserved_field_name_label_in_edge() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person, Properties: { label: String } }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved field name") && d.message.contains("label"))
+        );
+    }
+
+    #[test]
+    fn test_reserved_field_name_to_node() {
+        let source = r#"
+            N::Person { to_node: ID }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
+    }
+
+    #[test]
+    fn test_reserved_field_name_data_in_vector() {
+        let source = r#"
+            V::Document { data: String, embedding: [F32] }
+
+            QUERY test() =>
+                d <- V<Document>
+                RETURN d
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
+    }
+
+    #[test]
+    fn test_reserved_field_name_case_insensitive() {
+        let source = r#"
+            N::Person { ID: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Reserved field names are checked case-insensitively
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
+    }
+
+    // ============================================================================
+    // Invalid Schema Field Type Tests
+    // ============================================================================
+
+    #[test]
+    fn test_valid_primitive_field_types() {
+        let source = r#"
+            N::Person {
+                name: String,
+                age: U32,
+                score: F64,
+                active: Boolean,
+                user_id: ID,
+                created_at: Date
+            }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not have any E209 errors for these valid types
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E209));
+    }
+
+    #[test]
+    fn test_valid_array_field_types() {
+        let source = r#"
+            N::Person {
+                tags: [String],
+                scores: [F64],
+                ids: [ID]
+            }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E209));
+    }
+
+    // ============================================================================
+    // Field Lookup Tests
+    // ============================================================================
+
+    #[test]
+    fn test_field_lookup_includes_implicit_fields() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let ctx = Ctx::new(&parsed).unwrap();
+
+        // Node should have implicit 'id' and 'label' fields
+        let person_fields = ctx.node_fields.get("Person").unwrap();
+        assert!(person_fields.contains_key("id"));
+        assert!(person_fields.contains_key("label"));
+        assert!(person_fields.contains_key("name"));
+    }
+
+    #[test]
+    fn test_edge_field_lookup_includes_implicit_fields() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person, Properties: { since: Date } }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let ctx = Ctx::new(&parsed).unwrap();
+
+        // Edge should have implicit fields
+        let knows_fields = ctx.edge_fields.get("Knows").unwrap();
+        assert!(knows_fields.contains_key("id"));
+        assert!(knows_fields.contains_key("label"));
+        assert!(knows_fields.contains_key("from_node"));
+        assert!(knows_fields.contains_key("to_node"));
+        assert!(knows_fields.contains_key("since"));
+    }
+
+    #[test]
+    fn test_vector_field_lookup_includes_implicit_fields() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY test() =>
+                d <- V<Document>
+                RETURN d
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let ctx = Ctx::new(&parsed).unwrap();
+
+        // Vector should have implicit fields
+        let doc_fields = ctx.vector_fields.get("Document").unwrap();
+        assert!(doc_fields.contains_key("id"));
+        assert!(doc_fields.contains_key("label"));
+        assert!(doc_fields.contains_key("data"));
+        assert!(doc_fields.contains_key("score"));
+        assert!(doc_fields.contains_key("content"));
+    }
+
+    // ============================================================================
+    // Complex Schema Tests
+    // ============================================================================
+
+    #[test]
+    fn test_multiple_edges_between_same_types() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+            E::Follows { From: Person, To: Person }
+            E::Blocks { From: Person, To: Person }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not error - multiple edges between same types is valid
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E106 || d.error_code == ErrorCode::E107)
+        );
+    }
+
+    #[test]
+    fn test_schema_with_no_nodes_only_vectors() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY test() =>
+                d <- V<Document>
+                RETURN d
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        // Schema with only vectors should be valid
+    }
+}

@@ -29,6 +29,7 @@ pub enum GraphError {
     EmbeddingError(String),
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
+    RerankerError(String),
 }
 
 impl std::error::Error for GraphError {}
@@ -65,6 +66,7 @@ impl fmt::Display for GraphError {
             GraphError::IoNeeded(_) => {
                 write!(f, "Asyncronous IO is needed to complete the DB operation")
             }
+            GraphError::RerankerError(msg) => write!(f, "Reranker error: {msg}"),
         }
     }
 }
@@ -144,6 +146,7 @@ impl From<VectorError> for GraphError {
 #[derive(Debug)]
 pub enum VectorError {
     VectorNotFound(String),
+    VectorDeleted,
     InvalidVectorLength,
     InvalidVectorData,
     EntryPointNotFound,
@@ -158,6 +161,7 @@ impl fmt::Display for VectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VectorError::VectorNotFound(id) => write!(f, "Vector not found: {id}"),
+            VectorError::VectorDeleted => write!(f, "Vector deleted"),
             VectorError::InvalidVectorLength => write!(f, "Invalid vector length"),
             VectorError::InvalidVectorData => write!(f, "Invalid vector data"),
             VectorError::EntryPointNotFound => write!(f, "Entry point not found"),

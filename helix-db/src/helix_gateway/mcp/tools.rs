@@ -1,42 +1,34 @@
 use crate::{
-    debug_println,
     helix_engine::{
-        bm25::bm25::{BM25, BM25Flatten, HBM25Config},
         storage_core::HelixGraphStorage,
         traversal_core::{
             ops::{
-                bm25::search_bm25::SearchBM25Adapter,
                 g::G,
-                in_::{
-                    in_::{InAdapter, InNodesIterator},
-                    in_e::{InEdgesAdapter, InEdgesIterator},
-                },
-                out::{
-                    out::{OutAdapter, OutNodesIterator},
-                    out_e::{OutEdgesAdapter, OutEdgesIterator},
-                },
-                source::{add_e::EdgeType, e_from_type::EFromType, n_from_type::NFromType},
-                util::order::OrderByAdapter,
-                vectors::{brute_force_search::BruteForceSearchVAdapter, search::SearchVAdapter},
+                in_::{in_::InAdapter, in_e::InEdgesAdapter},
+                out::{out::OutAdapter, out_e::OutEdgesAdapter},
+                source::{e_from_type::EFromTypeAdapter, n_from_type::NFromTypeAdapter},
+                util::{order::OrderByAdapter, range::RangeAdapter},
             },
-            traversal_value::{Traversable, TraversalValue},
+            traversal_iter::RoTraversalIterator,
+            traversal_value::TraversalValue,
         },
         types::GraphError,
-        vector_core::vector::HVector,
     },
-    helix_gateway::{
-        embedding_providers::embedding_providers::{EmbeddingModel, get_embedding_model},
-        mcp::mcp::{MCPConnection, MCPHandler, MCPHandlerSubmission, MCPToolInput, McpBackend},
-    },
-    protocol::{response::Response, return_values::ReturnValue, value::Value},
-    utils::label_hash::hash_label,
+    protocol::value::Value,
 };
-use heed3::{EnvOpenOptions, RoTxn};
-use helix_macros::{mcp_handler, tool_calls};
+use bumpalo::Bump;
+use heed3::RoTxn;
 use serde::Deserialize;
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeType {
+    Node,
+    Vec,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "tool_name", content = "args")]
 pub enum ToolArgs {
@@ -65,16 +57,31 @@ pub enum ToolArgs {
         edge_type: String,
     },
     FilterItems {
-        properties: Option<Vec<(String, String)>>,
-        filter_traversals: Option<Vec<ToolArgs>>,
+        #[serde(default)]
+        filter: FilterTraversal,
     },
     OrderBy {
         properties: String,
         order: Order,
     },
+    SearchKeyword {
+        query: String,
+        limit: usize,
+        label: String,
+    },
+    SearchVecText {
+        query: String,
+        label: String,
+        k: usize,
+    },
+    SearchVec {
+        vector: Vec<f64>,
+        k: usize,
+        min_score: Option<f64>,
+    },
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub enum Order {
     #[serde(rename = "asc")]
     Asc,
@@ -82,7 +89,7 @@ pub enum Order {
     Desc,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FilterProperties {
     pub key: String,
@@ -90,7 +97,13 @@ pub struct FilterProperties {
     pub operator: Option<Operator>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FilterTraversal {
+    pub properties: Option<Vec<Vec<FilterProperties>>>,
+    pub filter_traversals: Option<Vec<ToolArgs>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub enum Operator {
     #[serde(rename = "==")]
     Eq,
@@ -107,709 +120,402 @@ pub enum Operator {
 }
 
 impl Operator {
-    pub fn execute(&self, value1: &Value, value2: &Value) -> bool {
-        debug_println!("operating on value1: {:?}, value2: {:?}", *value1, *value2);
+    #[inline]
+    pub fn execute(&self, lhs: &Value, rhs: &Value) -> bool {
         match self {
-            Operator::Eq => *value1 == *value2,
-            Operator::Neq => *value1 != *value2,
-            Operator::Gt => *value1 > *value2,
-            Operator::Lt => *value1 < *value2,
-            Operator::Gte => *value1 >= *value2,
-            Operator::Lte => *value1 <= *value2,
+            Operator::Eq => lhs == rhs,
+            Operator::Neq => lhs != rhs,
+            Operator::Gt => lhs > rhs,
+            Operator::Lt => lhs < rhs,
+            Operator::Gte => lhs >= rhs,
+            Operator::Lte => lhs <= rhs,
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct FilterTraversal {
-    pub properties: Option<Vec<Vec<FilterProperties>>>,
-    pub filter_traversals: Option<Vec<ToolArgs>>,
+type DynIter<'arena, 'txn> =
+    Box<dyn Iterator<Item = Result<TraversalValue<'arena>, GraphError>> + 'txn>;
+
+pub struct TraversalStream<'db, 'arena, 'txn>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    iter: RoTraversalIterator<'db, 'arena, 'txn, DynIter<'arena, 'txn>>,
 }
 
-#[tool_calls]
-pub(super) trait McpTools<'a> {
-    fn out_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-        edge_type: EdgeType,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn out_e_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn in_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-        edge_type: EdgeType,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn in_e_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn n_from_type(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        node_type: String,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn e_from_type(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_type: String,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    /// filters items based on properies and traversal existence
-    /// a node or edge needs to have been search first though
-    fn filter_items(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        filter: FilterTraversal,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    /// BM25
-    fn search_keyword(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        query: String,
-        limit: usize,
-        label: String,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    /// HNSW Search with built int embedding model
-    fn search_vector_text(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        query: String,
-        label: String,
-        k: Option<usize>,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn search_vector(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        vector: Vec<f64>,
-        k: usize,
-        min_score: Option<f64>,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-
-    fn order_by(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        properties: String,
-        order: Order,
-    ) -> Result<Vec<TraversalValue>, GraphError>;
-}
-
-impl<'a> McpTools<'a> for McpBackend {
-    fn out_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-        edge_type: EdgeType,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let iter = connection
-            .iter
-            .clone()
-            .filter_map(move |item| {
-                let edge_label_hash = hash_label(&edge_label, None);
-                let prefix = HelixGraphStorage::out_edge_key(&item.id(), &edge_label_hash);
-                match db
-                    .out_edges_db
-                    .lazily_decode_data()
-                    .get_duplicates(txn, &prefix)
-                {
-                    Ok(Some(iter)) => Some(OutNodesIterator {
-                        iter,
-                        storage: Arc::clone(&db),
-                        edge_type: edge_type.clone(),
-                        txn,
-                    }),
-                    Ok(None) => None,
-                    Err(e) => {
-                        println!("{} Error getting out edges: {:?}", line!(), e);
-                        // return Err(e);
-                        None
-                    }
-                }
-            })
-            .flatten();
-
-        let result = iter.collect();
-        debug_println!("result: {:?}", result);
-        result
+impl<'db, 'arena, 'txn> TraversalStream<'db, 'arena, 'txn>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    pub fn new(
+        storage: &'db HelixGraphStorage,
+        txn: &'txn RoTxn<'db>,
+        arena: &'arena Bump,
+    ) -> Self {
+        Self::from_ro_iterator(G::new(storage, txn, arena))
     }
 
-    fn out_e_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let iter = connection
-            .iter
-            .clone()
-            .filter_map(move |item| {
-                let edge_label_hash = hash_label(&edge_label, None);
-                let prefix = HelixGraphStorage::out_edge_key(&item.id(), &edge_label_hash);
-                match db
-                    .out_edges_db
-                    .lazily_decode_data()
-                    .get_duplicates(txn, &prefix)
-                {
-                    Ok(Some(iter)) => Some(OutEdgesIterator {
-                        iter,
-                        storage: Arc::clone(&db),
-                        txn,
-                    }),
-                    Ok(None) => None,
-                    Err(e) => {
-                        println!("{} Error getting out edges: {:?}", line!(), e);
-                        // return Err(e);
-                        None
-                    }
-                }
-            })
-            .flatten();
-
-        let result = iter.collect();
-        debug_println!("result: {:?}", result);
-        result
+    pub fn from_iter(
+        storage: &'db HelixGraphStorage,
+        txn: &'txn RoTxn<'db>,
+        arena: &'arena Bump,
+        items: impl Iterator<Item = TraversalValue<'arena>> + 'txn,
+    ) -> Self {
+        Self::from_ro_iterator(G::from_iter(storage, txn, items, arena))
     }
 
-    fn in_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-        edge_type: EdgeType,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
+    pub fn from_ro_iterator<I>(iter: RoTraversalIterator<'db, 'arena, 'txn, I>) -> Self
+    where
+        I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>> + 'txn,
+    {
+        let RoTraversalIterator {
+            storage,
+            arena,
+            txn,
+            inner,
+        } = iter;
 
-        let iter = connection
-            .iter
-            .clone()
-            .filter_map(move |item| {
-                let edge_label_hash = hash_label(&edge_label, None);
-                let prefix = HelixGraphStorage::in_edge_key(&item.id(), &edge_label_hash);
-                match db
-                    .in_edges_db
-                    .lazily_decode_data()
-                    .get_duplicates(txn, &prefix)
-                {
-                    Ok(Some(iter)) => Some(InNodesIterator {
-                        iter,
-                        storage: Arc::clone(&db),
-                        edge_type: edge_type.clone(),
-                        txn,
-                    }),
-                    Ok(None) => None,
-                    Err(e) => {
-                        println!("{} Error getting out edges: {:?}", line!(), e);
-                        // return Err(e);
-                        None
-                    }
-                }
-            })
-            .flatten();
+        let boxed: DynIter<'arena, 'txn> = Box::new(inner);
 
-        let result = iter.collect();
-        debug_println!("result: {:?}", result);
-        result
+        Self {
+            iter: RoTraversalIterator {
+                storage,
+                arena,
+                txn,
+                inner: boxed,
+            },
+        }
     }
 
-    fn in_e_step(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        edge_label: String,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let iter = connection
-            .iter
-            .clone()
-            .filter_map(move |item| {
-                let edge_label_hash = hash_label(&edge_label, None);
-                let prefix = HelixGraphStorage::in_edge_key(&item.id(), &edge_label_hash);
-                match db
-                    .in_edges_db
-                    .lazily_decode_data()
-                    .get_duplicates(txn, &prefix)
-                {
-                    Ok(Some(iter)) => Some(InEdgesIterator {
-                        iter,
-                        storage: Arc::clone(&db),
-                        txn,
-                    }),
-                    Ok(None) => None,
-                    Err(_e) => {
-                        debug_println!("{} Error getting out edges: {:?}", line!(), _e);
-                        // return Err(e);
-                        None
-                    }
-                }
-            })
-            .flatten();
-
-        let result = iter.collect();
-        debug_println!("result: {:?}", result);
-        result
+    pub fn map<I, F>(self, f: F) -> TraversalStream<'db, 'arena, 'txn>
+    where
+        I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>> + 'txn,
+        F: FnOnce(
+            RoTraversalIterator<'db, 'arena, 'txn, DynIter<'arena, 'txn>>,
+        ) -> RoTraversalIterator<'db, 'arena, 'txn, I>,
+    {
+        TraversalStream::from_ro_iterator(f(self.iter))
     }
 
-    fn n_from_type(
-        &'a self,
-        txn: &'a RoTxn,
-        _connection: &'a MCPConnection,
-        node_type: String,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let iter = db.nodes_db.lazily_decode_data().iter(txn).unwrap();
-
-        let iter = NFromType {
-            iter,
-            label: &node_type,
-        };
-
-        let result = Ok(iter.filter_map(|item| item.ok()).collect::<Vec<_>>());
-        debug_println!("result: {:?}", result);
-        result
+    pub fn into_ro(self) -> RoTraversalIterator<'db, 'arena, 'txn, DynIter<'arena, 'txn>> {
+        self.iter
     }
 
-    fn e_from_type(
-        &'a self,
-        txn: &'a RoTxn,
-        _connection: &'a MCPConnection,
-        edge_type: String,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let iter = EFromType {
-            iter: db.edges_db.lazily_decode_data().iter(txn).unwrap(),
-            label: &edge_type,
-        };
-
-        let result = Ok(iter.filter_map(|item| item.ok()).collect::<Vec<_>>());
-        debug_println!("result: {:?}", result);
-        result
+    pub fn into_inner_iter(self) -> DynIter<'arena, 'txn> {
+        self.iter.inner
     }
 
-    fn filter_items(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        filter: FilterTraversal,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let result = _filter_items(Arc::clone(&self.db), txn, connection.iter.clone(), &filter);
-
-        Ok(result)
+    pub fn collect(self) -> Result<Vec<TraversalValue<'arena>>, GraphError> {
+        let mut values = Vec::new();
+        for item in self.into_inner_iter() {
+            values.push(item?);
+        }
+        Ok(values)
     }
 
-    // fn search_keyword_old(
-    //     &'a self,
-    //     txn: &'a RoTxn,
-    //     _connection: &'a MCPConnection,
-    //     query: String,
-    //     limit: usize,
-    //     label: String,
-    // ) -> Result<Vec<TraversalValue>, GraphError> {
-    //     let db = Arc::clone(&self.db);
-
-    //     //         let items = connection.iter.clone().collect::<Vec<_>>();
-
-    //     // Check if BM25 is enabled and has metadata
-    //     if let Some(bm25) = &db.bm25 {
-    //         match bm25
-    //             .metadata_db
-    //             .get(txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
-    //         {
-    //             Ok(Some(_)) => {
-    //                 let results = G::new(db, txn)
-    //                     .search_bm25(&label, &query, limit)?
-    //                     .collect_to::<Vec<_>>();
-
-    //                 println!("BM25 search results: {results:?}");
-    //                 Ok(results)
-    //             }
-    //             Ok(None) => {
-    //                 // BM25 metadata not found - index not initialized yet
-    //                 debug_println!("BM25 index not initialized yet - returning empty results");
-    //                 println!("BM25 index not initialized yet - returning empty results");
-    //                 Err(GraphError::from(
-    //                     "BM25 index not initialized yet - returning empty results",
-    //                 ))
-    //             }
-    //             Err(_e) => {
-    //                 // Error accessing metadata database
-    //                 debug_println!(
-    //                     "Error checking BM25 metadata: {_e:?} - returning empty results"
-    //                 );
-    //                 println!("Error checking BM25 metadata: {_e:?} - returning empty results");
-    //                 Err(GraphError::from(
-    //                     "Error checking BM25 metadata - returning empty results",
-    //                 ))
-    //             }
-    //         }
-    //     } else {
-    //         // BM25 is not enabled
-    //         debug_println!("BM25 is not enabled - returning empty results");
-    //         println!("BM25 is not enabled - returning empty results");
-    //         Err(GraphError::from(
-    //             "BM25 is not enabled - returning empty results",
-    //         ))
-    //     }
-    // }
-
-    fn search_keyword(
-        &'a self,
-        _txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        query: String,
-        limit: usize,
-        label: String,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        _search_keyword(Arc::clone(&self.db), connection, query, limit, label)
-    }
-
-    fn search_vector_text(
-        &'a self,
-        txn: &'a RoTxn,
-        _connection: &'a MCPConnection,
-        query: String,
-        label: String,
-        k: Option<usize>,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let model = get_embedding_model(None, None, None)?;
-        let result = model.fetch_embedding(&query);
-        let embedding = result?;
-
-        let res = G::new(db, txn)
-            .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&embedding, k.unwrap_or(5), &label, None)
-            .collect_to::<Vec<_>>();
-
-        debug_println!("result: {res:?}");
-        Ok(res)
-    }
-
-    fn search_vector(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        vector: Vec<f64>,
-        k: usize,
-        min_score: Option<f64>,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
-
-        let items = connection.iter.clone().collect::<Vec<_>>();
-
-        let mut res = G::new_from(db, txn, items)
-            .brute_force_search_v(&vector, k)
-            .collect_to::<Vec<_>>();
-
-        if let Some(min_score) = min_score {
-            res.retain(|item| {
-                if let TraversalValue::Vector(vector) = item {
-                    vector.get_distance() > min_score
-                } else {
-                    false
-                }
-            });
+    pub fn nth(self, index: usize) -> Result<Option<TraversalValue<'arena>>, GraphError> {
+        let mut iter = self.into_inner_iter();
+        for _ in 0..index {
+            if let Some(res) = iter.next() {
+                res?;
+            } else {
+                return Ok(None);
+            }
         }
 
-        debug_println!("result: {res:?}");
-        Ok(res)
+        match iter.next() {
+            Some(res) => res.map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+pub fn execute_query_chain<'db, 'arena, 'txn>(
+    steps: &[ToolArgs],
+    storage: &'db HelixGraphStorage,
+    txn: &'txn RoTxn<'db>,
+    arena: &'arena Bump,
+) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    let initial = TraversalStream::new(storage, txn, arena);
+    execute_query_chain_with_stream(initial, steps, storage, txn, arena)
+}
+
+pub fn execute_query_chain_from_seed<'db, 'arena, 'txn>(
+    steps: &[ToolArgs],
+    storage: &'db HelixGraphStorage,
+    txn: &'txn RoTxn<'db>,
+    arena: &'arena Bump,
+    seed: impl Iterator<Item = TraversalValue<'arena>> + 'txn,
+) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    let initial = TraversalStream::from_iter(storage, txn, arena, seed);
+    execute_query_chain_with_stream(initial, steps, storage, txn, arena)
+}
+
+pub fn execute_query_chain_with_stream<'db, 'arena, 'txn>(
+    initial: TraversalStream<'db, 'arena, 'txn>,
+    steps: &[ToolArgs],
+    storage: &'db HelixGraphStorage,
+    txn: &'txn RoTxn<'db>,
+    arena: &'arena Bump,
+) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    steps.iter().try_fold(initial, |stream, step| {
+        apply_step(stream, step, storage, txn, arena)
+    })
+}
+
+fn apply_step<'db, 'arena, 'txn>(
+    stream: TraversalStream<'db, 'arena, 'txn>,
+    step: &ToolArgs,
+    storage: &'db HelixGraphStorage,
+    txn: &'txn RoTxn<'db>,
+    arena: &'arena Bump,
+) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    match step {
+        ToolArgs::NFromType { node_type } => {
+            let label = arena.alloc_str(node_type);
+            Ok(TraversalStream::from_ro_iterator(
+                G::new(storage, txn, arena).n_from_type(label),
+            ))
+        }
+        ToolArgs::EFromType { edge_type } => {
+            let label = arena.alloc_str(edge_type);
+            Ok(TraversalStream::from_ro_iterator(
+                G::new(storage, txn, arena).e_from_type(label),
+            ))
+        }
+        ToolArgs::OutStep {
+            edge_label,
+            edge_type,
+            filter,
+        } => {
+            let label = arena.alloc_str(edge_label);
+            let edge_kind = *edge_type;
+            let transformed = match edge_kind {
+                EdgeType::Node => stream.map(|iter| iter.out_node(label)),
+                EdgeType::Vec => stream.map(|iter| iter.out_vec(label, true)),
+            };
+
+            if let Some(filter) = filter.clone() {
+                apply_filter(transformed, filter)
+            } else {
+                Ok(transformed)
+            }
+        }
+        ToolArgs::OutEStep { edge_label, filter } => {
+            let label = arena.alloc_str(edge_label);
+            let transformed = stream.map(|iter| iter.out_e(label));
+
+            if let Some(filter) = filter.clone() {
+                apply_filter(transformed, filter)
+            } else {
+                Ok(transformed)
+            }
+        }
+        ToolArgs::InStep {
+            edge_label,
+            edge_type,
+            filter,
+        } => {
+            let label = arena.alloc_str(edge_label);
+            let edge_kind = *edge_type;
+            let transformed = match edge_kind {
+                EdgeType::Node => stream.map(|iter| iter.in_node(label)),
+                EdgeType::Vec => stream.map(|iter| iter.in_vec(label, true)),
+            };
+
+            if let Some(filter) = filter.clone() {
+                apply_filter(transformed, filter)
+            } else {
+                Ok(transformed)
+            }
+        }
+        ToolArgs::InEStep { edge_label, filter } => {
+            let label = arena.alloc_str(edge_label);
+            let transformed = stream.map(|iter| iter.in_e(label));
+
+            if let Some(filter) = filter.clone() {
+                apply_filter(transformed, filter)
+            } else {
+                Ok(transformed)
+            }
+        }
+        ToolArgs::FilterItems { filter } => apply_filter(stream, filter.clone()),
+        ToolArgs::OrderBy { properties, order } => {
+            let props = arena.alloc_str(properties);
+            let values = stream.collect()?;
+            let iter = TraversalStream::from_iter(storage, txn, arena, values.into_iter());
+            let ordered_stream = match order {
+                Order::Asc => iter.map(|iter| iter.order_by_asc(props)),
+                Order::Desc => iter.map(|iter| iter.order_by_desc(props)),
+            };
+            Ok(ordered_stream)
+        }
+        ToolArgs::SearchKeyword { .. } => {
+            // SearchKeyword requires special BM25 indexing and connection state
+            // It should be called via the dedicated search_keyword MCP handler
+            // not through the generic query chain execution
+            Err(GraphError::New(
+                "SearchKeyword is not supported in generic query chains. Use the search_keyword endpoint directly.".to_string()
+            ))
+        }
+        ToolArgs::SearchVecText { query, label, k } => {
+            // SearchVecText requires embedding model initialization
+            // It should be called via the dedicated search_vec_text MCP handler
+            // not through the generic query chain execution
+            Err(GraphError::New(
+                format!("SearchVecText (query: {}, label: {}, k: {}) is not supported in generic query chains. Use the search_vec_text endpoint directly.", query, label, k)
+            ))
+        }
+        ToolArgs::SearchVec { vector, k, min_score } => {
+            use crate::helix_engine::traversal_core::ops::vectors::brute_force_search::BruteForceSearchVAdapter;
+
+            let query_vec = arena.alloc_slice_copy(vector);
+            let mut results = stream.map(|iter| iter.range(0, *k*3).brute_force_search_v(query_vec, *k));
+
+            // Apply min_score filter if specified
+            if let Some(min_score_val) = min_score {
+                let min_score_copy = *min_score_val;
+                results = results.map(|iter| {
+                    let RoTraversalIterator { storage, arena, txn, inner } = iter;
+                    let filtered: DynIter<'arena, 'txn> = Box::new(
+                        inner.filter(move |item_res| {
+                            match item_res {
+                                Ok(TraversalValue::Vector(v)) => v.get_distance() > min_score_copy,
+                                _ => true, // Keep non-vector items
+                            }
+                        })
+                    );
+                    RoTraversalIterator { storage, arena, txn, inner: filtered }
+                });
+            }
+
+            Ok(results)
+        }
+    }
+}
+
+fn apply_filter<'db, 'arena, 'txn>(
+    stream: TraversalStream<'db, 'arena, 'txn>,
+    filter: FilterTraversal,
+) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    let filter_arc = Arc::new(filter);
+
+    Ok(stream.map(|iter| {
+        let RoTraversalIterator {
+            storage,
+            arena,
+            txn,
+            inner,
+        } = iter;
+
+        let filter_clone = Arc::clone(&filter_arc);
+        let filtered: DynIter<'arena, 'txn> =
+            Box::new(inner.filter_map(move |item_res| match item_res {
+                Ok(item) => match matches_filter(&item, &filter_clone, storage, txn, arena) {
+                    Ok(true) => Some(Ok(item)),
+                    Ok(false) => None,
+                    Err(err) => Some(Err(err)),
+                },
+                Err(err) => Some(Err(err)),
+            }));
+
+        RoTraversalIterator {
+            storage,
+            arena,
+            txn,
+            inner: filtered,
+        }
+    }))
+}
+
+fn matches_filter<'db, 'arena, 'txn>(
+    item: &TraversalValue<'arena>,
+    filter: &FilterTraversal,
+    storage: &'db HelixGraphStorage,
+    txn: &'txn RoTxn<'db>,
+    arena: &'arena Bump,
+) -> Result<bool, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    if !matches_properties(item, filter.properties.as_ref()) {
+        return Ok(false);
     }
 
-    fn order_by(
-        &'a self,
-        txn: &'a RoTxn,
-        connection: &'a MCPConnection,
-        properties: String,
-        order: Order,
-    ) -> Result<Vec<TraversalValue>, GraphError> {
-        let db = Arc::clone(&self.db);
+    match &filter.filter_traversals {
+        Some(traversals) => {
+            for tool in traversals {
+                if !evaluate_sub_traversal(item, tool, storage, txn, arena)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        None => Ok(true),
+    }
+}
 
-        let iter = connection.iter.clone().collect::<Vec<_>>();
+fn matches_properties(
+    item: &TraversalValue<'_>,
+    groups: Option<&Vec<Vec<FilterProperties>>>,
+) -> bool {
+    match groups {
+        Some(groups) => groups.iter().any(|filters| {
+            filters.iter().all(|filter| {
+                item.get_property(&filter.key)
+                    .map(|value| value.compare(&filter.value, filter.operator))
+                    .unwrap_or(false)
+            })
+        }),
+        None => true,
+    }
+}
 
-        let res = match order {
-            Order::Asc => G::new_from(db, txn, iter)
-                .order_by_asc(&properties)
-                .collect_to::<Vec<_>>(),
-            Order::Desc => G::new_from(db, txn, iter)
-                .order_by_desc(&properties)
-                .collect_to::<Vec<_>>(),
-        };
-
-        debug_println!("result: {res:?}");
-        Ok(res)
+fn evaluate_sub_traversal<'db, 'arena, 'txn>(
+    item: &TraversalValue<'arena>,
+    step: &ToolArgs,
+    storage: &'db HelixGraphStorage,
+    txn: &'txn RoTxn<'db>,
+    arena: &'arena Bump,
+) -> Result<bool, GraphError>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    let seed = std::iter::once(item.clone());
+    let stream =
+        execute_query_chain_from_seed(std::slice::from_ref(step), storage, txn, arena, seed)?;
+    let mut iter = stream.into_inner_iter();
+    match iter.next() {
+        Some(Ok(_)) => Ok(true),
+        Some(Err(err)) => Err(err),
+        None => Ok(false),
     }
 }
 
 pub trait FilterValues {
     fn compare(&self, value: &Value, operator: Option<Operator>) -> bool;
-}
-
-pub(super) fn _filter_items(
-    db: Arc<HelixGraphStorage>,
-    txn: &RoTxn,
-    iter: impl Iterator<Item = TraversalValue>,
-    filter: &FilterTraversal,
-) -> Vec<TraversalValue> {
-    let db = Arc::clone(&db);
-
-    debug_println!("properties: {:?}", filter);
-    debug_println!("filter_traversals: {:?}", filter.filter_traversals);
-
-    let initial_filtered_iter = match &filter.properties {
-        Some(properties) => iter
-            .filter(move |item| {
-                properties.iter().any(|filters| {
-                    filters.iter().all(|filter| {
-                        debug_println!("filter: {:?}", filter);
-                        match item.check_property(&filter.key) {
-                            Ok(v) => {
-                                debug_println!("item value for key: {:?} is {:?}", filter.key, v);
-                                v.compare(&filter.value, filter.operator.clone())
-                            }
-                            Err(_) => false,
-                        }
-                    })
-                })
-            })
-            .collect::<Vec<_>>(),
-        None => iter.collect::<Vec<_>>(),
-    };
-
-    debug_println!("iter: {:?}", initial_filtered_iter);
-
-    let result = initial_filtered_iter
-        .into_iter()
-        .filter_map(move |item| match &filter.filter_traversals {
-            Some(filter_traversals) => {
-                match filter_traversals.iter().all(|filter| {
-                    let result = G::new_from(Arc::clone(&db), txn, vec![item.clone()]);
-                    match filter {
-                        ToolArgs::OutStep {
-                            edge_label,
-                            edge_type,
-                            filter: filter_traversal_filter,
-                        } => match filter_traversal_filter {
-                            Some(filter_traversal_filter) => !_filter_items(
-                                Arc::clone(&db),
-                                txn,
-                                result
-                                    .out(edge_label, edge_type)
-                                    .collect_to::<Vec<_>>()
-                                    .into_iter(),
-                                filter_traversal_filter,
-                            )
-                            .is_empty(),
-                            None => result.out(edge_label, edge_type).next().is_some(),
-                        },
-                        ToolArgs::OutEStep {
-                            edge_label,
-                            filter: filter_traversal_filter,
-                        } => match filter_traversal_filter {
-                            Some(filter_traversal_filter) => !_filter_items(
-                                Arc::clone(&db),
-                                txn,
-                                result.out_e(edge_label).collect_to::<Vec<_>>().into_iter(),
-                                filter_traversal_filter,
-                            )
-                            .is_empty(),
-                            None => result.out_e(edge_label).next().is_some(),
-                        },
-                        ToolArgs::InStep {
-                            edge_label,
-                            edge_type,
-                            filter: filter_traversal_filter,
-                        } => match filter_traversal_filter {
-                            Some(filter_traversal_filter) => !_filter_items(
-                                Arc::clone(&db),
-                                txn,
-                                result
-                                    .in_(edge_label, edge_type)
-                                    .collect_to::<Vec<_>>()
-                                    .into_iter(),
-                                filter_traversal_filter,
-                            )
-                            .is_empty(),
-                            None => result.in_(edge_label, edge_type).next().is_some(),
-                        },
-                        ToolArgs::InEStep {
-                            edge_label,
-                            filter: filter_traversal_filter,
-                        } => match filter_traversal_filter {
-                            Some(filter_traversal_filter) => !_filter_items(
-                                Arc::clone(&db),
-                                txn,
-                                result.in_e(edge_label).collect_to::<Vec<_>>().into_iter(),
-                                filter_traversal_filter,
-                            )
-                            .is_empty(),
-                            None => result.in_e(edge_label).next().is_some(),
-                        },
-                        _ => false,
-                    }
-                }) {
-                    true => Some(item),
-                    false => None,
-                }
-            }
-            None => Some(item),
-        })
-        .collect::<Vec<_>>();
-
-    debug_println!("result: {:?}", result);
-    result
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use tempfile::TempDir;
-
-    use crate::{
-        helix_engine::{storage_core::version_info::VersionInfo, traversal_core::config},
-        protocol::value::Value,
-        utils::items::Node,
-    };
-
-    use super::*;
-
-    #[test]
-    fn test_filter_items() {
-        let (storage, _temp_dir) = {
-            let temp_dir = TempDir::new().unwrap();
-            let storage = Arc::new(
-                HelixGraphStorage::new(
-                    temp_dir.path().to_str().unwrap(),
-                    config::Config::default(),
-                    VersionInfo::default(),
-                )
-                .unwrap(),
-            );
-            (storage, temp_dir)
-        };
-        let items = (1..101)
-            .map(|i| {
-                TraversalValue::Node(Node {
-                    id: i,
-                    version: 1,
-                    label: "test".to_string(),
-                    properties: Some(HashMap::from([("age".to_string(), Value::I64(i as i64))])),
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let filter = FilterTraversal {
-            properties: Some(vec![vec![FilterProperties {
-                key: "age".to_string(),
-                value: Value::I64(50),
-                operator: Some(Operator::Gt),
-            }]]),
-            filter_traversals: None,
-        };
-
-        let txn = storage.graph_env.read_txn().unwrap();
-
-        let result = _filter_items(Arc::clone(&storage), &txn, items.into_iter(), &filter);
-        assert_eq!(result.len(), 50);
-    }
-}
-
-fn _search_keyword(
-    db: Arc<HelixGraphStorage>,
-    connection: &MCPConnection,
-    query: String,
-    limit: usize,
-    label: String,
-) -> Result<Vec<TraversalValue>, GraphError> {
-    let env = unsafe {
-        EnvOpenOptions::new()
-            .map_size(10 * 1024 * 1024 * 1024)
-            .max_dbs(20)
-            .max_readers(200)
-            .open(Path::new("bm25_index"))?
-    };
-    let mut txn = env.write_txn()?;
-    let bm25_index = HBM25Config::new_temp(&env, &mut txn, &connection.connection_id)?;
-
-    for item in connection.iter.clone() {
-        if let Some(props) = item.get_properties() {
-            let mut data = props.flatten_bm25();
-            data.push_str(&item.label());
-            bm25_index.insert_doc(&mut txn, item.id(), &data)?;
-        }
-    }
-
-    // Check if BM25 is enabled and has metadata
-
-    let results = match bm25_index
-        .metadata_db
-        .get(&txn, crate::helix_engine::bm25::bm25::METADATA_KEY)
-    {
-        Ok(Some(_)) => {
-            let results = G::new(Arc::clone(&db), &txn)
-                .search_bm25(&label, &query, limit)?
-                .collect_to::<Vec<_>>();
-
-            println!("BM25 search results: {results:?}");
-            Ok(results)
-        }
-        Ok(None) => {
-            // BM25 metadata not found - index not initialized yet
-            debug_println!("BM25 index not initialized yet - returning empty results");
-            println!("BM25 index not initialized yet - returning empty results");
-            Err(GraphError::from(
-                "BM25 index not initialized yet - returning empty results",
-            ))
-        }
-        Err(e) => {
-            // Error accessing metadata database
-            debug_println!(
-                "Error checking BM25 metadata: {:?} - returning empty results",
-                e
-            );
-            println!("Error checking BM25 metadata: {e:?} - returning empty results",);
-            Err(GraphError::from(
-                "Error checking BM25 metadata - returning empty results",
-            ))
-        }
-    };
-
-    // clear all data made in this function
-    // can just abort as nothing is flushed to disk
-    txn.abort();
-
-    results
 }

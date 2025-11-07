@@ -131,3 +131,228 @@ pub(crate) fn validate_exclude<'a>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::helixc::analyzer::error_codes::ErrorCode;
+    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+
+    // ============================================================================
+    // Field Exclusion Tests
+    // ============================================================================
+
+    #[test]
+    fn test_exclude_valid_field() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY test() =>
+                people <- N<Person>::!{email}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_multiple_fields() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String, phone: String }
+
+            QUERY test() =>
+                people <- N<Person>::!{email, phone}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_nonexistent_field() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+
+            QUERY test() =>
+                people <- N<Person>::!{nonexistent}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E202));
+    }
+
+    #[test]
+    fn test_exclude_on_edge() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                edges <- person::OutE<Knows>::!{id}
+                RETURN edges
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_after_filter() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY test(minAge: U32, maxAge: U32) =>
+                people <- N<Person>::WHERE(AND(_::{age}::GTE(minAge), _::{age}::LTE(maxAge)))::!{email}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_with_traversal() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                friends <- N<Person>(id)::Out<Knows>::!{age}
+                RETURN friends
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_single_field_keeps_others() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY test() =>
+                people <- N<Person>::!{age}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_implicit_field() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                people <- N<Person>::!{id}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_after_where() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY test(minAge: U32) =>
+                people <- N<Person>::WHERE(_::{age}::GT(minAge))::!{email}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_on_nodes_collection() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY test() =>
+                people <- N<Person>::!{email, age}
+                RETURN people
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_with_multi_hop_traversal() {
+        let source = r#"
+            N::Person { name: String, age: U32 }
+            N::Company { companyName: String }
+            E::WorksAt { From: Person, To: Company }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                colleagues <- N<Person>(id)::Out<WorksAt>::In<WorksAt>::!{age}
+                RETURN colleagues
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+}

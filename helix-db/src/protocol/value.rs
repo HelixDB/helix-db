@@ -9,15 +9,15 @@ use serde::{
     de::{DeserializeSeed, VariantAccess, Visitor},
 };
 use sonic_rs::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::{
     cmp::Ordering,
     collections::HashMap,
     fmt::{self},
 };
-
 /// A flexible value type that can represent various property values in nodes and edges.
 /// Handles both JSON and binary serialisation formats via custom implementaions of the Serialize and Deserialize traits.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Value {
     String(String),
     F32(f32),
@@ -36,6 +36,7 @@ pub enum Value {
     Id(ID),
     Array(Vec<Value>),
     Object(HashMap<String, Value>),
+    #[default]
     Empty,
 }
 
@@ -71,6 +72,27 @@ impl Value {
         }
     }
 
+    pub fn inner_str(&self) -> Cow<'_, str> {
+        match self {
+            Value::String(s) => Cow::Borrowed(s.as_str()),
+            Value::F32(f) => Cow::Owned(f.to_string()),
+            Value::F64(f) => Cow::Owned(f.to_string()),
+            Value::I8(i) => Cow::Owned(i.to_string()),
+            Value::I16(i) => Cow::Owned(i.to_string()),
+            Value::I32(i) => Cow::Owned(i.to_string()),
+            Value::I64(i) => Cow::Owned(i.to_string()),
+            Value::U8(u) => Cow::Owned(u.to_string()),
+            Value::U16(u) => Cow::Owned(u.to_string()),
+            Value::U32(u) => Cow::Owned(u.to_string()),
+            Value::U64(u) => Cow::Owned(u.to_string()),
+            Value::U128(u) => Cow::Owned(u.to_string()),
+            Value::Date(d) => Cow::Owned(d.to_string()),
+            Value::Id(id) => Cow::Owned(id.stringify()),
+            Value::Boolean(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
+            _ => panic!("Not primitive"),
+        }
+    }
+
     pub fn to_variant_string(&self) -> &str {
         match self {
             Value::String(_) => "String",
@@ -99,6 +121,12 @@ impl Value {
             Value::String(s) => s.as_str(),
             _ => panic!("Not a string"),
         }
+    }
+
+    /// Checks if this value contains the needle value (as strings).
+    /// Converts both values to their string representations and performs substring matching.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.inner_str().contains(needle)
     }
 
     #[inline]
@@ -1080,11 +1108,11 @@ impl FilterValues for Value {
         let comparison = match (self, value) {
             (Value::Array(a1), Value::Array(a2)) => a1.iter().any(|a1_item| {
                 a2.iter()
-                    .any(|a2_item| a1_item.compare(a2_item, operator.clone()))
+                    .any(|a2_item| a1_item.compare(a2_item, operator))
             }),
             (value, Value::Array(a)) => a
                 .iter()
-                .any(|a_item| value.compare(a_item, operator.clone())),
+                .any(|a_item| value.compare(a_item, operator)),
             (value1, value2) => match operator {
                 Some(op) => op.execute(value1, value2),
                 None => value1 == value2,
@@ -1476,6 +1504,15 @@ pub trait IntoPrimitive<T> {
     fn into_primitive(&self) -> &T;
 }
 
+impl IntoPrimitive<String> for Value {
+    fn into_primitive(&self) -> &String {
+        match self {
+            Value::String(s) => s,
+            _ => panic!("Value is not a string"),
+        }
+    }
+}
+
 impl IntoPrimitive<i8> for Value {
     fn into_primitive(&self) -> &i8 {
         match self {
@@ -1620,13 +1657,573 @@ impl IntoPrimitive<Date> for Value {
     }
 }
 
-#[test]
-fn test_value_eq() {
-    assert_eq!(Value::I64(1), Value::I64(1));
-    assert_eq!(Value::U64(1), Value::U64(1));
-    assert_eq!(Value::F64(1.0), Value::F64(1.0));
-    assert_eq!(Value::I64(1), Value::U64(1));
-    assert_eq!(Value::U64(1), Value::I64(1));
-    assert_eq!(Value::I32(1), 1 as i32);
-    assert_eq!(Value::U32(1), 1 as i32);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // Value Creation and From Implementations
+    // ============================================================================
+
+    #[test]
+    fn test_value_from_primitives() {
+        assert!(matches!(Value::from("test"), Value::String(_)));
+        assert!(matches!(
+            Value::from(String::from("test")),
+            Value::String(_)
+        ));
+        assert!(matches!(Value::from(true), Value::Boolean(true)));
+        assert!(matches!(Value::from(42i8), Value::I8(42)));
+        assert!(matches!(Value::from(42i16), Value::I16(42)));
+        assert!(matches!(Value::from(42i32), Value::I32(42)));
+        assert!(matches!(Value::from(42i64), Value::I64(42)));
+        assert!(matches!(Value::from(42u8), Value::U8(42)));
+        assert!(matches!(Value::from(42u16), Value::U16(42)));
+        assert!(matches!(Value::from(42u32), Value::U32(42)));
+        assert!(matches!(Value::from(42u64), Value::U64(42)));
+        assert!(matches!(Value::from(42u128), Value::U128(42)));
+        assert!(matches!(Value::from(3.14f32), Value::F32(_)));
+        assert!(matches!(Value::from(3.14f64), Value::F64(_)));
+    }
+
+    #[test]
+    fn test_value_from_string_trims_quotes() {
+        let val = Value::from("\"quoted\"");
+        assert_eq!(val, Value::String("quoted".to_string()));
+
+        let val2 = Value::from(String::from("\"test\""));
+        assert_eq!(val2, Value::String("test".to_string()));
+    }
+
+    #[test]
+    fn test_value_from_vec() {
+        let vec_vals = vec![Value::I32(1), Value::I32(2), Value::I32(3)];
+        let val = Value::from(vec_vals.clone());
+        assert!(matches!(val, Value::Array(_)));
+        if let Value::Array(arr) = val {
+            assert_eq!(arr.len(), 3);
+        }
+
+        // Test From<Vec<primitive>>
+        let vec_i64 = vec![1i64, 2i64, 3i64];
+        let val = Value::from(vec_i64);
+        assert!(matches!(val, Value::Array(_)));
+
+        let vec_str = vec![String::from("a"), String::from("b")];
+        let val = Value::from(vec_str);
+        assert!(matches!(val, Value::Array(_)));
+    }
+
+    #[test]
+    fn test_value_from_usize() {
+        let val = Value::from(42usize);
+        // Should be U64 on 64-bit systems
+        if cfg!(target_pointer_width = "64") {
+            assert!(matches!(val, Value::U64(42)));
+        } else {
+            assert!(matches!(val, Value::U128(42)));
+        }
+    }
+
+    #[test]
+    fn test_value_from_datetime() {
+        let dt = Utc::now();
+        let val = Value::from(dt);
+        assert!(matches!(val, Value::String(_)));
+        if let Value::String(s) = val {
+            // Should be RFC3339 format
+            assert!(s.contains('T'));
+            assert!(s.contains('Z') || s.contains('+'));
+        }
+    }
+
+    // ============================================================================
+    // Equality Tests (PartialEq)
+    // ============================================================================
+
+    #[test]
+    fn test_value_eq() {
+        assert_eq!(Value::I64(1), Value::I64(1));
+        assert_eq!(Value::U64(1), Value::U64(1));
+        assert_eq!(Value::F64(1.0), Value::F64(1.0));
+        assert_eq!(Value::I64(1), Value::U64(1));
+        assert_eq!(Value::U64(1), Value::I64(1));
+        assert_eq!(Value::I32(1), 1 as i32);
+        assert_eq!(Value::U32(1), 1 as i32);
+    }
+
+    #[test]
+    fn test_value_cross_type_numeric_equality() {
+        // Integer cross-type equality
+        assert_eq!(Value::I8(42), Value::I16(42));
+        assert_eq!(Value::I8(42), Value::I32(42));
+        assert_eq!(Value::U8(42), Value::U16(42));
+        assert_eq!(Value::U8(42), Value::I32(42));
+
+        // Float cross-type equality (use value that's exactly representable in both f32 and f64)
+        assert_eq!(Value::F32(2.0), Value::F64(2.0));
+
+        // Integer to float equality
+        assert_eq!(Value::I32(42), Value::F64(42.0));
+        assert_eq!(Value::U64(100), Value::F32(100.0));
+    }
+
+    #[test]
+    fn test_value_string_equality() {
+        let val = Value::String("test".to_string());
+        assert_eq!(val, Value::String("test".to_string()));
+        assert_eq!(val, String::from("test"));
+        assert_eq!(val, "test");
+        assert_ne!(val, "other");
+    }
+
+    #[test]
+    fn test_value_boolean_equality() {
+        assert_eq!(Value::Boolean(true), Value::Boolean(true));
+        assert_eq!(Value::Boolean(true), true);
+        assert_eq!(Value::Boolean(false), false);
+        assert_ne!(Value::Boolean(true), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_value_array_equality() {
+        let arr1 = Value::Array(vec![Value::I32(1), Value::I32(2)]);
+        let arr2 = Value::Array(vec![Value::I32(1), Value::I32(2)]);
+        let arr3 = Value::Array(vec![Value::I32(1), Value::I32(3)]);
+
+        assert_eq!(arr1, arr2);
+        assert_ne!(arr1, arr3);
+    }
+
+    #[test]
+    fn test_value_empty_equality() {
+        assert_eq!(Value::Empty, Value::Empty);
+        assert_ne!(Value::Empty, Value::I32(0));
+        assert_ne!(Value::Empty, Value::String(String::new()));
+    }
+
+    // ============================================================================
+    // Ordering Tests (Ord, PartialOrd)
+    // ============================================================================
+
+    #[test]
+    fn test_value_ordering_integers() {
+        assert!(Value::I32(1) < Value::I32(2));
+        assert!(Value::I32(2) > Value::I32(1));
+        assert!(Value::I32(1) == Value::I32(1));
+
+        // Cross-type integer ordering
+        assert!(Value::I8(10) < Value::I32(20));
+        assert!(Value::U8(5) < Value::I16(10));
+    }
+
+    #[test]
+    fn test_value_ordering_floats() {
+        assert!(Value::F64(1.5) < Value::F64(2.5));
+        assert!(Value::F32(3.14) > Value::F32(2.71));
+    }
+
+    #[test]
+    fn test_value_ordering_strings() {
+        assert!(Value::String("apple".to_string()) < Value::String("banana".to_string()));
+        assert!(Value::String("xyz".to_string()) > Value::String("abc".to_string()));
+    }
+
+    #[test]
+    fn test_value_ordering_empty() {
+        // Empty is always less than other values
+        assert!(Value::Empty < Value::I32(0));
+        assert!(Value::Empty < Value::String(String::new()));
+        assert!(Value::Empty < Value::Boolean(false));
+        assert_eq!(Value::Empty.cmp(&Value::Empty), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_value_ordering_mixed_types() {
+        // Non-comparable types should return Equal
+        assert_eq!(
+            Value::String("test".to_string()).cmp(&Value::I32(42)),
+            Ordering::Equal
+        );
+        assert_eq!(Value::Boolean(true).cmp(&Value::F64(3.14)), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_value_ordering_u128_edge_cases() {
+        // Test U128 values that exceed i128::MAX
+        let large_u128 = u128::MAX;
+        let small_u128 = 100u128;
+
+        assert!(Value::U128(small_u128) < Value::U128(large_u128));
+        assert!(Value::U128(large_u128) > Value::U128(small_u128));
+    }
+
+    // ============================================================================
+    // Value Methods
+    // ============================================================================
+
+    #[test]
+    fn test_inner_stringify() {
+        assert_eq!(Value::String("test".to_string()).inner_stringify(), "test");
+        assert_eq!(Value::I32(42).inner_stringify(), "42");
+        assert_eq!(Value::F64(3.14).inner_stringify(), "3.14");
+        assert_eq!(Value::Boolean(true).inner_stringify(), "true");
+        assert_eq!(Value::U64(100).inner_stringify(), "100");
+    }
+
+    #[test]
+    fn test_inner_stringify_array() {
+        let arr = Value::Array(vec![Value::I32(1), Value::I32(2), Value::I32(3)]);
+        let result = arr.inner_stringify();
+        assert_eq!(result, "1 2 3");
+    }
+
+    #[test]
+    fn test_inner_stringify_object() {
+        let mut map = HashMap::new();
+        map.insert("key1".to_string(), Value::I32(1));
+        map.insert("key2".to_string(), Value::I32(2));
+
+        let obj = Value::Object(map);
+        let result = obj.inner_stringify();
+        // Order may vary, but should contain both key-value pairs
+        assert!(result.contains("key1") && result.contains("1"));
+        assert!(result.contains("key2") && result.contains("2"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Not primitive")]
+    fn test_inner_stringify_empty_panics() {
+        Value::Empty.inner_stringify();
+    }
+
+    #[test]
+    fn test_to_variant_string() {
+        assert_eq!(
+            Value::String("test".to_string()).to_variant_string(),
+            "String"
+        );
+        assert_eq!(Value::I32(42).to_variant_string(), "I32");
+        assert_eq!(Value::F64(3.14).to_variant_string(), "F64");
+        assert_eq!(Value::Boolean(true).to_variant_string(), "Boolean");
+        assert_eq!(Value::Empty.to_variant_string(), "Empty");
+        assert_eq!(Value::Array(vec![]).to_variant_string(), "Array");
+        assert_eq!(Value::Object(HashMap::new()).to_variant_string(), "Object");
+    }
+
+    #[test]
+    fn test_as_str() {
+        let val = Value::String("test".to_string());
+        assert_eq!(val.as_str(), "test");
+    }
+
+    #[test]
+    #[should_panic(expected = "Not a string")]
+    fn test_as_str_panics_on_non_string() {
+        Value::I32(42).as_str();
+    }
+
+    // ============================================================================
+    // Serialization/Deserialization
+    // ============================================================================
+
+    #[test]
+    fn test_json_serialization() {
+        // JSON should serialize without enum variant names
+        let val = Value::I32(42);
+        let json = sonic_rs::to_string(&val).unwrap();
+        assert_eq!(json, "42");
+
+        let val = Value::String("test".to_string());
+        let json = sonic_rs::to_string(&val).unwrap();
+        assert_eq!(json, "\"test\"");
+
+        let val = Value::Boolean(true);
+        let json = sonic_rs::to_string(&val).unwrap();
+        assert_eq!(json, "true");
+    }
+
+    #[test]
+    fn test_json_deserialization() {
+        let val: Value = sonic_rs::from_str("42").unwrap();
+        assert_eq!(val, Value::I64(42)); // JSON integers default to I64
+
+        let val: Value = sonic_rs::from_str("\"test\"").unwrap();
+        assert_eq!(val, Value::String("test".to_string()));
+
+        let val: Value = sonic_rs::from_str("true").unwrap();
+        assert_eq!(val, Value::Boolean(true));
+
+        let val: Value = sonic_rs::from_str("3.14").unwrap();
+        assert!(matches!(val, Value::F64(_)));
+    }
+
+    #[test]
+    fn test_json_array_serialization() {
+        let arr = Value::Array(vec![Value::I32(1), Value::I32(2), Value::I32(3)]);
+        let json = sonic_rs::to_string(&arr).unwrap();
+        assert_eq!(json, "[1,2,3]");
+    }
+
+    #[test]
+    fn test_json_object_serialization() {
+        let mut map = HashMap::new();
+        map.insert("key".to_string(), Value::String("value".to_string()));
+        let obj = Value::Object(map);
+        let json = sonic_rs::to_string(&obj).unwrap();
+        assert!(json.contains("\"key\""));
+        assert!(json.contains("\"value\""));
+    }
+
+    #[test]
+    fn test_bincode_serialization_roundtrip() {
+        let test_values = vec![
+            Value::String("test".to_string()),
+            Value::I32(42),
+            Value::F64(3.14),
+            Value::Boolean(true),
+            Value::U128(u128::MAX),
+            Value::Empty,
+            Value::Array(vec![Value::I32(1), Value::I32(2)]),
+        ];
+
+        for val in test_values {
+            let encoded = bincode::serialize(&val).unwrap();
+            let decoded: Value = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(val, decoded);
+        }
+    }
+
+    #[test]
+    fn test_properties_encode_decode() {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), Value::String("Alice".to_string()));
+        props.insert("age".to_string(), Value::I32(30));
+        props.insert("score".to_string(), Value::F64(98.5));
+
+        let encoded = props.encode_properties().unwrap();
+        let decoded = HashMap::decode_properties(&encoded).unwrap();
+
+        assert_eq!(props, decoded);
+    }
+
+    #[test]
+    fn test_properties_empty_hashmap() {
+        let props = HashMap::<String, Value>::new();
+        let encoded = props.encode_properties().unwrap();
+        let decoded = HashMap::decode_properties(&encoded).unwrap();
+
+        assert_eq!(props, decoded);
+        assert_eq!(decoded.len(), 0);
+    }
+
+    // ============================================================================
+    // Type Conversions (Into implementations)
+    // ============================================================================
+
+    #[test]
+    fn test_value_into_primitives() {
+        let val = Value::I32(42);
+        let i: i32 = val.into();
+        assert_eq!(i, 42);
+
+        let val = Value::F64(3.14);
+        let f: f64 = val.into();
+        assert_eq!(f, 3.14);
+
+        let val = Value::Boolean(true);
+        let b: bool = val.into();
+        assert_eq!(b, true);
+
+        let val = Value::String("test".to_string());
+        let s: String = val.into();
+        assert_eq!(s, "test");
+    }
+
+    #[test]
+    fn test_value_into_cross_type_conversion() {
+        // I32 to I64
+        let val = Value::I32(42);
+        let i: i64 = val.into();
+        assert_eq!(i, 42);
+
+        // U8 to U32
+        let val = Value::U8(255);
+        let u: u32 = val.into();
+        assert_eq!(u, 255);
+
+        // I32 to F32
+        let val = Value::I32(42);
+        let f: f32 = val.into();
+        assert_eq!(f, 42.0);
+    }
+
+    #[test]
+    fn test_value_string_parsing_conversion() {
+        let val = Value::String("42".to_string());
+        let i: i32 = val.into();
+        assert_eq!(i, 42);
+
+        let val = Value::String("3.14".to_string());
+        let f: f64 = val.into();
+        assert_eq!(f, 3.14);
+    }
+
+    #[test]
+    #[should_panic(expected = "Value is not a string")]
+    fn test_value_into_string_panics_on_non_string() {
+        let val = Value::I32(42);
+        let _: String = val.into();
+    }
+
+    #[test]
+    #[should_panic(expected = "Value cannot be cast to boolean")]
+    fn test_value_into_bool_panics_on_non_boolean() {
+        let val = Value::I32(1);
+        let _: bool = val.into();
+    }
+
+    #[test]
+    fn test_value_into_array() {
+        let arr = vec![Value::I32(1), Value::I32(2)];
+        let val = Value::Array(arr.clone());
+        let result: Vec<Value> = val.into();
+        assert_eq!(result, arr);
+    }
+
+    #[test]
+    #[should_panic(expected = "Value cannot be cast to array")]
+    fn test_value_into_array_panics_on_non_array() {
+        let val = Value::I32(42);
+        let _: Vec<Value> = val.into();
+    }
+
+    // ============================================================================
+    // IntoPrimitive Trait
+    // ============================================================================
+
+    #[test]
+    fn test_into_primitive() {
+        let val = Value::I32(42);
+        let i: &i32 = val.into_primitive();
+        assert_eq!(*i, 42);
+
+        let val = Value::Boolean(true);
+        let b: &bool = val.into_primitive();
+        assert_eq!(*b, true);
+
+        let val = Value::String("test".to_string());
+        let s = val.as_str();
+        assert_eq!(s, "test");
+    }
+
+    #[test]
+    #[should_panic(expected = "Value is not an i32")]
+    fn test_into_primitive_panics_on_wrong_type() {
+        let val = Value::I64(42);
+        let _: &i32 = val.into_primitive();
+    }
+
+    // ============================================================================
+    // Edge Cases and UTF-8
+    // ============================================================================
+
+    #[test]
+    fn test_value_utf8_strings() {
+        let utf8_strings = vec![
+            "Hello",
+            "世界",   // Chinese
+            "🚀🌟",   // Emojis
+            "Привет", // Russian
+            "مرحبا",  // Arabic
+            "Ñoño",   // Spanish with tildes
+        ];
+
+        for s in utf8_strings {
+            let val = Value::String(s.to_string());
+            assert_eq!(val.inner_stringify(), s);
+
+            // Test serialization roundtrip
+            let json = sonic_rs::to_string(&val).unwrap();
+            let decoded: Value = sonic_rs::from_str(&json).unwrap();
+            assert_eq!(val, decoded);
+        }
+    }
+
+    #[test]
+    fn test_value_large_numbers() {
+        let val = Value::U128(u128::MAX);
+        assert_eq!(val, Value::U128(u128::MAX));
+
+        let val = Value::I64(i64::MAX);
+        assert_eq!(val, Value::I64(i64::MAX));
+
+        let val = Value::I64(i64::MIN);
+        assert_eq!(val, Value::I64(i64::MIN));
+    }
+
+    #[test]
+    fn test_value_nested_arrays() {
+        let inner = vec![Value::I32(1), Value::I32(2)];
+        let outer = Value::Array(vec![
+            Value::Array(inner.clone()),
+            Value::Array(inner.clone()),
+        ]);
+
+        assert!(matches!(outer, Value::Array(_)));
+        if let Value::Array(arr) = outer {
+            assert_eq!(arr.len(), 2);
+            assert!(matches!(arr[0], Value::Array(_)));
+        }
+    }
+
+    #[test]
+    fn test_value_nested_objects() {
+        let mut inner = HashMap::new();
+        inner.insert("inner_key".to_string(), Value::I32(42));
+
+        let mut outer = HashMap::new();
+        outer.insert("outer_key".to_string(), Value::Object(inner));
+
+        let val = Value::Object(outer);
+        assert!(matches!(val, Value::Object(_)));
+    }
+
+    #[test]
+    fn test_value_empty_collections() {
+        let empty_arr = Value::Array(vec![]);
+        assert_eq!(empty_arr.inner_stringify(), "");
+
+        let empty_obj = Value::Object(HashMap::new());
+        assert_eq!(empty_obj.inner_stringify(), "");
+    }
+
+    // ============================================================================
+    // Casting Module
+    // ============================================================================
+
+    #[test]
+    fn test_cast_to_string() {
+        let val = Value::I32(42);
+        let result = casting::cast(val, casting::CastType::String);
+        assert_eq!(result, Value::String("42".to_string()));
+    }
+
+    #[test]
+    fn test_cast_between_numeric_types() {
+        let val = Value::I32(42);
+        let result = casting::cast(val, casting::CastType::I64);
+        assert_eq!(result, Value::I64(42));
+
+        let val = Value::F64(3.14);
+        let result = casting::cast(val, casting::CastType::F32);
+        assert!(matches!(result, Value::F32(_)));
+    }
+
+    #[test]
+    fn test_cast_to_empty() {
+        let val = Value::I32(42);
+        let result = casting::cast(val, casting::CastType::Empty);
+        assert_eq!(result, Value::Empty);
+    }
 }

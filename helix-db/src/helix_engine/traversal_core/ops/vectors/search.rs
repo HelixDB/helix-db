@@ -5,56 +5,58 @@ use crate::helix_engine::{
     types::{GraphError, VectorError},
     vector_core::{hnsw::HNSW, vector::HVector},
 };
-use helix_macros::debug_trace;
 use std::iter::once;
 
-pub struct SearchV<I: Iterator<Item = Result<TraversalValue, GraphError>>> {
-    iter: I,
-}
-
-// implementing iterator for OutIterator
-impl<I: Iterator<Item = Result<TraversalValue, GraphError>>> Iterator for SearchV<I> {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("SEARCH_V")]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-}
-
-pub trait SearchVAdapter<'a>: Iterator<Item = Result<TraversalValue, GraphError>> {
+pub trait SearchVAdapter<'db, 'arena, 'txn>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
+{
     fn search_v<F, K>(
         self,
-        query: &[f64],
+        query: &'arena [f64],
         k: K,
-        label: &str,
-        filter: Option<&[F]>,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+        label: &'arena str,
+        filter: Option<&'arena [F]>,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
         F: Fn(&HVector, &RoTxn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAdapter<'a>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    SearchVAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
     fn search_v<F, K>(
         self,
-        query: &[f64],
+        query: &'arena [f64],
         k: K,
-        label: &str,
-        filter: Option<&[F]>,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+        label: &'arena str,
+        filter: Option<&'arena [F]>,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
         F: Fn(&HVector, &RoTxn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let vectors =
-            self.storage
-                .vectors
-                .search(self.txn, query, k.try_into().unwrap(), label, filter, false);
+        let vectors = self.storage.vectors.search(
+            self.txn,
+            query,
+            k.try_into().unwrap(),
+            label,
+            filter,
+            false,
+            self.arena,
+        );
 
         let iter = match vectors {
             Ok(vectors) => vectors
@@ -95,13 +97,11 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
             .into_iter(),
         };
 
-        let iter = SearchV { iter };
-
         RoTraversalIterator {
-            inner: iter,
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: iter,
         }
     }
 }
-

@@ -1,58 +1,15 @@
 use crate::{
     helix_engine::{
-        traversal_core::{traversal_value::TraversalValue, traversal_iter::RoTraversalIterator},
-        storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue, LMDB_STRING_HEADER_LENGTH},
         types::GraphError,
     },
-    protocol::value::Value,
+    protocol::value::Value, utils::items::Node,
 };
-use heed3::{RoTxn, byteorder::BE};
-use helix_macros::debug_trace;
 use serde::Serialize;
-use std::sync::Arc;
 
-pub struct NFromIndex<'a> {
-    iter:
-        heed3::RoPrefix<'a, heed3::types::Bytes, heed3::types::LazyDecode<heed3::types::U128<BE>>>,
-    txn: &'a RoTxn<'a>,
-    storage: Arc<HelixGraphStorage>,
-    label: &'a str,
-}
-
-impl<'a> Iterator for NFromIndex<'a> {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("N_FROM_INDEX")]
-    fn next(&mut self) -> Option<Self::Item> {
-        for value in self.iter.by_ref() {
-            let (_, value) = value.unwrap();
-            match value.decode() {
-                Ok(value) => match self.storage.get_node(self.txn, &value) {
-                    Ok(node) => {
-                        if node.label == self.label {
-                            return Some(Ok(TraversalValue::Node(node)));
-                        } else {
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        println!("{} Error getting node: {:?}", line!(), e);
-                        return Some(Err(GraphError::ConversionError(e.to_string())));
-                    }
-                },
-
-                Err(e) => return Some(Err(GraphError::ConversionError(e.to_string()))),
-            }
-        }
-        None
-    }
-}
-
-pub trait NFromIndexAdapter<'a, K: Into<Value> + Serialize>:
-    Iterator<Item = Result<TraversalValue, GraphError>>
+pub trait NFromIndexAdapter<'db, 'arena, 'txn, 's, K: Into<Value> + Serialize>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
-    type OutputIter: Iterator<Item = Result<TraversalValue, GraphError>>;
-
     /// Returns a new iterator that will return the node from the secondary index.
     ///
     /// # Arguments
@@ -62,18 +19,42 @@ pub trait NFromIndexAdapter<'a, K: Into<Value> + Serialize>:
     ///
     /// Note that both the `index` and `key` must be provided.
     /// The index must be a valid and existing secondary index and the key should match the type of the index.
-    fn n_from_index(self, label: &'a str, index: &'a str, key: &'a K) -> Self::OutputIter
+    fn n_from_index(
+        self,
+        label: &'s str,
+        index: &'s str,
+        key: &'s K,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
         K: Into<Value> + Serialize + Clone;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>, K: Into<Value> + Serialize + 'a>
-    NFromIndexAdapter<'a, K> for RoTraversalIterator<'a, I>
+impl<
+    'db,
+    'arena,
+    'txn,
+    's,
+    K: Into<Value> + Serialize,
+    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+> NFromIndexAdapter<'db, 'arena, 'txn, 's, K> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
-    type OutputIter = RoTraversalIterator<'a, NFromIndex<'a>>;
-
     #[inline]
-    fn n_from_index(self, label: &'a str, index: &'a str, key: &'a K) -> Self::OutputIter
+    fn n_from_index(
+        self,
+        label: &'s str,
+        index: &'s str,
+        key: &K,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
         K: Into<Value> + Serialize + Clone,
     {
@@ -85,22 +66,56 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>, K: Into<Value> 
                 "Secondary Index {index} not found"
             )))
             .unwrap();
+        let label_as_bytes = label.as_bytes();
         let res = db
-            .lazily_decode_data()
             .prefix_iter(self.txn, &bincode::serialize(&Value::from(key)).unwrap())
-            .unwrap();
+            .unwrap()
+            .filter_map(move |item| {
+                if let Ok((_, node_id)) = item &&
+                 let Some(value) = self.storage.nodes_db.get(self.txn, &node_id).ok()? {
+                    assert!(
+                        value.len() >= LMDB_STRING_HEADER_LENGTH,
+                        "value length does not contain header which means the `label` field was missing from the node on insertion"
+                    );
+                    let length_of_label_in_lmdb =
+                        u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap()) as usize;
+        
+                    if length_of_label_in_lmdb != label.len() {
+                        return None;
+                    }
+        
+                    assert!(
+                        value.len() >= length_of_label_in_lmdb + LMDB_STRING_HEADER_LENGTH,
+                        "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
+                    );
+                    let label_in_lmdb = &value[LMDB_STRING_HEADER_LENGTH
+                        ..LMDB_STRING_HEADER_LENGTH + length_of_label_in_lmdb];
+        
+                    if label_in_lmdb == label_as_bytes {
+                        match Node::<'arena>::from_bincode_bytes(node_id, value, self.arena) {
+                            Ok(node) => {
+                                return Some(Ok(TraversalValue::Node(node)));
+                            }
+                            Err(e) => {
+                                println!("{} Error decoding node: {:?}", line!(), e);
+                                return Some(Err(GraphError::ConversionError(e.to_string())));
+                            }
+                        }
+                    } else {
+                        return None;
+                    }
+                
+                }
+                None
+            
 
-        let n_from_index = NFromIndex {
-            iter: res,
-            txn: self.txn,
-            storage: Arc::clone(&self.storage),
-            label,
-        };
+            });
 
         RoTraversalIterator {
-            inner: n_from_index,
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: res,
         }
     }
 }

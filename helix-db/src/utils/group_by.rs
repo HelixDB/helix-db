@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::protocol::value::Value;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize)]
 pub struct GroupByItem {
     pub values: HashMap<String, Value>,
     pub count: i32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub enum GroupBy {
     Group(HashMap<String, GroupByItem>),
     Count(HashMap<String, GroupByItem>),

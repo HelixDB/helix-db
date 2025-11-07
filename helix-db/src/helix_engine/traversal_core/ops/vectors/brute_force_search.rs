@@ -1,65 +1,50 @@
-use std::sync::Arc;
-
-use crate::{
-    debug_println,
-    helix_engine::{
-        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
-        types::GraphError,
-        vector_core::vector_distance::cosine_similarity,
-    },
-    protocol::value::Value,
-    utils::filterable::Filterable,
+use crate::helix_engine::{
+    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
+    types::GraphError,
+    vector_core::vector_distance::cosine_similarity,
 };
-use helix_macros::debug_trace;
 use itertools::Itertools;
 
-pub struct BruteForceSearchV<I: Iterator<Item = Result<TraversalValue, GraphError>>> {
-    iter: I,
-}
-
-// implementing iterator for OutIterator
-impl<I: Iterator<Item = Result<TraversalValue, GraphError>>> Iterator for BruteForceSearchV<I> {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("BRUTE_FORCE_SEARCH_V")]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-}
-
-pub trait BruteForceSearchVAdapter<'a>:
-    Iterator<Item = Result<TraversalValue, GraphError>>
+pub trait BruteForceSearchVAdapter<'db, 'arena, 'txn>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
     fn brute_force_search_v<K>(
         self,
-        query: &[f64],
+        query: &'arena [f64],
         k: K,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
         K: TryInto<usize>,
         K::Error: std::fmt::Debug;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForceSearchVAdapter<'a>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    BruteForceSearchVAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
     fn brute_force_search_v<K>(
         self,
-        query: &[f64],
+        query: &'arena [f64],
         k: K,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let storage = Arc::clone(&self.storage);
-        let txn = self.txn;
-
         let iter = self
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.get_data(), query).unwrap();
+                    let d = cosine_similarity(v.data, query).unwrap();
                     v.set_distance(d);
                     Some(v)
                 }
@@ -68,41 +53,30 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> BruteForce
             .sorted_by(|v1, v2| v1.partial_cmp(v2).unwrap())
             .take(k.try_into().unwrap())
             .filter_map(move |mut item| {
-                item.properties = match storage
+                match self
+                    .storage
                     .vectors
-                    .vector_data_db
-                    .get(txn, &item.get_id().to_be_bytes())
+                    .get_vector_properties(self.txn, *item.id(), self.arena)
                 {
-                    Ok(Some(bytes)) => Some(
-                        bincode::deserialize(bytes)
-                            .map_err(GraphError::from)
-                            .unwrap(),
-                    ),
+                    Ok(Some(vector_without_data)) => {
+                        item.expand_from_vector_without_data(vector_without_data);
+                        Some(item)
+                    }
+
                     Ok(None) => None, // TODO: maybe should be an error?
                     Err(e) => {
                         println!("error getting vector data: {e:?}");
-                        return None;
-                    }
-                };
-                debug_println!("item: {item:?}");
-
-                if let Ok(is_deleted) = item.check_property("is_deleted") {
-                    debug_println!("is_deleted: {is_deleted:?}");
-                    if let Value::Boolean(is_deleted) = is_deleted.as_ref() {
-                        if *is_deleted { None } else { Some(item) }
-                    } else {
                         None
                     }
-                } else {
-                    None
                 }
             })
             .map(|v| Ok(TraversalValue::Vector(v)));
 
         RoTraversalIterator {
-            inner: iter.into_iter(),
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: iter.into_iter(),
         }
     }
 }

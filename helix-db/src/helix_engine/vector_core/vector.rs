@@ -1,54 +1,86 @@
 use crate::{
     helix_engine::{
-        types::{GraphError, VectorError},
-        vector_core::vector_distance::DistanceCalc,
+        types::VectorError,
+        vector_core::{vector_distance::DistanceCalc, vector_without_data::VectorWithoutData},
     },
-    protocol::{return_values::ReturnValue, value::Value},
+    protocol::{custom_serde::vector_serde::VectorDeSeed, value::Value},
     utils::{
-        filterable::{Filterable, FilterableType},
-        id::v6_uuid,
+        id::{uuid_str_from_buf, v6_uuid},
+        properties::ImmutablePropertiesMap,
     },
 };
+use bincode::Options;
 use core::fmt;
-use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, cmp::Ordering, collections::HashMap, fmt::Debug};
+use serde::{Serialize, Serializer};
+use std::{alloc, cmp::Ordering, fmt::Debug, mem, ptr, slice};
 
 // TODO: make this generic over the type of encoding (f32, f64, etc)
 // TODO: use const param to set dimension
 // TODO: set level as u8
 
 #[repr(C, align(16))] // TODO: see performance impact of repr(C) and align(16)
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-pub struct HVector {
+#[derive(Clone, Copy)]
+pub struct HVector<'arena> {
     /// The id of the HVector
     pub id: u128,
-    /// Whether the HVector is deleted (will be used for soft deletes)
-    // pub is_deleted: bool,
+    /// The label of the HVector
+    pub label: &'arena str,
+    /// the version of the vector
+    pub version: u8,
+    /// whether the vector is deleted
+    pub deleted: bool,
     /// The level of the HVector
-    #[serde(default)]
     pub level: usize,
     /// The distance of the HVector
-    #[serde(default)]
     pub distance: Option<f64>,
     /// The actual vector
-    #[serde(default)]
-    pub data: Vec<f64>,
+    pub data: &'arena [f64],
     /// The properties of the HVector
-    #[serde(default)]
-    pub properties: Option<HashMap<String, Value>>,
-
-    /// the version of the vector
-    #[serde(default)]
-    pub version: u8,
+    pub properties: Option<ImmutablePropertiesMap<'arena>>,
 }
 
-impl Eq for HVector {}
-impl PartialOrd for HVector {
+impl<'arena> Serialize for HVector<'arena> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        // Check if this is a human-readable format (like JSON)
+        if serializer.is_human_readable() {
+            // Include id for JSON serialization
+            let mut buffer = [0u8; 36];
+            let mut state = serializer.serialize_struct("HVector", 5)?;
+            state.serialize_field("id", uuid_str_from_buf(self.id, &mut buffer))?;
+            state.serialize_field("label", &self.label)?;
+            state.serialize_field("version", &self.version)?;
+            state.serialize_field("deleted", &self.deleted)?;
+            state.serialize_field("properties", &self.properties)?;
+            state.end()
+        } else {
+            // Skip id, level, distance, and data for bincode serialization
+            let mut state = serializer.serialize_struct("HVector", 4)?;
+            state.serialize_field("label", &self.label)?;
+            state.serialize_field("version", &self.version)?;
+            state.serialize_field("deleted", &self.deleted)?;
+            state.serialize_field("properties", &self.properties)?;
+            state.end()
+        }
+    }
+}
+
+impl PartialEq for HVector<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for HVector<'_> {}
+impl PartialOrd for HVector<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl Ord for HVector {
+impl Ord for HVector<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .distance
@@ -57,114 +89,139 @@ impl Ord for HVector {
     }
 }
 
-impl Debug for HVector {
+impl Debug for HVector<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{{ \nid: {},\nlevel: {},\ndistance: {:?},\ndata: {:?},\nproperties: {:#?} }}",
+            "{{ \nid: {},\nlevel: {},\ndistance: {:?},\ndata: {:?}, }}",
             uuid::Uuid::from_u128(self.id),
             // self.is_deleted,
             self.level,
             self.distance,
             self.data,
-            self.properties
         )
     }
 }
 
-impl HVector {
+impl<'arena> HVector<'arena> {
     #[inline(always)]
-    pub fn new(data: Vec<f64>) -> Self {
-        let id = v6_uuid();
-        HVector {
-            id,
-            // is_deleted: false,
-            version: 1,
-            level: 0,
-            data,
-            distance: None,
-            properties: None,
-        }
-    }
-
-    #[inline(always)]
-    pub fn from_slice(level: usize, data: Vec<f64>) -> Self {
+    pub fn from_slice(label: &'arena str, level: usize, data: &'arena [f64]) -> Self {
         let id = v6_uuid();
         HVector {
             id,
             // is_deleted: false,
             version: 1,
             level,
+            label,
             data,
             distance: None,
             properties: None,
+            deleted: false,
         }
-    }
-
-    #[inline(always)]
-    pub fn decode_vector(
-        raw_vector_bytes: &[u8],
-        properties: Option<HashMap<String, Value>>,
-        id: u128,
-    ) -> Result<Self, VectorError> {
-        let mut vector = HVector::from_bytes(id, 0, raw_vector_bytes)?;
-        vector.properties = properties;
-        Ok(vector)
-    }
-
-    /// Returns the data of the HVector
-    #[inline(always)]
-    pub fn get_data(&self) -> &[f64] {
-        &self.data
-    }
-
-    /// Returns the id of the HVector
-    #[inline(always)]
-    pub fn get_id(&self) -> u128 {
-        self.id
-    }
-
-    /// Returns the level of the HVector
-    #[inline(always)]
-    pub fn get_level(&self) -> usize {
-        self.level
     }
 
     /// Converts the HVector to an vec of bytes by accessing the data field directly
     /// and converting each f64 to a byte slice
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let size = self.data.len() * std::mem::size_of::<f64>();
-        let mut bytes = Vec::with_capacity(size);
-        for &value in &self.data {
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        bytes
+    #[inline(always)]
+    pub fn vector_data_to_bytes(&self) -> Result<&[u8], VectorError> {
+        bytemuck::try_cast_slice(self.data).map_err(|_| {
+            VectorError::ConversionError("Invalid vector data: vector data".to_string())
+        })
     }
 
-    // will make to use const param for type of encoding (f32, f64, etc)
-    /// Converts a byte array into a HVector by chunking the bytes into f64 values
-    pub fn from_bytes(id: u128, level: usize, bytes: &[u8]) -> Result<Self, VectorError> {
-        if !bytes.len().is_multiple_of(std::mem::size_of::<f64>()){
-            return Err(VectorError::InvalidVectorData);
-        }
+    /// Deserializes bytes into an vector using a custom deserializer that allocates into the provided arena
+    ///
+    /// Both the properties bytes (if present) and the raw vector data are combined to generate the final vector struct
+    ///
+    /// NOTE: in this method, fixint encoding is used
+    #[inline]
+    pub fn from_bincode_bytes<'txn>(
+        arena: &'arena bumpalo::Bump,
+        properties: Option<&'txn [u8]>,
+        raw_vector_data: &'txn [u8],
+        id: u128,
+    ) -> Result<Self, VectorError> {
+        bincode::options()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .deserialize_seed(
+                VectorDeSeed {
+                    arena,
+                    id,
+                    raw_vector_data,
+                },
+                properties.unwrap_or(&[]),
+            )
+            .map_err(|e| VectorError::ConversionError(format!("Error deserializing vector: {e}")))
+    }
 
-        let mut data = Vec::with_capacity(bytes.len() / std::mem::size_of::<f64>());
-        let chunks = bytes.chunks_exact(std::mem::size_of::<f64>());
+    #[inline(always)]
+    pub fn to_bincode_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
 
-        for chunk in chunks {
-            // panic here because panic means corruption of some sort
-            let value = f64::from_be_bytes(chunk.try_into().expect("Invalid chunk"));
-            data.push(value);
-        }
+    /// Casts the raw bytes to a f64 slice by copying them once into the arena
+    #[inline]
+    pub fn cast_raw_vector_data<'txn>(
+        arena: &'arena bumpalo::Bump,
+        raw_vector_data: &'txn [u8],
+    ) -> &'arena [f64] {
+        assert!(!raw_vector_data.is_empty(), "raw_vector_data.len() == 0");
+        assert!(
+            raw_vector_data.len().is_multiple_of(mem::size_of::<f64>()),
+            "raw_vector_data bytes len is not a multiple of size_of::<f64>()"
+        );
+        let dimensions = raw_vector_data.len() / mem::size_of::<f64>();
 
+        assert!(
+            raw_vector_data.len().is_multiple_of(dimensions),
+            "raw_vector_data does not have the exact required number of dimensions"
+        );
+
+        let layout = alloc::Layout::array::<f64>(dimensions)
+            .expect("vector_data array arithmetic overflow or total size exceeds isize::MAX");
+
+        let vector_data: ptr::NonNull<u8> = arena.alloc_layout(layout);
+
+        // 'arena because the destination pointer is allocated in the arena
+        let data: &'arena [f64] = unsafe {
+            // SAFETY:
+            // - We assert data is present and that we are within bounds in asserts above
+            ptr::copy_nonoverlapping(
+                raw_vector_data.as_ptr(),
+                vector_data.as_ptr(),
+                raw_vector_data.len(),
+            );
+
+            // We allocated with the layout of an f64 array
+            let vector_data: ptr::NonNull<f64> = vector_data.cast();
+
+            // SAFETY:
+            // - `vector_data`` is guaranteed to be valid by being NonNull
+            // - the asserts above guarantee that there are enough valid bytes to be read
+            slice::from_raw_parts(vector_data.as_ptr(), dimensions)
+        };
+
+        data
+    }
+
+    /// Uses just the vector data to generate a HVector struct
+    pub fn from_raw_vector_data<'txn>(
+        arena: &'arena bumpalo::Bump,
+        raw_vector_data: &'txn [u8],
+        label: &'arena str,
+        id: u128,
+    ) -> Result<Self, VectorError> {
+        let data = Self::cast_raw_vector_data(arena, raw_vector_data);
         Ok(HVector {
             id,
-            // is_deleted: false,
-            level,
-            version: 1,
+            label,
             data,
+            version: 1,
+            level: 0,
             distance: None,
             properties: None,
+            deleted: false,
         })
     }
 
@@ -180,7 +237,7 @@ impl HVector {
 
     #[inline(always)]
     pub fn distance_to(&self, other: &HVector) -> Result<f64, VectorError> {
-        HVector::distance(self, other)
+        HVector::<'arena>::distance(self, other)
     }
 
     #[inline(always)]
@@ -197,108 +254,46 @@ impl HVector {
     pub fn get_label(&self) -> Option<&Value> {
         match &self.properties {
             Some(p) => p.get("label"),
-            None => None
-        } 
-    }
-}
-
-/// Filterable implementation for HVector
-///
-/// see helix_db/src/protocol/filterable.rs
-///
-/// NOTE: This could be moved to the protocol module with the node and edges in `helix_db/protocol/items.rs``
-impl Filterable for HVector {
-    fn type_name(&self) -> FilterableType {
-        FilterableType::Vector
+            None => None,
+        }
     }
 
-    fn id(&self) -> &u128 {
+    #[inline(always)]
+    pub fn get_property(&self, key: &str) -> Option<&'arena Value> {
+        self.properties.as_ref().and_then(|value| value.get(key))
+    }
+
+    pub fn id(&self) -> &u128 {
         &self.id
     }
 
-    fn uuid(&self) -> String {
-        uuid::Uuid::from_u128(self.id).to_string()
+    pub fn label(&self) -> &'arena str {
+        self.label
     }
 
-    fn label(&self) -> &str {
-        match &self.properties {
-            Some(properties) => match properties.get("label") {
-                Some(label) => label.as_str(),
-                None => "vector",
-            },
-            None => "vector",
+    pub fn score(&self) -> f64 {
+        self.distance.unwrap_or(2.0)
+    }
+
+    pub fn expand_from_vector_without_data(&mut self, vector: VectorWithoutData<'arena>) {
+        self.label = vector.label;
+        self.version = vector.version;
+        self.level = vector.level;
+        self.properties = vector.properties;
+    }
+}
+
+impl<'arena> From<VectorWithoutData<'arena>> for HVector<'arena> {
+    fn from(value: VectorWithoutData<'arena>) -> Self {
+        HVector {
+            id: value.id,
+            label: value.label,
+            version: value.version,
+            level: value.level,
+            distance: None,
+            data: &[],
+            properties: value.properties,
+            deleted: value.deleted,
         }
-    }
-
-    fn from_node(&self) -> u128 {
-        unreachable!()
-    }
-
-    fn from_node_uuid(&self) -> String {
-        unreachable!()
-    }
-
-    fn to_node(&self) -> u128 {
-        unreachable!()
-    }
-
-    fn to_node_uuid(&self) -> String {
-        unreachable!()
-    }
-
-    fn properties(self) -> Option<HashMap<String, Value>> {
-        let mut properties = self.properties.unwrap_or_default();
-        properties.insert(
-            "data".to_string(),
-            Value::Array(self.data.iter().map(|f| Value::F64(*f)).collect()),
-        );
-        Some(properties)
-    }
-
-    fn vector_data(&self) -> &[f64] {
-        &self.data
-    }
-
-    fn score(&self) -> f64 {
-        self.get_distance()
-    }
-
-    fn properties_mut(&mut self) -> &mut Option<HashMap<String, Value>> {
-        &mut self.properties
-    }
-
-    fn properties_ref(&self) -> &Option<HashMap<String, Value>> {
-        &self.properties
-    }
-
-    fn check_property(&self, key: &str) -> Result<Cow<'_, Value>, GraphError> {
-        match key {
-            "id" => Ok(Cow::Owned(Value::from(self.uuid()))),
-            "label" => Ok(Cow::Owned(Value::from(self.label().to_string()))),
-            "data" => Ok(Cow::Owned(Value::Array(
-                self.data.iter().map(|f| Value::F64(*f)).collect(),
-            ))),
-            "score" => Ok(Cow::Owned(Value::F64(self.score()))),
-            _ => match &self.properties {
-                Some(properties) => properties
-                    .get(key)
-                    .ok_or(GraphError::ConversionError(format!(
-                        "Property {key} not found"
-                    )))
-                    .map(Cow::Borrowed),
-                None => Err(GraphError::ConversionError(format!(
-                    "Property {key} not found"
-                ))),
-            },
-        }
-    }
-
-    fn find_property(
-        &self,
-        _key: &str,
-        _secondary_properties: &HashMap<String, ReturnValue>,
-        _property: &mut ReturnValue,
-    ) -> Option<&ReturnValue> {
-        unreachable!()
     }
 }

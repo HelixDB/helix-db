@@ -1,64 +1,55 @@
-use crate::{
-    helix_engine::{
-        traversal_core::{traversal_value::TraversalValue, traversal_iter::RoTraversalIterator},
-        storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
-        types::GraphError,
-    },
-    utils::items::Node,
+use crate::helix_engine::{
+    storage_core::storage_methods::StorageMethods,
+    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
+    types::GraphError,
 };
-use helix_macros::debug_trace;
-use heed3::RoTxn;
-use std::{iter::Once, sync::Arc};
 
-pub struct NFromId<'a, T> {
-    iter: Once<Result<TraversalValue, GraphError>>,
-    storage: Arc<HelixGraphStorage>,
-    txn: &'a T,
-    id: u128,
-}
-
-impl<'a> Iterator for NFromId<'a, RoTxn<'a>> {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("N_FROM_ID")]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|_| {
-            let node: Node = match self.storage.get_node(self.txn, &self.id) {
-                Ok(node) => node,
-                Err(e) => return Err(e),
-            };
-            Ok(TraversalValue::Node(node))
-        })
-    }
-}
-
-pub trait NFromIdAdapter<'a>: Iterator<Item = Result<TraversalValue, GraphError>> {
-    type OutputIter: Iterator<Item = Result<TraversalValue, GraphError>>;
-
+pub trait NFromIdAdapter<
+    'db: 'arena,
+    'arena: 'txn,
+    'txn,
+    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+>: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
+{
     /// Returns an iterator containing the node with the given id.
     ///
     /// Note that the `id` cannot be empty and must be a valid, existing node id.
-    fn n_from_id(self, id: &u128) -> Self::OutputIter;
+    fn n_from_id(
+        self,
+        id: &u128,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> NFromIdAdapter<'a>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    NFromIdAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
-    type OutputIter = RoTraversalIterator<'a, NFromId<'a, RoTxn<'a>>>;
-
     #[inline]
-    fn n_from_id(self, id: &u128) -> Self::OutputIter {
-        let n_from_id = NFromId {
-            iter: std::iter::once(Ok(TraversalValue::Empty)),
-            storage: Arc::clone(&self.storage),
-            txn: self.txn,
-            id: *id,
-        };
+    fn n_from_id(
+        self,
+        id: &u128,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let n_from_id = std::iter::once({
+            match self.storage.get_node(self.txn, id, self.arena) {
+                Ok(node) => Ok(TraversalValue::Node(node)),
+                Err(e) => Err(e),
+            }
+        });
 
         RoTraversalIterator {
-            inner: n_from_id,
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
+            inner: n_from_id,
         }
     }
 }

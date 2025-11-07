@@ -26,6 +26,22 @@ QUERY GetUserPosts (user_id: ID) =>
         }
     }
 
+QUERY GetUserPostsWorking2 (user_id: ID) =>
+    user <- N<User>(user_id)
+    posts <- user::Out<HasPost>
+    RETURN user::{
+            creatorID: id, 
+            creatorName: name,
+    }
+
+QUERY GetUserPostsWorking (user_id: ID) =>
+    user <- N<User>(user_id)
+    posts <- user::Out<HasPost>
+    RETURN user::{
+            id, 
+            name
+    }
+
 QUERY CreateUser (name: String, age: U8, email: String) =>
     user <- AddN<User>({
         name: name,

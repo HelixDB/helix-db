@@ -332,17 +332,13 @@ impl PartialEq<Value> for FieldType {
             }
             (FieldType::Date, value) => match value {
                 Value::String(date) => {
-                    println!("date: {}, {:?}", date, date.parse::<NaiveDate>());
                     date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
                 }
                 Value::I64(timestamp) => DateTime::from_timestamp(*timestamp, 0).is_some(),
                 Value::U64(timestamp) => DateTime::from_timestamp(*timestamp as i64, 0).is_some(),
                 _ => false,
             },
-            l => {
-                println!("l: {l:?}");
-                false
-            }
+            _ => false,
         }
     }
 }
@@ -374,7 +370,6 @@ impl PartialEq<DefaultValue> for FieldType {
             ) => true,
             (FieldType::Boolean, DefaultValue::Boolean(_)) => true,
             (FieldType::Date, DefaultValue::String(date)) => {
-                println!("date: {}, {:?}", date, date.parse::<NaiveDate>());
                 date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
             }
             (FieldType::Date, DefaultValue::I64(timestamp)) => {
@@ -608,6 +603,27 @@ pub struct GroupBy {
 }
 
 #[derive(Debug, Clone)]
+pub struct RerankRRF {
+    pub loc: Loc,
+    pub k: Option<Expression>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RerankMMR {
+    pub loc: Loc,
+    pub lambda: Expression,
+    pub distance: Option<MMRDistance>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MMRDistance {
+    Cosine,
+    Euclidean,
+    DotProduct,
+    Identifier(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum StepType {
     Node(GraphStep),
     Edge(GraphStep),
@@ -624,6 +640,8 @@ pub enum StepType {
     GroupBy(GroupBy),
     AddEdge(AddEdge),
     First,
+    RerankRRF(RerankRRF),
+    RerankMMR(RerankMMR),
 }
 impl PartialEq<StepType> for StepType {
     fn eq(&self, other: &StepType) -> bool {
@@ -646,6 +664,8 @@ impl PartialEq<StepType> for StepType {
                 | (&StepType::AddEdge(_), &StepType::AddEdge(_))
                 | (&StepType::Aggregate(_), &StepType::Aggregate(_))
                 | (&StepType::GroupBy(_), &StepType::GroupBy(_))
+                | (&StepType::RerankRRF(_), &StepType::RerankRRF(_))
+                | (&StepType::RerankMMR(_), &StepType::RerankMMR(_))
         )
     }
 }

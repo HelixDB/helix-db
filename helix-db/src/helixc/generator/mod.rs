@@ -20,7 +20,6 @@ use std::{fmt::Display, fs::File, io::Result, path::Path};
 
 pub mod bool_ops;
 pub mod migrations;
-pub mod object_remappings;
 pub mod queries;
 pub mod return_values;
 pub mod schemas;

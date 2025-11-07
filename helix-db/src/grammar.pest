@@ -62,7 +62,7 @@ get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | search_vector | start_vector) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
 anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
-step                = { "::" ~ (graph_step | order_by| aggregate | group_by | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE) }
+step                = { "::" ~ (graph_step | order_by| aggregate | group_by | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE | rerank_rrf | rerank_mmr) }
 last_step           = { "::" ~ (bool_operations | update | first) }
 // change this for loop to be able to take traversals etc in the future. 
 for_loop            = { "FOR" ~ for_argument ~ "IN" ~ identifier ~ "{" ~ query_body ~ "}" }
@@ -134,7 +134,7 @@ return_stmt = { "RETURN" ~ (evaluates_to_anything ~ ("," ~ evaluates_to_anything
 // Creation steps
 // ---------------------------------------------------------------------
 create_field  = { "{" ~ new_field ~ ("," ~ new_field)* ~ ","? ~ "}" }
-new_field     = { identifier ~ ":" ~ (anonymous_traversal | evaluates_to_anything | create_field) }
+new_field     = { identifier ~ ":" ~ (id_traversal | anonymous_traversal | evaluates_to_anything | create_field) }
 to_from       = { to ~ from? | from ~ to? }
 to            = { "::" ~ "To" ~ "(" ~ id_arg ~ ")" }
 from          = { "::" ~ "From" ~ "(" ~ id_arg ~ ")" }
@@ -205,6 +205,12 @@ group_by = { "GROUP_BY" ~ "(" ~ (identifier ~ ("," ~ identifier)*) ~ ")" }
 
 
 // ---------------------------------------------------------------------
+// Reranker steps
+// ---------------------------------------------------------------------
+rerank_rrf = { "RerankRRF" ~ ("(" ~ "k" ~ ":" ~ evaluates_to_number ~ ")")? }
+rerank_mmr = { "RerankMMR" ~ "(" ~ "lambda" ~ ":" ~ evaluates_to_number ~ ("," ~ "distance" ~ ":" ~ (string_literal | identifier))? ~ ")" }
+
+// ---------------------------------------------------------------------
 // Vector steps
 // ---------------------------------------------------------------------
 search_vector = { "SearchV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ vector_data ~ "," ~ (integer | identifier) ~ ")" }// ~ ("::" ~ pre_filter)? }
@@ -237,7 +243,7 @@ object_step   = { "{" ~ ((mapping_field ~ ("," ~ mapping_field)* ~ "," ~ spread_
 exclude_field = { "!" ~ "{" ~ identifier ~ ("," ~ identifier)* ~ "}" }
 closure_step  = { "|" ~ identifier ~ "|" ~ object_step }
 spread_object = { ".." ~ ","?}
-mapping_field = { (identifier ~ (":" ~ (anonymous_traversal | evaluates_to_anything | object_step))) | identifier }
+mapping_field = { (identifier ~ ":" ~ (id_traversal | anonymous_traversal | evaluates_to_anything | object_step)) | identifier }
 array_creation = { "[" ~ (identifier | object_creation ) ~ ("," ~ (identifier | object_creation))* ~ ","? ~ "]" }
 object_creation = {  "{" ~ object_inner ~ ("," ~ object_inner)* ~ ","? ~ "}" }
 object_inner = { identifier ~ ":" ~ object_field }

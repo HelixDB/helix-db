@@ -66,8 +66,7 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
     // for each migration item mapping
     let mut item_mappings = Vec::new();
     for item in &migration.body {
-        // // get from fields and to fields and check they exist in respective versions
-        // println!("item: {:?}", item);
+        // get from fields and to fields and check they exist in respective versions
 
         let from_fields = match match &item.from_item {
             (_, MigrationItem::Node(node)) => from_node_fields.get(node.as_str()),

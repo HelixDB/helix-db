@@ -3,21 +3,19 @@ use crate::helix_engine::{
     types::GraphError,
 };
 use heed3::RoTxn;
-use helix_macros::debug_trace;
 
-pub struct FilterRef<'a, I, F> {
+pub struct FilterRef<'db, 'txn, I, F> {
     iter: I,
-    txn: &'a RoTxn<'a>,
+    txn: &'txn RoTxn<'db>,
     f: F,
 }
 
-impl<'a, I, F> Iterator for FilterRef<'a, I, F>
+impl<'db, 'arena, 'txn, I, F> Iterator for FilterRef<'db, 'txn, I, F>
 where
-    I: Iterator<Item = Result<TraversalValue, GraphError>>,
+    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     F: Fn(&I::Item, &RoTxn) -> Result<bool, GraphError>,
 {
     type Item = I::Item;
-    #[debug_trace("FILTER_REF")]
     fn next(&mut self) -> Option<Self::Item> {
         for item in self.iter.by_ref() {
             match (self.f)(&item, self.txn) {
@@ -35,36 +33,47 @@ where
     }
 }
 
-pub trait FilterRefAdapter<'a>: Iterator {
+pub trait FilterRefAdapter<'db, 'arena, 'txn>: Iterator {
     /// FilterRef filters the iterator by taking a reference
     /// to each item and a transaction.
     fn filter_ref<F>(
         self,
         f: F,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
-        F: Fn(&Result<TraversalValue, GraphError>, &RoTxn) -> Result<bool, GraphError>;
+        F: Fn(&Result<TraversalValue<'arena>, GraphError>, &RoTxn) -> Result<bool, GraphError>;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> FilterRefAdapter<'a>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    FilterRefAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
     #[inline]
     fn filter_ref<F>(
         self,
         f: F,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
-        F: Fn(&Result<TraversalValue, GraphError>, &RoTxn) -> Result<bool, GraphError>,
+        F: Fn(&Result<TraversalValue<'arena>, GraphError>, &RoTxn) -> Result<bool, GraphError>,
     {
         RoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
             inner: FilterRef {
                 iter: self.inner,
                 txn: self.txn,
                 f,
             },
-            storage: self.storage,
-            txn: self.txn,
         }
     }
 }

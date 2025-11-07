@@ -10,16 +10,25 @@ use helix_db::helix_gateway::{
     router::router::{HandlerFn, HandlerSubmission},
 };
 use std::{collections::HashMap, sync::Arc};
-use tracing::{Level, info};
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 mod queries;
 
 fn main() {
     let env_res = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_max_level(Level::TRACE)
-        .finish()
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::filter::filter_fn(
+                |metadata| {
+                    let target = metadata.target();
+                    !target.starts_with("axum")
+                        && !target.starts_with("hyper")
+                        && !target.starts_with("tower")
+                        && !target.starts_with("h2")
+                },
+            )),
+        )
         .init();
 
     match env_res {
@@ -50,41 +59,42 @@ fn main() {
     println!("\tpath: {}", path.display());
     println!("\tport: {port}");
 
-    let transition_fns = inventory::iter::<TransitionSubmission>.into_iter().fold(
-        HashMap::new(),
-        |mut acc,
-         TransitionSubmission(Transition {
-             item_label,
-             func,
-             from_version,
-             to_version,
-         })| {
-            acc.entry(item_label.to_string())
-                .and_modify(|item_info: &mut ItemInfo| {
-                    item_info.latest = item_info.latest.max(*to_version);
+    let transition_fns: HashMap<&'static str, ItemInfo> =
+        inventory::iter::<TransitionSubmission>.into_iter().fold(
+            HashMap::new(),
+            |mut acc,
+             TransitionSubmission(Transition {
+                 item_label,
+                 func,
+                 from_version,
+                 to_version,
+             })| {
+                acc.entry(item_label)
+                    .and_modify(|item_info: &mut ItemInfo| {
+                        item_info.latest = item_info.latest.max(*to_version);
 
-                    // asserts for versions
-                    assert!(
-                        *from_version < *to_version,
-                        "from_version must be less than to_version"
-                    );
-                    assert!(*from_version > 0, "from_version must be greater than 0");
-                    assert!(*to_version > 0, "to_version must be greater than 0");
-                    assert!(
-                        *to_version - *from_version == 1,
-                        "to_version must be exactly 1 greater than from_version"
-                    );
+                        // asserts for versions
+                        assert!(
+                            *from_version < *to_version,
+                            "from_version must be less than to_version"
+                        );
+                        assert!(*from_version > 0, "from_version must be greater than 0");
+                        assert!(*to_version > 0, "to_version must be greater than 0");
+                        assert!(
+                            *to_version - *from_version == 1,
+                            "to_version must be exactly 1 greater than from_version"
+                        );
 
-                    item_info.transition_fns.push(TransitionFn {
-                        from_version: *from_version,
-                        to_version: *to_version,
-                        func: *func,
+                        item_info.transition_fns.push(TransitionFn {
+                            from_version: *from_version,
+                            to_version: *to_version,
+                            func: *func,
+                        });
+                        item_info.transition_fns.sort_by_key(|f| f.from_version);
                     });
-                    item_info.transition_fns.sort_by_key(|f| f.from_version);
-                });
-            acc
-        },
-    );
+                acc
+            },
+        );
 
     let path_str = path.to_str().expect("Could not convert path to string");
     let opts = HelixGraphEngineOpts {

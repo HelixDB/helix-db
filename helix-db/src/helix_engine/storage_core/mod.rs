@@ -1,6 +1,12 @@
-pub mod graph_visualization;
+pub mod metadata;
 pub mod storage_methods;
+pub mod storage_migration;
 pub mod version_info;
+
+#[cfg(test)]
+mod storage_migration_tests;
+#[cfg(test)]
+mod storage_concurrent_tests;
 
 use crate::{
     helix_engine::{
@@ -13,12 +19,10 @@ use crate::{
         types::GraphError,
         vector_core::{
             hnsw::HNSW,
-            vector::HVector,
             vector_core::{HNSWConfig, VectorCore},
         },
     },
     utils::{
-        filterable::Filterable,
         items::{Edge, Node},
         label_hash::hash_label,
     },
@@ -35,6 +39,7 @@ const DB_NODES: &str = "nodes"; // for node data (n:)
 const DB_EDGES: &str = "edges"; // for edge data (e:)
 const DB_OUT_EDGES: &str = "out_edges"; // for outgoing edge indices (o:)
 const DB_IN_EDGES: &str = "in_edges"; // for incoming edge indices (i:)
+const DB_STORAGE_METADATA: &str = "storage_metadata"; // for storage metadata key/value pairs
 
 pub type NodeId = u128;
 pub type EdgeId = u128;
@@ -55,6 +60,7 @@ pub struct HelixGraphStorage {
     pub secondary_indices: HashMap<String, Database<Bytes, U128<BE>>>,
     pub vectors: VectorCore,
     pub bm25: Option<HBM25Config>,
+    pub metadata_db: Database<Bytes, Bytes>,
     pub version_info: VersionInfo,
 
     pub storage_config: StorageConfig,
@@ -76,7 +82,6 @@ impl HelixGraphStorage {
 
         let graph_env = unsafe {
             EnvOpenOptions::new()
-                
                 .map_size(db_size * 1024 * 1024 * 1024)
                 .max_dbs(200)
                 .max_readers(200)
@@ -129,6 +134,12 @@ impl HelixGraphStorage {
             .name(DB_IN_EDGES)
             .create(&mut wtxn)?;
 
+        let metadata_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name(DB_STORAGE_METADATA)
+            .create(&mut wtxn)?;
+
         let mut secondary_indices = HashMap::new();
         if let Some(indexes) = config.get_graph_config().secondary_indices {
             for index in indexes {
@@ -143,7 +154,6 @@ impl HelixGraphStorage {
                 );
             }
         }
-
         let vector_config = config.get_vector_config();
         let vectors = VectorCore::new(
             &graph_env,
@@ -167,7 +177,8 @@ impl HelixGraphStorage {
         );
 
         wtxn.commit()?;
-        Ok(Self {
+
+        let mut storage = Self {
             graph_env,
             nodes_db,
             edges_db,
@@ -176,9 +187,14 @@ impl HelixGraphStorage {
             secondary_indices,
             vectors,
             bm25,
+            metadata_db,
             storage_config,
             version_info,
-        })
+        };
+
+        storage_migration::migrate(&mut storage)?;
+
+        Ok(storage)
     }
 
     /// Used because in the case the key changes in the future.
@@ -256,11 +272,6 @@ impl HelixGraphStorage {
         );
         Ok((edge_id, node_id))
     }
-
-    /// Gets a vector from level 0 of HNSW index (because that's where all are stored)
-    pub fn get_vector(&self, txn: &RoTxn, id: &u128) -> Result<HVector, GraphError> {
-        Ok(self.vectors.get_vector(txn, *id, 0, true)?)
-    }
 }
 
 impl StorageConfig {
@@ -302,33 +313,39 @@ impl DBMethods for HelixGraphStorage {
 }
 
 impl StorageMethods for HelixGraphStorage {
-    #[inline(always)]
-    fn check_exists(&self, txn: &RoTxn, id: &u128) -> Result<bool, GraphError> {
-        Ok(self.nodes_db.get(txn, Self::node_key(id))?.is_some())
-    }
-
-    #[inline(always)]
-    fn get_node(&self, txn: &RoTxn, id: &u128) -> Result<Node, GraphError> {
+    #[inline]
+    fn get_node<'arena>(
+        &self,
+        txn: &RoTxn,
+        id: &u128,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<Node<'arena>, GraphError> {
         let node = match self.nodes_db.get(txn, Self::node_key(id))? {
             Some(data) => data,
             None => return Err(GraphError::NodeNotFound),
         };
-        let node: Node = Node::decode_node(node, *id)?;
+        let node: Node = Node::from_bincode_bytes(*id, node, arena)?;
         let node = self.version_info.upgrade_to_node_latest(node);
         Ok(node)
     }
 
-    #[inline(always)]
-    fn get_edge(&self, txn: &RoTxn, id: &u128) -> Result<Edge, GraphError> {
+    #[inline]
+    fn get_edge<'arena>(
+        &self,
+        txn: &RoTxn,
+        id: &u128,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<Edge<'arena>, GraphError> {
         let edge = match self.edges_db.get(txn, Self::edge_key(id))? {
             Some(data) => data,
             None => return Err(GraphError::EdgeNotFound),
         };
-        let edge: Edge = Edge::decode_edge(edge, *id)?;
+        let edge: Edge = Edge::from_bincode_bytes(*id, edge, arena)?;
         Ok(self.version_info.upgrade_to_edge_latest(edge))
     }
 
     fn drop_node(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
+        let arena = bumpalo::Bump::new();
         // Get node to get its label
         //let node = self.get_node(txn, id)?;
         let mut edges = HashSet::new();
@@ -399,11 +416,11 @@ impl StorageMethods for HelixGraphStorage {
         }
 
         // delete secondary indices
-        let node = self.get_node(txn, id)?;
+        let node = self.get_node(txn, id, &arena)?;
         for (index_name, db) in &self.secondary_indices {
-            // Use check_property like we do when adding, to handle id, label, and regular properties consistently
-            match node.check_property(index_name) {
-                Ok(value) => match bincode::serialize(&*value) {
+            // Use get_property like we do when adding, to handle id, label, and regular properties consistently
+            match node.get_property(index_name) {
+                Some(value) => match bincode::serialize(value) {
                     Ok(serialized) => {
                         if let Err(e) = db.delete_one_duplicate(txn, &serialized, &node.id) {
                             return Err(GraphError::from(e));
@@ -411,7 +428,7 @@ impl StorageMethods for HelixGraphStorage {
                     }
                     Err(e) => return Err(GraphError::from(e)),
                 },
-                Err(_) => {
+                None => {
                     // Property not found - this is expected for some indices
                     // Continue to next index
                 }
@@ -425,13 +442,14 @@ impl StorageMethods for HelixGraphStorage {
     }
 
     fn drop_edge(&self, txn: &mut RwTxn, edge_id: &u128) -> Result<(), GraphError> {
+        let arena = bumpalo::Bump::new();
         // Get edge data first
         let edge_data = match self.edges_db.get(txn, Self::edge_key(edge_id))? {
             Some(data) => data,
             None => return Err(GraphError::EdgeNotFound),
         };
-        let edge: Edge = bincode::deserialize(edge_data)?;
-        let label_hash = hash_label(&edge.label, None);
+        let edge: Edge = Edge::from_bincode_bytes(*edge_id, edge_data, &arena)?;
+        let label_hash = hash_label(edge.label, None);
         let out_edge_value = Self::pack_edge_data(edge_id, &edge.to_node);
         let in_edge_value = Self::pack_edge_data(edge_id, &edge.from_node);
         // Delete all edge-related data
@@ -451,6 +469,7 @@ impl StorageMethods for HelixGraphStorage {
     }
 
     fn drop_vector(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
+        let arena = bumpalo::Bump::new();
         let mut edges = HashSet::new();
         let mut out_edges = HashSet::new();
         let mut in_edges = HashSet::new();
@@ -519,7 +538,7 @@ impl StorageMethods for HelixGraphStorage {
         }
 
         // Delete vector data
-        self.vectors.delete(txn, *id)?;
+        self.vectors.delete(txn, *id, &arena)?;
 
         Ok(())
     }

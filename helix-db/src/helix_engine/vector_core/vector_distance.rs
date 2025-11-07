@@ -7,7 +7,7 @@ pub const MIN_DISTANCE: f64 = 0.0;
 pub trait DistanceCalc {
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError>;
 }
-impl DistanceCalc for HVector {
+impl<'a> DistanceCalc for HVector<'a> {
     /// Calculates the distance between two vectors.
     ///
     /// It normalizes the distance to be between 0 and 2.
@@ -18,10 +18,9 @@ impl DistanceCalc for HVector {
     #[inline(always)]
     #[cfg(feature = "cosine")]
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError> {
-        cosine_similarity(&from.data, &to.data).map(|sim| 1.0 - sim)
+        cosine_similarity(from.data, to.data).map(|sim| 1.0 - sim)
     }
 }
-
 
 #[inline]
 #[cfg(feature = "cosine")]

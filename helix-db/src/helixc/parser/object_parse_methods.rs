@@ -76,6 +76,10 @@ impl HelixParser {
                 loc: value_pair.loc(),
                 value: FieldValueType::Traversal(Box::new(self.parse_traversal(value_pair)?)),
             },
+            Rule::id_traversal => FieldValue {
+                loc: value_pair.loc(),
+                value: FieldValueType::Traversal(Box::new(self.parse_traversal(value_pair)?)),
+            },
             Rule::object_step => FieldValue {
                 loc: value_pair.loc(),
                 value: FieldValueType::Fields(self.parse_object_fields(value_pair)?),
@@ -159,6 +163,14 @@ impl HelixParser {
             Rule::anonymous_traversal => FieldValue {
                 loc: value_pair.loc(),
                 value: FieldValueType::Traversal(Box::new(self.parse_traversal(value_pair)?)),
+            },
+            Rule::id_traversal => FieldValue {
+                loc: value_pair.loc(),
+                value: FieldValueType::Traversal(Box::new(self.parse_traversal(value_pair)?)),
+            },
+            Rule::identifier => FieldValue {
+                loc: value_pair.loc(),
+                value: FieldValueType::Identifier(value_pair.as_str().to_string()),
             },
             Rule::object_step => FieldValue {
                 loc: value_pair.loc(),

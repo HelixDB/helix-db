@@ -129,13 +129,102 @@ impl Display for Drop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Drop::<Vec<_>>::drop_traversal(
-                {},
-                Arc::clone(&db),
+            "Drop::drop_traversal(
+                {}.collect::<Vec<_>>().into_iter(),
+                &db,
                 &mut txn,
             )?;",
             self.expression
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // Statement Tests
+    // ============================================================================
+
+    #[test]
+    fn test_statement_literal() {
+        let stmt = Statement::Literal(GenRef::Literal("test".to_string()));
+        assert_eq!(format!("{}", stmt), "\"test\"");
+    }
+
+    #[test]
+    fn test_statement_identifier() {
+        let stmt = Statement::Identifier(GenRef::Std("variable".to_string()));
+        assert_eq!(format!("{}", stmt), "variable");
+    }
+
+    #[test]
+    fn test_statement_empty() {
+        let stmt = Statement::Empty;
+        assert_eq!(format!("{}", stmt), "");
+    }
+
+    #[test]
+    fn test_statement_array() {
+        let stmt = Statement::Array(vec![
+            Statement::Literal(GenRef::Literal("a".to_string())),
+            Statement::Literal(GenRef::Literal("b".to_string())),
+        ]);
+        assert_eq!(format!("{}", stmt), "[\"a\", \"b\"]");
+    }
+
+    #[test]
+    fn test_statement_empty_array() {
+        let stmt = Statement::Array(vec![]);
+        assert_eq!(format!("{}", stmt), "[]");
+    }
+
+    // ============================================================================
+    // Assignment Tests
+    // ============================================================================
+
+    #[test]
+    fn test_assignment_simple() {
+        let assignment = Assignment {
+            variable: GenRef::Std("x".to_string()),
+            value: Box::new(Statement::Literal(GenRef::Literal("value".to_string()))),
+        };
+        assert_eq!(format!("{}", assignment), "let x = \"value\"");
+    }
+
+    #[test]
+    fn test_assignment_statement() {
+        let assignment = Statement::Assignment(Assignment {
+            variable: GenRef::Std("result".to_string()),
+            value: Box::new(Statement::Identifier(GenRef::Std("computation".to_string()))),
+        });
+        let output = format!("{}", assignment);
+        assert!(output.contains("let result = computation"));
+    }
+
+    // ============================================================================
+    // ForLoopInVariable Tests
+    // ============================================================================
+
+    #[test]
+    fn test_for_loop_in_variable_identifier() {
+        let var = ForLoopInVariable::Identifier(GenRef::Std("items".to_string()));
+        assert_eq!(format!("{}", var), "items");
+        assert_eq!(var.inner(), "items");
+    }
+
+    #[test]
+    fn test_for_loop_in_variable_parameter() {
+        let var = ForLoopInVariable::Parameter(GenRef::Std("param_name".to_string()));
+        assert_eq!(format!("{}", var), "&data.param_name");
+        assert_eq!(var.inner(), "param_name");
+    }
+
+    #[test]
+    fn test_for_loop_in_variable_empty_inner() {
+        let var = ForLoopInVariable::Empty;
+        assert_eq!(var.inner(), "");
     }
 }
 

@@ -1,98 +1,57 @@
 use crate::{
     helix_engine::{
-        traversal_core::{
-            ops::{
-                source::add_e::EdgeType,
-            },
-            traversal_value::{Traversable, TraversalValue},
-            traversal_iter::RoTraversalIterator,
-        },
         storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::label_hash::hash_label,
 };
-use heed3::{RoTxn, types::Bytes};
-use helix_macros::debug_trace;
-use std::sync::Arc;
 
-pub struct OutNodesIterator<'a, T> {
-    pub iter: heed3::RoIter<
-        'a,
-        Bytes,
-        heed3::types::LazyDecode<Bytes>,
-        heed3::iteration_method::MoveOnCurrentKeyDuplicates,
-    >,
-    pub storage: Arc<HelixGraphStorage>,
-    pub edge_type: EdgeType,
-    pub txn: &'a T,
-}
-
-impl<'a> Iterator for OutNodesIterator<'a, RoTxn<'a>> {
-    type Item = Result<TraversalValue, GraphError>;
-
-    #[debug_trace("OUT")]
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(Ok((_, data))) = self.iter.next() {
-            match data.decode() {
-                Ok(data) => {
-                    let (_, item_id) = match HelixGraphStorage::unpack_adj_edge_data(data) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            println!("Error unpacking edge data: {e:?}");
-                            return Some(Err(e));
-                        }
-                    };
-                    match self.edge_type {
-                        EdgeType::Node => {
-                            if let Ok(node) = self.storage.get_node(self.txn, &item_id) {
-                                return Some(Ok(TraversalValue::Node(node)));
-                            }
-                        }
-                        EdgeType::Vec => {
-                            if let Ok(vector) = self.storage.get_vector(self.txn, &item_id) {
-                                return Some(Ok(TraversalValue::Vector(vector)));
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("Error decoding edge data: {e:?}");
-                    return Some(Err(GraphError::DecodeError(e.to_string())));
-                }
-            }
-        }
-        None
-    }
-}
-
-pub trait OutAdapter<'a, T>: Iterator<Item = Result<TraversalValue, GraphError>> {
+pub trait OutAdapter<'db, 'arena, 'txn, 's>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
+{
     /// Returns an iterator containing the nodes that have an outgoing edge with the given label.
     ///
     /// Note that the `edge_label` cannot be empty and must be a valid, existing edge label.
     ///
     /// To provide safety, you cannot get all outgoing nodes as it would be ambiguous as to what
     /// type that resulting node would be.
-    fn out(
+    fn out_vec(
         self,
-        edge_label: &'a str,
-        edge_type: &'a EdgeType,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>>;
+        edge_label: &'s str,
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
+
+    fn out_node(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
-impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> OutAdapter<'a, RoTxn<'a>>
-    for RoTraversalIterator<'a, I>
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    OutAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
     #[inline]
-    fn out(
+    fn out_vec(
         self,
-        edge_label: &'a str,
-        edge_type: &'a EdgeType,
-    ) -> RoTraversalIterator<'a, impl Iterator<Item = Result<TraversalValue, GraphError>>> {
-        let db = Arc::clone(&self.storage);
-        let storage = Arc::clone(&self.storage);
-        let txn = self.txn;
-
+        edge_label: &'s str,
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
         let iter = self
             .inner
             .filter_map(move |item| {
@@ -104,17 +63,38 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> OutAdapter<'a, 
                     },
                     &edge_label_hash,
                 );
-                match db
-                    .out_edges_db
-                    .lazily_decode_data()
-                    .get_duplicates(txn, &prefix)
-                {
-                    Ok(Some(iter)) => Some(OutNodesIterator {
-                        iter,
-                        storage: Arc::clone(&db),
-                        edge_type: edge_type.clone(),
-                        txn,
-                    }),
+
+                match self.storage.out_edges_db.get_duplicates(self.txn, &prefix) {
+                    Ok(Some(iter)) => Some(iter.filter_map(move |item| {
+                        if let Ok((_, value)) = item {
+                            let (_, item_id) = match HelixGraphStorage::unpack_adj_edge_data(value)
+                            {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    println!("Error unpacking edge data: {e:?}");
+                                    return Some(Err(e));
+                                }
+                            };
+                            if get_vector_data {
+                                if let Ok(vec) = self
+                                    .storage
+                                    .vectors
+                                    .get_full_vector(self.txn, item_id, self.arena)
+                                {
+                                    return Some(Ok(TraversalValue::Vector(vec)));
+                                }
+                            } else if let Ok(Some(vec)) = self
+                                .storage
+                                .vectors
+                                .get_vector_properties(self.txn, item_id, self.arena)
+                            {
+                                return Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vec)));
+                            }
+                            None
+                        } else {
+                            None
+                        }
+                    })),
                     Ok(None) => None,
                     Err(e) => {
                         println!("{} Error getting out edges: {:?}", line!(), e);
@@ -127,8 +107,65 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> OutAdapter<'a, 
 
         RoTraversalIterator {
             inner: iter,
-            storage,
-            txn,
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+        }
+    }
+
+    #[inline]
+    fn out_node(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let edge_label_hash = hash_label(edge_label, None);
+                let prefix = HelixGraphStorage::out_edge_key(
+                    &match item {
+                        Ok(item) => item.id(),
+                        Err(_) => return None,
+                    },
+                    &edge_label_hash,
+                );
+                match self.storage.out_edges_db.get_duplicates(self.txn, &prefix) {
+                    Ok(Some(iter)) => Some(iter.filter_map(move |item| {
+                        if let Ok((_, data)) = item {
+                            let (_, item_id) = match HelixGraphStorage::unpack_adj_edge_data(data) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    println!("Error unpacking edge data: {e:?}");
+                                    return Some(Err(e));
+                                }
+                            };
+                            if let Ok(node) = self.storage.get_node(self.txn, &item_id, self.arena)
+                            {
+                                return Some(Ok(TraversalValue::Node(node)));
+                            }
+                        }
+                        None
+                    })),
+                    Ok(None) => None,
+                    Err(e) => {
+                        println!("{} Error getting out nodes: {:?}", line!(), e);
+                        // return Err(e);
+                        None
+                    }
+                }
+            })
+            .flatten();
+
+        RoTraversalIterator {
+            inner: iter,
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
         }
     }
 }

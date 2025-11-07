@@ -1,61 +1,52 @@
-use heed3::RoTxn;
-
 use crate::{
     helix_engine::{
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
         vector_core::{hnsw::HNSW, vector::HVector},
     },
-    protocol::value::Value,
+    utils::properties::ImmutablePropertiesMap,
 };
+use heed3::RoTxn;
 
-pub struct InsertVIterator {
-    inner: std::iter::Once<Result<TraversalValue, GraphError>>,
-}
-
-impl Iterator for InsertVIterator {
-    type Item = Result<TraversalValue, GraphError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-}
-
-pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, GraphError>> {
-    fn insert_v<F>(
-        self,
-        query: &[f64],
-        label: &str,
-        fields: Option<Vec<(String, Value)>>,
-    ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
-    where
-        F: Fn(&HVector, &RoTxn) -> bool;
-}
-
-impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdapter<'a, 'b>
-    for RwTraversalIterator<'a, 'b, I>
+pub trait InsertVAdapter<'db, 'arena, 'txn>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
     fn insert_v<F>(
         self,
-        query: &[f64],
-        label: &str,
-        fields: Option<Vec<(String, Value)>>,
-    ) -> RwTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+        query: &'arena [f64],
+        label: &'arena str,
+        properties: Option<ImmutablePropertiesMap<'arena>>,
+    ) -> RwTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool;
+}
+
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    InsertVAdapter<'db, 'arena, 'txn> for RwTraversalIterator<'db, 'arena, 'txn, I>
+{
+    fn insert_v<F>(
+        self,
+        query: &'arena [f64],
+        label: &'arena str,
+        properties: Option<ImmutablePropertiesMap<'arena>>,
+    ) -> RwTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
+    where
+        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
     {
-        let fields = match fields {
-            Some(mut fields) => {
-                fields.push((String::from("label"), Value::String(label.to_string())));
-                fields.push((String::from("is_deleted"), Value::Boolean(false)));
-                Some(fields)
-            }
-            None => Some(vec![
-                (String::from("label"), Value::String(label.to_string())),
-                (String::from("is_deleted"), Value::Boolean(false)),
-            ]),
-        };
-        let vector = self.storage.vectors.insert::<F>(self.txn, query, fields);
+        let vector: Result<HVector<'arena>, crate::helix_engine::types::VectorError> = self
+            .storage
+            .vectors
+            .insert::<F>(self.txn, label, query, properties, self.arena);
 
         let result = match vector {
             Ok(vector) => Ok(TraversalValue::Vector(vector)),
@@ -65,6 +56,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
         RwTraversalIterator {
             inner: std::iter::once(result),
             storage: self.storage,
+            arena: self.arena,
             txn: self.txn,
         }
     }

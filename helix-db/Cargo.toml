@@ -15,20 +15,26 @@ helix-metrics = { path = "../metrics" }
 # external dependencies
 tokio = { version = "1.44.2", features = ["full"] }
 serde = { version = "1.0.217", features = ["derive"] }
-bincode = "1.3.3"                                                  # TODO: Figure out bincode 2 impl with current serde impl
+bincode = "1.3.3" # TODO: Figure out bincode 2 impl with current serde impl
 sonic-rs = "0.5.0"
 inventory = "0.3.16"
 twox-hash = "2.1.0"
 heed3 = "0.22.0"
-uuid = { version = "1.12.1", features = ["v4", "v6", "fast-rng"] }
+uuid = { version = "1.12.1", features = ["serde", "v4", "v6", "fast-rng"] }
 rand = "0.9.0"
 chrono = "0.4.39"
-flume = { version = "0.11.1", default-features = false, features = ["async", "select"] }
+flume = { version = "0.11.1", default-features = false, features = [
+    "async",
+    "select",
+    "eventual-fairness",
+] }
 itertools = "0.14.0"
 tempfile = "3.20.0"
 paste = "1.0.15"
 rayon = "1.11.0"
 mimalloc = "0.1.48"
+bumpalo = { version = "3.19.0", features = ["collections", "boxed", "serde"] }
+bytemuck = "1.24.0"
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }
@@ -46,13 +52,20 @@ tracing = "0.1.41"
 core_affinity = "0.8.3"
 async-trait = "0.1.88"
 thiserror = "2.0.12"
+polars = { version = "0.46.0", features = [
+    "parquet",
+    "lazy",
+    "json",
+], optional = true }
 
 [dev-dependencies]
 rand = "0.9.0"
 lazy_static = "1.4.0"
-polars = { version = "0.46.0", features = ["parquet", "lazy", "json"] }
-kdam = "0.3"
-num_cpus = "1.17"                                                       # TODO: write ourselves
+num_cpus = "1.17"     # TODO: write ourselves
+proptest = "1.4"
+criterion = "0.5"
+loom = "0.7"          # Concurrency model checking
+tokio-test = "0.4"    # Tokio testing utilities
 
 [features]
 debug-output = ["helix-macros/debug-output"]
@@ -65,7 +78,8 @@ build = ["compiler"]
 vectors = ["cosine", "url"]
 server = ["build", "compiler", "vectors", "reqwest"]
 full = ["build", "compiler", "vectors"]
-dev = ["debug-output", "server"]
+bench = ["polars"]
+dev = ["debug-output", "server", "bench"]
 dev-instance = []
 default = ["server"]
 
@@ -77,3 +91,4 @@ path = "benches/bm25_benches.rs"
 [[test]]
 name = "hnsw_benches"
 path = "benches/hnsw_benches.rs"
+
