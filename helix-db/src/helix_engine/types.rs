@@ -201,3 +201,9 @@ impl From<bincode::Error> for VectorError {
         VectorError::ConversionError(format!("bincode error: {error}"))
     }
 }
+
+impl From<toml::de::Error> for GraphError {
+    fn from(error: toml::de::Error) -> Self {
+        GraphError::ConversionError(format!("toml error: {error}"))
+    }
+}

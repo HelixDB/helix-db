@@ -256,11 +256,10 @@ async fn compile_project(project: &ProjectContext, instance_name: &str) -> Resul
     // Create the directories
     fs::create_dir_all(&src_dir)?;
 
-    // Generate config.hx.json from helix.toml
+    // Generate config.toml from helix.toml
     let instance = project.config.get_instance(instance_name)?;
-    let legacy_config_json = instance.to_legacy_json();
-    let legacy_config_str = serde_json::to_string_pretty(&legacy_config_json)?;
-    fs::write(src_dir.join("config.hx.json"), legacy_config_str)?;
+    let config_toml_str = instance.to_config_toml();
+    fs::write(src_dir.join("config.toml"), config_toml_str)?;
 
     // Read and compile the .hx files using the same logic as the original CLI
     print_status("CODEGEN", "Generating Rust code from Helix queries...");
@@ -393,13 +392,13 @@ fn analyze_source(source: Source) -> Result<GeneratedSource> {
     Ok(generated_source)
 }
 
-/// Read the config.hx.json file from the instance workspace
+/// Read the config.toml file from the instance workspace
 fn read_config(instance_src_dir: &std::path::Path) -> Result<Config> {
-    let config_path = instance_src_dir.join("config.hx.json");
+    let config_path = instance_src_dir.join("config.toml");
 
     if !config_path.exists() {
         return Err(eyre::eyre!(
-            "config.hx.json not found in instance workspace"
+            "config.toml not found in instance workspace"
         ));
     }
 

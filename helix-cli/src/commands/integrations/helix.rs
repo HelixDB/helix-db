@@ -4,18 +4,12 @@ use crate::project::ProjectContext;
 use crate::utils::helixc_utils::{collect_hx_files, generate_content};
 use crate::utils::{print_error_with_hint, print_status, print_success};
 use eyre::{OptionExt, Result, eyre};
-use helix_db::helix_engine::traversal_core::config::Config;
 use helix_db::utils::styled_string::StyledString;
 use serde_json::json;
 use std::env;
 use std::path::PathBuf;
-use std::sync::LazyLock;
-// use uuid::Uuid;
 
-const DEFAULT_CLOUD_AUTHORITY: &str = "ec2-184-72-27-116.us-west-1.compute.amazonaws.com:3000";
-pub static CLOUD_AUTHORITY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("CLOUD_AUTHORITY").unwrap_or(DEFAULT_CLOUD_AUTHORITY.to_string())
-});
+pub static CLOUD_AUTHORITY: Option<&'static str> = option_env!("CLOUD_AUTHORITY");
 
 pub struct HelixManager<'a> {
     project: &'a ProjectContext,
@@ -44,7 +38,7 @@ impl<'a> HelixManager<'a> {
 
         let credentials = Credentials::read_from_file(&credentials_path);
         if !credentials.is_authenticated() {
-            return Err(eyre!("Credentials file is not authenticated"));
+            return Err(eyre!("Credentials not authenticated"));
         }
 
         Ok(())
@@ -164,27 +158,6 @@ impl<'a> HelixManager<'a> {
         // get credentials - already validated by check_auth()
         let credentials = Credentials::read_from_file(&self.credentials_path()?);
 
-        // read config.hx.json
-        let config_path = path.join("config.hx.json");
-        let schema_path = path.join("schema.hx");
-
-        // Use from_files if schema.hx exists (backward compatibility), otherwise use from_file
-        let config = if schema_path.exists() {
-            match Config::from_files(config_path, schema_path) {
-                Ok(config) => config,
-                Err(e) => {
-                    return Err(eyre!("Error: failed to load config: {e}"));
-                }
-            }
-        } else {
-            match Config::from_file(config_path) {
-                Ok(config) => config,
-                Err(e) => {
-                    return Err(eyre!("Error: failed to load config: {e}"));
-                }
-            }
-        };
-
         // get cluster information from helix.toml
         let cluster_info = match self.project.config.get_instance(&cluster_name)? {
             InstanceInfo::Helix(config) => config,
@@ -198,12 +171,13 @@ impl<'a> HelixManager<'a> {
             "user_id": credentials.user_id,
             "queries": content.files,
             "cluster_id": cluster_info.cluster_id,
-            "version": "0.1.0",
-            "helix_config": config.to_json()
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "project_settings": serde_json::to_value(&self.project.config.project)?,
+            "instance_config": serde_json::to_value(cluster_info)?
         });
         let client = reqwest::Client::new();
 
-        let cloud_url = format!("http://{}/clusters/deploy-queries", *CLOUD_AUTHORITY);
+        let cloud_url = format!("http://{}/deploy", CLOUD_AUTHORITY.unwrap());
 
         match client
             .post(cloud_url)
