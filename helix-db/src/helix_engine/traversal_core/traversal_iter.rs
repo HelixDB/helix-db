@@ -1,11 +1,14 @@
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage, traversal_core::{traversal_value::TraversalValue, txn::RTxn},
+        storage_core::HelixGraphStorage,
+        traversal_core::{
+            traversal_value::TraversalValue,
+            txn::{RTxn, WTxn},
+        },
         types::GraphError,
     },
     protocol::value::Value,
 };
-use heed3::{RoTxn, RwTxn};
 use itertools::Itertools;
 
 pub struct RoTraversalIterator<'db, 'arena, 'txn, I>
@@ -13,7 +16,7 @@ where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub storage: &'db HelixGraphStorage,
+    pub storage: &'db HelixGraphStorage<'db>,
     pub arena: &'arena bumpalo::Bump,
     pub txn: &'txn RTxn<'db>,
     pub inner: I,
@@ -95,9 +98,9 @@ where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub storage: &'db HelixGraphStorage,
+    pub storage: &'db HelixGraphStorage<'db>,
     pub arena: &'arena bumpalo::Bump,
-    pub txn: &'txn mut RwTxn<'db>,
+    pub txn: &'txn mut WTxn<'db>,
     pub inner: I,
 }
 
@@ -117,7 +120,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     pub fn new(
         storage: &'db HelixGraphStorage,
-        txn: &'txn mut RwTxn<'db>,
+        txn: &'txn mut WTxn<'db>,
         arena: &'arena bumpalo::Bump,
         inner: I,
     ) -> Self {

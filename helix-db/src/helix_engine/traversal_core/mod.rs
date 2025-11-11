@@ -20,8 +20,8 @@ pub enum QueryInput {
     BooleanValue { value: bool },
 }
 
-pub struct HelixGraphEngine {
-    pub storage: Arc<HelixGraphStorage>,
+pub struct HelixGraphEngine<'db> {
+    pub storage: Arc<HelixGraphStorage<'db>>,
     pub mcp_backend: Option<Arc<McpBackend>>,
     pub mcp_connections: Option<Arc<Mutex<McpConnections>>>,
 }
@@ -33,8 +33,8 @@ pub struct HelixGraphEngineOpts {
     pub version_info: VersionInfo,
 }
 
-impl HelixGraphEngine {
-    pub fn new(opts: HelixGraphEngineOpts) -> Result<HelixGraphEngine, GraphError> {
+impl<'db> HelixGraphEngine<'db> {
+    pub fn new(opts: HelixGraphEngineOpts) -> Result<HelixGraphEngine<'db>, GraphError> {
         let should_use_mcp = opts.config.mcp;
         let storage =
             match HelixGraphStorage::new(opts.path.as_str(), opts.config, opts.version_info) {

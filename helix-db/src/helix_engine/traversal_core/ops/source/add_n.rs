@@ -1,32 +1,12 @@
 use crate::{
     helix_engine::{
         bm25::bm25::{BM25, BM25Flatten},
-        storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::{id::v6_uuid, items::Node, properties::ImmutablePropertiesMap},
 };
-use heed3::{PutFlags, RwTxn};
-
-pub struct AddNIterator<'db, 'arena, 'txn>
-where
-    'db: 'arena,
-    'arena: 'txn,
-{
-    pub storage: &'db HelixGraphStorage,
-    pub arena: &'arena bumpalo::Bump,
-    pub txn: &'txn RwTxn<'db>,
-    inner: std::iter::Once<Result<TraversalValue<'arena>, GraphError>>,
-}
-
-impl<'db, 'arena, 'txn> Iterator for AddNIterator<'db, 'arena, 'txn> {
-    type Item = Result<TraversalValue<'arena>, GraphError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-}
+use heed3::PutFlags;
 
 pub trait AddNAdapter<'db, 'arena, 'txn, 's>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>

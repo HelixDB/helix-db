@@ -62,6 +62,7 @@ pub trait BM25 {
     ) -> Result<Vec<(u128, f32)>, GraphError>;
 }
 
+
 pub struct HBM25Config {
     pub graph_env: Env,
     pub inverted_index_db: Database<Bytes, Bytes>,
@@ -71,6 +72,7 @@ pub struct HBM25Config {
     k1: f64,
     b: f64,
 }
+
 
 impl HBM25Config {
     pub fn new(graph_env: &Env, wtxn: &mut RwTxn) -> Result<HBM25Config, GraphError> {
@@ -154,6 +156,102 @@ impl HBM25Config {
     }
 }
 
+
+
+pub struct HBM25Config {
+    pub graph_env: Env,
+    pub inverted_index_db: Database<Bytes, Bytes>,
+    pub doc_lengths_db: Database<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>>,
+    pub term_frequencies_db: Database<Bytes, U32<heed3::byteorder::BE>>,
+    pub metadata_db: Database<Bytes, Bytes>,
+    k1: f64,
+    b: f64,
+}
+
+
+impl HBM25Config {
+    pub fn new(graph_env: &Env, wtxn: &mut RwTxn) -> Result<HBM25Config, GraphError> {
+        let inverted_index_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .flags(heed3::DatabaseFlags::DUP_SORT)
+            .name(DB_BM25_INVERTED_INDEX)
+            .create(wtxn)?;
+
+        let doc_lengths_db: Database<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>> =
+            graph_env
+                .database_options()
+                .types::<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>>()
+                .name(DB_BM25_DOC_LENGTHS)
+                .create(wtxn)?;
+
+        let term_frequencies_db: Database<Bytes, U32<heed3::byteorder::BE>> = graph_env
+            .database_options()
+            .types::<Bytes, U32<heed3::byteorder::BE>>()
+            .name(DB_BM25_TERM_FREQUENCIES)
+            .create(wtxn)?;
+
+        let metadata_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name(DB_BM25_METADATA)
+            .create(wtxn)?;
+
+        Ok(HBM25Config {
+            graph_env: graph_env.clone(),
+            inverted_index_db,
+            doc_lengths_db,
+            term_frequencies_db,
+            metadata_db,
+            k1: 1.2,
+            b: 0.75,
+        })
+    }
+
+    pub fn new_temp(
+        graph_env: &Env,
+        wtxn: &mut RwTxn,
+        uuid: &str,
+    ) -> Result<HBM25Config, GraphError> {
+        let inverted_index_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .flags(heed3::DatabaseFlags::DUP_SORT)
+            .name(format!("{DB_BM25_INVERTED_INDEX}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        let doc_lengths_db: Database<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>> =
+            graph_env
+                .database_options()
+                .types::<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>>()
+                .name(format!("{DB_BM25_DOC_LENGTHS}_{uuid}").as_str())
+                .create(wtxn)?;
+
+        let term_frequencies_db: Database<Bytes, U32<heed3::byteorder::BE>> = graph_env
+            .database_options()
+            .types::<Bytes, U32<heed3::byteorder::BE>>()
+            .name(format!("{DB_BM25_TERM_FREQUENCIES}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        let metadata_db: Database<Bytes, Bytes> = graph_env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name(format!("{DB_BM25_METADATA}_{uuid}").as_str())
+            .create(wtxn)?;
+
+        Ok(HBM25Config {
+            graph_env: graph_env.clone(),
+            inverted_index_db,
+            doc_lengths_db,
+            term_frequencies_db,
+            metadata_db,
+            k1: 1.2,
+            b: 0.75,
+        })
+    }
+}
+
+
 impl BM25 for HBM25Config {
     /// Converts text to lowercase, removes non-alphanumeric chars, splits into words
     fn tokenize<const SHOULD_FILTER: bool>(&self, text: &str) -> Vec<String> {
@@ -217,7 +315,7 @@ impl BM25 for HBM25Config {
         Ok(())
     }
 
-    fn delete_doc(&self, txn: &mut RwTxn, doc_id: u128) -> Result<(), GraphError> {
+    fn delete_doc(&self, txn: &mut WTxn, doc_id: u128) -> Result<(), GraphError> {
         let terms_to_update = {
             let mut terms = Vec::new();
             let mut iter = self.inverted_index_db.iter(txn)?;
@@ -418,8 +516,8 @@ impl HybridSearch for HelixGraphStorage {
             }
         });
 
-        let vector_handle = task::spawn_blocking(
-            move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
+        let vector_handle =
+            task::spawn_blocking(move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
                 let txn = graph_env_vector.read_txn()?;
                 let arena = Bump::new(); // MOVE 
                 let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
@@ -437,8 +535,7 @@ impl HybridSearch for HelixGraphStorage {
                     .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))
                     .collect::<Vec<(u128, f64)>>();
                 Ok(Some(scores))
-            },
-        );
+            });
 
         let (bm25_results, vector_results) = match tokio::try_join!(bm25_handle, vector_handle) {
             Ok((a, b)) => (a, b),

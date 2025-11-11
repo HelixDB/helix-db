@@ -19,7 +19,7 @@ impl<'db> RTxn<'db> {
     }
 }
 
-pub struct Wtxn<'db> {
+pub struct WTxn<'db> {
     #[cfg(feature = "lmdb")]
     pub txn: heed3::RwTxn<'db>,
     #[cfg(feature = "rocks")]
@@ -28,7 +28,7 @@ pub struct Wtxn<'db> {
 
 /// Rocks implementation of txn
 #[cfg(feature = "rocks")]
-impl<'db> Wtxn<'db> {
+impl<'db> WTxn<'db> {
     pub fn new(env: &'db rocksdb::TransactionDB) -> rocksdb::Transaction<'db, rocksdb::TransactionDB> {
         env.transaction()
     }
@@ -37,3 +37,8 @@ impl<'db> Wtxn<'db> {
         self.txn.commit().map_err(|_| GraphError::Default)
     }
 }
+
+
+// pub trait DBMethods {
+//     pub fn put<K, V>(&self, txn: &mut WTxn, key: K, value: V) -> Result<(), GraphError>;
+// }

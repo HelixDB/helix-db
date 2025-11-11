@@ -6,26 +6,7 @@ use crate::{
     },
     utils::{id::v6_uuid, items::Edge, label_hash::hash_label, properties::ImmutablePropertiesMap},
 };
-use heed3::{PutFlags, RwTxn};
-
-pub struct AddE<'db, 'arena, 'txn>
-where
-    'db: 'arena,
-    'arena: 'txn,
-{
-    pub storage: &'db HelixGraphStorage,
-    pub arena: &'arena bumpalo::Bump,
-    pub txn: &'txn RwTxn<'db>,
-    inner: std::iter::Once<Result<TraversalValue<'arena>, GraphError>>,
-}
-
-impl<'db, 'arena, 'txn> Iterator for AddE<'db, 'arena, 'txn> {
-    type Item = Result<TraversalValue<'arena>, GraphError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-}
+use heed3::PutFlags;
 
 pub trait AddEAdapter<'db, 'arena, 'txn, 's>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>

@@ -119,6 +119,12 @@ impl From<bincode::Error> for GraphError {
     }
 }
 
+impl From<rocksdb::Error> for GraphError {
+    fn from(error: rocksdb::Error) -> Self {
+        GraphError::ConversionError(format!("rocksdb error: {error}"))
+    }
+}
+
 impl From<ParserError> for GraphError {
     fn from(error: ParserError) -> Self {
         GraphError::ConversionError(format!("ParserError: {error}"))

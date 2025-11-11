@@ -608,15 +608,20 @@ impl<'db> HelixGraphStorage<'db> {
             rocksdb::ColumnFamilyDescriptor::new("metadata", rocksdb::Options::default()),
         ];
 
-        // Add secondary index column families
-        // if let Some(indexes) = config.get_graph_config().secondary_indices.as_ref() {
-        //     for index in indexes {
-        //         cf_descriptors.push(ColumnFamilyDescriptor::new(
-        //             format!("idx_{}", index),
-        //             Self::secondary_index_cf_options(),
-        //         ));
-        //     }
-        // }
+        let vector_cf_descriptors = vec![
+            rocksdb::ColumnFamilyDescriptor::new("vectors", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("vector_data", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("hnsw_out_nodes", rocksdb::Options::default()),
+        ];
+        cf_descriptors.extend(vector_cf_descriptors);
+
+        let bm25_cf_descriptors = vec![
+            rocksdb::ColumnFamilyDescriptor::new("inverted_index", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("doc_lengths", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("term_frequencies", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("metadata", rocksdb::Options::default()),
+        ];
+        cf_descriptors.extend(bm25_cf_descriptors);
 
         let txn_db_opts = rocksdb::TransactionDBOptions::new();
 
@@ -630,7 +635,7 @@ impl<'db> HelixGraphStorage<'db> {
         .unwrap();
 
         // Get column family handles
-        let nodes_db: Arc<rocksdb::BoundColumnFamily<'_>> = db.cf_handle("nodes").unwrap();
+        let nodes_db = db.cf_handle("nodes").unwrap();
         let edges_db = db.cf_handle("edges").unwrap();
         let out_edges_db = db.cf_handle("out_edges").unwrap();
         let in_edges_db = db.cf_handle("in_edges").unwrap();
@@ -758,6 +763,85 @@ impl<'db> HelixGraphStorage<'db> {
         let node: Node = Node::from_bincode_bytes(*id, &node, arena)?;
         let node = self.version_info.upgrade_to_node_latest(node);
         Ok(node)
+    }
+
+    #[inline]
+    pub fn get_edge<'arena>(
+        &self,
+        txn: &RTxn,
+        id: &u128,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<Edge<'arena>, GraphError> {
+        let edge = match txn
+            .txn
+            .get_pinned_cf(&self.edges_db, Self::edge_key(id))
+            .unwrap()
+        {
+            Some(data) => data,
+            None => return Err(GraphError::EdgeNotFound),
+        };
+        let edge: Edge = Edge::from_bincode_bytes(*id, &edge, arena)?;
+        Ok(self.version_info.upgrade_to_edge_latest(edge))
+    }
+
+    /// Out edge key generator. Creates a 20 byte array and copies in the node id and 4 byte label.
+    ///
+    /// key = `from-node(16)` | `label-id(4)`                 ← 20 B
+    ///
+    /// The generated out edge key will remain the same for the same from_node_id and label.
+    /// To save space, the key is only stored once,
+    /// with the values being stored in a sorted sub-tree, with this key being the root.
+    #[inline(always)]
+    pub fn out_edge_key(from_node_id: &u128, label: &[u8; 4]) -> [u8; 20] {
+        let mut key = [0u8; 20];
+        key[0..16].copy_from_slice(&from_node_id.to_be_bytes());
+        key[16..20].copy_from_slice(label);
+        key
+    }
+
+    /// In edge key generator. Creates a 20 byte array and copies in the node id and 4 byte label.
+    ///
+    /// key = `to-node(16)` | `label-id(4)`                 ← 20 B
+    ///
+    /// The generated in edge key will remain the same for the same to_node_id and label.
+    /// To save space, the key is only stored once,
+    /// with the values being stored in a sorted sub-tree, with this key being the root.
+    #[inline(always)]
+    pub fn in_edge_key(to_node_id: &u128, label: &[u8; 4]) -> [u8; 20] {
+        let mut key = [0u8; 20];
+        key[0..16].copy_from_slice(&to_node_id.to_be_bytes());
+        key[16..20].copy_from_slice(label);
+        key
+    }
+
+    /// Packs the edge data into a 32 byte array.
+    ///
+    /// data = `edge-id(16)` | `node-id(16)`                 ← 32 B (DUPFIXED)
+    #[inline(always)]
+    pub fn pack_edge_data(edge_id: &u128, node_id: &u128) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[0..16].copy_from_slice(&edge_id.to_be_bytes());
+        key[16..32].copy_from_slice(&node_id.to_be_bytes());
+        key
+    }
+
+    /// Unpacks the 32 byte array into an (edge_id, node_id) tuple of u128s.
+    ///
+    /// Returns (edge_id, node_id)
+    #[inline(always)]
+    // Uses Type Aliases for clarity
+    pub fn unpack_adj_edge_data(data: &[u8]) -> Result<(EdgeId, NodeId), GraphError> {
+        let edge_id = u128::from_be_bytes(
+            data[0..16]
+                .try_into()
+                .map_err(|_| GraphError::SliceLengthError)?,
+        );
+        let node_id = u128::from_be_bytes(
+            data[16..32]
+                .try_into()
+                .map_err(|_| GraphError::SliceLengthError)?,
+        );
+        Ok((edge_id, node_id))
     }
 }
 
