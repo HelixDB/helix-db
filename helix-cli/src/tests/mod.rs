@@ -13,3 +13,5 @@ pub mod compile_tests;
 // pub mod status_tests;
 #[cfg(test)]
 pub mod project_tests;
+#[cfg(test)]
+pub mod docker_tests;
