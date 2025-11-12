@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helixdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: helixdb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: helixdb
+  template:
+    metadata:
+      labels:
+        app: helixdb
+    spec:
+      securityContext: {}
+      containers:
+        - name: helixdb
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/helix-container"]
+          securityContext: {}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+{{- with .Values.resources }}
+          resources:
+{{ toYaml . | indent 12 }}
+{{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.name }}
+

@@ -1,0 +1,33 @@
+# Namespace for the deployment
+namespace: helixdb 
+
+image:
+  # Image repository and tag
+  repository: "" 
+  tag: "" 
+  pullPolicy: IfNotPresent
+
+service:
+  # TCP port used by the application
+  port: 6969
+
+pvc:
+  # PVC name (required)
+  name: helixdb-data
+  # Optional storage class (default = cluster default)
+  storageClassName: ""
+  # Requested storage size
+  size: "" 
+
+
+# ---------------------------------------------------------------------------
+# 🔹 Resources for the main Deployment container
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: ""
+    memory: ""
+  limits:
+    cpu: ""
+    memory: ""
+
