@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: helixdb-service
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: helixdb
+  ports:
+    - name: helixdb
+      protocol: TCP
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+

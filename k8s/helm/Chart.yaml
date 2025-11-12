@@ -1,0 +1,6 @@
+apiVersion: v2
+name: helixdb
+description: Helm chart to deploy helixdb with a single replica and ReadWriteOncePod PVC
+type: application
+version: 0.1.0
+appVersion: "2.1.2"
