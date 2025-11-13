@@ -85,7 +85,7 @@ class ArgSubchapter(helix.Struct):
     chunk: helix.Vector
 
 @db.query
-def loaddocs_rag(chapters: helix.List[ArgChapter]) -> str:
+def loaddocs_rag(chapters: helix.List[ArgChapter]) -> helix.String:
     for c in chapters:
         c_node = db.add_node(Chapter(index=c.id))
 
@@ -101,7 +101,7 @@ def loaddocs_rag(chapters: helix.List[ArgChapter]) -> str:
     return "Success"
 
 @db.query
-def searchdocs_rag(query: helix.Vector, k: helix.I32) -> helix.Iterator[dict[str, helix.Value]]:
+def searchdocs_rag(query: helix.Vector, k: helix.I32) -> helix.Iterator[helix.Map[helix.String, helix.Value]]:
     # TODO
     vecs = db.search_vector(query, k)
     chapters = vecs.incoming_nodes[Contains]
