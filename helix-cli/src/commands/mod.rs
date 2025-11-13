@@ -14,4 +14,5 @@ pub mod push;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod templates;
 pub mod update;
