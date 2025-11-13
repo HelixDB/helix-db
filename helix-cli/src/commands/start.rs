@@ -28,7 +28,7 @@ async fn start_local_instance(project: &ProjectContext, instance_name: &str) -> 
     let docker = DockerManager::new(project);
 
     // Check Docker availability
-    DockerManager::check_docker_available()?;
+    DockerManager::check_runtime_available(docker.runtime)?;
 
     // Check if instance is built (has docker-compose.yml)
     let workspace = project.instance_workspace(instance_name);

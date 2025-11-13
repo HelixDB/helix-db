@@ -123,6 +123,7 @@ pub async fn run(deployment_type: CloudDeploymentTypeCommand) -> Result<()> {
                 port: None, // Let the system assign a port
                 build_mode: BuildMode::Debug,
                 db_config: DbConfig::default(),
+                
             };
 
             project_context

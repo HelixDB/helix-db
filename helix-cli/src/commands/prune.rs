@@ -5,6 +5,7 @@ use crate::utils::{
     print_confirm, print_lines, print_newline, print_status, print_success, print_warning,
 };
 use eyre::Result;
+use crate::config::ContainerRuntime;
 
 pub async fn run(instance: Option<String>, all: bool) -> Result<()> {
     // Try to load project context
@@ -38,7 +39,8 @@ async fn prune_instance(project: &ProjectContext, instance_name: &str) -> Result
     let _instance_config = project.config.get_instance(instance_name)?;
 
     // Check Docker availability
-    if DockerManager::check_docker_available().is_ok() {
+    let runtime = project.config.project.container_runtime;
+    if DockerManager::check_runtime_available(runtime).is_ok() {
         let docker = DockerManager::new(project);
 
         // Remove containers (but not volumes)
@@ -72,8 +74,8 @@ async fn prune_all_instances(project: &ProjectContext) -> Result<()> {
     }
 
     print_status("PRUNE", &format!("Found {} instance(s) to prune", instances.len()));
-
-    if DockerManager::check_docker_available().is_ok() {
+    let runtime = project.config.project.container_runtime;
+    if DockerManager::check_runtime_available(runtime).is_ok() {
         let docker = DockerManager::new(project);
 
         for instance_name in &instances {
@@ -115,10 +117,10 @@ async fn prune_unused_resources(project: &ProjectContext) -> Result<()> {
         "      To clean a specific instance, use 'helix prune <instance_name>'",
     ]);
     print_newline();
-
+    let runtime = project.config.project.container_runtime;
     // Check Docker availability
     print_status("PRUNE", "Checking Docker availability");
-    DockerManager::check_docker_available()?;
+    DockerManager::check_runtime_available(runtime)?;
 
     print_status("PRUNE", "Running Docker system cleanup");
     // Use centralized docker command
@@ -156,22 +158,20 @@ async fn prune_system_wide() -> Result<()> {
     }
 
     print_status("PRUNE", "Pruning all Helix images from system");
-
-    // Check Docker availability
-    DockerManager::check_docker_available()?;
-
-    // Remove all Helix images
-    DockerManager::clean_all_helix_images()?;
-
-    // Also clean unused Docker resources
-    let output = std::process::Command::new("docker")
-        .args(["system", "prune", "-f"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run docker system prune: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre::eyre!("Failed to prune Docker resources:\n{stderr}"));
+    for runtime in [ContainerRuntime::Docker, ContainerRuntime::Podman] {
+        if DockerManager::check_runtime_available(runtime).is_ok() {
+            DockerManager::clean_all_helix_images(runtime)?;
+            // Run system prune for this runtime
+            let output = std::process::Command::new(runtime.binary())  
+                .args(["system", "prune", "-f"])
+                .output()
+                .map_err(|e| eyre::eyre!("Failed to run {} system prune: {e}", runtime.binary()))?;
+    
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                print_warning(&format!("{} system prune failed: {stderr}", runtime.label()));
+            } 
+        }
     }
 
     print_success("System-wide Helix prune completed");

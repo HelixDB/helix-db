@@ -94,7 +94,7 @@ async fn push_local_instance(
     let docker = DockerManager::new(project);
 
     // Check Docker availability
-    DockerManager::check_docker_available()?;
+    DockerManager::check_runtime_available(docker.runtime)?;
 
     // Build the instance first (this ensures it's up to date) and get metrics data
     let metrics_data =

@@ -1,5 +1,5 @@
 use crate::config::{
-    BuildMode, DbConfig, GraphConfig, HelixConfig, LocalInstanceConfig, ProjectConfig, VectorConfig,
+    BuildMode, DbConfig, GraphConfig, HelixConfig, LocalInstanceConfig, ProjectConfig, VectorConfig, ContainerRuntime
 };
 use crate::errors::{CliError, project_error};
 use crate::utils::{
@@ -415,6 +415,7 @@ fn create_v2_config(ctx: &MigrationContext) -> Result<()> {
         port: Some(ctx.port),
         build_mode: BuildMode::Debug,
         db_config,
+        
     };
 
     // Create local instances map
@@ -425,6 +426,7 @@ fn create_v2_config(ctx: &MigrationContext) -> Result<()> {
     let project_config = ProjectConfig {
         name: ctx.project_name.clone(),
         queries: PathBuf::from(&ctx.queries_dir),
+        container_runtime: ContainerRuntime::Docker,
     };
 
     // Create final helix config

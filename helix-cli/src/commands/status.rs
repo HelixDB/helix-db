@@ -76,7 +76,8 @@ pub async fn run() -> Result<()> {
 
 async fn show_container_status(project: &ProjectContext) -> Result<()> {
     // Check if Docker is available
-    if DockerManager::check_docker_available().is_err() {
+    let runtime = project.config.project.container_runtime ; 
+    if DockerManager::check_runtime_available(runtime).is_err() {
         print_field("Docker Status", "Not available");
         return Ok(());
     }
