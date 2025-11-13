@@ -59,8 +59,9 @@ import helix
 db = helix.Db()
 
 class Chapter(db.Node):
-    @index
     index: helix.I64
+
+db.index(Chapter.index, unique=True)
 
 class SubChapter(db.Node):
     title: helix.String
