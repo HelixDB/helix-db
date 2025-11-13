@@ -67,9 +67,9 @@ class SubChapter(db.Node):
     title: helix.String
     content: helix.String
 
-    embedding: EmbeddingVector
+    embedding: SubChapterEmbedding
 
-class EmbeddingVector(db.Vector(dimensions=1536, hnsw=helix.cosine)):
+class SubChapterEmbedding(db.Vector(dimensions=1536, hnsw=helix.cosine)):
     pass
 
 class Contains(db.Edge[Chapter, SubChapter]):
@@ -93,7 +93,7 @@ def loaddocs_rag(chapters: helix.List[ArgChapter]) -> str:
             sc_node = db.add_node(SubChapter(
                 title=sc.title,
                 content=sc.content,
-                embedding=EmbeddingVector(sc.chunk)
+                embedding=SubChapterEmbedding(sc.chunk)
             ))
             
             db.add_edge(Contains(from=c_node, to=sc_node))
