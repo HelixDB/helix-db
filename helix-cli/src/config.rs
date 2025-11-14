@@ -204,54 +204,54 @@ pub enum InstanceInfo<'a> {
 impl<'a> InstanceInfo<'a> {
     pub fn build_mode(&self) -> BuildMode {
         match self {
-            InstanceInfo::Local(config) => config.build_mode,
-            InstanceInfo::Helix(config) => config.build_mode,
-            InstanceInfo::FlyIo(config) => config.build_mode,
-            InstanceInfo::Ecr(config) => config.build_mode,
+            Self::Local(config) => config.build_mode,
+            Self::Helix(config) => config.build_mode,
+            Self::FlyIo(config) => config.build_mode,
+            Self::Ecr(config) => config.build_mode,
         }
     }
 
     pub fn port(&self) -> Option<u16> {
         match self {
-            InstanceInfo::Local(config) => config.port,
-            InstanceInfo::Helix(_) => None,
-            InstanceInfo::FlyIo(_) => None,
-            InstanceInfo::Ecr(_) => None,
+            Self::Local(config) => config.port,
+            Self::Helix(_) => None,
+            Self::FlyIo(_) => None,
+            Self::Ecr(_) => None,
         }
     }
 
     pub fn cluster_id(&self) -> Option<&str> {
         match self {
-            InstanceInfo::Local(_) => None,
-            InstanceInfo::Helix(config) => Some(&config.cluster_id),
-            InstanceInfo::FlyIo(_) => Some("flyio"),
-            InstanceInfo::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
+            Self::Local(_) => None,
+            Self::Helix(config) => Some(&config.cluster_id),
+            Self::FlyIo(_) => Some("flyio"),
+            Self::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
         }
     }
 
     pub fn db_config(&self) -> &DbConfig {
         match self {
-            InstanceInfo::Local(config) => &config.db_config,
-            InstanceInfo::Helix(config) => &config.db_config,
-            InstanceInfo::FlyIo(config) => &config.db_config,
-            InstanceInfo::Ecr(config) => &config.db_config,
+            Self::Local(config) => &config.db_config,
+            Self::Helix(config) => &config.db_config,
+            Self::FlyIo(config) => &config.db_config,
+            Self::Ecr(config) => &config.db_config,
         }
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, InstanceInfo::Local(_))
+        matches!(self, Self::Local(_))
     }
 
     pub fn should_build_docker_image(&self) -> bool {
-        matches!(self, InstanceInfo::Local(_) | InstanceInfo::FlyIo(_))
+        matches!(self, Self::Local(_) | Self::FlyIo(_))
     }
 
     pub fn docker_build_target(&self) -> Option<&str> {
         match self {
-            InstanceInfo::Local(_) => None,
-            InstanceInfo::Helix(_) => None,
-            InstanceInfo::FlyIo(_) => Some("linux/amd64"),
-            InstanceInfo::Ecr(_) => Some("linux/amd64"),
+            Self::Local(_) => None,
+            Self::Helix(_) => None,
+            Self::FlyIo(_) => Some("linux/amd64"),
+            Self::Ecr(_) => Some("linux/amd64"),
         }
     }
 

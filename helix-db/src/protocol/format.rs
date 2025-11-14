@@ -112,8 +112,8 @@ impl<'a, T> Deref for MaybeOwned<'a, T> {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            MaybeOwned::Owned(v) => v,
-            MaybeOwned::Borrowed(v) => v,
+            Self::Owned(v) => v,
+            Self::Borrowed(v) => v,
         }
     }
 }
@@ -121,8 +121,8 @@ impl<'a, T> Deref for MaybeOwned<'a, T> {
 impl<'a, T: Clone> MaybeOwned<'a, T> {
     pub fn into_owned(self) -> T {
         match self {
-            MaybeOwned::Owned(v) => v,
-            MaybeOwned::Borrowed(v) => v.clone(),
+            Self::Owned(v) => v,
+            Self::Borrowed(v) => v.clone(),
         }
     }
 }

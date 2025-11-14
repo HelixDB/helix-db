@@ -275,11 +275,11 @@ impl Type {
     pub fn get_type_name(&self) -> String {
         match self {
             Self::Aggregate(_) => "aggregate".to_string(),
-            Self::Node(Some(name)) => name.clone(),
-            Self::Nodes(Some(name)) => name.clone(),
-            Self::Edge(Some(name)) => name.clone(),
-            Self::Edges(Some(name)) => name.clone(),
-            Self::Vector(Some(name)) => name.clone(),
+            Self::Node(Some(name)) |
+            Self::Nodes(Some(name)) |
+            Self::Edge(Some(name)) |
+            Self::Edges(Some(name)) |
+            Self::Vector(Some(name)) |
             Self::Vectors(Some(name)) => name.clone(),
             Self::Scalar(ft) => ft.to_string(),
             Self::Anonymous(ty) => ty.get_type_name(),

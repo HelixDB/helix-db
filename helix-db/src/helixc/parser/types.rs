@@ -116,8 +116,8 @@ pub enum MigrationItem {
 impl MigrationItem {
     pub fn inner(&self) -> &str {
         match self {
-            Self::Node(s) => s,
-            Self::Edge(s) => s,
+            Self::Node(s) |
+            Self::Edge(s) |
             Self::Vector(s) => s,
         }
     }
@@ -126,8 +126,8 @@ impl MigrationItem {
 impl PartialEq<Self> for MigrationItem {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Node(a), Self::Node(b)) => a == b,
-            (Self::Edge(a), Self::Edge(b)) => a == b,
+            (Self::Node(a), Self::Node(b)) |
+            (Self::Edge(a), Self::Edge(b)) |
             (Self::Vector(a), Self::Vector(b)) => a == b,
             _ => false,
         }

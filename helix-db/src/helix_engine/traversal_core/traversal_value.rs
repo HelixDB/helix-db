@@ -35,74 +35,74 @@ pub enum TraversalValue<'arena> {
 impl<'arena> TraversalValue<'arena> {
     pub fn id(&self) -> u128 {
         match self {
-            TraversalValue::Node(node) => node.id,
-            TraversalValue::Edge(edge) => edge.id,
-            TraversalValue::Vector(vector) => vector.id,
-            TraversalValue::VectorNodeWithoutVectorData(vector) => vector.id,
-            TraversalValue::Empty => 0,
+            Self::Node(node) => node.id,
+            Self::Edge(edge) => edge.id,
+            Self::Vector(vector) => vector.id,
+            Self::VectorNodeWithoutVectorData(vector) => vector.id,
+            Self::Empty => 0,
             _ => 0,
         }
     }
 
     pub fn label(&self) -> &'arena str {
         match self {
-            TraversalValue::Node(node) => node.label,
-            TraversalValue::Edge(edge) => edge.label,
-            TraversalValue::Vector(vector) => vector.label,
-            TraversalValue::VectorNodeWithoutVectorData(vector) => vector.label,
-            TraversalValue::Empty => "",
+            Self::Node(node) => node.label,
+            Self::Edge(edge) => edge.label,
+            Self::Vector(vector) => vector.label,
+            Self::VectorNodeWithoutVectorData(vector) => vector.label,
+            Self::Empty => "",
             _ => "",
         }
     }
 
     pub fn from_node(&self) -> u128 {
         match self {
-            TraversalValue::Edge(edge) => edge.from_node,
+            Self::Edge(edge) => edge.from_node,
             _ => unimplemented!(),
         }
     }
 
     pub fn to_node(&self) -> u128 {
         match self {
-            TraversalValue::Edge(edge) => edge.to_node,
+            Self::Edge(edge) => edge.to_node,
             _ => unimplemented!(),
         }
     }
 
     pub fn data(&self) -> &'arena [f64] {
         match self {
-            TraversalValue::Vector(vector) => vector.data,
-            TraversalValue::VectorNodeWithoutVectorData(_) => &[],
+            Self::Vector(vector) => vector.data,
+            Self::VectorNodeWithoutVectorData(_) => &[],
             _ => unimplemented!(),
         }
     }
 
     pub fn score(&self) -> f64 {
         match self {
-            TraversalValue::Vector(vector) => vector.score(),
-            TraversalValue::VectorNodeWithoutVectorData(_) => 2f64,
+            Self::Vector(vector) => vector.score(),
+            Self::VectorNodeWithoutVectorData(_) => 2f64,
             _ => unimplemented!(),
         }
     }
 
     pub fn label_arena(&self) -> &'arena str {
         match self {
-            TraversalValue::Node(node) => node.label,
-            TraversalValue::Edge(edge) => edge.label,
-            TraversalValue::Vector(vector) => vector.label,
-            TraversalValue::VectorNodeWithoutVectorData(vector) => vector.label,
-            TraversalValue::Empty => "",
+            Self::Node(node) => node.label,
+            Self::Edge(edge) => edge.label,
+            Self::Vector(vector) => vector.label,
+            Self::VectorNodeWithoutVectorData(vector) => vector.label,
+            Self::Empty => "",
             _ => "",
         }
     }
 
     pub fn get_property(&self, property: &str) -> Option<&'arena Value> {
         match self {
-            TraversalValue::Node(node) => node.get_property(property),
-            TraversalValue::Edge(edge) => edge.get_property(property),
-            TraversalValue::Vector(vector) => vector.get_property(property),
-            TraversalValue::VectorNodeWithoutVectorData(vector) => vector.get_property(property),
-            TraversalValue::Empty => None,
+            Self::Node(node) => node.get_property(property),
+            Self::Edge(edge) => edge.get_property(property),
+            Self::Vector(vector) => vector.get_property(property),
+            Self::VectorNodeWithoutVectorData(vector) => vector.get_property(property),
+            Self::Empty => None,
             _ => None,
         }
     }
@@ -111,11 +111,11 @@ impl<'arena> TraversalValue<'arena> {
 impl Hash for TraversalValue<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            TraversalValue::Node(node) => node.id.hash(state),
-            TraversalValue::Edge(edge) => edge.id.hash(state),
-            TraversalValue::Vector(vector) => vector.id.hash(state),
-            TraversalValue::VectorNodeWithoutVectorData(vector) => vector.id.hash(state),
-            TraversalValue::Empty => state.write_u8(0),
+            Self::Node(node) => node.id.hash(state),
+            Self::Edge(edge) => edge.id.hash(state),
+            Self::Vector(vector) => vector.id.hash(state),
+            Self::VectorNodeWithoutVectorData(vector) => vector.id.hash(state),
+            Self::Empty => state.write_u8(0),
             _ => state.write_u8(0),
         }
     }
@@ -125,24 +125,24 @@ impl Eq for TraversalValue<'_> {}
 impl PartialEq for TraversalValue<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (TraversalValue::Node(node1), TraversalValue::Node(node2)) => node1.id == node2.id,
-            (TraversalValue::Edge(edge1), TraversalValue::Edge(edge2)) => edge1.id == edge2.id,
-            (TraversalValue::Vector(vector1), TraversalValue::Vector(vector2)) => {
+            (Self::Node(node1), Self::Node(node2)) => node1.id == node2.id,
+            (Self::Edge(edge1), Self::Edge(edge2)) => edge1.id == edge2.id,
+            (Self::Vector(vector1), Self::Vector(vector2)) => {
                 vector1.id() == vector2.id()
             }
             (
-                TraversalValue::VectorNodeWithoutVectorData(vector1),
-                TraversalValue::VectorNodeWithoutVectorData(vector2),
+                Self::VectorNodeWithoutVectorData(vector1),
+                Self::VectorNodeWithoutVectorData(vector2),
             ) => vector1.id() == vector2.id(),
             (
-                TraversalValue::Vector(vector1),
-                TraversalValue::VectorNodeWithoutVectorData(vector2),
+                Self::Vector(vector1),
+                Self::VectorNodeWithoutVectorData(vector2),
             ) => vector1.id() == vector2.id(),
             (
-                TraversalValue::VectorNodeWithoutVectorData(vector1),
-                TraversalValue::Vector(vector2),
+                Self::VectorNodeWithoutVectorData(vector1),
+                Self::Vector(vector2),
             ) => vector1.id() == vector2.id(),
-            (TraversalValue::Empty, TraversalValue::Empty) => true,
+            (Self::Empty, Self::Empty) => true,
             _ => false,
         }
     }
