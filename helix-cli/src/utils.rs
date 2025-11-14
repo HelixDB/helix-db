@@ -228,10 +228,10 @@ impl Template {
     #[allow(unused)]
     pub fn from(value: &str) -> Result<Self> {
         let template = match value {
-            "ts" | "typescript" => Template::Typescript,
-            "py" | "python" => Template::Python,
-            "rs" | "rust" => Template::Rust,
-            "go" => Template::Go,
+            "ts" | "typescript" => Self::Typescript,
+            "py" | "python" => Self::Python,
+            "rs" | "rust" => Self::Rust,
+            "go" => Self::Go,
             _ => return Err(eyre::eyre!("Invalid template: {value}")),
         };
         Ok(template)

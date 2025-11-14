@@ -49,10 +49,10 @@ impl HelixGateway {
         routes: Option<HashMap<String, HandlerFn>>,
         mcp_routes: Option<HashMap<String, MCPHandlerFn>>,
         opts: Option<HelixGraphEngineOpts>,
-    ) -> HelixGateway {
+    ) -> Self {
         let router = Arc::new(HelixRouter::new(routes, mcp_routes));
         let cluster_id = std::env::var("CLUSTER_ID").ok();
-        HelixGateway {
+        Self {
             address: address.to_string(),
             graph_access,
             router,

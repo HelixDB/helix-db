@@ -268,7 +268,7 @@ impl ReturnValueStruct {
         // Check if any field contains a lifetime parameter
         let has_lifetime = fields.iter().any(|f| f.field_type.contains("'a"));
 
-        let mut struct_def = ReturnValueStruct::new(name);
+        let mut struct_def = Self::new(name);
         struct_def.has_lifetime = has_lifetime;
         struct_def.fields = fields;
         struct_def.source_variable = source_variable;
@@ -299,7 +299,7 @@ impl ReturnValueStruct {
                 } else {
                     format!("{}ReturnType", capitalize_first(&field_info.name))
                 };
-                let nested_struct = ReturnValueStruct::from_return_fields(
+                let nested_struct = Self::from_return_fields(
                     nested_name,
                     nested_fields.clone(),
                     "item".to_string(), // Placeholder - actual value comes from traversal
@@ -466,7 +466,7 @@ impl ReturnFieldInfo {
         }
     }
 
-    pub fn new_nested(name: String, fields: Vec<ReturnFieldInfo>, traversal_expr: String) -> Self {
+    pub fn new_nested(name: String, fields: Vec<Self>, traversal_expr: String) -> Self {
         Self {
             name,
             field_type: ReturnFieldType::Nested(fields),

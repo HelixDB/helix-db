@@ -12,12 +12,15 @@ use crate::helixc::{
         methods::{
             migration_validation::validate_migration,
             query_validation::validate_query,
-            schema_methods::{build_field_lookups, check_schema, SchemaVersionMap},
+            schema_methods::{SchemaVersionMap, build_field_lookups, check_schema},
         },
         types::Type,
     },
     generator::Source as GeneratedSource,
-    parser::{errors::ParserError, types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source}},
+    parser::{
+        errors::ParserError,
+        types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source},
+    },
 };
 use itertools::Itertools;
 use serde::Serialize;
@@ -43,7 +46,6 @@ pub mod methods;
 pub mod pretty;
 pub mod types;
 pub mod utils;
-
 
 /// Internal working context shared by all passes.
 pub(crate) struct Ctx<'a> {
@@ -194,7 +196,7 @@ impl SchemaData {
         let vectors = ctx.vector_fields.iter().map(NodeData::from_entry).collect();
         let edges = ctx.edge_map.iter().map(EdgeData::from_entry).collect();
 
-        SchemaData {
+        Self {
             nodes,
             vectors,
             edges,
@@ -215,7 +217,7 @@ impl NodeData {
             .iter()
             .map(|(n, f)| (n.to_string(), f.field_type.to_string()))
             .collect();
-        NodeData {
+        Self {
             name: val.0.to_string(),
             properties,
         }
@@ -239,7 +241,7 @@ impl EdgeData {
             .map(|f| (f.name.to_string(), f.field_type.to_string()))
             .collect();
 
-        EdgeData {
+        Self {
             name: name.to_string(),
             from: es.from.1.clone(),
             to: es.to.1.clone(),
@@ -279,7 +281,7 @@ impl QueryData {
             })
             .collect();
 
-        QueryData {
+        Self {
             name: query.name.to_string(),
             parameters,
             returns,

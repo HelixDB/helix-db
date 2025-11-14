@@ -203,7 +203,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -271,7 +273,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1258,7 +1262,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();

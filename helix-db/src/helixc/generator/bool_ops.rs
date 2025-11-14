@@ -19,14 +19,14 @@ pub enum BoolOp {
 impl Display for BoolOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            BoolOp::Gt(gt) => format!("{gt}"),
-            BoolOp::Gte(gte) => format!("{gte}"),
-            BoolOp::Lt(lt) => format!("{lt}"),
-            BoolOp::Lte(lte) => format!("{lte}"),
-            BoolOp::Eq(eq) => format!("{eq}"),
-            BoolOp::Neq(neq) => format!("{neq}"),
-            BoolOp::Contains(contains) => format!("v{contains}"),
-            BoolOp::IsIn(is_in) => format!("v{is_in}"),
+            Self::Gt(gt) => format!("{gt}"),
+            Self::Gte(gte) => format!("{gte}"),
+            Self::Lt(lt) => format!("{lt}"),
+            Self::Lte(lte) => format!("{lte}"),
+            Self::Eq(eq) => format!("{eq}"),
+            Self::Neq(neq) => format!("{neq}"),
+            Self::Contains(contains) => format!("v{contains}"),
+            Self::IsIn(is_in) => format!("v{is_in}"),
         };
         write!(f, "map_value_or(false, |v| {s})?")
     }
@@ -132,28 +132,28 @@ pub enum BoExp {
 impl BoExp {
     pub fn negate(&self) -> Self {
         match self {
-            BoExp::Not(expr) => *expr.clone(),
-            _ => BoExp::Not(Box::new(self.clone())),
+            Self::Not(expr) => *expr.clone(),
+            _ => Self::Not(Box::new(self.clone())),
         }
     }
 
     pub fn is_not(&self) -> bool {
-        matches!(self, BoExp::Not(_))
+        matches!(self, Self::Not(_))
     }
 }
 impl Display for BoExp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BoExp::Not(expr) => write!(f, "!({expr})"),
-            BoExp::And(exprs) => {
+            Self::Not(expr) => write!(f, "!({expr})"),
+            Self::And(exprs) => {
                 let displayed_exprs = exprs.iter().map(|s| format!("{s}")).collect::<Vec<_>>();
                 write!(f, "({})", displayed_exprs.join(" && "))
             }
-            BoExp::Or(exprs) => {
+            Self::Or(exprs) => {
                 let displayed_exprs = exprs.iter().map(|s| format!("{s}")).collect::<Vec<_>>();
                 write!(f, "({})", displayed_exprs.join(" || "))
             }
-            BoExp::Exists(traversal) => {
+            Self::Exists(traversal) => {
                 // Optimize Exists expressions in filter context to use std::iter::once for single values
                 let is_val_traversal = match &traversal.traversal_type {
                     TraversalType::FromIter(var) | TraversalType::FromSingle(var) => match var {
@@ -175,7 +175,7 @@ impl Display for BoExp {
                     write!(f, "Exist::exists(&mut {traversal})")
                 }
             }
-            BoExp::Expr(traversal) => {
+            Self::Expr(traversal) => {
                 // Optimize simple property checks in filters to avoid unnecessary cloning and traversal creation
                 // Check if this is a FromVar("val") or FromSingle("val") traversal with just property fetch + bool op
                 let is_val_traversal = match &traversal.traversal_type {
@@ -243,7 +243,7 @@ impl Display for BoExp {
                 // Fall back to full traversal for complex expressions
                 write!(f, "{traversal}")
             }
-            BoExp::Empty => write!(f, ""),
+            Self::Empty => write!(f, ""),
         }
     }
 }

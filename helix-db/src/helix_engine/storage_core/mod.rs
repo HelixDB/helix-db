@@ -5,9 +5,9 @@ pub mod storage_migration;
 pub mod version_info;
 
 #[cfg(test)]
-mod storage_migration_tests;
-#[cfg(test)]
 mod storage_concurrent_tests;
+#[cfg(test)]
+mod storage_migration_tests;
 
 use crate::{
     helix_engine::{
@@ -68,11 +68,7 @@ pub struct HelixGraphStorage {
 }
 
 impl HelixGraphStorage {
-    pub fn new(
-        path: &str,
-        config: Config,
-        version_info: VersionInfo,
-    ) -> Result<HelixGraphStorage, GraphError> {
+    pub fn new(path: &str, config: Config, version_info: VersionInfo) -> Result<Self, GraphError> {
         fs::create_dir_all(path)?;
 
         let db_size = if config.db_max_size_gb.unwrap_or(100) >= 9999 {
@@ -280,7 +276,7 @@ impl StorageConfig {
         schema: Option<String>,
         graphvis_node_label: Option<String>,
         embedding_model: Option<String>,
-    ) -> StorageConfig {
+    ) -> Self {
         Self {
             schema,
             graphvis_node_label,

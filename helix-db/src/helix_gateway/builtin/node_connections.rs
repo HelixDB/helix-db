@@ -95,9 +95,10 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
             Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                 Ok((edge_id, from_node)) => {
                     if connected_node_ids.insert(from_node)
-                        && let Ok(node) = db.get_node(&txn, &from_node, &arena) {
-                            connected_nodes.push(TraversalValue::Node(node));
-                        }
+                        && let Ok(node) = db.get_node(&txn, &from_node, &arena)
+                    {
+                        connected_nodes.push(TraversalValue::Node(node));
+                    }
 
                     match db.get_edge(&txn, &edge_id, &arena) {
                         Ok(edge) => Some(TraversalValue::Edge(edge)),
@@ -117,9 +118,10 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
             Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                 Ok((edge_id, to_node)) => {
                     if connected_node_ids.insert(to_node)
-                        && let Ok(node) = db.get_node(&txn, &to_node, &arena) {
-                            connected_nodes.push(TraversalValue::Node(node));
-                        }
+                        && let Ok(node) = db.get_node(&txn, &to_node, &arena)
+                    {
+                        connected_nodes.push(TraversalValue::Node(node));
+                    }
 
                     match db.get_edge(&txn, &edge_id, &arena) {
                         Ok(edge) => Some(TraversalValue::Edge(edge)),
@@ -208,9 +210,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use axum::body::Bytes;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
@@ -219,18 +218,18 @@ mod tests {
                 config::Config,
                 ops::{
                     g::G,
-                    source::{
-                        add_e::AddEAdapter,
-                        add_n::AddNAdapter,
-                    },
+                    source::{add_e::AddEAdapter, add_n::AddNAdapter},
                 },
             },
         },
-        protocol::{request::Request, request::RequestType, Format},
         helix_gateway::router::router::HandlerInput,
-        utils::id::ID,
         helixc::generator::traversal_steps::EdgeType,
+        protocol::{Format, request::Request, request::RequestType},
+        utils::id::ID,
     };
+    use axum::body::Bytes;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -259,7 +258,13 @@ mod tests {
             .collect_to_obj()?;
 
         let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
-            .add_edge(arena.alloc_str("knows"), None, node1.id(), node2.id(), false)
+            .add_edge(
+                arena.alloc_str("knows"),
+                None,
+                node1.id(),
+                node2.id(),
+                false,
+            )
             .collect_to_obj()?;
 
         txn.commit().unwrap();
@@ -279,7 +284,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_connections_inner(input);
@@ -307,7 +311,13 @@ mod tests {
             .collect_to_obj()?;
 
         let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
-            .add_edge(arena.alloc_str("knows"), None, node1.id(), node2.id(), false)
+            .add_edge(
+                arena.alloc_str("knows"),
+                None,
+                node1.id(),
+                node2.id(),
+                false,
+            )
             .collect_to_obj()?;
 
         txn.commit().unwrap();
@@ -327,7 +337,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_connections_inner(input);
@@ -366,7 +375,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_connections_inner(input);
@@ -398,7 +406,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_connections_inner(input);
@@ -421,7 +428,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_connections_inner(input);

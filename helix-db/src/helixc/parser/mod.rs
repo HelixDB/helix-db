@@ -47,7 +47,7 @@ impl HelixParser {
         input.files.iter().try_for_each(|file| {
             source.source.push_str(&file.content);
             source.source.push('\n');
-            let pair = match HelixParser::parse(Rule::source, &file.content) {
+            let pair = match Self::parse(Rule::source, &file.content) {
                 Ok(mut pairs) => pairs
                     .next()
                     .ok_or_else(|| ParserError::from("Empty input"))?,
@@ -55,7 +55,7 @@ impl HelixParser {
                     return Err(ParserError::from(e));
                 }
             };
-            let mut parser = HelixParser {
+            let mut parser = Self {
                 source: Source::default(),
             };
 

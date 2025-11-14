@@ -8,7 +8,7 @@ use crate::{
             fix::Fix,
             types::Type,
         },
-        parser::{types::*, location::Loc},
+        parser::{location::Loc, types::*},
     },
 };
 use paste::paste;
@@ -127,7 +127,13 @@ pub(crate) fn validate_exclude<'a>(
             validate_exclude(ctx, ty, tr, ex, excluded, original_query);
         }
         _ => {
-            generate_error!(ctx, original_query, ex.fields[0].0.clone(), E203, cur_ty.kind_str());
+            generate_error!(
+                ctx,
+                original_query,
+                ex.fields[0].0.clone(),
+                E203,
+                cur_ty.kind_str()
+            );
         }
     }
 }
@@ -135,7 +141,7 @@ pub(crate) fn validate_exclude<'a>(
 #[cfg(test)]
 mod tests {
     use crate::helixc::analyzer::error_codes::ErrorCode;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Field Exclusion Tests

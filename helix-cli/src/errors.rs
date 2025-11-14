@@ -11,17 +11,17 @@ pub enum CliErrorSeverity {
 impl CliErrorSeverity {
     pub fn label(&self) -> &'static str {
         match self {
-            CliErrorSeverity::Error => "error",
-            CliErrorSeverity::Warning => "warning",
-            CliErrorSeverity::Info => "info",
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
         }
     }
 
     pub fn color_code<T: AsRef<str>>(&self, text: T) -> String {
         match self {
-            CliErrorSeverity::Error => text.as_ref().red().bold().to_string(),
-            CliErrorSeverity::Warning => text.as_ref().yellow().bold().to_string(),
-            CliErrorSeverity::Info => text.as_ref().blue().bold().to_string(),
+            Self::Error => text.as_ref().red().bold().to_string(),
+            Self::Warning => text.as_ref().yellow().bold().to_string(),
+            Self::Info => text.as_ref().blue().bold().to_string(),
         }
     }
 }
@@ -92,7 +92,6 @@ impl CliError {
         self
     }
 
-
     pub fn render(&self) -> String {
         let mut output = String::new();
 
@@ -153,22 +152,22 @@ impl From<std::io::Error> for CliError {
     fn from(err: std::io::Error) -> Self {
         match err.kind() {
             std::io::ErrorKind::NotFound => {
-                CliError::new("file or directory not found").with_caused_by(err.to_string())
+                Self::new("file or directory not found").with_caused_by(err.to_string())
             }
-            std::io::ErrorKind::PermissionDenied => CliError::new("permission denied")
+            std::io::ErrorKind::PermissionDenied => Self::new("permission denied")
                 .with_caused_by(err.to_string())
                 .with_hint("check file permissions and try again"),
             std::io::ErrorKind::InvalidInput => {
-                CliError::new("invalid input").with_caused_by(err.to_string())
+                Self::new("invalid input").with_caused_by(err.to_string())
             }
-            _ => CliError::new("I/O operation failed").with_caused_by(err.to_string()),
+            _ => Self::new("I/O operation failed").with_caused_by(err.to_string()),
         }
     }
 }
 
 impl From<toml::de::Error> for CliError {
     fn from(err: toml::de::Error) -> Self {
-        CliError::new("failed to parse TOML configuration")
+        Self::new("failed to parse TOML configuration")
             .with_caused_by(err.to_string())
             .with_hint("check the helix.toml file for syntax errors")
     }
@@ -176,7 +175,7 @@ impl From<toml::de::Error> for CliError {
 
 impl From<serde_json::Error> for CliError {
     fn from(err: serde_json::Error) -> Self {
-        CliError::new("failed to parse JSON").with_caused_by(err.to_string())
+        Self::new("failed to parse JSON").with_caused_by(err.to_string())
     }
 }
 
@@ -186,36 +185,30 @@ pub type CliResult<T> = Result<T, CliError>;
 // Convenience functions for common error patterns with error codes
 #[allow(unused)]
 pub fn config_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message)
-        .with_hint("run `helix init` if you need to create a new project")
+    CliError::new(message).with_hint("run `helix init` if you need to create a new project")
 }
 
 #[allow(unused)]
 pub fn file_error<S: Into<String>>(message: S, file_path: S) -> CliError {
-    CliError::new(message)
-        .with_file_path(file_path)
+    CliError::new(message).with_file_path(file_path)
 }
 
 #[allow(unused)]
 pub fn docker_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message)
-        .with_hint("ensure Docker is running and accessible")
+    CliError::new(message).with_hint("ensure Docker is running and accessible")
 }
 
 #[allow(unused)]
 pub fn network_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message)
-        .with_hint("check your internet connection and try again")
+    CliError::new(message).with_hint("check your internet connection and try again")
 }
 
 #[allow(unused)]
 pub fn project_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message)
-        .with_hint("ensure you're in a valid helix project directory")
+    CliError::new(message).with_hint("ensure you're in a valid helix project directory")
 }
 
 #[allow(unused)]
 pub fn cloud_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message)
-        .with_hint("run `helix auth login` to authenticate with Helix Cloud")
+    CliError::new(message).with_hint("run `helix auth login` to authenticate with Helix Cloud")
 }

@@ -12,7 +12,6 @@
 /// - Multiple inserts at same level could create invalid graph topology
 /// - Delete during search might return inconsistent results
 /// - LMDB transaction model provides MVCC but needs validation
-
 use bumpalo::Bump;
 use heed3::{Env, EnvOpenOptions, RoTxn, RwTxn};
 use rand::Rng;
@@ -50,12 +49,17 @@ fn setup_concurrent_env() -> (TempDir, Env) {
 
 /// Generate a random vector of given dimensionality
 fn random_vector(dim: usize) -> Vec<f64> {
-    (0..dim).map(|_| rand::rng().random_range(0.0..1.0)).collect()
+    (0..dim)
+        .map(|_| rand::rng().random_range(0.0..1.0))
+        .collect()
 }
 
 /// Open existing VectorCore databases (for concurrent access)
 /// Note: create_database opens existing database if it exists
-fn open_vector_core(env: &Env, txn: &mut RwTxn) -> Result<VectorCore, crate::helix_engine::types::VectorError> {
+fn open_vector_core(
+    env: &Env,
+    txn: &mut RwTxn,
+) -> Result<VectorCore, crate::helix_engine::types::VectorError> {
     VectorCore::new(env, txn, HNSWConfig::new(None, None, None))
 }
 
@@ -100,7 +104,8 @@ fn test_concurrent_inserts_single_label() {
 
                     // Open the existing databases and insert
                     let index = open_vector_core(&env, &mut wtxn).unwrap();
-                    index.insert::<Filter>(&mut wtxn, "concurrent_test", data, None, &arena)
+                    index
+                        .insert::<Filter>(&mut wtxn, "concurrent_test", data, None, &arena)
                         .expect("Insert should succeed");
                     wtxn.commit().expect("Commit should succeed");
                 }
@@ -133,7 +138,8 @@ fn test_concurrent_inserts_single_label() {
     // Additional consistency check: Verify we can perform searches (entry point exists implicitly)
     let arena = Bump::new();
     let query = [0.5; 128];
-    let search_result = index.search::<Filter>(&rtxn, &query, 10, "concurrent_test", None, false, &arena);
+    let search_result =
+        index.search::<Filter>(&rtxn, &query, 10, "concurrent_test", None, false, &arena);
     assert!(
         search_result.is_ok(),
         "Should be able to search after concurrent inserts (entry point exists)"
@@ -161,7 +167,9 @@ fn test_concurrent_searches_during_inserts() {
         for _ in 0..50 {
             let vector = random_vector(128);
             let data = arena.alloc_slice_copy(&vector);
-            index.insert::<Filter>(&mut txn, "search_test", data, None, &arena).unwrap();
+            index
+                .insert::<Filter>(&mut txn, "search_test", data, None, &arena)
+                .unwrap();
         }
         txn.commit().unwrap();
     }
@@ -251,7 +259,8 @@ fn test_concurrent_searches_during_inserts() {
                 let data = arena.alloc_slice_copy(&vector);
 
                 let index = open_vector_core(&env, &mut wtxn).unwrap();
-                index.insert::<Filter>(&mut wtxn, "search_test", data, None, &arena)
+                index
+                    .insert::<Filter>(&mut wtxn, "search_test", data, None, &arena)
                     .expect("Insert should succeed");
                 wtxn.commit().expect("Commit should succeed");
 
@@ -283,7 +292,10 @@ fn test_concurrent_searches_during_inserts() {
     let results = index
         .search::<Filter>(&rtxn, &query[..], 10, "search_test", None, false, &arena)
         .unwrap();
-    assert!(!results.is_empty(), "Should find results after concurrent operations");
+    assert!(
+        !results.is_empty(),
+        "Should find results after concurrent operations"
+    );
 }
 
 #[test]
@@ -433,11 +445,18 @@ fn test_entry_point_consistency() {
 
     // If we can successfully search, entry point must be valid
     let query = [0.5; 32];
-    let search_result = index.search::<Filter>(&rtxn, &query, 10, "entry_test", None, false, &arena);
-    assert!(search_result.is_ok(), "Entry point should exist and be valid");
+    let search_result =
+        index.search::<Filter>(&rtxn, &query, 10, "entry_test", None, false, &arena);
+    assert!(
+        search_result.is_ok(),
+        "Entry point should exist and be valid"
+    );
 
     let results = search_result.unwrap();
-    assert!(!results.is_empty(), "Should return results if entry point is valid");
+    assert!(
+        !results.is_empty(),
+        "Should return results if entry point is valid"
+    );
 
     // Verify results have valid properties
     for result in results.iter() {
@@ -507,15 +526,7 @@ fn test_graph_connectivity_after_concurrent_inserts() {
     for i in 0..10 {
         let query = random_vector(64);
         let results = index
-            .search::<Filter>(
-                &rtxn,
-                &query,
-                10,
-                "connectivity_test",
-                None,
-                false,
-                &arena,
-            )
+            .search::<Filter>(&rtxn, &query, 10, "connectivity_test", None, false, &arena)
             .unwrap();
 
         assert!(
@@ -553,7 +564,9 @@ fn test_transaction_isolation() {
         for _ in 0..initial_count {
             let vector = random_vector(32);
             let data = arena.alloc_slice_copy(&vector);
-            index.insert::<Filter>(&mut txn, "isolation_test", data, None, &arena).unwrap();
+            index
+                .insert::<Filter>(&mut txn, "isolation_test", data, None, &arena)
+                .unwrap();
         }
         txn.commit().unwrap();
     }
@@ -585,7 +598,9 @@ fn test_transaction_isolation() {
 
             let vector = random_vector(32);
             let data = arena.alloc_slice_copy(&vector);
-            index.insert::<Filter>(&mut wtxn, "isolation_test", data, None, &arena).unwrap();
+            index
+                .insert::<Filter>(&mut wtxn, "isolation_test", data, None, &arena)
+                .unwrap();
             wtxn.commit().unwrap();
         }
     });
@@ -612,7 +627,9 @@ fn test_transaction_isolation() {
     // Entry point may be included in counts (+1)
     let expected_new = initial_count + 20;
     assert!(
-        count_new == expected_new || count_new == expected_new + 1 || count_new == initial_count + 20 + 1,
+        count_new == expected_new
+            || count_new == expected_new + 1
+            || count_new == initial_count + 20 + 1,
         "Expected around {} vectors, got {}",
         expected_new,
         count_new

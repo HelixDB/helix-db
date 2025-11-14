@@ -255,21 +255,21 @@ impl Display for SearchBM25 {
 impl Display for SourceStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SourceStep::Identifier(_) => write!(f, ""),
-            SourceStep::AddN(add_n) => write!(f, "{add_n}"),
-            SourceStep::AddE(add_e) => write!(f, "{add_e}"),
-            SourceStep::AddV(add_v) => write!(f, "{add_v}"),
-            SourceStep::NFromID(n_from_id) => write!(f, "{n_from_id}"),
-            SourceStep::NFromIndex(n_from_index) => write!(f, "{n_from_index}"),
-            SourceStep::NFromType(n_from_type) => write!(f, "{n_from_type}"),
-            SourceStep::EFromID(e_from_id) => write!(f, "{e_from_id}"),
-            SourceStep::EFromType(e_from_type) => write!(f, "{e_from_type}"),
-            SourceStep::SearchVector(search_vector) => write!(f, "{search_vector}"),
-            SourceStep::SearchBM25(search_bm25) => write!(f, "{search_bm25}"),
-            SourceStep::Anonymous => write!(f, ""),
-            SourceStep::Empty => panic!("Should not be empty"),
-            SourceStep::VFromID(v_from_id) => write!(f, "{v_from_id}"),
-            SourceStep::VFromType(v_from_type) => write!(f, "{v_from_type}"),
+            Self::Identifier(_) => write!(f, ""),
+            Self::AddN(add_n) => write!(f, "{add_n}"),
+            Self::AddE(add_e) => write!(f, "{add_e}"),
+            Self::AddV(add_v) => write!(f, "{add_v}"),
+            Self::NFromID(n_from_id) => write!(f, "{n_from_id}"),
+            Self::NFromIndex(n_from_index) => write!(f, "{n_from_index}"),
+            Self::NFromType(n_from_type) => write!(f, "{n_from_type}"),
+            Self::EFromID(e_from_id) => write!(f, "{e_from_id}"),
+            Self::EFromType(e_from_type) => write!(f, "{e_from_type}"),
+            Self::SearchVector(search_vector) => write!(f, "{search_vector}"),
+            Self::SearchBM25(search_bm25) => write!(f, "{search_bm25}"),
+            Self::Anonymous => write!(f, ""),
+            Self::Empty => panic!("Should not be empty"),
+            Self::VFromID(v_from_id) => write!(f, "{v_from_id}"),
+            Self::VFromType(v_from_type) => write!(f, "{v_from_type}"),
         }
     }
 }

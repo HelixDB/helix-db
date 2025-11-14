@@ -97,7 +97,7 @@ where
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         };
-        let out = Request {
+        let out = Self {
             name,
             req_type,
             api_key_hash,
@@ -320,7 +320,10 @@ mod tests {
             out_fmt: Format::Json,
         };
 
-        assert_ne!(request1.api_key_hash.unwrap(), request2.api_key_hash.unwrap());
+        assert_ne!(
+            request1.api_key_hash.unwrap(),
+            request2.api_key_hash.unwrap()
+        );
     }
 
     #[test]

@@ -44,7 +44,7 @@ impl Date {
                         }
                     },
                 };
-                Ok(Date(date))
+                Ok(Self(date))
             }
             Value::I64(date) => {
                 let date = match DateTime::from_timestamp(*date, 0) {
@@ -55,7 +55,7 @@ impl Date {
                         ));
                     }
                 };
-                Ok(Date(date))
+                Ok(Self(date))
             }
             Value::U64(date) => {
                 let date = match DateTime::from_timestamp(*date as i64, 0) {
@@ -66,7 +66,7 @@ impl Date {
                         ));
                     }
                 };
-                Ok(Date(date))
+                Ok(Self(date))
             }
             _ => Err(DateError::ParseError(
                 "Date must be a valid date".to_string(),
@@ -155,7 +155,7 @@ pub enum DateError {
 impl fmt::Display for DateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DateError::ParseError(error) => write!(f, "{error}"),
+            Self::ParseError(error) => write!(f, "{error}"),
         }
     }
 }

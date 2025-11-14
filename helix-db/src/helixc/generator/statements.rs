@@ -3,8 +3,6 @@ use std::fmt::Display;
 
 use crate::helixc::generator::{bool_ops::BoExp, traversal_steps::Traversal, utils::GenRef};
 
-
-
 #[derive(Clone)]
 pub enum Statement {
     Assignment(Assignment),
@@ -20,19 +18,26 @@ pub enum Statement {
 impl Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Statement::Assignment(assignment) => write!(f, "{assignment}"),
-            Statement::Drop(drop) => write!(f, "{drop}"),
-            Statement::Traversal(traversal) => write!(f, "{traversal}"),
-            Statement::ForEach(foreach) => write!(f, "{foreach}"),
-            Statement::Literal(literal) => write!(f, "{literal}"),
-            Statement::Identifier(identifier) => write!(f, "{identifier}"),
-            Statement::BoExp(bo) => write!(f, "{bo}"),
-            Statement::Array(array) => write!(f, "[{}]", array.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ")),
-            Statement::Empty => write!(f, ""),
+            Self::Assignment(assignment) => write!(f, "{assignment}"),
+            Self::Drop(drop) => write!(f, "{drop}"),
+            Self::Traversal(traversal) => write!(f, "{traversal}"),
+            Self::ForEach(foreach) => write!(f, "{foreach}"),
+            Self::Literal(literal) => write!(f, "{literal}"),
+            Self::Identifier(identifier) => write!(f, "{identifier}"),
+            Self::BoExp(bo) => write!(f, "{bo}"),
+            Self::Array(array) => write!(
+                f,
+                "[{}]",
+                array
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Empty => write!(f, ""),
         }
     }
 }
-
 
 #[derive(Clone)]
 pub enum IdentifierType {
@@ -104,18 +109,18 @@ pub enum ForLoopInVariable {
 impl ForLoopInVariable {
     pub fn inner(&self) -> String {
         match self {
-            ForLoopInVariable::Identifier(identifier) => identifier.to_string(),
-            ForLoopInVariable::Parameter(parameter) => parameter.to_string(),
-            ForLoopInVariable::Empty => "".to_string(),
+            Self::Identifier(identifier) => identifier.to_string(),
+            Self::Parameter(parameter) => parameter.to_string(),
+            Self::Empty => "".to_string(),
         }
     }
 }
 impl Display for ForLoopInVariable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ForLoopInVariable::Identifier(identifier) => write!(f, "{identifier}"),
-            ForLoopInVariable::Parameter(parameter) => write!(f, "&data.{parameter}"),
-            ForLoopInVariable::Empty => {
+            Self::Identifier(identifier) => write!(f, "{identifier}"),
+            Self::Parameter(parameter) => write!(f, "&data.{parameter}"),
+            Self::Empty => {
                 panic!("For loop in variable is empty");
             }
         }
@@ -197,7 +202,9 @@ mod tests {
     fn test_assignment_statement() {
         let assignment = Statement::Assignment(Assignment {
             variable: GenRef::Std("result".to_string()),
-            value: Box::new(Statement::Identifier(GenRef::Std("computation".to_string()))),
+            value: Box::new(Statement::Identifier(GenRef::Std(
+                "computation".to_string(),
+            ))),
         });
         let output = format!("{}", assignment);
         assert!(output.contains("let result = computation"));
@@ -227,4 +234,3 @@ mod tests {
         assert_eq!(var.inner(), "");
     }
 }
-

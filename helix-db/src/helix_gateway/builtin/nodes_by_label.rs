@@ -108,9 +108,10 @@ pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, G
                     count += 1;
 
                     if let Some(limit_count) = limit
-                        && count >= limit_count {
-                            break;
-                        }
+                        && count >= limit_count
+                    {
+                        break;
+                    }
                 }
             }
             Err(_) => continue,
@@ -137,24 +138,21 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use axum::body::Bytes;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
             traversal_core::{
                 HelixGraphEngine, HelixGraphEngineOpts,
                 config::Config,
-                ops::{
-                    g::G,
-                    source::add_n::AddNAdapter,
-                },
+                ops::{g::G, source::add_n::AddNAdapter},
             },
         },
-        protocol::{request::Request, request::RequestType, Format, value::Value},
         helix_gateway::router::router::HandlerInput,
+        protocol::{Format, request::Request, request::RequestType, value::Value},
     };
+    use axum::body::Bytes;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -179,7 +177,9 @@ mod tests {
         let props1 = vec![("name", Value::String("Alice".to_string()))];
         let props_map1 = ImmutablePropertiesMap::new(
             props1.len(),
-            props1.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props1
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -190,7 +190,9 @@ mod tests {
         let props2 = vec![("name", Value::String("Bob".to_string()))];
         let props_map2 = ImmutablePropertiesMap::new(
             props2.len(),
-            props2.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props2
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -214,7 +216,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -238,7 +239,9 @@ mod tests {
             let props = vec![("index", Value::I64(i))];
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
 
@@ -263,7 +266,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -293,7 +295,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -320,7 +321,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -357,7 +357,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);

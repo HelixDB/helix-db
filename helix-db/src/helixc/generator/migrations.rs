@@ -66,14 +66,14 @@ impl std::fmt::Display for GeneratedMigration {
 impl std::fmt::Display for GeneratedMigrationPropertyMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GeneratedMigrationPropertyMapping::FieldAdditionFromOldField {
+            Self::FieldAdditionFromOldField {
                 old_field,
                 new_field,
             } => write!(
                 f,
                 "field_addition_from_old_field!(&mut props, &mut new_props, {new_field}, {old_field})"
             ),
-            GeneratedMigrationPropertyMapping::FieldAdditionFromValue {
+            Self::FieldAdditionFromValue {
                 new_field_name,
                 new_field_type,
                 value,
@@ -83,7 +83,7 @@ impl std::fmt::Display for GeneratedMigrationPropertyMapping {
                     "field_addition_from_value!(&mut new_props, {new_field_name}, {new_field_type}, {value})"
                 )
             }
-            GeneratedMigrationPropertyMapping::FieldTypeCast { field, cast } => {
+            Self::FieldTypeCast { field, cast } => {
                 write!(
                     f,
                     "field_type_cast!(&mut props, &mut new_props, {field}, {cast})"
@@ -153,7 +153,9 @@ mod tests {
                 remappings: vec![Separator::Semicolon(
                     GeneratedMigrationPropertyMapping::FieldAdditionFromOldField {
                         old_field: GeneratedValue::Literal(GenRef::Literal("name".to_string())),
-                        new_field: GeneratedValue::Literal(GenRef::Literal("full_name".to_string())),
+                        new_field: GeneratedValue::Literal(GenRef::Literal(
+                            "full_name".to_string(),
+                        )),
                     },
                 )],
                 should_spread: false,
@@ -203,7 +205,9 @@ mod tests {
                     ),
                     Separator::Semicolon(
                         GeneratedMigrationPropertyMapping::FieldAdditionFromValue {
-                            new_field_name: GeneratedValue::Literal(GenRef::Literal("c".to_string())),
+                            new_field_name: GeneratedValue::Literal(GenRef::Literal(
+                                "c".to_string(),
+                            )),
                             new_field_type: FieldType::Boolean,
                             value: GeneratedValue::Primitive(GenRef::Std("true".to_string())),
                         },

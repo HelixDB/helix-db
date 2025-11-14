@@ -111,9 +111,9 @@ pub enum CloudConfig {
 impl CloudConfig {
     pub fn get_cluster_id(&self) -> Option<&str> {
         match self {
-            CloudConfig::Helix(config) => Some(&config.cluster_id),
-            CloudConfig::FlyIo(_) => Some("flyio"),
-            CloudConfig::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
+            Self::Helix(config) => Some(&config.cluster_id),
+            Self::FlyIo(_) => Some("flyio"),
+            Self::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
         }
     }
 }
@@ -173,7 +173,7 @@ fn is_default_graph_config(value: &GraphConfig) -> bool {
 
 impl Default for VectorConfig {
     fn default() -> Self {
-        VectorConfig {
+        Self {
             m: default_m(),
             ef_construction: default_ef_construction(),
             ef_search: default_ef_search(),
@@ -184,7 +184,7 @@ impl Default for VectorConfig {
 
 impl Default for DbConfig {
     fn default() -> Self {
-        DbConfig {
+        Self {
             vector_config: VectorConfig::default(),
             graph_config: GraphConfig::default(),
             mcp: true,
@@ -204,54 +204,54 @@ pub enum InstanceInfo<'a> {
 impl<'a> InstanceInfo<'a> {
     pub fn build_mode(&self) -> BuildMode {
         match self {
-            InstanceInfo::Local(config) => config.build_mode,
-            InstanceInfo::Helix(config) => config.build_mode,
-            InstanceInfo::FlyIo(config) => config.build_mode,
-            InstanceInfo::Ecr(config) => config.build_mode,
+            Self::Local(config) => config.build_mode,
+            Self::Helix(config) => config.build_mode,
+            Self::FlyIo(config) => config.build_mode,
+            Self::Ecr(config) => config.build_mode,
         }
     }
 
     pub fn port(&self) -> Option<u16> {
         match self {
-            InstanceInfo::Local(config) => config.port,
-            InstanceInfo::Helix(_) => None,
-            InstanceInfo::FlyIo(_) => None,
-            InstanceInfo::Ecr(_) => None,
+            Self::Local(config) => config.port,
+            Self::Helix(_) => None,
+            Self::FlyIo(_) => None,
+            Self::Ecr(_) => None,
         }
     }
 
     pub fn cluster_id(&self) -> Option<&str> {
         match self {
-            InstanceInfo::Local(_) => None,
-            InstanceInfo::Helix(config) => Some(&config.cluster_id),
-            InstanceInfo::FlyIo(_) => Some("flyio"),
-            InstanceInfo::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
+            Self::Local(_) => None,
+            Self::Helix(config) => Some(&config.cluster_id),
+            Self::FlyIo(_) => Some("flyio"),
+            Self::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
         }
     }
 
     pub fn db_config(&self) -> &DbConfig {
         match self {
-            InstanceInfo::Local(config) => &config.db_config,
-            InstanceInfo::Helix(config) => &config.db_config,
-            InstanceInfo::FlyIo(config) => &config.db_config,
-            InstanceInfo::Ecr(config) => &config.db_config,
+            Self::Local(config) => &config.db_config,
+            Self::Helix(config) => &config.db_config,
+            Self::FlyIo(config) => &config.db_config,
+            Self::Ecr(config) => &config.db_config,
         }
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, InstanceInfo::Local(_))
+        matches!(self, Self::Local(_))
     }
 
     pub fn should_build_docker_image(&self) -> bool {
-        matches!(self, InstanceInfo::Local(_) | InstanceInfo::FlyIo(_))
+        matches!(self, Self::Local(_) | Self::FlyIo(_))
     }
 
     pub fn docker_build_target(&self) -> Option<&str> {
         match self {
-            InstanceInfo::Local(_) => None,
-            InstanceInfo::Helix(_) => None,
-            InstanceInfo::FlyIo(_) => Some("linux/amd64"),
-            InstanceInfo::Ecr(_) => Some("linux/amd64"),
+            Self::Local(_) => None,
+            Self::Helix(_) => None,
+            Self::FlyIo(_) => Some("linux/amd64"),
+            Self::Ecr(_) => Some("linux/amd64"),
         }
     }
 
@@ -279,9 +279,9 @@ impl<'a> InstanceInfo<'a> {
 impl From<InstanceInfo<'_>> for CloudConfig {
     fn from(instance_info: InstanceInfo<'_>) -> Self {
         match instance_info {
-            InstanceInfo::Helix(config) => CloudConfig::Helix(config.clone()),
-            InstanceInfo::FlyIo(config) => CloudConfig::FlyIo(config.clone()),
-            InstanceInfo::Ecr(config) => CloudConfig::Ecr(config.clone()),
+            InstanceInfo::Helix(config) => Self::Helix(config.clone()),
+            InstanceInfo::FlyIo(config) => Self::FlyIo(config.clone()),
+            InstanceInfo::Ecr(config) => Self::Ecr(config.clone()),
             InstanceInfo::Local(_) => unimplemented!(),
         }
     }
@@ -292,7 +292,7 @@ impl HelixConfig {
         let content =
             fs::read_to_string(path).map_err(|e| eyre!("Failed to read helix.toml: {}", e))?;
 
-        let config: HelixConfig =
+        let config: Self =
             toml::from_str(&content).map_err(|e| eyre!("Failed to parse helix.toml: {}", e))?;
 
         config.validate()?;
@@ -382,7 +382,7 @@ impl HelixConfig {
             },
         );
 
-        HelixConfig {
+        Self {
             project: ProjectConfig {
                 name: project_name.to_string(),
                 queries: default_queries_path(),

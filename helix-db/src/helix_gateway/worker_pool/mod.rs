@@ -29,7 +29,7 @@ impl WorkerPool {
         graph_access: Arc<HelixGraphEngine>,
         router: Arc<HelixRouter>,
         io_rt: Arc<Runtime>,
-    ) -> WorkerPool {
+    ) -> Self {
         let (req_tx, req_rx) = flume::bounded::<ReqMsg>(1000);
         let (cont_tx, cont_rx) = flume::bounded::<ContMsg>(1000);
 
@@ -57,7 +57,7 @@ impl WorkerPool {
             })
             .collect();
 
-        WorkerPool {
+        Self {
             tx: req_tx,
             _workers: workers,
         }
@@ -94,7 +94,7 @@ impl Worker {
         io_rt: Arc<Runtime>,
         (cont_tx, cont_rx): (ContChan, Receiver<ContMsg>),
         parity: bool,
-    ) -> Worker {
+    ) -> Self {
         let handle = std::thread::spawn(move || {
             core_setter.set_current();
 
@@ -170,7 +170,7 @@ impl Worker {
                 }
             }
         });
-        Worker { _handle: handle }
+        Self { _handle: handle }
     }
 }
 

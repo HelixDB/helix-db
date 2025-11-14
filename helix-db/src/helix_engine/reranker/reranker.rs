@@ -3,11 +3,9 @@
 
 //! Core Reranker trait and related types.
 
-use crate::{
-    helix_engine::{
-        reranker::errors::{RerankerError, RerankerResult},
-        traversal_core::traversal_value::TraversalValue,
-    },
+use crate::helix_engine::{
+    reranker::errors::{RerankerError, RerankerResult},
+    traversal_core::traversal_value::TraversalValue,
 };
 
 /// Represents a scored item for reranking.
@@ -41,7 +39,11 @@ pub trait Reranker: Send + Sync {
     ///
     /// # Returns
     /// A vector of reranked items with updated scores
-    fn rerank<'arena, I>(&self, items: I, query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>;
 

@@ -88,10 +88,10 @@ pub enum CloudDeploymentTypeCommand {
 impl CloudDeploymentTypeCommand {
     pub fn name(&self) -> Option<String> {
         match self {
-            CloudDeploymentTypeCommand::Helix { name, .. } => name.clone(),
-            CloudDeploymentTypeCommand::Ecr { name } => name.clone(),
-            CloudDeploymentTypeCommand::Fly { name, .. } => name.clone(),
-            CloudDeploymentTypeCommand::Local { name } => name.clone(),
+            Self::Helix { name, .. }
+            | Self::Ecr { name }
+            | Self::Fly { name, .. }
+            | Self::Local { name } => name.clone(),
         }
     }
 }

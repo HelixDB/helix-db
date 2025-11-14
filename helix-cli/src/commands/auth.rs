@@ -167,7 +167,7 @@ impl Credentials {
             }
         }
 
-        Ok(Credentials {
+        Ok(Self {
             user_id: user_id.ok_or_eyre("Missing helix_user_id in credentials file")?,
             helix_admin_key: helix_admin_key
                 .ok_or_eyre("Missing helix_user_key in credentials file")?,

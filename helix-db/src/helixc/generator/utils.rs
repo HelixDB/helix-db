@@ -26,18 +26,18 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GenRef::Literal(t) => write!(f, "\"{t}\""),
-            GenRef::Std(t) => write!(f, "{t}"),
-            GenRef::Mut(t) => write!(f, "mut {t}"),
-            GenRef::Ref(t) => write!(f, "&{t}"),
-            GenRef::RefLT(lifetime_name, t) => write!(f, "&'{lifetime_name} {t}"),
-            GenRef::DeRef(t) => write!(f, "*{t}"),
-            GenRef::MutRef(t) => write!(f, "& mut {t}"),
-            GenRef::MutRefLT(lifetime_name, t) => write!(f, "&'{lifetime_name} mut {t}"),
-            GenRef::MutDeRef(t) => write!(f, "mut *{t}"),
-            GenRef::RefLiteral(t) => write!(f, "ref {t}"),
-            GenRef::Unknown => write!(f, ""),
-            GenRef::Id(id) => write!(f, "data.{id}"),
+            Self::Literal(t) => write!(f, "\"{t}\""),
+            Self::Std(t) => write!(f, "{t}"),
+            Self::Mut(t) => write!(f, "mut {t}"),
+            Self::Ref(t) => write!(f, "&{t}"),
+            Self::RefLT(lifetime_name, t) => write!(f, "&'{lifetime_name} {t}"),
+            Self::DeRef(t) => write!(f, "*{t}"),
+            Self::MutRef(t) => write!(f, "& mut {t}"),
+            Self::MutRefLT(lifetime_name, t) => write!(f, "&'{lifetime_name} mut {t}"),
+            Self::MutDeRef(t) => write!(f, "mut *{t}"),
+            Self::RefLiteral(t) => write!(f, "ref {t}"),
+            Self::Unknown => write!(f, ""),
+            Self::Id(id) => write!(f, "data.{id}"),
         }
     }
 }
@@ -48,24 +48,24 @@ where
 {
     pub fn inner(&self) -> &T {
         match self {
-            GenRef::Literal(t) => t,
-            GenRef::Mut(t) => t,
-            GenRef::Ref(t) => t,
-            GenRef::RefLT(_, t) => t,
-            GenRef::DeRef(t) => t,
-            GenRef::MutRef(t) => t,
-            GenRef::MutRefLT(_, t) => t,
-            GenRef::MutDeRef(t) => t,
-            GenRef::RefLiteral(t) => t,
-            GenRef::Unknown => {
+            Self::Literal(t) => t,
+            Self::Mut(t) => t,
+            Self::Ref(t) => t,
+            Self::RefLT(_, t) => t,
+            Self::DeRef(t) => t,
+            Self::MutRef(t) => t,
+            Self::MutRefLT(_, t) => t,
+            Self::MutDeRef(t) => t,
+            Self::RefLiteral(t) => t,
+            Self::Unknown => {
                 // This should have been caught during analysis
                 // For now, panic with a descriptive message
                 panic!(
                     "Code generation error: Unknown reference type encountered. This indicates a bug in the analyzer."
                 )
             }
-            GenRef::Std(t) => t,
-            GenRef::Id(_) => {
+            Self::Std(t) => t,
+            Self::Id(_) => {
                 // Id doesn't have an inner T, it's just a String identifier
                 panic!(
                     "Code generation error: Cannot get inner value of Id type. Use the identifier directly."
@@ -80,23 +80,23 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GenRef::Literal(t) => write!(f, "Literal({t})"),
-            GenRef::Std(t) => write!(f, "Std({t})"),
-            GenRef::Mut(t) => write!(f, "Mut({t})"),
-            GenRef::Ref(t) => write!(f, "Ref({t})"),
-            GenRef::RefLT(lifetime_name, t) => write!(f, "RefLT({lifetime_name}, {t})"),
-            GenRef::DeRef(t) => write!(f, "DeRef({t})"),
-            GenRef::MutRef(t) => write!(f, "MutRef({t})"),
-            GenRef::MutRefLT(lifetime_name, t) => write!(f, "MutRefLT({lifetime_name}, {t})"),
-            GenRef::MutDeRef(t) => write!(f, "MutDeRef({t})"),
-            GenRef::RefLiteral(t) => write!(f, "RefLiteral({t})"),
-            GenRef::Unknown => write!(f, "Unknown"),
-            GenRef::Id(id) => write!(f, "String({id})"),
+            Self::Literal(t) => write!(f, "Literal({t})"),
+            Self::Std(t) => write!(f, "Std({t})"),
+            Self::Mut(t) => write!(f, "Mut({t})"),
+            Self::Ref(t) => write!(f, "Ref({t})"),
+            Self::RefLT(lifetime_name, t) => write!(f, "RefLT({lifetime_name}, {t})"),
+            Self::DeRef(t) => write!(f, "DeRef({t})"),
+            Self::MutRef(t) => write!(f, "MutRef({t})"),
+            Self::MutRefLT(lifetime_name, t) => write!(f, "MutRefLT({lifetime_name}, {t})"),
+            Self::MutDeRef(t) => write!(f, "MutDeRef({t})"),
+            Self::RefLiteral(t) => write!(f, "RefLiteral({t})"),
+            Self::Unknown => write!(f, "Unknown"),
+            Self::Id(id) => write!(f, "String({id})"),
         }
     }
 }
-impl From<GenRef<String>> for String {
-    fn from(value: GenRef<String>) -> Self {
+impl From<GenRef<Self>> for String {
+    fn from(value: GenRef<Self>) -> Self {
         match value {
             GenRef::Literal(s) => format!("\"{s}\""),
             GenRef::Std(s) => format!("\"{s}\""),
@@ -116,9 +116,9 @@ impl From<GenRef<String>> for String {
 impl From<IdType> for GenRef<String> {
     fn from(value: IdType) -> Self {
         match value {
-            IdType::Literal { value: s, .. } => GenRef::Literal(s),
-            IdType::Identifier { value: s, .. } => GenRef::Id(s),
-            _ => GenRef::Unknown,
+            IdType::Literal { value: s, .. } => Self::Literal(s),
+            IdType::Identifier { value: s, .. } => Self::Id(s),
+            _ => Self::Unknown,
         }
     }
 }
@@ -137,13 +137,13 @@ pub enum VecData {
 impl Display for VecData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VecData::Standard(v) => write!(f, "{v}"),
+            Self::Standard(v) => write!(f, "{v}"),
             // VecData::Embed { data, model_name } => match model_name {
             //     Some(model) => write!(f, "&embed!(db, {data}, {model})"),
             //     None => write!(f, "&embed!(db, {data})"),
             // },
-            VecData::Hoisted(ident) => write!(f, "&{ident}"),
-            VecData::Unknown => {
+            Self::Hoisted(ident) => write!(f, "&{ident}"),
+            Self::Unknown => {
                 // Generate a compile error in the output code
                 write!(f, "compile_error!(\"Unknown VecData in code generation\")")
             }
@@ -164,7 +164,7 @@ impl EmbedData {
 
 impl Display for EmbedData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let EmbedData { data, model_name } = self;
+        let Self { data, model_name } = self;
         match model_name {
             Some(model) => write!(f, "embed_async!(db, {data}, {model})"),
             None => write!(f, "embed_async!(db, {data})"),
@@ -181,8 +181,8 @@ pub enum Order {
 impl Display for Order {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Order::Asc => write!(f, "Asc"),
-            Order::Desc => write!(f, "Desc"),
+            Self::Asc => write!(f, "Asc"),
+            Self::Desc => write!(f, "Desc"),
         }
     }
 }
@@ -250,20 +250,20 @@ pub enum GeneratedValue {
 impl GeneratedValue {
     pub fn inner(&self) -> &GenRef<String> {
         match self {
-            GeneratedValue::Literal(value) => value,
-            GeneratedValue::Primitive(value) => value,
-            GeneratedValue::Identifier(value) => value,
-            GeneratedValue::Parameter(value) => value,
-            GeneratedValue::Array(value) => value,
-            GeneratedValue::Aggregate(value) => value,
-            GeneratedValue::Traversal(_) => {
+            Self::Literal(value) => value,
+            Self::Primitive(value) => value,
+            Self::Identifier(value) => value,
+            Self::Parameter(value) => value,
+            Self::Array(value) => value,
+            Self::Aggregate(value) => value,
+            Self::Traversal(_) => {
                 // This should not be called for traversals
                 // The caller should handle traversals specially
                 panic!(
                     "Code generation error: Cannot get inner value of Traversal. Traversals should be handled specially."
                 )
             }
-            GeneratedValue::Unknown => {
+            Self::Unknown => {
                 // This indicates a bug in the analyzer
                 panic!(
                     "Code generation error: Unknown GeneratedValue encountered. This indicates incomplete type inference in the analyzer."
@@ -276,28 +276,28 @@ impl GeneratedValue {
 impl Display for GeneratedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GeneratedValue::Literal(value) => write!(f, "{value}"),
-            GeneratedValue::Primitive(value) => write!(f, "{value}"),
-            GeneratedValue::Identifier(value) => write!(f, "{value}"),
-            GeneratedValue::Parameter(value) => write!(f, "{value}"),
-            GeneratedValue::Array(value) => write!(f, "&[{value}]"),
-            GeneratedValue::Aggregate(value) => write!(f, "{value}"),
-            GeneratedValue::Traversal(value) => write!(f, "{value}"),
-            GeneratedValue::Unknown => write!(f, ""),
+            Self::Literal(value) => write!(f, "{value}"),
+            Self::Primitive(value) => write!(f, "{value}"),
+            Self::Identifier(value) => write!(f, "{value}"),
+            Self::Parameter(value) => write!(f, "{value}"),
+            Self::Array(value) => write!(f, "&[{value}]"),
+            Self::Aggregate(value) => write!(f, "{value}"),
+            Self::Traversal(value) => write!(f, "{value}"),
+            Self::Unknown => write!(f, ""),
         }
     }
 }
 impl Debug for GeneratedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GeneratedValue::Literal(value) => write!(f, "GV: Literal({value})"),
-            GeneratedValue::Primitive(value) => write!(f, "GV: Primitive({value})"),
-            GeneratedValue::Identifier(value) => write!(f, "GV: Identifier({value})"),
-            GeneratedValue::Parameter(value) => write!(f, "GV: Parameter({value})"),
-            GeneratedValue::Array(value) => write!(f, "GV: Array({value:?})"),
-            GeneratedValue::Aggregate(value) => write!(f, "GV: Aggregate({value:?})"),
-            GeneratedValue::Traversal(value) => write!(f, "GV: Traversal({value})"),
-            GeneratedValue::Unknown => write!(f, "Unknown"),
+            Self::Literal(value) => write!(f, "GV: Literal({value})"),
+            Self::Primitive(value) => write!(f, "GV: Primitive({value})"),
+            Self::Identifier(value) => write!(f, "GV: Identifier({value})"),
+            Self::Parameter(value) => write!(f, "GV: Parameter({value})"),
+            Self::Array(value) => write!(f, "GV: Array({value:?})"),
+            Self::Aggregate(value) => write!(f, "GV: Aggregate({value:?})"),
+            Self::Traversal(value) => write!(f, "GV: Traversal({value})"),
+            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -313,10 +313,10 @@ pub enum GeneratedType {
 impl Display for GeneratedType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GeneratedType::RustType(t) => write!(f, "{t}"),
-            GeneratedType::Vec(t) => write!(f, "Vec<{t}>"),
-            GeneratedType::Variable(v) => write!(f, "{v}"),
-            GeneratedType::Object(o) => write!(f, "{o}"),
+            Self::RustType(t) => write!(f, "{t}"),
+            Self::Vec(t) => write!(f, "Vec<{t}>"),
+            Self::Variable(v) => write!(f, "{v}"),
+            Self::Object(o) => write!(f, "{o}"),
         }
     }
 }
@@ -342,42 +342,42 @@ pub enum RustType {
 impl Display for RustType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RustType::String => write!(f, "String"),
-            RustType::I8 => write!(f, "i8"),
-            RustType::I16 => write!(f, "i16"),
-            RustType::I32 => write!(f, "i32"),
-            RustType::I64 => write!(f, "i64"),
-            RustType::U8 => write!(f, "u8"),
-            RustType::U16 => write!(f, "u16"),
-            RustType::U32 => write!(f, "u32"),
-            RustType::U64 => write!(f, "u64"),
-            RustType::U128 => write!(f, "u128"),
-            RustType::F32 => write!(f, "f32"),
-            RustType::F64 => write!(f, "f64"),
-            RustType::Bool => write!(f, "bool"),
-            RustType::Uuid => write!(f, "ID"),
-            RustType::Date => write!(f, "DateTime<Utc>"),
+            Self::String => write!(f, "String"),
+            Self::I8 => write!(f, "i8"),
+            Self::I16 => write!(f, "i16"),
+            Self::I32 => write!(f, "i32"),
+            Self::I64 => write!(f, "i64"),
+            Self::U8 => write!(f, "u8"),
+            Self::U16 => write!(f, "u16"),
+            Self::U32 => write!(f, "u32"),
+            Self::U64 => write!(f, "u64"),
+            Self::U128 => write!(f, "u128"),
+            Self::F32 => write!(f, "f32"),
+            Self::F64 => write!(f, "f64"),
+            Self::Bool => write!(f, "bool"),
+            Self::Uuid => write!(f, "ID"),
+            Self::Date => write!(f, "DateTime<Utc>"),
         }
     }
 }
 impl RustType {
     pub fn to_ts(&self) -> String {
         let s = match self {
-            RustType::String => "string",
-            RustType::I8 => "number",
-            RustType::I16 => "number",
-            RustType::I32 => "number",
-            RustType::I64 => "number",
-            RustType::U8 => "number",
-            RustType::U16 => "number",
-            RustType::U32 => "number",
-            RustType::U64 => "number",
-            RustType::U128 => "number",
-            RustType::F32 => "number",
-            RustType::F64 => "number",
-            RustType::Bool => "boolean",
-            RustType::Uuid => "string", // do thee
-            RustType::Date => "Date",   // do thee
+            Self::String => "string",
+            Self::I8 => "number",
+            Self::I16 => "number",
+            Self::I32 => "number",
+            Self::I64 => "number",
+            Self::U8 => "number",
+            Self::U16 => "number",
+            Self::U32 => "number",
+            Self::U64 => "number",
+            Self::U128 => "number",
+            Self::F32 => "number",
+            Self::F64 => "number",
+            Self::Bool => "boolean",
+            Self::Uuid => "string", // do thee
+            Self::Date => "Date",   // do thee
         };
         s.to_string()
     }
@@ -394,22 +394,22 @@ pub enum Separator<T> {
 impl<T: Display> Display for Separator<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Separator::Comma(t) => write!(f, ",\n{t}"),
-            Separator::Semicolon(t) => writeln!(f, "{t};"),
-            Separator::Period(t) => write!(f, "\n.{t}"),
-            Separator::Newline(t) => write!(f, "\n{t}"),
-            Separator::Empty(t) => write!(f, "{t}"),
+            Self::Comma(t) => write!(f, ",\n{t}"),
+            Self::Semicolon(t) => writeln!(f, "{t};"),
+            Self::Period(t) => write!(f, "\n.{t}"),
+            Self::Newline(t) => write!(f, "\n{t}"),
+            Self::Empty(t) => write!(f, "{t}"),
         }
     }
 }
 impl<T: Display> Separator<T> {
     pub fn inner(&self) -> &T {
         match self {
-            Separator::Comma(t) => t,
-            Separator::Semicolon(t) => t,
-            Separator::Period(t) => t,
-            Separator::Newline(t) => t,
-            Separator::Empty(t) => t,
+            Self::Comma(t) => t,
+            Self::Semicolon(t) => t,
+            Self::Period(t) => t,
+            Self::Newline(t) => t,
+            Self::Empty(t) => t,
         }
     }
 }

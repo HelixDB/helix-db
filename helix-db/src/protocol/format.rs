@@ -30,7 +30,7 @@ impl Format {
     /// is compatible with the chosen format to avoid panics.
     pub fn serialize<T: Serialize>(self, val: &T) -> Cow<'_, [u8]> {
         match self {
-            Format::Json => sonic_rs::to_vec(val).unwrap().into(),
+            Self::Json => sonic_rs::to_vec(val).unwrap().into(),
         }
     }
 
@@ -42,7 +42,7 @@ impl Format {
         writer: &mut BufWriter<impl AsyncWrite + Unpin>,
     ) -> Result<(), Box<dyn Error>> {
         match self {
-            Format::Json => {
+            Self::Json => {
                 let encoded = sonic_rs::to_vec(val)?;
                 writer.write_all(&encoded).await?;
             }
@@ -65,7 +65,7 @@ impl Format {
         val: &'a [u8],
     ) -> Result<MaybeOwned<'a, T>, GraphError> {
         match self {
-            Format::Json => Ok(MaybeOwned::Owned(
+            Self::Json => Ok(MaybeOwned::Owned(
                 sonic_rs::from_slice::<T>(val)
                     .map_err(|e| GraphError::DecodeError(e.to_string()))?,
             )),
@@ -75,7 +75,7 @@ impl Format {
     /// Deserialize the provided value
     pub fn deserialize_owned<'a, T: Deserialize<'a>>(self, val: &'a [u8]) -> Result<T, GraphError> {
         match self {
-            Format::Json => Ok(sonic_rs::from_slice::<T>(val)
+            Self::Json => Ok(sonic_rs::from_slice::<T>(val)
                 .map_err(|e| GraphError::DecodeError(e.to_string()))?),
         }
     }
@@ -86,7 +86,7 @@ impl FromStr for Format {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "application/json" => Ok(Format::Json),
+            "application/json" => Ok(Self::Json),
             _ => Err(()),
         }
     }
@@ -95,7 +95,7 @@ impl FromStr for Format {
 impl Display for Format {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Format::Json => write!(f, "application/json"),
+            Self::Json => write!(f, "application/json"),
         }
     }
 }
@@ -112,8 +112,8 @@ impl<'a, T> Deref for MaybeOwned<'a, T> {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            MaybeOwned::Owned(v) => v,
-            MaybeOwned::Borrowed(v) => v,
+            Self::Owned(v) => v,
+            Self::Borrowed(v) => v,
         }
     }
 }
@@ -121,8 +121,8 @@ impl<'a, T> Deref for MaybeOwned<'a, T> {
 impl<'a, T: Clone> MaybeOwned<'a, T> {
     pub fn into_owned(self) -> T {
         match self {
-            MaybeOwned::Owned(v) => v,
-            MaybeOwned::Borrowed(v) => v.clone(),
+            Self::Owned(v) => v,
+            Self::Borrowed(v) => v.clone(),
         }
     }
 }
@@ -201,7 +201,8 @@ mod tests {
     fn test_format_deserialize_invalid_json() {
         let invalid_json = b"not valid json {";
 
-        let result: Result<MaybeOwned<TestData>, GraphError> = Format::Json.deserialize(invalid_json);
+        let result: Result<MaybeOwned<TestData>, GraphError> =
+            Format::Json.deserialize(invalid_json);
         assert!(result.is_err());
 
         if let Err(GraphError::DecodeError(msg)) = result {

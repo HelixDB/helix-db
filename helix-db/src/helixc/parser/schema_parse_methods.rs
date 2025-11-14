@@ -524,7 +524,7 @@ impl HelixParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Node Definition Tests
@@ -568,8 +568,14 @@ mod tests {
 
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
-        assert!(matches!(schema.node_schemas[0].fields[0].prefix, FieldPrefix::Index));
-        assert!(matches!(schema.node_schemas[0].fields[1].prefix, FieldPrefix::Empty));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].prefix,
+            FieldPrefix::Index
+        ));
+        assert!(matches!(
+            schema.node_schemas[0].fields[1].prefix,
+            FieldPrefix::Empty
+        ));
     }
 
     #[test]
@@ -641,8 +647,14 @@ mod tests {
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
         assert_eq!(schema.node_schemas[0].fields.len(), 2);
-        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Array(_)));
-        assert!(matches!(schema.node_schemas[0].fields[1].field_type, FieldType::Array(_)));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].field_type,
+            FieldType::Array(_)
+        ));
+        assert!(matches!(
+            schema.node_schemas[0].fields[1].field_type,
+            FieldType::Array(_)
+        ));
     }
 
     #[test]
@@ -660,7 +672,10 @@ mod tests {
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
         assert_eq!(schema.node_schemas[0].fields.len(), 1);
-        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Object(_)));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].field_type,
+            FieldType::Object(_)
+        ));
     }
 
     #[test]
@@ -967,7 +982,10 @@ mod tests {
 
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
-        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Array(_)));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].field_type,
+            FieldType::Array(_)
+        ));
     }
 
     #[test]

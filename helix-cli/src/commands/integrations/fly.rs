@@ -106,15 +106,15 @@ impl TryFrom<String> for VmSize {
 impl VmSize {
     fn into_command_args(&self) -> [&'static str; 2] {
         let vm_size_arg = match self {
-            VmSize::SharedCpu4x => "shared-cpu-4x",
-            VmSize::SharedCpu8x => "shared-cpu-8x",
-            VmSize::PerformanceCpu4x => "performance-4x",
-            VmSize::PerformanceCpu8x => "performance-8x",
-            VmSize::PerformanceCpu16x => "performance-16x",
-            VmSize::A10 => "a10",
-            VmSize::A10040Gb => "a100-40gb",
-            VmSize::A10080Gb => "a100-80gb",
-            VmSize::L40s => "l40s",
+            Self::SharedCpu4x => "shared-cpu-4x",
+            Self::SharedCpu8x => "shared-cpu-8x",
+            Self::PerformanceCpu4x => "performance-4x",
+            Self::PerformanceCpu8x => "performance-8x",
+            Self::PerformanceCpu16x => "performance-16x",
+            Self::A10 => "a10",
+            Self::A10040Gb => "a100-40gb",
+            Self::A10080Gb => "a100-80gb",
+            Self::L40s => "l40s",
         };
         ["--vm-size", vm_size_arg]
     }

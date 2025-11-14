@@ -338,9 +338,9 @@ fn test_gateway_opts_default_workers_per_core() {
 mod api_key_tests {
     use super::*;
     use crate::helix_gateway::key_verification::verify_key;
+    use crate::protocol::Format;
     use crate::protocol::{HelixError, request::Request};
     use axum::body::Bytes;
-    use crate::protocol::Format;
 
     #[test]
     fn test_verify_key_integration_success() {

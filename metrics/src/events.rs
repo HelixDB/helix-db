@@ -29,17 +29,17 @@ pub enum EventType {
 impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            EventType::CliInstall => "cli_install",
-            EventType::Compile => "compile",
-            EventType::DeployLocal => "deploy_local",
-            EventType::DeployCloud => "deploy_cloud",
-            EventType::RedeployLocal => "redeploy_local",
-            EventType::QuerySuccess => "query_success",
-            EventType::QueryError => "query_error",
-            EventType::WriteError => "write_error",
-            EventType::ReadError => "read_error",
-            EventType::InvalidApiKey => "invalid_api_key",
-            EventType::Test => "test",
+            Self::CliInstall => "cli_install",
+            Self::Compile => "compile",
+            Self::DeployLocal => "deploy_local",
+            Self::DeployCloud => "deploy_cloud",
+            Self::RedeployLocal => "redeploy_local",
+            Self::QuerySuccess => "query_success",
+            Self::QueryError => "query_error",
+            Self::WriteError => "write_error",
+            Self::ReadError => "read_error",
+            Self::InvalidApiKey => "invalid_api_key",
+            Self::Test => "test",
         }
     }
 }
@@ -72,61 +72,61 @@ pub enum EventData {
 
 impl From<CompileEvent> for EventData {
     fn from(e: CompileEvent) -> Self {
-        EventData::Compile(e)
+        Self::Compile(e)
     }
 }
 
 impl From<DeployLocalEvent> for EventData {
     fn from(e: DeployLocalEvent) -> Self {
-        EventData::DeployLocal(e)
+        Self::DeployLocal(e)
     }
 }
 
 impl From<DeployCloudEvent> for EventData {
     fn from(e: DeployCloudEvent) -> Self {
-        EventData::DeployCloud(e)
+        Self::DeployCloud(e)
     }
 }
 
 impl From<RedeployLocalEvent> for EventData {
     fn from(e: RedeployLocalEvent) -> Self {
-        EventData::RedeployLocal(e)
+        Self::RedeployLocal(e)
     }
 }
 
 impl From<QuerySuccessEvent> for EventData {
     fn from(e: QuerySuccessEvent) -> Self {
-        EventData::QuerySuccess(e)
+        Self::QuerySuccess(e)
     }
 }
 
 impl From<QueryErrorEvent> for EventData {
     fn from(e: QueryErrorEvent) -> Self {
-        EventData::QueryError(e)
+        Self::QueryError(e)
     }
 }
 
 impl From<WriteErrorEvent> for EventData {
     fn from(e: WriteErrorEvent) -> Self {
-        EventData::WriteError(e)
+        Self::WriteError(e)
     }
 }
 
 impl From<ReadErrorEvent> for EventData {
     fn from(e: ReadErrorEvent) -> Self {
-        EventData::ReadError(e)
+        Self::ReadError(e)
     }
 }
 
 impl From<TestEvent> for EventData {
     fn from(e: TestEvent) -> Self {
-        EventData::Test(e)
+        Self::Test(e)
     }
 }
 
 impl From<InvalidApiKeyEvent> for EventData {
     fn from(e: InvalidApiKeyEvent) -> Self {
-        EventData::InvalidApiKey(e)
+        Self::InvalidApiKey(e)
     }
 }
 
@@ -143,7 +143,7 @@ pub struct TestEvent {
 
 impl Default for TestEvent {
     fn default() -> Self {
-        TestEvent {
+        Self {
             cluster_id: "test_cluster".to_string(),
             queries_string: "test_queries".to_string(),
             num_of_queries: 0,

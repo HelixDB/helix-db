@@ -22,9 +22,9 @@ impl IntoResponse for HelixError {
     fn into_response(self) -> axum::response::Response {
         let body = self.to_string();
         let code = match &self {
-            HelixError::Graph(_) | HelixError::Vector(_) => 500,
-            HelixError::NotFound { .. } => 404,
-            HelixError::InvalidApiKey => 403,
+            Self::Graph(_) | Self::Vector(_) => 500,
+            Self::NotFound { .. } => 404,
+            Self::InvalidApiKey => 403,
         };
 
         axum::response::Response::builder()
