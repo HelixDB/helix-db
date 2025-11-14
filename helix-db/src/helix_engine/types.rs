@@ -207,3 +207,9 @@ impl From<bincode::Error> for VectorError {
         VectorError::ConversionError(format!("bincode error: {error}"))
     }
 }
+
+impl From<rocksdb::Error> for VectorError {
+    fn from(error: rocksdb::Error) -> Self {
+        VectorError::ConversionError(format!("rocksdb error: {error}"))
+    }
+}

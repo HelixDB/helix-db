@@ -1,11 +1,15 @@
 use crate::{
     helix_engine::{
-        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue, LMDB_STRING_HEADER_LENGTH},
+        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
-    protocol::value::Value, utils::items::Node,
+    protocol::value::Value,
+    utils::items::Node,
 };
 use serde::Serialize;
+
+#[cfg(feature = "lmdb")]
+use crate::helix_engine::traversal_core::LMDB_STRING_HEADER_LENGTH;
 
 pub trait NFromIndexAdapter<'db, 'arena, 'txn, 's, K: Into<Value> + Serialize>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -34,6 +38,7 @@ pub trait NFromIndexAdapter<'db, 'arena, 'txn, 's, K: Into<Value> + Serialize>:
         K: Into<Value> + Serialize + Clone;
 }
 
+#[cfg(feature = "lmdb")]
 impl<
     'db,
     'arena,
@@ -79,18 +84,18 @@ impl<
                     );
                     let length_of_label_in_lmdb =
                         u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap()) as usize;
-        
+
                     if length_of_label_in_lmdb != label.len() {
                         return None;
                     }
-        
+
                     assert!(
                         value.len() >= length_of_label_in_lmdb + LMDB_STRING_HEADER_LENGTH,
                         "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
                     );
                     let label_in_lmdb = &value[LMDB_STRING_HEADER_LENGTH
                         ..LMDB_STRING_HEADER_LENGTH + length_of_label_in_lmdb];
-        
+
                     if label_in_lmdb == label_as_bytes {
                         match Node::<'arena>::from_bincode_bytes(node_id, value, self.arena) {
                             Ok(node) => {
@@ -104,11 +109,95 @@ impl<
                     } else {
                         return None;
                     }
-                
+
                 }
                 None
-            
 
+
+            });
+
+        RoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: res,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<
+    'db,
+    'arena,
+    'txn,
+    's,
+    K: Into<Value> + Serialize,
+    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+> NFromIndexAdapter<'db, 'arena, 'txn, 's, K> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn n_from_index(
+        self,
+        label: &'s str,
+        index: &'s str,
+        key: &K,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
+    where
+        K: Into<Value> + Serialize + Clone,
+    {
+        let db = self
+            .storage
+            .secondary_indices
+            .get(index)
+            .ok_or(GraphError::New(format!(
+                "Secondary Index {index} not found"
+            )))
+            .unwrap();
+
+        let search_key = bincode::serialize(&Value::from(key)).unwrap();
+
+        let storage = self.storage;
+        let arena = self.arena;
+        let txn = self.txn;
+
+        let res = txn
+            .prefix_iterator_cf(db, &search_key)
+            .filter_map(move |result| {
+                match result {
+                    Ok((key_bytes, _value)) => {
+                        // Manual prefix check for RocksDB
+                        if !key_bytes.starts_with(&search_key) {
+                            return None;
+                        }
+
+                        // Extract node_id from the end of the composite key (last 16 bytes)
+                        if key_bytes.len() < 16 {
+                            return None;
+                        }
+                        let node_id = u128::from_be_bytes(
+                            key_bytes[key_bytes.len() - 16..].try_into().unwrap(),
+                        );
+
+                        // Get the full node using get_node()
+                        match storage.get_node(txn, node_id, arena) {
+                            Ok(node) => {
+                                // Filter by label using deserialized node
+                                if node.label == label {
+                                    Some(Ok(TraversalValue::Node(node)))
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => Some(Err(e)),
+                        }
+                    }
+                    Err(_e) => Some(Err(GraphError::New("RocksDB iterator error".to_string()))),
+                }
             });
 
         RoTraversalIterator {

@@ -1,10 +1,7 @@
 use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,
-        traversal_core::{
-            traversal_value::TraversalValue,
-            txn::{RTxn, WTxn},
-        },
+        traversal_core::{RTxn, WTxn, traversal_value::TraversalValue},
         types::GraphError,
     },
     protocol::value::Value,

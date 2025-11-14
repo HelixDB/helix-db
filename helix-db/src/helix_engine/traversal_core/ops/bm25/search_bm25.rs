@@ -1,6 +1,6 @@
 use crate::{
     helix_engine::{
-        bm25::bm25::BM25,
+        bm25::BM25,
         traversal_core::{
             LMDB_STRING_HEADER_LENGTH, traversal_iter::RoTraversalIterator,
             traversal_value::TraversalValue,
@@ -60,38 +60,47 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
         let label_as_bytes = label.as_bytes();
         let iter = results.into_iter().filter_map(move |(id, score)| {
-            if let Ok(Some(value)) = self.storage.nodes_db.get(self.txn, &id) {
-            assert!(
-                value.len() >= LMDB_STRING_HEADER_LENGTH,
-                "value length does not contain header which means the `label` field was missing from the node on insertion"
-            );
-            let length_of_label_in_lmdb =
-                u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap()) as usize;
 
-            if length_of_label_in_lmdb != label.len() {
-                return None;
-            }
+            let node = {
+                #[cfg(feature= "lmdb")]
+                {self.storage.nodes_db.get(self.txn, *id)}
 
-            assert!(
-                value.len() >= length_of_label_in_lmdb + LMDB_STRING_HEADER_LENGTH,
-                "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
-            );
-            let label_in_lmdb = &value[LMDB_STRING_HEADER_LENGTH
-                ..LMDB_STRING_HEADER_LENGTH + length_of_label_in_lmdb];
+                #[cfg(feature= "rocks")]
+                {self.txn.get_pinned_cf(&self.storage.nodes_db, &id.to_be_bytes())}
+                };
 
-            if label_in_lmdb == label_as_bytes {
-                match Node::<'arena>::from_bincode_bytes(id, value, self.arena) {
-                    Ok(node) => {
-                        return Some(Ok(TraversalValue::NodeWithScore { node, score: score as f64 }));
-                    }
-                    Err(e) => {
-                        println!("{} Error decoding node: {:?}", line!(), e);
-                        return Some(Err(GraphError::ConversionError(e.to_string())));
-                    }
+            if let Ok(Some(value)) = &node {
+                assert!(
+                    value.len() >= LMDB_STRING_HEADER_LENGTH,
+                    "value length does not contain header which means the `label` field was missing from the node on insertion"
+                );
+                let length_of_label_in_lmdb =
+                    u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap()) as usize;
+
+                if length_of_label_in_lmdb != label.len() {
+                    return None;
                 }
-            } else {
-                return None;
-            }
+
+                assert!(
+                    value.len() >= length_of_label_in_lmdb + LMDB_STRING_HEADER_LENGTH,
+                    "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
+                );
+                let label_in_lmdb = &value[LMDB_STRING_HEADER_LENGTH
+                    ..LMDB_STRING_HEADER_LENGTH + length_of_label_in_lmdb];
+
+                if label_in_lmdb == label_as_bytes {
+                    match Node::<'arena>::from_bincode_bytes(id, value, self.arena) {
+                        Ok(node) => {
+                            return Some(Ok(TraversalValue::NodeWithScore { node, score: score as f64 }));
+                        }
+                        Err(e) => {
+                            println!("{} Error decoding node: {:?}", line!(), e);
+                            return Some(Err(GraphError::ConversionError(e.to_string())));
+                        }
+                    }
+                } else {
+                    return None;
+                }
             }
             None
         });

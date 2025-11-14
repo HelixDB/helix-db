@@ -24,6 +24,7 @@ pub trait NFromIdAdapter<
     >;
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     NFromIdAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -39,6 +40,36 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     > {
         let n_from_id = std::iter::once({
             match self.storage.get_node(self.txn, id, self.arena) {
+                Ok(node) => Ok(TraversalValue::Node(node)),
+                Err(e) => Err(e),
+            }
+        });
+
+        RoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: n_from_id,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    NFromIdAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn n_from_id(
+        self,
+        id: &u128,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let n_from_id = std::iter::once({
+            match self.storage.get_node(self.txn, *id, self.arena) {
                 Ok(node) => Ok(TraversalValue::Node(node)),
                 Err(e) => Err(e),
             }

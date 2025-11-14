@@ -38,6 +38,7 @@ pub trait InAdapter<'db, 'arena, 'txn, 's>:
     >;
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     InAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -158,6 +159,160 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                         None
                     }
                 }
+            })
+            .flatten();
+
+        RoTraversalIterator {
+            inner: iter,
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    InAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn in_vec(
+        self,
+        edge_label: &'s str,
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let edge_label_hash = hash_label(edge_label, None);
+                let node_id = match item {
+                    Ok(item) => item.id(),
+                    Err(_) => return None,
+                };
+
+                // Create prefix: to_node(16) | label(4)
+                let mut prefix = Vec::with_capacity(20);
+                prefix.extend_from_slice(&node_id.to_be_bytes());
+                prefix.extend_from_slice(&edge_label_hash);
+
+                let iter = self
+                    .txn
+                    .prefix_iterator_cf(&self.storage.in_edges_db, &prefix);
+
+                Some(iter.filter_map(move |result| {
+                    let (key, _value) = match result {
+                        Ok(kv) => kv,
+                        Err(e) => return Some(Err(GraphError::from(e))),
+                    };
+
+                    // Manual prefix check for RocksDB
+                    if !key.starts_with(&prefix) {
+                        return None;
+                    }
+
+                    // Extract from_node from key: to_node(16) | label(4) | from_node(16)
+                    let (_, _, from_node) =
+                        match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                println!("Error unpacking edge key: {e:?}");
+                                return Some(Err(e));
+                            }
+                        };
+
+                    if get_vector_data {
+                        match self
+                            .storage
+                            .vectors
+                            .get_full_vector(self.txn, from_node, self.arena)
+                        {
+                            Ok(vec) => Some(Ok(TraversalValue::Vector(vec))),
+                            Err(_e) => None,
+                        }
+                    } else {
+                        match self
+                            .storage
+                            .vectors
+                            .get_vector_properties(self.txn, from_node, self.arena)
+                        {
+                            Ok(Some(vec)) => {
+                                Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vec)))
+                            }
+                            Ok(None) => None,
+                            Err(_e) => None,
+                        }
+                    }
+                }))
+            })
+            .flatten();
+
+        RoTraversalIterator {
+            inner: iter,
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+        }
+    }
+
+    #[inline]
+    fn in_node(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let edge_label_hash = hash_label(edge_label, None);
+                let node_id = match item {
+                    Ok(item) => item.id(),
+                    Err(_) => return None,
+                };
+
+                // Create prefix: to_node(16) | label(4)
+                let mut prefix = Vec::with_capacity(20);
+                prefix.extend_from_slice(&node_id.to_be_bytes());
+                prefix.extend_from_slice(&edge_label_hash);
+
+                let iter = self
+                    .txn
+                    .prefix_iterator_cf(&self.storage.in_edges_db, &prefix);
+
+                Some(iter.filter_map(move |result| {
+                    let (key, _value) = match result {
+                        Ok(kv) => kv,
+                        Err(e) => return Some(Err(GraphError::from(e))),
+                    };
+
+                    // Manual prefix check for RocksDB
+                    if !key.starts_with(&prefix) {
+                        return None;
+                    }
+
+                    // Extract from_node from key: to_node(16) | label(4) | from_node(16)
+                    let (_, _, from_node) =
+                        match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                println!("Error unpacking edge key: {e:?}");
+                                return Some(Err(e));
+                            }
+                        };
+
+                    match self.storage.get_node(self.txn, from_node, self.arena) {
+                        Ok(node) => Some(Ok(TraversalValue::Node(node))),
+                        Err(e) => Some(Err(e)),
+                    }
+                }))
             })
             .flatten();
 

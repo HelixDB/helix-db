@@ -1,9 +1,10 @@
-use crate::{
-    helix_engine::{
-        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue, LMDB_STRING_HEADER_LENGTH},
-        types::{GraphError, VectorError},
-        vector_core::vector_without_data::VectorWithoutData,
+use crate::helix_engine::{
+    traversal_core::{
+        LMDB_STRING_HEADER_LENGTH, traversal_iter::RoTraversalIterator,
+        traversal_value::TraversalValue,
     },
+    types::{GraphError, VectorError},
+    vector_core::vector_without_data::VectorWithoutData,
 };
 
 pub trait VFromTypeAdapter<'db, 'arena, 'txn>:
@@ -24,6 +25,7 @@ pub trait VFromTypeAdapter<'db, 'arena, 'txn>:
     >;
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     VFromTypeAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -60,10 +62,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     );
                     let label_in_lmdb = &value[LMDB_STRING_HEADER_LENGTH
                         ..LMDB_STRING_HEADER_LENGTH + length_of_label_in_lmdb];
-        
+
                     if label_in_lmdb == label_bytes {
-                        
-        
+
+
                         if get_vector_data {
                             let vector = match self.storage.vectors.get_full_vector(self.txn, id,  self.arena) {
                                 Ok(bytes) => bytes,
@@ -84,7 +86,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     } else {
                         return None;
                     }
-                   
+
                 }
                 None
             });
@@ -94,6 +96,100 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             arena: self.arena,
             txn: self.txn,
             inner: iter,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    VFromTypeAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn v_from_type(
+        self,
+        label: &'arena str,
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let label_bytes = label.as_bytes();
+        let storage = self.storage;
+        let arena = self.arena;
+        let txn = self.txn;
+
+        // Collect results using raw iterator
+        let mut results = Vec::new();
+        let mut iter = txn.raw_iterator_cf(&storage.vectors.vector_properties_db);
+        iter.seek_to_first();
+
+        while iter.valid() {
+            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
+                // Extract ID from key
+                let id = match key.try_into() {
+                    Ok(bytes) => u128::from_be_bytes(bytes),
+                    Err(_) => {
+                        iter.next();
+                        continue;
+                    }
+                };
+
+                // Check label with bincode header pattern
+                assert!(
+                    value.len() >= LMDB_STRING_HEADER_LENGTH,
+                    "value length does not contain header which means the `label` field was missing from the vector on insertion"
+                );
+                let length_of_label_in_db =
+                    u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap())
+                        as usize;
+
+                if length_of_label_in_db != label.len() {
+                    iter.next();
+                    continue;
+                }
+
+                assert!(
+                    value.len() >= length_of_label_in_db + LMDB_STRING_HEADER_LENGTH,
+                    "value length is not at least the header length plus the label length meaning there has been a corruption on vector insertion"
+                );
+                let label_in_db = &value
+                    [LMDB_STRING_HEADER_LENGTH..LMDB_STRING_HEADER_LENGTH + length_of_label_in_db];
+
+                if label_in_db == label_bytes {
+                    if get_vector_data {
+                        match storage.vectors.get_full_vector(txn, id, arena) {
+                            Ok(vector) => {
+                                results.push(Ok(TraversalValue::Vector(vector)));
+                            }
+                            Err(VectorError::VectorDeleted) => {
+                                // Skip deleted vectors
+                            }
+                            Err(e) => {
+                                results.push(Err(GraphError::from(e)));
+                            }
+                        }
+                    } else {
+                        match VectorWithoutData::from_bincode_bytes(arena, value, id) {
+                            Ok(v) => {
+                                results.push(Ok(TraversalValue::VectorNodeWithoutVectorData(v)));
+                            }
+                            Err(e) => {
+                                results.push(Err(GraphError::ConversionError(e.to_string())));
+                            }
+                        }
+                    }
+                }
+            }
+            iter.next();
+        }
+
+        RoTraversalIterator {
+            storage,
+            arena,
+            txn,
+            inner: results.into_iter(),
         }
     }
 }

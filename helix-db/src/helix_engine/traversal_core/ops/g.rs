@@ -1,9 +1,9 @@
 use crate::helix_engine::{
     storage_core::HelixGraphStorage,
     traversal_core::{
+        RTxn, WTxn,
         traversal_iter::{RoTraversalIterator, RwTraversalIterator},
         traversal_value::TraversalValue,
-        txn::{RTxn, WTxn},
     },
     types::GraphError,
 };

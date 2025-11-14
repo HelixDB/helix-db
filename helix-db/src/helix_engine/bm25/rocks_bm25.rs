@@ -2,7 +2,7 @@ use crate::{
     debug_println,
     helix_engine::{
         storage_core::HelixGraphStorage,
-        traversal_core::txn::{RTxn, WTxn},
+        traversal_core::{RTxn, WTxn},
         types::GraphError,
         vector_core::{hnsw::HNSW, vector::HVector},
     },
@@ -122,7 +122,7 @@ impl<'db> BM25 for HBM25Config<'db> {
             *term_counts.entry(token).or_insert(0) += 1;
         }
 
-        txn.txn.put_cf(
+        txn.put_cf(
             &self.doc_lengths_db,
             &doc_id.to_be_bytes(),
             &doc_length.to_be_bytes(),
@@ -138,21 +138,19 @@ impl<'db> BM25 for HBM25Config<'db> {
 
             let posting_bytes = bincode::serialize(&posting_entry)?;
 
-            txn.txn
-                .put_cf(&self.inverted_index_db, term_bytes, &posting_bytes)?;
+            txn.put_cf(&self.inverted_index_db, term_bytes, &posting_bytes)?;
 
             let current_df = txn
-                .txn
                 .get_cf(&self.term_frequencies_db, term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
-            txn.txn.put_cf(
+            txn.put_cf(
                 &self.term_frequencies_db,
                 term_bytes,
                 &(current_df + 1).to_be_bytes(),
             )?;
         }
 
-        let mut metadata = if let Some(data) = txn.txn.get_cf(&self.metadata_db, METADATA_KEY)? {
+        let mut metadata = if let Some(data) = txn.get_cf(&self.metadata_db, METADATA_KEY)? {
             bincode::deserialize::<BM25Metadata>(&data)?
         } else {
             BM25Metadata {
@@ -169,8 +167,7 @@ impl<'db> BM25 for HBM25Config<'db> {
             / metadata.total_docs as f64;
 
         let metadata_bytes = bincode::serialize(&metadata)?;
-        txn.txn
-            .put_cf(&self.metadata_db, METADATA_KEY, &metadata_bytes)?;
+        txn.put_cf(&self.metadata_db, METADATA_KEY, &metadata_bytes)?;
 
         Ok(())
     }
@@ -179,7 +176,6 @@ impl<'db> BM25 for HBM25Config<'db> {
         let terms_to_update = {
             let mut terms = Vec::new();
             let mut iter = txn
-                .txn
                 .iterator_cf(&self.inverted_index_db, rocksdb::IteratorMode::Start);
 
             while let Some((term_bytes, posting_bytes)) = iter.next().transpose()? {
@@ -197,7 +193,6 @@ impl<'db> BM25 for HBM25Config<'db> {
             let entries_to_keep = {
                 let mut entries = Vec::new();
                 for result in txn
-                    .txn
                     .prefix_iterator_cf(&self.inverted_index_db, &term_bytes)
                 {
                     let (_, posting_bytes) = result?;
@@ -210,20 +205,18 @@ impl<'db> BM25 for HBM25Config<'db> {
             };
 
             // delete all entries for this term
-            txn.txn.delete_cf(&self.inverted_index_db, &term_bytes)?;
+            txn.delete_cf(&self.inverted_index_db, &term_bytes)?;
 
             // re-add the entries we want to keep
             for entry_bytes in entries_to_keep {
-                txn.txn
-                    .put_cf(&self.inverted_index_db, &term_bytes, &entry_bytes)?;
+                txn.put_cf(&self.inverted_index_db, &term_bytes, &entry_bytes)?;
             }
 
             let current_df = txn
-                .txn
                 .get_cf(&self.term_frequencies_db, &term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
             if current_df > 0 {
-                txn.txn.put_cf(
+                txn.put_cf(
                     &self.term_frequencies_db,
                     &term_bytes,
                     &(current_df - 1).to_be_bytes(),
@@ -232,14 +225,12 @@ impl<'db> BM25 for HBM25Config<'db> {
         }
 
         let doc_length = txn
-            .txn
             .get_cf(&self.doc_lengths_db, &doc_id.to_be_bytes())?
             .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
 
-        txn.txn
-            .delete_cf(&self.doc_lengths_db, &doc_id.to_be_bytes())?;
+        txn.delete_cf(&self.doc_lengths_db, &doc_id.to_be_bytes())?;
 
-        let metadata_data = txn.txn.get_cf(&self.metadata_db, METADATA_KEY)?;
+        let metadata_data = txn.get_cf(&self.metadata_db, METADATA_KEY)?;
 
         if let Some(data) = metadata_data {
             let mut metadata: BM25Metadata = bincode::deserialize(&data.to_vec())?;
@@ -254,8 +245,7 @@ impl<'db> BM25 for HBM25Config<'db> {
                 metadata.total_docs -= 1;
 
                 let metadata_bytes = bincode::serialize(&metadata)?;
-                txn.txn
-                    .put_cf(&self.metadata_db, METADATA_KEY, &metadata_bytes)?;
+                txn.put_cf(&self.metadata_db, METADATA_KEY, &metadata_bytes)?;
             }
         }
 
@@ -402,7 +392,7 @@ impl<'db> HybridSearch for HelixGraphStorage<'db> {
         let vector_handle =
             task::spawn_blocking(move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
                 let txn = RTxn::new(&graph_env_vector);
-                let arena = Bump::new(); // MOVE 
+                let arena = Bump::new(); // MOVE
                 let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
                 let results = self.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
                     &txn,

@@ -6,14 +6,17 @@ use crate::{
     },
     utils::label_hash::hash_label,
 };
+
+#[cfg(feature = "lmdb")]
 use heed3::{RoTxn, types::Bytes};
 
+#[cfg(feature = "lmdb")]
 pub struct InEdgesIterator<'db, 'arena, 'txn>
 where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub storage: &'db HelixGraphStorage,
+    pub storage: &'db HelixGraphStorage<'db>,
     pub arena: &'arena bumpalo::Bump,
     pub txn: &'txn RoTxn<'db>,
     pub iter: heed3::RoIter<
@@ -24,6 +27,7 @@ where
     >,
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn> Iterator for InEdgesIterator<'db, 'arena, 'txn> {
     type Item = Result<TraversalValue<'arena>, GraphError>;
 
@@ -52,6 +56,58 @@ impl<'db, 'arena, 'txn> Iterator for InEdgesIterator<'db, 'arena, 'txn> {
     }
 }
 
+#[cfg(feature = "rocks")]
+use crate::helix_engine::traversal_core::RTxn;
+
+#[cfg(feature = "rocks")]
+pub struct InEdgesIterator<'db, 'arena, 'txn>
+where
+    'db: 'arena,
+    'arena: 'txn,
+{
+    pub storage: &'db HelixGraphStorage<'db>,
+    pub arena: &'arena bumpalo::Bump,
+    pub txn: &'txn RTxn<'db>,
+    pub iter: rocksdb::DBIteratorWithThreadMode<
+        'txn,
+        rocksdb::Transaction<'db, rocksdb::TransactionDB>,
+    >,
+    pub prefix: Vec<u8>,
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn> Iterator for InEdgesIterator<'db, 'arena, 'txn> {
+    type Item = Result<TraversalValue<'arena>, GraphError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(result) = self.iter.next() {
+            let (key, value) = match result {
+                Ok(kv) => kv,
+                Err(e) => return Some(Err(GraphError::from(e))),
+            };
+
+            // Manual prefix check for RocksDB
+            if !key.starts_with(&self.prefix) {
+                return None;
+            }
+
+            let edge_id = match HelixGraphStorage::unpack_adj_edge_data(value.as_ref()) {
+                Ok(id) => id,
+                Err(e) => {
+                    println!("Error unpacking edge data: {e:?}");
+                    return Some(Err(e));
+                }
+            };
+
+            match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                Ok(edge) => return Some(Ok(TraversalValue::Edge(edge))),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        None
+    }
+}
+
 pub trait InEdgesAdapter<'db, 'arena, 'txn, 's, I>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
@@ -72,6 +128,7 @@ pub trait InEdgesAdapter<'db, 'arena, 'txn, 's, I>:
     >;
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     InEdgesAdapter<'db, 'arena, 'txn, 's, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -116,6 +173,58 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                         None
                     }
                 }
+            })
+            .flatten();
+
+        RoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: iter,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    InEdgesAdapter<'db, 'arena, 'txn, 's, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn in_e(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let edge_label_hash = hash_label(edge_label, None);
+
+                let node_id = match item {
+                    Ok(item) => item.id(),
+                    Err(_) => return None,
+                };
+
+                // Create prefix: to_node(16) | label(4)
+                let mut prefix = Vec::with_capacity(20);
+                prefix.extend_from_slice(&node_id.to_be_bytes());
+                prefix.extend_from_slice(&edge_label_hash);
+
+                let iter = self
+                    .txn
+                    .prefix_iterator_cf(&self.storage.in_edges_db, &prefix);
+
+                Some(InEdgesIterator {
+                    iter,
+                    storage: self.storage,
+                    arena: self.arena,
+                    txn: self.txn,
+                    prefix,
+                })
             })
             .flatten();
 

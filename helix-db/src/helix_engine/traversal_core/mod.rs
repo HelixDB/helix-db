@@ -2,7 +2,6 @@ pub mod config;
 pub mod ops;
 pub mod traversal_iter;
 pub mod traversal_value;
-pub mod txn;
 
 use crate::helix_engine::storage_core::{HelixGraphStorage, version_info::VersionInfo};
 use crate::helix_engine::traversal_core::config::Config;
@@ -36,11 +35,11 @@ pub struct HelixGraphEngineOpts {
 impl<'db> HelixGraphEngine<'db> {
     pub fn new(opts: HelixGraphEngineOpts) -> Result<HelixGraphEngine<'db>, GraphError> {
         let should_use_mcp = opts.config.mcp;
-        let storage =
-            match HelixGraphStorage::new(opts.path.as_str(), opts.config, opts.version_info) {
-                Ok(db) => Arc::new(db),
-                Err(err) => return Err(err),
-            };
+        let storage = match HelixGraphStorage::new(opts.path.leak(), opts.config, opts.version_info)
+        {
+            Ok(db) => Arc::new(db),
+            Err(err) => return Err(err),
+        };
 
         let (mcp_backend, mcp_connections) = if should_use_mcp.unwrap_or(false) {
             let mcp_backend = Arc::new(McpBackend::new(storage.clone()));
@@ -57,3 +56,13 @@ impl<'db> HelixGraphEngine<'db> {
         })
     }
 }
+
+#[cfg(feature = "rocks")]
+pub type WTxn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+#[cfg(feature = "rocks")]
+pub type RTxn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+
+#[cfg(feature = "lmdb")]
+pub type WTxn<'db> = heed3::RwTxn<'db>;
+#[cfg(feature = "lmdb")]
+pub type RTxn<'db> = heed3::RoTxn<'db>;

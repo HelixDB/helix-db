@@ -1,11 +1,14 @@
 use crate::{
     helix_engine::{
-        storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::label_hash::hash_label,
 };
+
+#[cfg(feature = "lmdb")]
+use crate::helix_engine::storage_core::storage_methods::StorageMethods;
 
 pub trait OutAdapter<'db, 'arena, 'txn, 's>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -38,6 +41,8 @@ pub trait OutAdapter<'db, 'arena, 'txn, 's>:
     >;
 }
 
+// LMDB Implementation
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     OutAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -158,6 +163,153 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                         None
                     }
                 }
+            })
+            .flatten();
+
+        RoTraversalIterator {
+            inner: iter,
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+        }
+    }
+}
+
+// RocksDB Implementation
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    OutAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn out_vec(
+        self,
+        edge_label: &'s str,
+        get_vector_data: bool,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let from_node_id = match item {
+                    Ok(item) => item.id(),
+                    Err(_) => return None,
+                };
+                let edge_label_hash = hash_label(edge_label, None);
+                let prefix = HelixGraphStorage::out_edge_key_prefix(from_node_id, &edge_label_hash);
+
+                let iter = self
+                    .txn
+                    .prefix_iterator_cf(&self.storage.out_edges_db, &prefix);
+
+                Some(iter.filter_map(move |result| {
+                    match result {
+                        Ok((key, value)) => {
+                            // Manual prefix check for RocksDB
+                            if !key.starts_with(&prefix) {
+                                return None;
+                            }
+
+                            // Unpack key to get to_node
+                            let (_, _, item_id) =
+                                match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        println!("Error unpacking edge key: {e:?}");
+                                        return Some(Err(e));
+                                    }
+                                };
+
+                            if get_vector_data {
+                                if let Ok(vec) = self
+                                    .storage
+                                    .vectors
+                                    .get_full_vector(self.txn, item_id, self.arena)
+                                {
+                                    return Some(Ok(TraversalValue::Vector(vec)));
+                                }
+                            } else if let Ok(Some(vec)) = self
+                                .storage
+                                .vectors
+                                .get_vector_properties(self.txn, item_id, self.arena)
+                            {
+                                return Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vec)));
+                            }
+                            None
+                        }
+                        Err(e) => {
+                            println!("{} Error iterating out edges: {:?}", line!(), e);
+                            Some(Err(GraphError::from(e)))
+                        }
+                    }
+                }))
+            })
+            .flatten();
+
+        RoTraversalIterator {
+            inner: iter,
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+        }
+    }
+
+    #[inline]
+    fn out_node(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let from_node_id = match item {
+                    Ok(item) => item.id(),
+                    Err(_) => return None,
+                };
+                let edge_label_hash = hash_label(edge_label, None);
+                let prefix = HelixGraphStorage::out_edge_key_prefix(from_node_id, &edge_label_hash);
+
+                let iter = self
+                    .txn
+                    .prefix_iterator_cf(&self.storage.out_edges_db, &prefix);
+
+                Some(iter.filter_map(move |result| {
+                    match result {
+                        Ok((key, _value)) => {
+                            // Manual prefix check for RocksDB
+                            if !key.starts_with(&prefix) {
+                                return None;
+                            }
+
+                            // Unpack key to get to_node
+                            let (_, _, item_id) =
+                                match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        println!("Error unpacking edge key: {e:?}");
+                                        return Some(Err(e));
+                                    }
+                                };
+
+                            if let Ok(node) = self.storage.get_node(self.txn, item_id, self.arena) {
+                                return Some(Ok(TraversalValue::Node(node)));
+                            }
+                            None
+                        }
+                        Err(e) => {
+                            println!("{} Error iterating out nodes: {:?}", line!(), e);
+                            Some(Err(GraphError::from(e)))
+                        }
+                    }
+                }))
             })
             .flatten();
 
