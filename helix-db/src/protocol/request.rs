@@ -320,7 +320,10 @@ mod tests {
             out_fmt: Format::Json,
         };
 
-        assert_ne!(request1.api_key_hash.unwrap(), request2.api_key_hash.unwrap());
+        assert_ne!(
+            request1.api_key_hash.unwrap(),
+            request2.api_key_hash.unwrap()
+        );
     }
 
     #[test]

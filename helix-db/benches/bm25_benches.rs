@@ -3,7 +3,7 @@
 mod tests {
     use helix_db::{
         debug_println,
-        helix_engine::bm25::bm25::{HBM25Config, BM25},
+        helix_engine::bm25::bm25::{BM25, HBM25Config},
         utils::{id::v6_uuid, tqdm::tqdm},
     };
 
@@ -155,4 +155,3 @@ mod tests {
         }
     }
 }
-

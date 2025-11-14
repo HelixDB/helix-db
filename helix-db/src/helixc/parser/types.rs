@@ -1,5 +1,8 @@
 use super::location::Loc;
-use crate::{helixc::parser::{errors::ParserError, HelixParser}, protocol::value::Value};
+use crate::{
+    helixc::parser::{HelixParser, errors::ParserError},
+    protocol::value::Value,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -116,9 +119,7 @@ pub enum MigrationItem {
 impl MigrationItem {
     pub fn inner(&self) -> &str {
         match self {
-            Self::Node(s) |
-            Self::Edge(s) |
-            Self::Vector(s) => s,
+            Self::Node(s) | Self::Edge(s) | Self::Vector(s) => s,
         }
     }
 }
@@ -126,9 +127,9 @@ impl MigrationItem {
 impl PartialEq<Self> for MigrationItem {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Node(a), Self::Node(b)) |
-            (Self::Edge(a), Self::Edge(b)) |
-            (Self::Vector(a), Self::Vector(b)) => a == b,
+            (Self::Node(a), Self::Node(b))
+            | (Self::Edge(a), Self::Edge(b))
+            | (Self::Vector(a), Self::Vector(b)) => a == b,
             _ => false,
         }
     }
@@ -477,7 +478,7 @@ pub enum MathFunction {
     Sqrt,
     Ln,
     Log10,
-    Log,    // Binary: LOG(x, base)
+    Log, // Binary: LOG(x, base)
     Exp,
     Ceil,
     Floor,
@@ -490,7 +491,7 @@ pub enum MathFunction {
     Asin,
     Acos,
     Atan,
-    Atan2,  // Binary: ATAN2(y, x)
+    Atan2, // Binary: ATAN2(y, x)
 
     // Constants (nullary)
     Pi,
@@ -509,16 +510,33 @@ impl MathFunction {
     pub fn arity(&self) -> usize {
         match self {
             Self::Pi | Self::E => 0,
-            Self::Abs | Self::Sqrt | Self::Ln |
-            Self::Log10 | Self::Exp | Self::Ceil |
-            Self::Floor | Self::Round | Self::Sin |
-            Self::Cos | Self::Tan | Self::Asin |
-            Self::Acos | Self::Atan | Self::Min |
-            Self::Max | Self::Sum | Self::Avg |
-            Self::Count => 1,
-            Self::Add | Self::Sub | Self::Mul |
-            Self::Div | Self::Pow | Self::Mod |
-            Self::Atan2 | Self::Log => 2,
+            Self::Abs
+            | Self::Sqrt
+            | Self::Ln
+            | Self::Log10
+            | Self::Exp
+            | Self::Ceil
+            | Self::Floor
+            | Self::Round
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Asin
+            | Self::Acos
+            | Self::Atan
+            | Self::Min
+            | Self::Max
+            | Self::Sum
+            | Self::Avg
+            | Self::Count => 1,
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::Pow
+            | Self::Mod
+            | Self::Atan2
+            | Self::Log => 2,
         }
     }
 
@@ -701,13 +719,13 @@ pub struct OrderBy {
 #[derive(Debug, Clone)]
 pub struct Aggregate {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GroupBy {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -758,10 +776,7 @@ impl PartialEq<Self> for StepType {
             (&Self::Node(_), &Self::Node(_))
                 | (&Self::Edge(_), &Self::Edge(_))
                 | (&Self::Where(_), &Self::Where(_))
-                | (
-                    &Self::BooleanOperation(_),
-                    &Self::BooleanOperation(_)
-                )
+                | (&Self::BooleanOperation(_), &Self::BooleanOperation(_))
                 | (&Self::Count, &Self::Count)
                 | (&Self::Update(_), &Self::Update(_))
                 | (&Self::Object(_), &Self::Object(_))

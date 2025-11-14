@@ -121,12 +121,12 @@ pub fn v6_uuid() -> u128 {
     uuid::Uuid::now_v6(&[1, 2, 3, 4, 5, 6]).as_u128()
 }
 
-/// Converts a uuid to a string slice using a buffer created in the arena 
-/// 
+/// Converts a uuid to a string slice using a buffer created in the arena
+///
 /// This is more efficient that using the `to_string` on the created uuid
 /// as it avoids formatting and potential double buffering
-/// 
-/// NOTE: This could be optimized further by reusing a slice at a set index within the arena 
+///
+/// NOTE: This could be optimized further by reusing a slice at a set index within the arena
 #[inline]
 pub fn uuid_str(id: u128, arena: &bumpalo::Bump) -> &str {
     let uuid = uuid::Uuid::from_u128(id);
@@ -134,13 +134,17 @@ pub fn uuid_str(id: u128, arena: &bumpalo::Bump) -> &str {
     uuid.as_hyphenated().encode_lower(buffer)
 }
 
-/// Converts a uuid to a string slice using a buffer 
-/// 
+/// Converts a uuid to a string slice using a buffer
+///
 /// This is more efficient that using the `to_string` on the created uuid
 /// as it avoids formatting and potential double buffering
 #[inline]
 pub fn uuid_str_from_buf(id: u128, buffer: &mut [u8]) -> &str {
-    assert_eq!(buffer.len(), 36, "length of hyphenated buffer should be 36 characters long");
+    assert_eq!(
+        buffer.len(),
+        36,
+        "length of hyphenated buffer should be 36 characters long"
+    );
     let uuid = uuid::Uuid::from_u128(id);
     uuid.as_hyphenated().encode_lower(buffer)
 }

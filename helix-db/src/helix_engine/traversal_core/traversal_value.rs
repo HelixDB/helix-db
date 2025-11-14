@@ -127,21 +127,17 @@ impl PartialEq for TraversalValue<'_> {
         match (self, other) {
             (Self::Node(node1), Self::Node(node2)) => node1.id == node2.id,
             (Self::Edge(edge1), Self::Edge(edge2)) => edge1.id == edge2.id,
-            (Self::Vector(vector1), Self::Vector(vector2)) => {
+            (Self::Vector(vector1), Self::Vector(vector2)) => vector1.id() == vector2.id(),
+            (
+                Self::VectorNodeWithoutVectorData(vector1),
+                Self::VectorNodeWithoutVectorData(vector2),
+            ) => vector1.id() == vector2.id(),
+            (Self::Vector(vector1), Self::VectorNodeWithoutVectorData(vector2)) => {
                 vector1.id() == vector2.id()
             }
-            (
-                Self::VectorNodeWithoutVectorData(vector1),
-                Self::VectorNodeWithoutVectorData(vector2),
-            ) => vector1.id() == vector2.id(),
-            (
-                Self::Vector(vector1),
-                Self::VectorNodeWithoutVectorData(vector2),
-            ) => vector1.id() == vector2.id(),
-            (
-                Self::VectorNodeWithoutVectorData(vector1),
-                Self::Vector(vector2),
-            ) => vector1.id() == vector2.id(),
+            (Self::VectorNodeWithoutVectorData(vector1), Self::Vector(vector2)) => {
+                vector1.id() == vector2.id()
+            }
             (Self::Empty, Self::Empty) => true,
             _ => false,
         }

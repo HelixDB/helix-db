@@ -510,9 +510,7 @@ impl Serialize for Value {
                 Self::U64(i) => serializer.serialize_newtype_variant("Value", 10, "U64", i),
                 Self::U128(i) => serializer.serialize_newtype_variant("Value", 11, "U128", i),
                 Self::Date(d) => serializer.serialize_newtype_variant("Value", 12, "Date", d),
-                Self::Boolean(b) => {
-                    serializer.serialize_newtype_variant("Value", 13, "Boolean", b)
-                }
+                Self::Boolean(b) => serializer.serialize_newtype_variant("Value", 13, "Boolean", b),
                 Self::Id(id) => serializer.serialize_newtype_variant("Value", 14, "Id", id),
                 Self::Array(a) => serializer.serialize_newtype_variant("Value", 15, "Array", a),
                 Self::Object(obj) => {
@@ -1080,7 +1078,7 @@ impl FilterValues for Value {
     #[inline]
     fn compare(&self, value: &Value, operator: Option<Operator>) -> bool {
         debug_println!("comparing value1: {:?}, value2: {:?}", self, value);
-        
+
         debug_println!("comparison: {:?}", comparison);
         match (self, value) {
             (Self::Array(a1), Self::Array(a2)) => a1

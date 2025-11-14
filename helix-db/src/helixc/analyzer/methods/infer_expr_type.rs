@@ -212,9 +212,8 @@ pub(crate) fn infer_expr_type<'a>(
                                                 value.as_str()
                                             );
                                         } else {
-                                            
                                             let variable_type =
-                                            &scope.get(value.as_str()).unwrap().ty;
+                                                &scope.get(value.as_str()).unwrap().ty;
                                             if variable_type
                                                 != &Type::from(
                                                     field_set
@@ -576,12 +575,10 @@ pub(crate) fn infer_expr_type<'a>(
 
                         Some(properties.into_iter().collect())
                     }
-                    None => {
-                        match default_properties.is_empty() {
-                            true => None,
-                            false => Some(default_properties),
-                        }
-                    }
+                    None => match default_properties.is_empty() {
+                        true => None,
+                        false => Some(default_properties),
+                    },
                 };
 
                 let (to, to_is_plural) = match &add.connection.to_id {
@@ -713,7 +710,12 @@ pub(crate) fn infer_expr_type<'a>(
                 }
                 let label = GenRef::Literal(ty.clone());
 
-                let vector_in_schema = match ctx.output.vectors.iter().find(|v| v.name == ty.as_str()) {
+                let vector_in_schema = match ctx
+                    .output
+                    .vectors
+                    .iter()
+                    .find(|v| v.name == ty.as_str())
+                {
                     Some(vector) => vector.clone(),
                     None => {
                         generate_error!(ctx, original_query, add.loc.clone(), E103, ty.as_str());
@@ -891,15 +893,13 @@ pub(crate) fn infer_expr_type<'a>(
 
                         properties
                     }
-                    None => {
-                        default_properties.into_iter().fold(
-                            HashMap::new(),
-                            |mut acc, (field_name, default_value)| {
-                                acc.insert(field_name, default_value);
-                                acc
-                            },
-                        )
-                    }
+                    None => default_properties.into_iter().fold(
+                        HashMap::new(),
+                        |mut acc, (field_name, default_value)| {
+                            acc.insert(field_name, default_value);
+                            acc
+                        },
+                    ),
                 };
                 if let Some(vec_data) = &add.data {
                     let vec = match vec_data {

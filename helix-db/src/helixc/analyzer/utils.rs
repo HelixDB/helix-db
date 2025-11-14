@@ -5,7 +5,7 @@ use crate::{
     helixc::{
         analyzer::{Ctx, errors::push_query_err, types::Type},
         generator::{
-            traversal_steps::{Step, ReservedProp},
+            traversal_steps::{ReservedProp, Step},
             utils::{GenRef, GeneratedValue},
         },
         parser::{location::Loc, types::*},

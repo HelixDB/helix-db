@@ -10,9 +10,6 @@
 ///
 /// NOTE: Loom tests are expensive - they explore all possible execution orderings.
 /// Keep the problem space small (few operations, few threads).
-
-
-
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicU64, Ordering};
 use loom::thread;
@@ -84,9 +81,7 @@ fn loom_entry_point_read_write_race() {
         });
 
         // Reader thread: Reads entry point (might see 0 or 12345)
-        let reader = thread::spawn(move || {
-            reader_entry.load(Ordering::SeqCst)
-        });
+        let reader = thread::spawn(move || reader_entry.load(Ordering::SeqCst));
 
         writer.join().unwrap();
         let read_value = reader.join().unwrap();
@@ -295,9 +290,7 @@ fn loom_two_writers_one_reader() {
         });
 
         // Reader: Read value (should see 0, 1, or 2)
-        let reader = thread::spawn(move || {
-            r_value.load(Ordering::SeqCst)
-        });
+        let reader = thread::spawn(move || r_value.load(Ordering::SeqCst));
 
         w1.join().unwrap();
         w2.join().unwrap();

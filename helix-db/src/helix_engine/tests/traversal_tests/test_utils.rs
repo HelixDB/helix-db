@@ -1,7 +1,4 @@
-use crate::{
-    protocol::value::Value,
-    utils::properties::ImmutablePropertiesMap,
-};
+use crate::{protocol::value::Value, utils::properties::ImmutablePropertiesMap};
 use bumpalo::Bump;
 
 pub fn props_map<'arena>(

@@ -71,18 +71,27 @@ async fn prune_all_instances(project: &ProjectContext) -> Result<()> {
         return Ok(());
     }
 
-    print_status("PRUNE", &format!("Found {} instance(s) to prune", instances.len()));
+    print_status(
+        "PRUNE",
+        &format!("Found {} instance(s) to prune", instances.len()),
+    );
 
     if DockerManager::check_docker_available().is_ok() {
         let docker = DockerManager::new(project);
 
         for instance_name in &instances {
-            print_status("PRUNE", &format!("Removing containers for '{instance_name}'"));
+            print_status(
+                "PRUNE",
+                &format!("Removing containers for '{instance_name}'"),
+            );
 
             // Remove containers (but not volumes)
             let _ = docker.prune_instance(instance_name, false);
 
-            print_status("PRUNE", &format!("Removing Docker images for '{instance_name}'"));
+            print_status(
+                "PRUNE",
+                &format!("Removing Docker images for '{instance_name}'"),
+            );
             // Remove Docker images
             let _ = docker.remove_instance_images(instance_name);
         }
@@ -93,8 +102,12 @@ async fn prune_all_instances(project: &ProjectContext) -> Result<()> {
         let workspace = project.instance_workspace(instance_name);
         if workspace.exists() {
             match std::fs::remove_dir_all(&workspace) {
-                Ok(()) => print_status("PRUNE", &format!("Removed workspace for '{instance_name}'")),
-                Err(e) => print_warning(&format!("Failed to remove workspace for '{instance_name}': {e}")),
+                Ok(()) => {
+                    print_status("PRUNE", &format!("Removed workspace for '{instance_name}'"))
+                }
+                Err(e) => print_warning(&format!(
+                    "Failed to remove workspace for '{instance_name}': {e}"
+                )),
             }
         }
     }

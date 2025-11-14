@@ -111,11 +111,7 @@ impl HBM25Config {
         })
     }
 
-    pub fn new_temp(
-        graph_env: &Env,
-        wtxn: &mut RwTxn,
-        uuid: &str,
-    ) -> Result<Self, GraphError> {
+    pub fn new_temp(graph_env: &Env, wtxn: &mut RwTxn, uuid: &str) -> Result<Self, GraphError> {
         let inverted_index_db: Database<Bytes, Bytes> = graph_env
             .database_options()
             .types::<Bytes, Bytes>()
@@ -418,8 +414,8 @@ impl HybridSearch for HelixGraphStorage {
             }
         });
 
-        let vector_handle = task::spawn_blocking(
-            move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
+        let vector_handle =
+            task::spawn_blocking(move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
                 let txn = graph_env_vector.read_txn()?;
                 let arena = Bump::new(); // MOVE 
                 let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
@@ -437,8 +433,7 @@ impl HybridSearch for HelixGraphStorage {
                     .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))
                     .collect::<Vec<(u128, f64)>>();
                 Ok(Some(scores))
-            },
-        );
+            });
 
         let (bm25_results, vector_results) = match tokio::try_join!(bm25_handle, vector_handle) {
             Ok((a, b)) => (a, b),

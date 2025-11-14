@@ -13,7 +13,8 @@ use crate::{
             out::{out::OutAdapter, out_e::OutEdgesAdapter},
             source::{
                 add_e::AddEAdapter, add_n::AddNAdapter, e_from_type::EFromTypeAdapter,
-                n_from_id::NFromIdAdapter, v_from_id::VFromIdAdapter, v_from_type::VFromTypeAdapter,
+                n_from_id::NFromIdAdapter, v_from_id::VFromIdAdapter,
+                v_from_type::VFromTypeAdapter,
             },
             util::drop::Drop,
             vectors::{
@@ -228,7 +229,9 @@ fn test_v_from_type_basic_with_vector_data() {
     assert_eq!(results[0].id(), vector_id);
 
     // Verify it's a full HVector with data
-    if let crate::helix_engine::traversal_core::traversal_value::TraversalValue::Vector(v) = &results[0] {
+    if let crate::helix_engine::traversal_core::traversal_value::TraversalValue::Vector(v) =
+        &results[0]
+    {
         assert_eq!(v.data.len(), 3);
         assert_eq!(v.data[0], 1.0);
     } else {
@@ -385,8 +388,8 @@ fn test_v_from_type_empty_database() {
 
 #[test]
 fn test_v_from_type_with_properties() {
-    use std::collections::HashMap;
     use crate::protocol::value::Value;
+    use std::collections::HashMap;
 
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
@@ -398,15 +401,20 @@ fn test_v_from_type_with_properties() {
     properties.insert("count".to_string(), Value::I64(42));
     properties.insert("score".to_string(), Value::F64(3.14));
     properties.insert("active".to_string(), Value::Boolean(true));
-    properties.insert("tags".to_string(), Value::Array(vec![
-        Value::String("tag1".to_string()),
-        Value::String("tag2".to_string()),
-    ]));
+    properties.insert(
+        "tags".to_string(),
+        Value::Array(vec![
+            Value::String("tag1".to_string()),
+            Value::String("tag2".to_string()),
+        ]),
+    );
 
     // Convert to ImmutablePropertiesMap
     let props_map = ImmutablePropertiesMap::new(
         properties.len(),
-        properties.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+        properties
+            .iter()
+            .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
         &arena,
     );
 
@@ -551,9 +559,9 @@ fn test_v_from_type_with_edges_and_nodes() {
 
 #[test]
 fn test_v_from_type_after_migration() {
-    use std::collections::HashMap;
-    use crate::protocol::value::Value;
     use crate::helix_engine::storage_core::storage_migration::migrate;
+    use crate::protocol::value::Value;
+    use std::collections::HashMap;
 
     // Helper to create old-format vector properties (HashMap-based)
     fn create_old_properties(
@@ -573,7 +581,9 @@ fn test_v_from_type_after_migration() {
     }
 
     // Helper to clear metadata (simulates PreMetadata state)
-    fn clear_metadata(storage: &mut crate::helix_engine::storage_core::HelixGraphStorage) -> Result<(), crate::helix_engine::types::GraphError> {
+    fn clear_metadata(
+        storage: &mut crate::helix_engine::storage_core::HelixGraphStorage,
+    ) -> Result<(), crate::helix_engine::types::GraphError> {
         let mut txn = storage.graph_env.write_txn()?;
         storage.metadata_db.clear(&mut txn)?;
         txn.commit()?;
@@ -607,7 +617,12 @@ fn test_v_from_type_after_migration() {
         // Add actual vector data with proper key format
         let vector_data1: Vec<f64> = vec![1.0, 2.0, 3.0];
         let bytes1: Vec<u8> = vector_data1.iter().flat_map(|f| f.to_be_bytes()).collect();
-        let key1 = [b"v:".as_slice(), &1u128.to_be_bytes(), &0usize.to_be_bytes()].concat();
+        let key1 = [
+            b"v:".as_slice(),
+            &1u128.to_be_bytes(),
+            &0usize.to_be_bytes(),
+        ]
+        .concat();
         storage_mut
             .vectors
             .vectors_db
@@ -628,7 +643,12 @@ fn test_v_from_type_after_migration() {
         // Add actual vector data with proper key format
         let vector_data2: Vec<f64> = vec![4.0, 5.0, 6.0];
         let bytes2: Vec<u8> = vector_data2.iter().flat_map(|f| f.to_be_bytes()).collect();
-        let key2 = [b"v:".as_slice(), &2u128.to_be_bytes(), &0usize.to_be_bytes()].concat();
+        let key2 = [
+            b"v:".as_slice(),
+            &2u128.to_be_bytes(),
+            &0usize.to_be_bytes(),
+        ]
+        .concat();
         storage_mut
             .vectors
             .vectors_db
@@ -648,7 +668,12 @@ fn test_v_from_type_after_migration() {
         // Add actual vector data with proper key format
         let vector_data3: Vec<f64> = vec![7.0, 8.0, 9.0];
         let bytes3: Vec<u8> = vector_data3.iter().flat_map(|f| f.to_be_bytes()).collect();
-        let key3 = [b"v:".as_slice(), &3u128.to_be_bytes(), &0usize.to_be_bytes()].concat();
+        let key3 = [
+            b"v:".as_slice(),
+            &3u128.to_be_bytes(),
+            &0usize.to_be_bytes(),
+        ]
+        .concat();
         storage_mut
             .vectors
             .vectors_db
@@ -673,7 +698,11 @@ fn test_v_from_type_after_migration() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    assert_eq!(results_with_data.len(), 2, "Should find 2 vectors with test_migration label");
+    assert_eq!(
+        results_with_data.len(),
+        2,
+        "Should find 2 vectors with test_migration label"
+    );
 
     // Verify we got the right vectors
     let ids: Vec<u128> = results_with_data.iter().map(|v| v.id()).collect();
@@ -681,7 +710,9 @@ fn test_v_from_type_after_migration() {
     assert!(ids.contains(&2u128), "Should contain vector 2");
 
     // Verify vector data is accessible
-    if let crate::helix_engine::traversal_core::traversal_value::TraversalValue::Vector(v) = &results_with_data[0] {
+    if let crate::helix_engine::traversal_core::traversal_value::TraversalValue::Vector(v) =
+        &results_with_data[0]
+    {
         assert_eq!(v.data.len(), 3, "Vector should have 3 dimensions");
     } else {
         panic!("Expected TraversalValue::Vector");
@@ -721,7 +752,11 @@ fn test_v_from_type_after_migration() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    assert_eq!(other_results.len(), 1, "Should find 1 vector with other_label");
+    assert_eq!(
+        other_results.len(),
+        1,
+        "Should find 1 vector with other_label"
+    );
     assert_eq!(other_results[0].id(), 3u128);
 
     // Query for non-existent label after migration
@@ -731,7 +766,10 @@ fn test_v_from_type_after_migration() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    assert!(empty_results.is_empty(), "Should find no vectors with nonexistent label");
+    assert!(
+        empty_results.is_empty(),
+        "Should find no vectors with nonexistent label"
+    );
 }
 
 // ============================================================================

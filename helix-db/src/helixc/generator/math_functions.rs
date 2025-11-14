@@ -66,16 +66,32 @@ impl Display for PropertyAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.context {
             PropertyContext::Edge => {
-                write!(f, "(edge.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(edge.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    self.property
+                )
             }
             PropertyContext::SourceNode => {
-                write!(f, "(src_node.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(src_node.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    self.property
+                )
             }
             PropertyContext::TargetNode => {
-                write!(f, "(dst_node.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(dst_node.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    self.property
+                )
             }
             PropertyContext::Current => {
-                write!(f, "(v.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(v.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    self.property
+                )
             }
         }
     }
@@ -307,22 +323,35 @@ fn parse_property_access_from_traversal(
     } else if traversal.steps.len() == 2 {
         // Check if first step is FromN or ToN
         match &traversal.steps[0].step {
-            StepType::Node(graph_step) => {
-                match &graph_step.step {
-                    GraphStepType::FromN => (PropertyContext::SourceNode, 1),
-                    GraphStepType::ToN => (PropertyContext::TargetNode, 1),
-                    _ => return Err(format!("Unexpected node step type in property access: {:?}", graph_step.step)),
+            StepType::Node(graph_step) => match &graph_step.step {
+                GraphStepType::FromN => (PropertyContext::SourceNode, 1),
+                GraphStepType::ToN => (PropertyContext::TargetNode, 1),
+                _ => {
+                    return Err(format!(
+                        "Unexpected node step type in property access: {:?}",
+                        graph_step.step
+                    ));
                 }
+            },
+            _ => {
+                return Err(format!(
+                    "Expected FromN or ToN step, got: {:?}",
+                    traversal.steps[0].step
+                ));
             }
-            _ => return Err(format!("Expected FromN or ToN step, got: {:?}", traversal.steps[0].step)),
         }
     } else {
-        return Err(format!("Invalid traversal length for property access: {}", traversal.steps.len()));
+        return Err(format!(
+            "Invalid traversal length for property access: {}",
+            traversal.steps.len()
+        ));
     };
 
     // Extract property name from the Object step
     if let StepType::Object(obj) = &traversal.steps[property_step_idx].step
-        && obj.fields.len() == 1 && !obj.should_spread {
+        && obj.fields.len() == 1
+        && !obj.should_spread
+    {
         let property_name = obj.fields[0].key.clone();
 
         // Override context if specified by ExpressionContext

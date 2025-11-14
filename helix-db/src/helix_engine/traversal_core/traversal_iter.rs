@@ -49,7 +49,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     }
 
     pub fn collect_to_obj(mut self) -> Result<TraversalValue<'arena>, GraphError> {
-        self.inner.next().unwrap_or(Err(GraphError::New("No value found".to_string())))
+        self.inner
+            .next()
+            .unwrap_or(Err(GraphError::New("No value found".to_string())))
     }
 
     pub fn collect_to_value(self) -> Value {
@@ -64,7 +66,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         default: bool,
         f: impl Fn(&Value) -> bool,
     ) -> Result<bool, GraphError> {
-        
         match &self.inner.next() {
             Some(Ok(TraversalValue::Value(val))) => Ok(f(val)),
             Some(Ok(_)) => Err(GraphError::ConversionError(
@@ -130,7 +131,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     }
 
     pub fn collect_to_obj(mut self) -> Result<TraversalValue<'arena>, GraphError> {
-        self.inner.next().unwrap_or(Err(GraphError::New("No value found".to_string())))
+        self.inner
+            .next()
+            .unwrap_or(Err(GraphError::New("No value found".to_string())))
     }
 
     pub fn map_value_or(
@@ -138,7 +141,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         default: bool,
         f: impl Fn(&Value) -> bool,
     ) -> Result<bool, GraphError> {
-        
         match &self.inner.next() {
             Some(Ok(TraversalValue::Value(val))) => Ok(f(val)),
             Some(Ok(_)) => Err(GraphError::ConversionError(

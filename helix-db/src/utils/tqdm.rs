@@ -1,6 +1,6 @@
 use std::{
-    io::{stdout, Write},
     fmt,
+    io::{Write, stdout},
 };
 
 pub enum ProgChar {
@@ -12,7 +12,8 @@ impl fmt::Display for ProgChar {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let c = match self {
             Self::Block => '█',
-            Self::Hash => '#', };
+            Self::Hash => '#',
+        };
         write!(f, "{c}")
     }
 }

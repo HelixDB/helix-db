@@ -47,10 +47,7 @@ impl<'arena, T: Ord> BinaryHeap<'arena, T> {
         self.data.first()
     }
 
-    pub fn from(
-        arena: &'arena bumpalo::Bump,
-        data: bumpalo::collections::Vec<'arena, T>,
-    ) -> Self {
+    pub fn from(arena: &'arena bumpalo::Bump, data: bumpalo::collections::Vec<'arena, T>) -> Self {
         BinaryHeap { arena, data }
     }
 

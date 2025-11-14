@@ -1,3 +1,4 @@
+use crate::helix_engine::traversal_core::HelixGraphEngine;
 /// Concurrency-specific tests for WorkerPool
 ///
 /// This test suite focuses on concurrent behavior and race conditions in the WorkerPool.
@@ -16,20 +17,15 @@
 /// - Worker fairness under load
 /// - No coordination between workers accessing shared graph
 /// - No deadlocks or livelocks under high concurrency
-
 use crate::helix_engine::traversal_core::HelixGraphEngineOpts;
 use crate::helix_engine::traversal_core::config::Config;
-use crate::helix_engine::{traversal_core::HelixGraphEngine};
 use crate::helix_gateway::worker_pool::WorkerPool;
-use crate::helix_gateway::{
-    gateway::CoreSetter,
-    router::router::HelixRouter,
-};
+use crate::helix_gateway::{gateway::CoreSetter, router::router::HelixRouter};
 use crate::protocol::Format;
 use crate::protocol::{Request, request::RequestType};
 use axum::body::Bytes;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -56,7 +52,10 @@ fn create_request(name: &str) -> Request {
     }
 }
 
-fn create_test_pool(num_cores: usize, threads_per_core: usize) -> (WorkerPool, Arc<HelixGraphEngine>, TempDir) {
+fn create_test_pool(
+    num_cores: usize,
+    threads_per_core: usize,
+) -> (WorkerPool, Arc<HelixGraphEngine>, TempDir) {
     let (graph, temp_dir) = create_test_graph();
     let router = Arc::new(HelixRouter::new(None, None));
     let rt = Arc::new(
@@ -106,8 +105,11 @@ async fn test_concurrent_requests_high_load() {
     }
 
     // All should complete (no panics or hangs)
-    assert_eq!(completed, num_concurrent,
-               "All requests should complete, got {}/{}", completed, num_concurrent);
+    assert_eq!(
+        completed, num_concurrent,
+        "All requests should complete, got {}/{}",
+        completed, num_concurrent
+    );
     println!("High load test: {} requests completed", num_concurrent);
 }
 
@@ -223,7 +225,10 @@ async fn test_parity_mechanism_both_workers() {
 
     // All should complete if parity mechanism allows all workers to participate
     assert_eq!(completed, num_requests);
-    println!("Parity test: {} requests completed across even/odd workers", completed);
+    println!(
+        "Parity test: {} requests completed across even/odd workers",
+        completed
+    );
 }
 
 #[tokio::test]
@@ -326,7 +331,10 @@ async fn test_concurrent_different_request_types() {
 
     let expected = 25 * request_types.len();
     assert_eq!(completed, expected);
-    println!("Different request types: {}/{} completed", completed, expected);
+    println!(
+        "Different request types: {}/{} completed",
+        completed, expected
+    );
 }
 
 #[tokio::test]
@@ -396,6 +404,9 @@ async fn test_worker_distribution_fairness() {
     println!("Fairness test: 100 requests completed in {:?}", elapsed);
 
     // Basic sanity: should complete in reasonable time
-    assert!(elapsed < Duration::from_secs(10),
-            "Requests took {:?}, may indicate poor distribution", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "Requests took {:?}, may indicate poor distribution",
+        elapsed
+    );
 }

@@ -1,6 +1,6 @@
 use chrono::{Local, NaiveDate};
 use dirs::home_dir;
-use eyre::{eyre, OptionExt, Result};
+use eyre::{OptionExt, Result, eyre};
 use flume::{Receiver, Sender, unbounded};
 use helix_metrics::events::{
     CompileEvent, DeployCloudEvent, DeployLocalEvent, EventData, EventType, RawEvent,

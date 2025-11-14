@@ -47,8 +47,6 @@ impl Debug for IoContFn {
     }
 }
 
-
-
 // basic type for function pointer
 pub type BasicHandlerFn = fn(HandlerInput) -> Result<Response, GraphError>;
 

@@ -218,9 +218,9 @@ impl From<DefaultValue> for GeneratedValue {
             DefaultValue::U64(i) => Self::Primitive(GenRef::Std(i.to_string())),
             DefaultValue::U128(i) => Self::Primitive(GenRef::Std(i.to_string())),
             DefaultValue::Boolean(b) => Self::Primitive(GenRef::Std(b.to_string())),
-            DefaultValue::Now => Self::Primitive(GenRef::Std(
-                "chrono::Utc::now().to_rfc3339()".to_string(),
-            )),
+            DefaultValue::Now => {
+                Self::Primitive(GenRef::Std("chrono::Utc::now().to_rfc3339()".to_string()))
+            }
             DefaultValue::Empty => Self::Unknown,
         }
     }
@@ -229,10 +229,10 @@ impl From<DefaultValue> for GeneratedValue {
 /// Metadata for GROUPBY and AGGREGATE_BY operations
 #[derive(Debug, Clone)]
 pub struct AggregateInfo {
-    pub source_type: Box<Type>,   // Original type being aggregated (Node, Edge, Vector)
-    pub properties: Vec<String>,  // Properties being grouped by
-    pub is_count: bool,           // true for COUNT mode
-    pub is_group_by: bool,        // true for GROUP_BY, false for AGGREGATE_BY
+    pub source_type: Box<Type>, // Original type being aggregated (Node, Edge, Vector)
+    pub properties: Vec<String>, // Properties being grouped by
+    pub is_count: bool,         // true for COUNT mode
+    pub is_group_by: bool,      // true for GROUP_BY, false for AGGREGATE_BY
 }
 
 #[derive(Debug, Clone)]
@@ -275,12 +275,12 @@ impl Type {
     pub fn get_type_name(&self) -> String {
         match self {
             Self::Aggregate(_) => "aggregate".to_string(),
-            Self::Node(Some(name)) |
-            Self::Nodes(Some(name)) |
-            Self::Edge(Some(name)) |
-            Self::Edges(Some(name)) |
-            Self::Vector(Some(name)) |
-            Self::Vectors(Some(name)) => name.clone(),
+            Self::Node(Some(name))
+            | Self::Nodes(Some(name))
+            | Self::Edge(Some(name))
+            | Self::Edges(Some(name))
+            | Self::Vector(Some(name))
+            | Self::Vectors(Some(name)) => name.clone(),
             Self::Scalar(ft) => ft.to_string(),
             Self::Anonymous(ty) => ty.get_type_name(),
             Self::Array(ty) => ty.get_type_name(),
@@ -408,7 +408,11 @@ impl From<&FieldType> for Type {
             String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128
             | Uuid | Date => Self::Scalar(ft.clone()),
             Array(inner_ft) => Self::Array(Box::new(Self::from(*inner_ft.clone()))),
-            Object(obj) => Self::Object(obj.iter().map(|(k, v)| (k.clone(), Self::from(v))).collect()),
+            Object(obj) => Self::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), Self::from(v)))
+                    .collect(),
+            ),
             Identifier(id) => Self::Scalar(FieldType::Identifier(id.clone())),
         }
     }

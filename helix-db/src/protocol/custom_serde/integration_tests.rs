@@ -203,9 +203,7 @@ mod integration_tests {
         let arena = Bump::new();
 
         let edges: Vec<Edge> = (0..20)
-            .map(|i| {
-                create_simple_edge(&arena, i as u128, "LINK", i as u128, (i + 1) as u128)
-            })
+            .map(|i| create_simple_edge(&arena, i as u128, "LINK", i as u128, (i + 1) as u128))
             .collect();
 
         let serialized: Vec<Vec<u8>> = edges
@@ -251,12 +249,8 @@ mod integration_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let deserialized = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_bytes),
-            data_bytes,
-            id,
-        ).unwrap();
+        let deserialized =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id).unwrap();
 
         assert_vectors_semantically_equal(&vector, &deserialized);
     }
@@ -277,12 +271,8 @@ mod integration_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let deserialized = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_bytes),
-            data_bytes,
-            id,
-        ).unwrap();
+        let deserialized =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id).unwrap();
 
         assert_vectors_semantically_equal(&vector, &deserialized);
     }
@@ -314,23 +304,15 @@ mod integration_tests {
         let props_bytes1 = bincode::serialize(&vector).unwrap();
         let data_bytes1 = vector.vector_data_to_bytes().unwrap();
         let arena2 = Bump::new();
-        let vector2 = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_bytes1),
-            data_bytes1,
-            id,
-        ).unwrap();
+        let vector2 =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes1), data_bytes1, id).unwrap();
 
         // Second roundtrip
         let props_bytes2 = bincode::serialize(&vector2).unwrap();
         let data_bytes2 = vector2.vector_data_to_bytes().unwrap();
         let arena3 = Bump::new();
-        let vector3 = HVector::from_bincode_bytes(
-            &arena3,
-            Some(&props_bytes2),
-            data_bytes2,
-            id,
-        ).unwrap();
+        let vector3 =
+            HVector::from_bincode_bytes(&arena3, Some(&props_bytes2), data_bytes2, id).unwrap();
 
         assert_vectors_semantically_equal(&vector, &vector2);
         assert_vectors_semantically_equal(&vector2, &vector3);
@@ -362,12 +344,8 @@ mod integration_tests {
         // Deserialize all
         let arena2 = Bump::new();
         for (i, (props_bytes, data_bytes)) in serialized.iter().enumerate() {
-            let result = HVector::from_bincode_bytes(
-                &arena2,
-                Some(props_bytes),
-                data_bytes,
-                i as u128,
-            );
+            let result =
+                HVector::from_bincode_bytes(&arena2, Some(props_bytes), data_bytes, i as u128);
             assert!(result.is_ok());
         }
     }
@@ -423,12 +401,8 @@ mod integration_tests {
         let arena2 = Bump::new();
         let node_restored = Node::from_bincode_bytes(1, &node_bytes, &arena2);
         let edge_restored = Edge::from_bincode_bytes(2, &edge_bytes, &arena2);
-        let vector_restored = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&vector_props_bytes),
-            vector_data_bytes,
-            3,
-        );
+        let vector_restored =
+            HVector::from_bincode_bytes(&arena2, Some(&vector_props_bytes), vector_data_bytes, 3);
 
         assert!(node_restored.is_ok());
         assert!(edge_restored.is_ok());
@@ -483,9 +457,7 @@ mod integration_tests {
         let restored: Vec<Node> = serialized
             .iter()
             .enumerate()
-            .map(|(i, bytes)| {
-                Node::from_bincode_bytes(i as u128, bytes, &shared_arena).unwrap()
-            })
+            .map(|(i, bytes)| Node::from_bincode_bytes(i as u128, bytes, &shared_arena).unwrap())
             .collect();
 
         assert_eq!(restored.len(), 100);
@@ -613,7 +585,11 @@ mod integration_tests {
         let bytes = bincode::serialize(&node).unwrap();
 
         // Should be relatively small (label + version + empty props indicator)
-        assert!(bytes.len() < 100, "Empty node should be small, got {} bytes", bytes.len());
+        assert!(
+            bytes.len() < 100,
+            "Empty node should be small, got {} bytes",
+            bytes.len()
+        );
     }
 
     #[test]

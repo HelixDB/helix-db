@@ -1,9 +1,9 @@
-use std::fmt;
-use serde::de::{DeserializeSeed, Visitor};
 use crate::utils::{
     items::Node,
     properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
 };
+use serde::de::{DeserializeSeed, Visitor};
+use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
 /// This is needed because we can't use next_element::<Option<T>>() with custom DeserializeSeed
@@ -84,7 +84,9 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for NodeDeSeed<'arena> {
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                 let label = self.arena.alloc_str(label_string);
 
-                let version: u8 = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                let version: u8 = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
 
                 // Bincode serializes Option<T> as ONE field: 0x00 (None) or 0x01+data (Some)
                 // Use our custom DeserializeSeed that handles the Option wrapper

@@ -11,15 +11,14 @@
 /// - Drop operations are multi-step (not atomic) - could leave orphans
 /// - LMDB provides single-writer guarantee but needs validation
 /// - MVCC snapshot isolation needs verification
-
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
 
 use crate::helix_engine::storage_core::HelixGraphStorage;
-use crate::helix_engine::traversal_core::config::Config;
 use crate::helix_engine::storage_core::version_info::VersionInfo;
-use crate::utils::items::{Node, Edge};
+use crate::helix_engine::traversal_core::config::Config;
+use crate::utils::items::{Edge, Node};
 use bumpalo::Bump;
 use uuid::Uuid;
 
@@ -70,7 +69,10 @@ fn test_concurrent_node_creation() {
                         properties: None,
                     };
 
-                    storage.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+                    storage
+                        .nodes_db
+                        .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                        .unwrap();
                     wtxn.commit().unwrap();
                 }
             })
@@ -114,7 +116,10 @@ fn test_concurrent_edge_creation() {
                 version: 1,
                 properties: None,
             };
-            storage.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+            storage
+                .nodes_db
+                .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                .unwrap();
         }
         wtxn.commit().unwrap();
     }
@@ -122,7 +127,8 @@ fn test_concurrent_edge_creation() {
     // Get node IDs
     let node_ids: Vec<u128> = {
         let rtxn = storage.graph_env.read_txn().unwrap();
-        storage.nodes_db
+        storage
+            .nodes_db
             .iter(&rtxn)
             .unwrap()
             .map(|result| {
@@ -164,7 +170,10 @@ fn test_concurrent_edge_creation() {
                         properties: None,
                     };
 
-                    storage.edges_db.put(&mut wtxn, &edge.id, &edge.to_bincode_bytes().unwrap()).unwrap();
+                    storage
+                        .edges_db
+                        .put(&mut wtxn, &edge.id, &edge.to_bincode_bytes().unwrap())
+                        .unwrap();
                     wtxn.commit().unwrap();
                 }
             })
@@ -209,7 +218,10 @@ fn test_concurrent_node_reads() {
                 version: 1,
                 properties: None,
             };
-            storage.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+            storage
+                .nodes_db
+                .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                .unwrap();
         }
         wtxn.commit().unwrap();
     }
@@ -269,7 +281,10 @@ fn test_concurrent_node_reads() {
                     version: 1,
                     properties: None,
                 };
-                storage.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+                storage
+                    .nodes_db
+                    .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                    .unwrap();
                 wtxn.commit().unwrap();
 
                 thread::sleep(std::time::Duration::from_millis(2));
@@ -314,7 +329,10 @@ fn test_transaction_isolation_storage() {
                 version: 1,
                 properties: None,
             };
-            storage.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+            storage
+                .nodes_db
+                .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                .unwrap();
         }
         wtxn.commit().unwrap();
     }
@@ -338,7 +356,10 @@ fn test_transaction_isolation_storage() {
                 version: 1,
                 properties: None,
             };
-            storage_clone.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+            storage_clone
+                .nodes_db
+                .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                .unwrap();
             wtxn.commit().unwrap();
         }
     });
@@ -394,7 +415,10 @@ fn test_write_transaction_serialization() {
                         properties: None,
                     };
 
-                    storage.nodes_db.put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap()).unwrap();
+                    storage
+                        .nodes_db
+                        .put(&mut wtxn, &node.id, &node.to_bincode_bytes().unwrap())
+                        .unwrap();
 
                     // Simulate some work during transaction
                     thread::sleep(std::time::Duration::from_micros(100));

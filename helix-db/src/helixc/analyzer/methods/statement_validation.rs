@@ -5,8 +5,11 @@ use crate::{
     generate_error,
     helixc::{
         analyzer::{
-            Ctx, errors::push_query_err, methods::infer_expr_type::infer_expr_type, types::Type,
-            utils::{is_valid_identifier, VariableInfo},
+            Ctx,
+            errors::push_query_err,
+            methods::infer_expr_type::infer_expr_type,
+            types::Type,
+            utils::{VariableInfo, is_valid_identifier},
         },
         generator::{
             queries::Query as GeneratedQuery,
@@ -63,14 +66,17 @@ pub(crate) fn validate_statements<'a>(
             // Determine if the variable is single or collection based on type
             let is_single = if let Some(GeneratedStatement::Traversal(ref tr)) = stmt {
                 // Check if should_collect is ToObj, or if the type is a single value
-                matches!(tr.should_collect, ShouldCollect::ToObj) ||
-                matches!(rhs_ty, Type::Node(_) | Type::Edge(_) | Type::Vector(_))
+                matches!(tr.should_collect, ShouldCollect::ToObj)
+                    || matches!(rhs_ty, Type::Node(_) | Type::Edge(_) | Type::Vector(_))
             } else {
                 // Non-traversal: check if type is single
                 matches!(rhs_ty, Type::Node(_) | Type::Edge(_) | Type::Vector(_))
             };
 
-            scope.insert(assign.variable.as_str(), VariableInfo::new(rhs_ty, is_single));
+            scope.insert(
+                assign.variable.as_str(),
+                VariableInfo::new(rhs_ty, is_single),
+            );
 
             stmt.as_ref()?;
 
@@ -200,8 +206,14 @@ pub(crate) fn validate_statements<'a>(
                                                     .unwrap()
                                                     .clone(),
                                             );
-                                            body_scope.insert(field_name.as_str(), VariableInfo::new(field_type.clone(), true));
-                                            scope.insert(field_name.as_str(), VariableInfo::new(field_type, true));
+                                            body_scope.insert(
+                                                field_name.as_str(),
+                                                VariableInfo::new(field_type.clone(), true),
+                                            );
+                                            scope.insert(
+                                                field_name.as_str(),
+                                                VariableInfo::new(field_type, true),
+                                            );
                                         }
                                         for_variable = ForVariable::ObjectDestructure(
                                             fields
@@ -238,18 +250,25 @@ pub(crate) fn validate_statements<'a>(
                                 Type::Array(object_arr) => {
                                     match object_arr.as_ref() {
                                         Type::Object(object) => {
-                                            let mut obj_dest_fields = Vec::with_capacity(fields.len());
+                                            let mut obj_dest_fields =
+                                                Vec::with_capacity(fields.len());
                                             let object = object.clone();
                                             for (_, field_name) in fields {
                                                 let name = field_name.as_str();
                                                 // adds non-param fields to scope
                                                 let field_type = object.get(name).unwrap().clone();
-                                                body_scope.insert(name, VariableInfo::new(field_type.clone(), true));
-                                                scope.insert(name, VariableInfo::new(field_type, true));
-                                            obj_dest_fields.push(GenRef::Std(name.to_string()));
-                                        }
-                                        for_variable =
-                                            ForVariable::ObjectDestructure(obj_dest_fields);
+                                                body_scope.insert(
+                                                    name,
+                                                    VariableInfo::new(field_type.clone(), true),
+                                                );
+                                                scope.insert(
+                                                    name,
+                                                    VariableInfo::new(field_type, true),
+                                                );
+                                                obj_dest_fields.push(GenRef::Std(name.to_string()));
+                                            }
+                                            for_variable =
+                                                ForVariable::ObjectDestructure(obj_dest_fields);
                                         }
                                         _ => {
                                             generate_error!(
@@ -273,7 +292,7 @@ pub(crate) fn validate_statements<'a>(
                                         [&fl.in_variable.1]
                                     );
                                 }
-                            }
+                            },
                             _ => {
                                 generate_error!(
                                     ctx,
@@ -311,7 +330,7 @@ pub(crate) fn validate_statements<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Assignment Validation Tests
@@ -335,7 +354,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E302));
-        assert!(diagnostics.iter().any(|d| d.message.contains("previously declared")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("previously declared"))
+        );
     }
 
     #[test]
@@ -381,7 +404,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
-        assert!(diagnostics.iter().any(|d| d.message.contains("not in scope") && d.message.contains("unknownList")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("not in scope") && d.message.contains("unknownList"))
+        );
     }
 
     #[test]
@@ -425,7 +452,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E651));
-        assert!(diagnostics.iter().any(|d| d.message.contains("not iterable")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("not iterable"))
+        );
     }
 
     #[test]
@@ -514,7 +545,9 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         // Expression statements should not produce errors
-        assert!(diagnostics.is_empty() || !diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+        assert!(
+            diagnostics.is_empty() || !diagnostics.iter().any(|d| d.error_code == ErrorCode::E301)
+        );
     }
 
     #[test]
@@ -586,7 +619,11 @@ mod tests {
 
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
-        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302)
+        );
     }
 
     #[test]
@@ -609,6 +646,10 @@ mod tests {
 
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
-        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302)
+        );
     }
 }

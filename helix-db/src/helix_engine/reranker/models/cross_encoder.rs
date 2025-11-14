@@ -131,7 +131,11 @@ impl CrossEncoderReranker {
 }
 
 impl Reranker for CrossEncoderReranker {
-    fn rerank<'arena, I>(&self, items: I, query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -213,7 +217,7 @@ mod tests {
         let result = reranker.extract_text(&item);
         assert!(result.is_err());
     }
-    
+
     #[ignore]
     #[test]
     fn test_rerank_without_query() {
@@ -221,7 +225,8 @@ mod tests {
         let config = CrossEncoderConfig::new("test-model");
         let reranker = CrossEncoderReranker::new(config);
 
-        let vectors: Vec<TraversalValue> = vec![TraversalValue::Vector(alloc_vector(&arena, &[1.0]))];
+        let vectors: Vec<TraversalValue> =
+            vec![TraversalValue::Vector(alloc_vector(&arena, &[1.0]))];
 
         let result = reranker.rerank(vectors.into_iter(), None);
         assert!(result.is_err());

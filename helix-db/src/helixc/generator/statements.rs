@@ -3,8 +3,6 @@ use std::fmt::Display;
 
 use crate::helixc::generator::{bool_ops::BoExp, traversal_steps::Traversal, utils::GenRef};
 
-
-
 #[derive(Clone)]
 pub enum Statement {
     Assignment(Assignment),
@@ -27,12 +25,19 @@ impl Display for Statement {
             Self::Literal(literal) => write!(f, "{literal}"),
             Self::Identifier(identifier) => write!(f, "{identifier}"),
             Self::BoExp(bo) => write!(f, "{bo}"),
-            Self::Array(array) => write!(f, "[{}]", array.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ")),
+            Self::Array(array) => write!(
+                f,
+                "[{}]",
+                array
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::Empty => write!(f, ""),
         }
     }
 }
-
 
 #[derive(Clone)]
 pub enum IdentifierType {
@@ -197,7 +202,9 @@ mod tests {
     fn test_assignment_statement() {
         let assignment = Statement::Assignment(Assignment {
             variable: GenRef::Std("result".to_string()),
-            value: Box::new(Statement::Identifier(GenRef::Std("computation".to_string()))),
+            value: Box::new(Statement::Identifier(GenRef::Std(
+                "computation".to_string(),
+            ))),
         });
         let output = format!("{}", assignment);
         assert!(output.contains("let result = computation"));
@@ -227,4 +234,3 @@ mod tests {
         assert_eq!(var.inner(), "");
     }
 }
-

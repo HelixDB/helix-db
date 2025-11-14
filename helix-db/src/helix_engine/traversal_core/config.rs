@@ -96,7 +96,7 @@ impl Config {
 
         let config = std::fs::read_to_string(config_path)?;
         let mut config = sonic_rs::from_str::<Self>(&config)?;
-        
+
         // Schema will be populated from INTROSPECTION_DATA during code generation
         config.schema = None;
 
