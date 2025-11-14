@@ -14,6 +14,8 @@ pub enum HelixError {
     Vector(#[from] VectorError),
     #[error("Couldn't find `{name}` of type {ty:?}")]
     NotFound { ty: RequestType, name: String },
+    #[error("Invalid API key")]
+    InvalidApiKey,
 }
 
 impl IntoResponse for HelixError {
@@ -22,6 +24,7 @@ impl IntoResponse for HelixError {
         let code = match &self {
             HelixError::Graph(_) | HelixError::Vector(_) => 500,
             HelixError::NotFound { .. } => 404,
+            HelixError::InvalidApiKey => 403,
         };
 
         axum::response::Response::builder()
@@ -140,5 +143,30 @@ mod tests {
         let debug_str = format!("{:?}", error);
         assert!(debug_str.contains("NotFound"));
         assert!(debug_str.contains("debug_test"));
+    }
+
+    // ============================================================================
+    // InvalidApiKey Tests
+    // ============================================================================
+
+    #[test]
+    fn test_helix_error_invalid_api_key() {
+        let error = HelixError::InvalidApiKey;
+        let error_string = error.to_string();
+        assert_eq!(error_string, "Invalid API key");
+    }
+
+    #[test]
+    fn test_helix_error_invalid_api_key_into_response() {
+        let error = HelixError::InvalidApiKey;
+        let response = error.into_response();
+        assert_eq!(response.status(), 403);
+    }
+
+    #[test]
+    fn test_helix_error_invalid_api_key_debug() {
+        let error = HelixError::InvalidApiKey;
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("InvalidApiKey"));
     }
 }

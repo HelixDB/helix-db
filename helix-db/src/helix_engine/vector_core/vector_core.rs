@@ -10,7 +10,7 @@ use crate::{
             vector_without_data::VectorWithoutData,
         },
     },
-    utils::properties::ImmutablePropertiesMap,
+    utils::{id::uuid_str, properties::ImmutablePropertiesMap},
 };
 use heed3::{
     Database, Env, RoTxn, RwTxn,
@@ -417,11 +417,10 @@ impl VectorCore {
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let key = Self::vector_key(id, 0);
         let vector_data_bytes = self
             .vectors_db
-            .get(txn, key.as_ref())?
-            .ok_or(VectorError::VectorNotFound(id.to_string()))?;
+            .get(txn, &Self::vector_key(id, 0))?
+            .ok_or(VectorError::VectorNotFound(uuid_str(id, arena).to_string()))?;
 
         let properties_bytes = self.vector_properties_db.get(txn, &id)?;
 
@@ -440,14 +439,57 @@ impl VectorCore {
         label: &'arena str,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let key = Self::vector_key(id, 0);
-        // println!("Looking up vector {} at level 0, key: {:?}", uuid::Uuid::from_u128(id), key);
-        let vector_data_bytes = self.vectors_db.get(txn, key.as_ref())?.ok_or_else(|| {
-            println!("VECTOR NOT FOUND: {}", uuid::Uuid::from_u128(id));
-            VectorError::VectorNotFound(uuid::Uuid::from_u128(id).to_string())
-        })?;
-        // println!("Found vector {}, data len: {}", uuid::Uuid::from_u128(id), vector_data_bytes.len());
+        let vector_data_bytes = self
+            .vectors_db
+            .get(txn, &Self::vector_key(id, 0))?
+            .ok_or(VectorError::VectorNotFound(uuid_str(id, arena).to_string()))?;
         HVector::from_raw_vector_data(arena, vector_data_bytes, label, id)
+    }
+
+    /// Get all vectors from the database, optionally filtered by level
+    pub fn get_all_vectors<'db: 'arena, 'arena: 'txn, 'txn>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        level: Option<usize>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<bumpalo::collections::Vec<'arena, HVector<'arena>>, VectorError> {
+        let mut vectors = bumpalo::collections::Vec::new_in(arena);
+
+        // Iterate over all vectors in the database
+        let prefix_iter = self.vectors_db.prefix_iter(txn, VECTOR_PREFIX)?;
+
+        for result in prefix_iter {
+            let (key, _) = result?;
+
+            // Extract id from the key: v: (2 bytes) + id (16 bytes) + level (8 bytes)
+            if key.len() < VECTOR_PREFIX.len() + 16 {
+                continue; // Skip malformed keys
+            }
+
+            let mut id_bytes = [0u8; 16];
+            id_bytes.copy_from_slice(&key[VECTOR_PREFIX.len()..VECTOR_PREFIX.len() + 16]);
+            let id = u128::from_be_bytes(id_bytes);
+
+            // Get the full vector using the existing method
+            match self.get_full_vector(txn, id, arena) {
+                Ok(vector) => {
+                    // Filter by level if specified
+                    if let Some(lvl) = level {
+                        if vector.level == lvl {
+                            vectors.push(vector);
+                        }
+                    } else {
+                        vectors.push(vector);
+                    }
+                }
+                Err(_) => {
+                    // Skip vectors that can't be loaded (e.g., deleted)
+                    continue;
+                }
+            }
+        }
+
+        Ok(vectors)
     }
 }
 

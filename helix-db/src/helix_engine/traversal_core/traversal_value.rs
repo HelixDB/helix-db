@@ -72,6 +72,7 @@ impl<'arena> TraversalValue<'arena> {
     pub fn data(&self) -> &'arena [f64] {
         match self {
             TraversalValue::Vector(vector) => vector.data,
+            TraversalValue::VectorNodeWithoutVectorData(_) => &[],
             _ => unimplemented!(),
         }
     }
@@ -79,6 +80,7 @@ impl<'arena> TraversalValue<'arena> {
     pub fn score(&self) -> f64 {
         match self {
             TraversalValue::Vector(vector) => vector.score(),
+            TraversalValue::VectorNodeWithoutVectorData(_) => 2f64,
             _ => unimplemented!(),
         }
     }

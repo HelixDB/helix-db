@@ -13,10 +13,11 @@ use crate::{
                     add_e::AddEAdapter, add_n::AddNAdapter, e_from_type::EFromTypeAdapter,
                     n_from_id::NFromIdAdapter, n_from_type::NFromTypeAdapter,
                 },
-                util::filter_ref::FilterRefAdapter,
+                util::{filter_ref::FilterRefAdapter, drop::Drop},
             },
             traversal_value::TraversalValue,
         },
+        types::GraphError,
     },
     props,
     protocol::value::Value,
@@ -26,7 +27,7 @@ use crate::{
 use bumpalo::Bump;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
-fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
+fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().to_str().unwrap();
     let storage = HelixGraphStorage::new(
@@ -35,12 +36,12 @@ fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
         Default::default(),
     )
     .unwrap();
-    (Arc::new(storage), temp_dir)
+    (temp_dir, Arc::new(storage))
 }
 
 #[test]
 fn test_add_n() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
 
     let mut txn = storage.graph_env.write_txn().unwrap();
@@ -80,45 +81,41 @@ fn test_add_n() {
 
 #[test]
 fn test_out() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     // Create graph: (person1)-[knows]->(person2)-[knows]->(person3)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person1 = person1.first().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person2 = person2.first().unwrap();
     let person3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person2.id(), person3.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     txn.commit().unwrap();
-    let txn = storage.graph_env.write_txn().unwrap();
+    let txn = storage.graph_env.read_txn().unwrap();
 
-    // let nodes = VFromId::new(&storage, &txn, person1.id.as_str())
-    //     .out("knows")
-    //     .filter_map(|node| node.ok())
-    //     .collect::<Vec<_>>();
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&person1.id())
         .out_node("knows")
         .filter_map(|node| node.ok())
         .collect::<Vec<_>>();
 
-    // txn.commit().unwrap();
+    txn.commit().unwrap();
     // Check that current step is at person2
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].id(), person2.id());
@@ -126,30 +123,31 @@ fn test_out() {
 
 #[test]
 fn test_in() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     // Create graph: (person1)-[knows]->(person2)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person1 = person1.first().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person2 = person2.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&person2.id())
         .in_node("knows")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
+    txn.commit().unwrap();
     // Check that current step is at person1
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].id(), person1.id());
@@ -157,7 +155,7 @@ fn test_in() {
 
 #[test]
 fn test_complex_traversal() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
@@ -169,26 +167,26 @@ fn test_complex_traversal() {
 
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person1 = person1.first().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person2 = person2.first().unwrap();
     let person3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("likes", None, person2.id(), person3.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("follows", None, person3.id(), person1.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     txn.commit().unwrap();
 
     let txn = storage.graph_env.read_txn().unwrap();
@@ -196,7 +194,7 @@ fn test_complex_traversal() {
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&person1.id())
         .out_node("knows")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     // Check that current step is at person2
     assert_eq!(nodes.len(), 1);
@@ -207,7 +205,7 @@ fn test_complex_traversal() {
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
         .out_node("likes")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     // Check that current step is at person3
     assert_eq!(nodes.len(), 1);
@@ -218,7 +216,7 @@ fn test_complex_traversal() {
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
         .out_node("follows")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     // Check that current step is at person1
     assert_eq!(nodes.len(), 1);
@@ -227,48 +225,48 @@ fn test_complex_traversal() {
 
 #[test]
 fn test_n_from_id() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     // Create a test node
     let person = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     let node_id = person.id();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let count = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(count.len(), 1);
 }
 
 #[test]
 fn test_n_from_id_with_traversal() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     // Create test graph: (person1)-[knows]->(person2)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), true)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let count = G::new(&storage, &txn, &arena)
         .n_from_id(&person1.id())
         .out_node("knows")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     // Check that traversal reaches person2
     assert_eq!(count.len(), 1);
@@ -276,42 +274,42 @@ fn test_n_from_id_with_traversal() {
 }
 
 #[test]
+#[should_panic]
 fn test_n_from_id_nonexistent() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let txn = storage.graph_env.read_txn().unwrap();
-    let nodes = G::new(&storage, &txn, &arena)
+    G::new(&storage, &txn, &arena)
         .n_from_id(&100)
-        .collect_to::<Vec<_>>();
-    assert!(nodes.is_empty());
+        .collect::<Result<Vec<_>,_>>().unwrap();
 }
 
 #[test]
 fn test_n_from_id_chain_operations() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     // Create test graph: (person1)-[knows]->(person2)-[likes]->(person3)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     let _ = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     let person3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("likes", None, person2.id(), person3.id(), false)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
@@ -319,7 +317,7 @@ fn test_n_from_id_chain_operations() {
         .n_from_id(&person1.id())
         .out_node("knows")
         .out_node("likes")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     // Check that the chain of traversals reaches person3
     assert_eq!(nodes.len(), 1);
@@ -328,7 +326,7 @@ fn test_n_from_id_chain_operations() {
 
 #[test]
 fn test_with_id_type() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
@@ -338,7 +336,7 @@ fn test_with_id_type() {
             props_option(&arena, props! { "name" => "test" }),
             None,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
     txn.commit().unwrap();
     #[derive(Serialize, Deserialize, Debug)]
     struct Input {
@@ -357,7 +355,7 @@ fn test_with_id_type() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(&storage, &txn, &arena)
         .n_from_id(&input.id)
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 1);
     assert_eq!(traversal[0].id(), input.id.inner());
@@ -365,7 +363,8 @@ fn test_with_id_type() {
 
 #[test]
 fn test_double_add_and_double_fetch() {
-    let (db, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
+    let db = &*storage;
     let arena = Bump::new();
     let mut txn = db.graph_env.write_txn().unwrap();
 
@@ -375,7 +374,7 @@ fn test_double_add_and_double_fetch() {
             props_option(&arena, props! { "entity_name" => "person1" }),
             None,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let original_node2 = G::new_mut(&db, &arena, &mut txn)
         .add_n(
@@ -383,7 +382,7 @@ fn test_double_add_and_double_fetch() {
             props_option(&arena, props! { "entity_name" => "person2" }),
             None,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -399,7 +398,7 @@ fn test_double_add_and_double_fetch() {
                 Ok(false)
             }
         })
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     let node2 = G::new(&db, &txn, &arena)
         .n_from_type("person")
@@ -412,7 +411,7 @@ fn test_double_add_and_double_fetch() {
                 Ok(false)
             }
         })
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(node1.len(), 1);
     assert_eq!(node1[0].id(), original_node1.id());
@@ -427,14 +426,14 @@ fn test_double_add_and_double_fetch() {
             node2.first().unwrap().id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
     let txn = db.graph_env.read_txn().unwrap();
     let e = G::new(&db, &txn, &arena)
         .e_from_type("knows")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     assert_eq!(e.len(), 1);
     assert_eq!(e[0].id(), e.first().unwrap().id());
     if let TraversalValue::Edge(e) = &e[0] {
@@ -443,4 +442,100 @@ fn test_double_add_and_double_fetch() {
     } else {
         panic!("e[0] is not an edge");
     }
+}
+
+// ============================================================================
+// Error Tests for n_from_id
+// ============================================================================
+
+#[test]
+fn test_n_from_id_with_nonexistent_id() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+
+    // Generate a random ID that doesn't exist
+    let fake_id = uuid::Uuid::new_v4().as_u128();
+
+    // Attempt to query
+    let result = G::new(&storage, &txn, &arena)
+        .n_from_id(&fake_id)
+        .collect_to_obj();
+
+    // Assert it returns NodeNotFound error
+    assert!(matches!(result, Err(GraphError::NodeNotFound)));
+}
+
+#[test]
+fn test_n_from_id_with_deleted_node() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    // Create a node
+    let node = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect_to_obj()
+        .unwrap();
+    let node_id = node.id();
+
+    txn.commit().unwrap();
+
+    // Delete the node
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let node_to_delete = G::new(&storage, &txn, &arena)
+        .n_from_id(&node_id)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    drop(txn);
+
+    let mut txn = storage.graph_env.write_txn().unwrap();
+    Drop::drop_traversal(
+        node_to_delete.into_iter().map(Ok::<_, GraphError>),
+        storage.as_ref(),
+        &mut txn,
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Try to query the deleted node
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let result = G::new(&storage, &txn, &arena)
+        .n_from_id(&node_id)
+        .collect_to_obj();
+
+    // Assert it returns NodeNotFound error
+    assert!(matches!(result, Err(GraphError::NodeNotFound)));
+}
+
+#[test]
+fn test_n_from_id_with_zero_id() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+
+    // Query with ID = 0
+    let result = G::new(&storage, &txn, &arena)
+        .n_from_id(&0)
+        .collect_to_obj();
+
+    // Assert it returns NodeNotFound error
+    assert!(matches!(result, Err(GraphError::NodeNotFound)));
+}
+
+#[test]
+fn test_n_from_id_with_max_id() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+
+    // Query with ID = u128::MAX
+    let result = G::new(&storage, &txn, &arena)
+        .n_from_id(&u128::MAX)
+        .collect_to_obj();
+
+    // Assert it returns NodeNotFound error
+    assert!(matches!(result, Err(GraphError::NodeNotFound)));
 }

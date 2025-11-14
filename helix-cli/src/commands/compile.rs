@@ -41,7 +41,7 @@ pub async fn run(output_dir: Option<String>, path: Option<String>) -> Result<()>
     }
 
     // Run static analysis to catch validation errors
-    let generated_source = analyze_source(source)?;
+    let generated_source = analyze_source(source, &content.files)?;
 
     // Generate Rust code
     let output_dir = output_dir

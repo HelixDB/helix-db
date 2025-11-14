@@ -77,7 +77,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Node::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Node::from_bincode_bytes(id, &bytes, &arena2);
         // May or may not fail depending on where corruption occurs
         // This test documents behavior
     }
@@ -98,7 +98,7 @@ mod error_handling_tests {
         let id = 55555u128;
         let zeros = vec![0u8; 100];
 
-        let result = Node::from_bincode_bytes(id, &zeros, &arena);
+        let _result = Node::from_bincode_bytes(id, &zeros, &arena);
         // This might actually deserialize to some default values
         // Test documents behavior
     }
@@ -168,7 +168,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Edge::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Edge::from_bincode_bytes(id, &bytes, &arena2);
         // Might succeed with corrupted IDs - test documents behavior
     }
 
@@ -188,7 +188,7 @@ mod error_handling_tests {
         let id = 333444u128;
         let zeros = vec![0u8; 100];
 
-        let result = Edge::from_bincode_bytes(id, &zeros, &arena);
+        let _result = Edge::from_bincode_bytes(id, &zeros, &arena);
         // May deserialize with zero values - test documents behavior
     }
 
@@ -218,7 +218,7 @@ mod error_handling_tests {
         let empty_data: &[u8] = &[];
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), empty_data, id);
+        let _result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), empty_data, id);
         // Should panic due to assertion in cast_raw_vector_data
     }
 
@@ -271,10 +271,10 @@ mod error_handling_tests {
         let arena = Bump::new();
         let id = 888999u128;
         let vector = create_simple_vector(&arena, id, "test", &[1.0]);
-        let props_bytes = bincode::serialize(&vector).unwrap();
-        let single_byte: &[u8] = &[0x42];
+        let _props_bytes = bincode::serialize(&vector).unwrap();
+        let _single_byte: &[u8] = &[0x42];
 
-        let arena2 = Bump::new();
+        let _arena2 = Bump::new();
         // Should panic due to misalignment
     }
 
@@ -299,7 +299,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Node::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Node::from_bincode_bytes(id, &bytes, &arena2);
         // Behavior depends on exact corruption
     }
 
@@ -319,7 +319,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Edge::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Edge::from_bincode_bytes(id, &bytes, &arena2);
         // May fail on UTF-8 validation
     }
 
@@ -345,7 +345,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Node::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Node::from_bincode_bytes(id, &bytes, &arena2);
         // Should fail on UTF-8 validation
     }
 
@@ -364,7 +364,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Edge::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Edge::from_bincode_bytes(id, &bytes, &arena2);
         // Should fail on UTF-8 validation
     }
 
@@ -384,7 +384,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let _result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
         // Should fail on UTF-8 validation
     }
 
@@ -404,7 +404,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Node::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Node::from_bincode_bytes(id, &bytes, &arena2);
         // May fail on UTF-8 validation
     }
 
@@ -425,7 +425,7 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let result = Edge::from_bincode_bytes(id, &bytes, &arena2);
+        let _result = Edge::from_bincode_bytes(id, &bytes, &arena2);
         // May fail during property deserialization
     }
 

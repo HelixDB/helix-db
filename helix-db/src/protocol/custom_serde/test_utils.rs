@@ -378,6 +378,7 @@ pub fn nested_value_props() -> Vec<(&'static str, Value)> {
 }
 
 /// Creates a large number of properties for stress testing
+#[allow(dead_code)]
 pub fn many_props(count: usize) -> Vec<(String, Value)> {
     (0..count)
         .map(|i| (format!("key_{}", i), Value::I32(i as i32)))
@@ -487,6 +488,7 @@ pub fn assert_vectors_semantically_equal(vec1: &HVector, vec2: &HVector) {
 // ============================================================================
 
 /// Prints byte-level comparison of two byte arrays
+#[allow(dead_code)]
 pub fn print_byte_comparison(label: &str, bytes1: &[u8], bytes2: &[u8]) {
     println!("\n=== {} ===", label);
     println!("Bytes1 ({} total): {:02x?}", bytes1.len(), bytes1);
@@ -513,6 +515,7 @@ pub fn print_byte_comparison(label: &str, bytes1: &[u8], bytes2: &[u8]) {
 }
 
 /// Prints human-readable interpretation of bytes
+#[allow(dead_code)]
 pub fn print_byte_interpretation(label: &str, bytes: &[u8]) {
     println!("\n{} as string interpretation:", label);
     for (i, byte) in bytes.iter().enumerate() {
@@ -533,6 +536,7 @@ pub fn print_byte_interpretation(label: &str, bytes: &[u8]) {
 // ============================================================================
 
 /// Generates a random string of given length
+#[allow(dead_code)]
 pub fn random_string(len: usize) -> String {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -542,6 +546,7 @@ pub fn random_string(len: usize) -> String {
 }
 
 /// Generates random valid UTF-8 strings including Unicode
+#[allow(dead_code)]
 pub fn random_utf8_string(len: usize) -> String {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -552,6 +557,7 @@ pub fn random_utf8_string(len: usize) -> String {
 }
 
 /// Generates a random f64 vector of given dimensions
+#[allow(dead_code)]
 pub fn random_f64_vector(dimensions: usize) -> Vec<f64> {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -559,6 +565,7 @@ pub fn random_f64_vector(dimensions: usize) -> Vec<f64> {
 }
 
 /// Generates a random Value for property testing
+#[allow(dead_code)]
 pub fn random_value() -> Value {
     use rand::Rng;
     let mut rng = rand::rng();

@@ -445,6 +445,7 @@ pub enum ReturnFieldSource {
         closure_param_name: Option<String>, // Closure parameter if in closure context
         closure_source_var: Option<String>, // Actual variable for the closure parameter
         accessed_field_name: Option<String>, // For simple property access, the field being accessed (e.g., "name" for usr::{name})
+        own_closure_param: Option<String>, // This traversal's own closure parameter if it ends with a Closure step
     },
 }
 
@@ -477,6 +478,7 @@ impl ReturnFieldInfo {
                 closure_param_name: None,
                 closure_source_var: None,
                 accessed_field_name: None,
+                own_closure_param: None,
             },
         }
     }

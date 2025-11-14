@@ -20,6 +20,7 @@ pub struct NestedTraversalInfo {
     pub parsed_traversal: Option<Box<crate::helixc::parser::types::Traversal>>, // Original parsed traversal for validation
     pub closure_param_name: Option<String>, // The closure parameter name if in closure context (e.g., "usr")
     pub closure_source_var: Option<String>, // The actual source variable for the closure parameter (e.g., "user")
+    pub own_closure_param: Option<String>, // This traversal's own closure parameter if it ends with a Closure step (e.g., "cluster")
 }
 
 #[derive(Clone)]
@@ -73,7 +74,7 @@ impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ShouldCollect::ToVec => write!(f, ".collect::<Result<Vec<_>, _>>()?"),
-            ShouldCollect::ToObj => write!(f, ".collect_to_obj()"),
+            ShouldCollect::ToObj => write!(f, ".collect_to_obj()?"),
             ShouldCollect::Try => write!(f, "?"),
             ShouldCollect::No => write!(f, ""),
             ShouldCollect::ToValue => write!(f, ".collect_to_value()"),
@@ -154,7 +155,7 @@ impl Display for Traversal {
                     "G::new_mut_from_iter(&db, &mut txn, update_tr.iter().cloned(), &arena)",
                 )?;
                 write!(f, "\n    .update({})", write_properties_slice(properties))?;
-                write!(f, "\n    .collect_to_obj()")?;
+                write!(f, "\n    .collect_to_obj()?")?;
                 write!(f, "}}")?;
             }
         }
@@ -241,6 +242,7 @@ pub enum Step {
     ShortestPath(ShortestPath),
     ShortestPathDijkstras(ShortestPathDijkstras),
     ShortestPathBFS(ShortestPathBFS),
+    ShortestPathAStar(ShortestPathAStar),
 
     // search vector
     SearchVector(SearchVectorStep),
@@ -288,6 +290,7 @@ impl Display for Step {
                 write!(f, "{shortest_path_dijkstras}")
             }
             Step::ShortestPathBFS(shortest_path_bfs) => write!(f, "{shortest_path_bfs}"),
+            Step::ShortestPathAStar(shortest_path_astar) => write!(f, "{shortest_path_astar}"),
             Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
             Step::GroupBy(group_by) => write!(f, "{group_by}"),
             Step::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
@@ -318,6 +321,7 @@ impl Debug for Step {
             Step::ShortestPath(_) => write!(f, "ShortestPath"),
             Step::ShortestPathDijkstras(_) => write!(f, "ShortestPathDijkstras"),
             Step::ShortestPathBFS(_) => write!(f, "ShortestPathBFS"),
+            Step::ShortestPathAStar(_) => write!(f, "ShortestPathAStar"),
             Step::SearchVector(_) => write!(f, "SearchVector"),
             Step::GroupBy(_) => write!(f, "GroupBy"),
             Step::AggregateBy(_) => write!(f, "AggregateBy"),
@@ -464,12 +468,12 @@ impl Display for WhereRef {
                         ReservedProp::Label => "Value::from(val.label())".to_string(),
                     };
                     let bool_expr = match bool_op {
-                        BoolOp::Gt(gt) => format!("{}{}", value_expr, gt),
-                        BoolOp::Gte(gte) => format!("{}{}", value_expr, gte),
-                        BoolOp::Lt(lt) => format!("{}{}", value_expr, lt),
-                        BoolOp::Lte(lte) => format!("{}{}", value_expr, lte),
-                        BoolOp::Eq(eq) => format!("{}{}", value_expr, eq),
-                        BoolOp::Neq(neq) => format!("{}{}", value_expr, neq),
+                        BoolOp::Gt(gt) => format!("{} > {}", value_expr, gt.right),
+                        BoolOp::Gte(gte) => format!("{} >= {}", value_expr, gte.right),
+                        BoolOp::Lt(lt) => format!("{} < {}", value_expr, lt.right),
+                        BoolOp::Lte(lte) => format!("{} <= {}", value_expr, lte.right),
+                        BoolOp::Eq(eq) => format!("{} == {}", value_expr, eq.right),
+                        BoolOp::Neq(neq) => format!("{} != {}", value_expr, neq.right),
                         BoolOp::Contains(contains) => format!("{}{}", value_expr, contains),
                         BoolOp::IsIn(is_in) => format!("{}{}", value_expr, is_in),
                     };
@@ -489,12 +493,12 @@ impl Display for WhereRef {
                 // Handle PropertyFetch with BoolOp - use get_property
                 if let (Some(prop), Some(bool_op)) = (prop, bool_op) {
                     let bool_expr = match bool_op {
-                        BoolOp::Gt(gt) => format!("*v{gt}"),
-                        BoolOp::Gte(gte) => format!("*v{gte}"),
-                        BoolOp::Lt(lt) => format!("*v{lt}"),
-                        BoolOp::Lte(lte) => format!("*v{lte}"),
-                        BoolOp::Eq(eq) => format!("*v{eq}"),
-                        BoolOp::Neq(neq) => format!("*v{neq}"),
+                        BoolOp::Gt(gt) => format!("{gt}"),
+                        BoolOp::Gte(gte) => format!("{gte}"),
+                        BoolOp::Lt(lt) => format!("{lt}"),
+                        BoolOp::Lte(lte) => format!("{lte}"),
+                        BoolOp::Eq(eq) => format!("{eq}"),
+                        BoolOp::Neq(neq) => format!("{neq}"),
                         BoolOp::Contains(contains) => format!("v{contains}"),
                         BoolOp::IsIn(is_in) => format!("v{is_in}"),
                     };
@@ -604,11 +608,21 @@ pub struct ShortestPath {
 }
 
 #[derive(Clone)]
+pub enum WeightCalculation {
+    /// Simple property access: edge.get_property("weight")
+    Property(GenRef<String>),
+    /// Mathematical expression: calculated from edge/source/dest properties
+    Expression(String),
+    /// Default weight of 1.0
+    Default,
+}
+
+#[derive(Clone)]
 pub struct ShortestPathDijkstras {
     pub label: Option<GenRef<String>>,
     pub from: Option<GenRef<String>>,
     pub to: Option<GenRef<String>>,
-    pub weight_property: Option<GenRef<String>>,
+    pub weight_calculation: WeightCalculation,
 }
 
 #[derive(Clone)]
@@ -616,6 +630,15 @@ pub struct ShortestPathBFS {
     pub label: Option<GenRef<String>>,
     pub from: Option<GenRef<String>>,
     pub to: Option<GenRef<String>>,
+}
+
+#[derive(Clone)]
+pub struct ShortestPathAStar {
+    pub label: Option<GenRef<String>>,
+    pub from: Option<GenRef<String>>,
+    pub to: Option<GenRef<String>>,
+    pub weight_calculation: WeightCalculation,
+    pub heuristic_property: GenRef<String>,
 }
 
 #[derive(Clone)]
@@ -680,7 +703,48 @@ impl Display for ShortestPathDijkstras {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::Dijkstra)",
+            "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::Dijkstra, ",
+            self.label
+                .as_ref()
+                .map_or("None".to_string(), |label| format!("Some({label})")),
+            self.from
+                .as_ref()
+                .map_or("None".to_string(), |from| format!("Some(&{from})")),
+            self.to
+                .as_ref()
+                .map_or("None".to_string(), |to| format!("Some(&{to})"))
+        )?;
+
+        // Generate the weight calculation closure
+        match &self.weight_calculation {
+            WeightCalculation::Property(prop) => {
+                write!(
+                    f,
+                    "|edge, _src_node, _dst_node| -> Result<f64, GraphError> {{ Ok(edge.get_property({})?.as_f64()?) }}",
+                    prop
+                )?;
+            }
+            WeightCalculation::Expression(expr) => {
+                write!(
+                    f,
+                    "|edge, src_node, dst_node| -> Result<f64, GraphError> {{ Ok({}) }}",
+                    expr
+                )?;
+            }
+            WeightCalculation::Default => {
+                write!(f, "helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn")?;
+            }
+        }
+
+        write!(f, ")")
+    }
+}
+
+impl Display for ShortestPathBFS {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::BFS, helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn)",
             self.label
                 .as_ref()
                 .map_or("None".to_string(), |label| format!("Some({label})")),
@@ -694,11 +758,11 @@ impl Display for ShortestPathDijkstras {
     }
 }
 
-impl Display for ShortestPathBFS {
+impl Display for ShortestPathAStar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "shortest_path_with_algorithm({}, {}, {}, PathAlgorithm::BFS)",
+            "shortest_path_astar({}, {}, {}, ",
             self.label
                 .as_ref()
                 .map_or("None".to_string(), |label| format!("Some({label})")),
@@ -708,7 +772,37 @@ impl Display for ShortestPathBFS {
             self.to
                 .as_ref()
                 .map_or("None".to_string(), |to| format!("Some(&{to})"))
-        )
+        )?;
+
+        // Generate the weight calculation closure
+        match &self.weight_calculation {
+            WeightCalculation::Property(prop) => {
+                write!(
+                    f,
+                    "|edge, _src_node, _dst_node| -> Result<f64, GraphError> {{ Ok(edge.get_property({})?.as_f64()?) }}, ",
+                    prop
+                )?;
+            }
+            WeightCalculation::Expression(expr) => {
+                write!(
+                    f,
+                    "|edge, src_node, dst_node| -> Result<f64, GraphError> {{ Ok({}) }}, ",
+                    expr
+                )?;
+            }
+            WeightCalculation::Default => {
+                write!(f, "helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn, ")?;
+            }
+        }
+
+        // Generate the heuristic function closure
+        write!(
+            f,
+            "|node| helix_db::helix_engine::traversal_core::ops::util::paths::property_heuristic(node, {})",
+            self.heuristic_property
+        )?;
+
+        write!(f, ")")
     }
 }
 

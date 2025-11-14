@@ -796,7 +796,7 @@ pub fn search_keyword(input: &mut MCPToolInput) -> Result<Response, GraphError> 
     // Perform BM25 search using the existing index
     let results = G::new(storage, &txn, &arena)
         .search_bm25(&req.data.label, &req.data.query, req.data.limit)?
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>()?;
 
     let (first, consumed_one) = match results.first() {
         Some(value) => (value.clone(), true),
@@ -901,7 +901,7 @@ pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphErr
             label_arena,
             None
         )
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>()?;
 
     tracing::debug!("[VECTOR_SEARCH] Search returned {} results", results.len());
 

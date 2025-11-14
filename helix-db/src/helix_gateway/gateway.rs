@@ -1,4 +1,3 @@
-use std::sync::LazyLock;
 use std::sync::atomic::{self, AtomicUsize};
 use std::time::Instant;
 use std::{collections::HashMap, sync::Arc};
@@ -30,11 +29,8 @@ use crate::{
 pub struct GatewayOpts {}
 
 impl GatewayOpts {
-    pub const DEFAULT_WORKERS_PER_CORE: usize = 5;
+    pub const DEFAULT_WORKERS_PER_CORE: usize = 8;
 }
-
-pub static HELIX_METRICS_CLIENT: LazyLock<helix_metrics::HelixMetricsClient> =
-    LazyLock::new(helix_metrics::HelixMetricsClient::new);
 
 pub struct HelixGateway {
     pub(crate) address: String,
@@ -114,6 +110,9 @@ impl HelixGateway {
         }));
 
         rt.block_on(async move {
+            // Initialize metrics system
+            helix_metrics::init_metrics_system();
+
             let listener = tokio::net::TcpListener::bind(self.address)
                 .await
                 .expect("Failed to bind listener");
@@ -121,7 +120,20 @@ impl HelixGateway {
             axum::serve(listener, axum_app)
                 .with_graceful_shutdown(shutdown_signal())
                 .await
-                .expect("Failed to serve")
+                .expect("Failed to serve");
+
+            // Shutdown metrics system to flush all pending events
+            info!("Shutting down metrics system...");
+            let shutdown_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                helix_metrics::shutdown_metrics_system(),
+            )
+            .await;
+
+            match shutdown_result {
+                Ok(_) => info!("Metrics system shutdown complete"),
+                Err(_) => warn!("Metrics system shutdown timed out after 5 seconds"),
+            }
         });
 
         Ok(())
@@ -159,39 +171,50 @@ async fn post_handler(
     State(state): State<Arc<AppState>>,
     req: protocol::request::Request,
 ) -> axum::http::Response<Body> {
-    // #[cfg(feature = "metrics")]
-    let _start_time = Instant::now();
-    let _body = req.body.to_vec();
-    let _query_name = req.name.clone();
+    let start_time = Instant::now();
+    #[cfg(feature = "api-key")]
+    {
+        use crate::helix_gateway::key_verification::verify_key;
+        if let Err(e) = verify_key(&req.api_key_hash.unwrap()) {
+            info!(?e, "Invalid API key");
+            helix_metrics::log_event(
+                helix_metrics::events::EventType::InvalidApiKey,
+                helix_metrics::events::InvalidApiKeyEvent {
+                    cluster_id: state.cluster_id.clone(),
+                    time_taken_usec: start_time.elapsed().as_micros() as u32,
+                },
+            );
+            return e.into_response();
+        }
+    }
+    let body = req.body.to_vec();
+    let query_name = req.name.clone();
     let res = state.worker_pool.process(req).await;
 
     match res {
         Ok(r) => {
-            // #[cfg(feature = "metrics")]
-            {
-                // HELIX_METRICS_CLIENT.send_event(
-                //     EventType::QuerySuccess,
-                //     QuerySuccessEvent {
-                //         cluster_id: state.cluster_id.clone(),
-                //         query_name,
-                //         time_taken_usec: start_time.elapsed().as_micros() as u32,
-                //     },
-                // );
-            }
+            helix_metrics::log_event(
+                helix_metrics::events::EventType::QuerySuccess,
+                helix_metrics::events::QuerySuccessEvent {
+                    cluster_id: state.cluster_id.clone(),
+                    query_name,
+                    time_taken_usec: start_time.elapsed().as_micros() as u32,
+                },
+            );
             r.into_response()
         }
         Err(e) => {
             info!(?e, "Got error");
-            // HELIX_METRICS_CLIENT.send_event(
-            //     EventType::QueryError,
-            //     QueryErrorEvent {
-            //         cluster_id: state.cluster_id.clone(),
-            //         query_name,
-            //         input_json: sonic_rs::to_string(&body).ok(),
-            //         output_json: sonic_rs::to_string(&json!({ "error": e.to_string() })).ok(),
-            //         time_taken_usec: start_time.elapsed().as_micros() as u32,
-            //     },
-            // );
+            helix_metrics::log_event(
+                helix_metrics::events::EventType::QueryError,
+                helix_metrics::events::QueryErrorEvent {
+                    cluster_id: state.cluster_id.clone(),
+                    query_name,
+                    input_json: sonic_rs::to_string(&body).ok(),
+                    output_json: Some(format!(r#"{{"error":"{e}"}}"#)),
+                    time_taken_usec: start_time.elapsed().as_micros() as u32,
+                },
+            );
             e.into_response()
         }
     }
@@ -241,14 +264,13 @@ impl CoreSetter {
 
     pub fn set_current_once(self: Arc<Self>) {
         use std::sync::OnceLock;
-    
+
         thread_local! {
             static CORE_SET: OnceLock<()> = const { OnceLock::new() };
         }
-    
+
         CORE_SET.with(|flag| {
             flag.get_or_init(move || self.set_current());
         });
     }
-    
 }

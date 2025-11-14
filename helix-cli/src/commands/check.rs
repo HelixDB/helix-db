@@ -68,7 +68,7 @@ fn validate_project_syntax(project: &ProjectContext) -> Result<()> {
     }
 
     // Run static analysis to catch validation errors
-    analyze_source(source)?;
+    analyze_source(source, &content.files)?;
 
     print_success("All queries and schema are valid");
     Ok(())

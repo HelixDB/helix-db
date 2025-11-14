@@ -60,7 +60,7 @@ async fn login() -> Result<()> {
 
     // write metics.toml
     let mut metrics = load_metrics_config()?;
-    metrics.user_id = Some(user_id);
+    metrics.user_id = Some(user_id.leak());
     save_metrics_config(&metrics)?;
 
     print_success("Logged in successfully");

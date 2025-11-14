@@ -30,6 +30,7 @@ pub async fn nodes_by_label_handler(
     let mut req = protocol::request::Request {
         name: "nodes_by_label".to_string(),
         req_type: RequestType::Query,
+        api_key_hash: None,
         body: axum::body::Bytes::new(),
         in_fmt: protocol::Format::default(),
         out_fmt: protocol::Format::default(),
@@ -56,6 +57,7 @@ pub async fn nodes_by_label_handler(
 pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     let db = Arc::clone(&input.graph.storage);
     let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
+    let arena = bumpalo::Bump::new();
 
     let (label, limit) = if !input.request.body.is_empty() {
         match sonic_rs::from_slice::<sonic_rs::Value>(&input.request.body) {
@@ -83,20 +85,20 @@ pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, G
 
     for result in db.nodes_db.iter(&txn)? {
         let (id, node_data) = result?;
-        match Node::decode_node(node_data, id) {
+        match Node::from_bincode_bytes(id, node_data, &arena) {
             Ok(node) => {
-                if node.label() == label {
+                if node.label == label {
                     let id_str = ID::from(id).stringify();
 
                     let mut node_json = json!({
                         "id": id_str.clone(),
-                        "label": node.label(),
+                        "label": node.label,
                         "title": id_str
                     });
 
                     // Add node properties
                     if let Some(properties) = &node.properties {
-                        for (key, value) in properties {
+                        for (key, value) in properties.iter() {
                             node_json[key] = sonic_rs::to_value(&value.inner_stringify())
                                 .unwrap_or_else(|_| sonic_rs::Value::from(""));
                         }
@@ -105,11 +107,10 @@ pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, G
                     nodes_json.push(node_json);
                     count += 1;
 
-                    if let Some(limit_count) = limit {
-                        if count >= limit_count {
+                    if let Some(limit_count) = limit
+                        && count >= limit_count {
                             break;
                         }
-                    }
                 }
             }
             Err(_) => continue,
@@ -168,17 +169,34 @@ mod tests {
     }
 
     #[test]
-    fn test_nodes_by_label_found() {
+    fn test_nodes_by_label_found() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::utils::properties::ImmutablePropertiesMap;
+
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let _node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", Some(vec![("name".to_string(), Value::String("Alice".to_string()))]), None)
-            .collect_to_obj();
+        let props1 = vec![("name", Value::String("Alice".to_string()))];
+        let props_map1 = ImmutablePropertiesMap::new(
+            props1.len(),
+            props1.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            &arena,
+        );
 
-        let _node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", Some(vec![("name".to_string(), Value::String("Bob".to_string()))]), None)
-            .collect_to_obj();
+        let _node1 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), Some(props_map1), None)
+            .collect_to_obj()?;
+
+        let props2 = vec![("name", Value::String("Bob".to_string()))];
+        let props_map2 = ImmutablePropertiesMap::new(
+            props2.len(),
+            props2.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            &arena,
+        );
+
+        let _node2 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), Some(props_map2), None)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
@@ -187,6 +205,7 @@ mod tests {
         let request = Request {
             name: "nodes_by_label".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -204,17 +223,28 @@ mod tests {
         let response = result.unwrap();
         let body_str = String::from_utf8(response.body).unwrap();
         assert!(body_str.contains("\"count\":2"));
+        Ok(())
     }
 
     #[test]
-    fn test_nodes_by_label_with_limit() {
+    fn test_nodes_by_label_with_limit() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::utils::properties::ImmutablePropertiesMap;
+
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
         for i in 0..10 {
-            let _node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-                .add_n("person", Some(vec![("index".to_string(), Value::I64(i))]), None)
-                .collect_to_obj();
+            let props = vec![("index", Value::I64(i))];
+            let props_map = ImmutablePropertiesMap::new(
+                props.len(),
+                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                &arena,
+            );
+
+            let _node = G::new_mut(&engine.storage, &arena, &mut txn)
+                .add_n(arena.alloc_str("person"), Some(props_map), None)
+                .collect_to_obj()?;
         }
 
         txn.commit().unwrap();
@@ -224,6 +254,7 @@ mod tests {
         let request = Request {
             name: "nodes_by_label".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -241,6 +272,7 @@ mod tests {
         let response = result.unwrap();
         let body_str = String::from_utf8(response.body).unwrap();
         assert!(body_str.contains("\"count\":5"));
+        Ok(())
     }
 
     #[test]
@@ -252,6 +284,7 @@ mod tests {
         let request = Request {
             name: "nodes_by_label".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -278,6 +311,7 @@ mod tests {
         let request = Request {
             name: "nodes_by_label".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -294,17 +328,18 @@ mod tests {
     }
 
     #[test]
-    fn test_nodes_by_label_multiple_labels() {
+    fn test_nodes_by_label_multiple_labels() -> Result<(), Box<dyn std::error::Error>> {
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let _person = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", None, None)
-            .collect_to_obj();
+        let _person = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), None, None)
+            .collect_to_obj()?;
 
-        let _company = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("company", None, None)
-            .collect_to_obj();
+        let _company = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("company"), None, None)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
@@ -313,6 +348,7 @@ mod tests {
         let request = Request {
             name: "nodes_by_label".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -330,5 +366,6 @@ mod tests {
         let response = result.unwrap();
         let body_str = String::from_utf8(response.body).unwrap();
         assert!(body_str.contains("\"count\":1"));
+        Ok(())
     }
 }

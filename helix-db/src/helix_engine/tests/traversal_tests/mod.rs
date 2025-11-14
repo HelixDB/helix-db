@@ -7,7 +7,6 @@ pub mod range_tests;
 pub mod secondary_index_tests;
 pub mod shortest_path_tests;
 pub mod test_utils;
-pub mod traversal_concurrent_tests;
 pub mod update_tests;
 pub mod util_tests;
 pub mod vector_traversal_tests;

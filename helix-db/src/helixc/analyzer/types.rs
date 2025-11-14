@@ -19,14 +19,11 @@ impl From<NodeSchema> for GeneratedNodeSchema {
             properties: generated
                 .fields
                 .into_iter()
-                .map(|f| {
-                    // println!("into: {:?}", f.field_type.into());
-                    SchemaProperty {
-                        name: f.name,
-                        field_type: f.field_type.into(),
-                        default_value: f.defaults.map(|d| d.into()),
-                        is_index: f.prefix,
-                    }
+                .map(|f| SchemaProperty {
+                    name: f.name,
+                    field_type: f.field_type.into(),
+                    default_value: f.defaults.map(|d| d.into()),
+                    is_index: f.prefix,
                 })
                 .collect(),
         }
@@ -199,7 +196,6 @@ impl From<FieldType> for GeneratedType {
             //         .collect(),
             // ),
             _ => {
-                println!("unimplemented: {generated:?}");
                 unimplemented!()
             }
         }

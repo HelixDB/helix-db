@@ -1,10 +1,25 @@
 use crate::errors::CliError;
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{Result, eyre};
-use std::fs;
-use std::path::Path;
+use helix_db::helixc::parser::types::HxFile;
+use std::{borrow::Cow, fs, path::Path};
 
 const IGNORES: [&str; 3] = ["target", ".git", ".helix"];
+
+/// Resolve the source text to use when rendering diagnostics.
+pub fn diagnostic_source<'a>(
+    filepath: &str,
+    files: &'a [HxFile],
+    fallback: &'a str,
+) -> Cow<'a, str> {
+    if let Some(src) = files.iter().find(|file| file.name == filepath) {
+        Cow::Borrowed(src.content.as_str())
+    } else if let Ok(contents) = fs::read_to_string(filepath) {
+        Cow::Owned(contents)
+    } else {
+        Cow::Borrowed(fallback)
+    }
+}
 
 /// Copy a directory recursively without any exclusions
 pub fn copy_dir_recursively(src: &Path, dst: &Path) -> Result<()> {
@@ -233,8 +248,7 @@ pub mod helixc_utils {
             types::{Content, HxFile, Source},
         },
     };
-    use std::fs;
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     /// Collect all .hx files from queries directory and subdirectories
     pub fn collect_hx_files(root: &Path, queries_dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
@@ -302,13 +316,14 @@ pub mod helixc_utils {
     }
 
     /// Analyze source for validation (similar to build.rs)
-    pub fn analyze_source(source: Source) -> Result<GeneratedSource> {
+    pub fn analyze_source(source: Source, files: &[HxFile]) -> Result<GeneratedSource> {
         let (diagnostics, generated_source) =
             analyze(&source).map_err(|e| eyre::eyre!("Analysis error: {}", e))?;
 
         if !diagnostics.is_empty() {
             // Format diagnostics properly using the helix-db pretty printer
-            let formatted_diagnostics = format_diagnostics(&diagnostics, &generated_source.src);
+            let formatted_diagnostics =
+                format_diagnostics(&diagnostics, &generated_source.src, files);
             return Err(eyre::eyre!(
                 "Compilation failed with {} error(s):\n\n{}",
                 diagnostics.len(),
@@ -323,6 +338,7 @@ pub mod helixc_utils {
     fn format_diagnostics(
         diagnostics: &[helix_db::helixc::analyzer::diagnostic::Diagnostic],
         src: &str,
+        files: &[HxFile],
     ) -> String {
         let mut output = String::new();
         for diagnostic in diagnostics {
@@ -332,7 +348,8 @@ pub mod helixc_utils {
                 .clone()
                 .unwrap_or("queries.hx".to_string());
 
-            output.push_str(&diagnostic.render(src, &filepath));
+            let snippet_src = super::diagnostic_source(&filepath, files, src);
+            output.push_str(&diagnostic.render(snippet_src.as_ref(), &filepath));
             output.push('\n');
         }
         output

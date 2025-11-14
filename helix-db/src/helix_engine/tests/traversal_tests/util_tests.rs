@@ -25,7 +25,7 @@ use crate::{
 use heed3::RoTxn;
 use tempfile::TempDir;
 use bumpalo::Bump;
-fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
+fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().to_str().unwrap();
     let storage = HelixGraphStorage::new(
@@ -34,26 +34,26 @@ fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
         Default::default(),
     )
     .unwrap();
-    (Arc::new(storage), temp_dir)
+    (temp_dir, Arc::new(storage))
 }
 
 #[test]
 fn test_order_node_by_asc() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let node = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 30 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 20 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 10 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -61,7 +61,7 @@ fn test_order_node_by_asc() {
     let traversal = G::new(&storage, &txn, &arena)
         .n_from_type("person")
         .order_by_asc("age")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 3);
     assert_eq!(traversal[0].id(), node3.id());
@@ -71,21 +71,21 @@ fn test_order_node_by_asc() {
 
 #[test]
 fn test_order_node_by_desc() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let node = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 30 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 20 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 10 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -93,7 +93,7 @@ fn test_order_node_by_desc() {
     let traversal = G::new(&storage, &txn, &arena)
         .n_from_type("person")
         .order_by_desc("age")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 3);
     assert_eq!(traversal[0].id(), node.id());
@@ -103,21 +103,21 @@ fn test_order_node_by_desc() {
 
 #[test]
 fn test_order_edge_by_asc() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let node = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 30 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 20 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 10 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let edge = G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
@@ -127,7 +127,7 @@ fn test_order_edge_by_asc() {
             node2.id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let edge2 = G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
@@ -137,7 +137,7 @@ fn test_order_edge_by_asc() {
             node2.id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -146,7 +146,7 @@ fn test_order_edge_by_asc() {
         .n_from_type("person")
         .out_e("knows")
         .order_by_asc("since")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 2);
     assert_eq!(traversal[0].id(), edge.id());
@@ -155,21 +155,21 @@ fn test_order_edge_by_asc() {
 
 #[test]
 fn test_order_edge_by_desc() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let node = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 30 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 20 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 10 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let edge = G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
@@ -179,7 +179,7 @@ fn test_order_edge_by_desc() {
             node2.id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let edge2 = G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
@@ -189,7 +189,7 @@ fn test_order_edge_by_desc() {
             node2.id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -198,7 +198,7 @@ fn test_order_edge_by_desc() {
         .n_from_type("person")
         .out_e("knows")
         .order_by_desc("since")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 2);
     assert_eq!(traversal[0].id(), edge2.id());
@@ -207,22 +207,22 @@ fn test_order_edge_by_desc() {
 
 #[test]
 fn test_order_vector_by_asc() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
     type FnTy = fn(&HVector, &RoTxn) -> bool;
 
     let vector = G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", props_option(&arena, props! { "age" => 30 }))
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let vector2 = G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", props_option(&arena, props! { "age" => 20 }))
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let vector3 = G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", props_option(&arena, props! { "age" => 10 }))
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -230,7 +230,7 @@ fn test_order_vector_by_asc() {
     let traversal = G::new(&storage, &txn, &arena)
         .search_v::<FnTy, _>(&[1.0, 2.0, 3.0], 10, "vector", None)
         .order_by_asc("age")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 3);
     assert_eq!(traversal[0].id(), vector3.id());
@@ -240,22 +240,22 @@ fn test_order_vector_by_asc() {
 
 #[test]
 fn test_order_vector_by_desc() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
     type FnTy = fn(&HVector, &RoTxn) -> bool;
 
     let vector = G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", props_option(&arena, props! { "age" => 30 }))
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let vector2 = G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", props_option(&arena, props! { "age" => 20 }))
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let vector3 = G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<FnTy>(&[1.0, 2.0, 3.0], "vector", props_option(&arena, props! { "age" => 10 }))
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -263,7 +263,7 @@ fn test_order_vector_by_desc() {
     let traversal = G::new(&storage, &txn, &arena)
         .search_v::<FnTy, _>(&[1.0, 2.0, 3.0], 10, "vector", None)
         .order_by_desc("age")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 3);
     assert_eq!(traversal[0].id(), vector.id());
@@ -273,21 +273,21 @@ fn test_order_vector_by_desc() {
 
 #[test]
 fn test_dedup() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
     let node = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 30 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 20 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let node3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", props_option(&arena, props! { "age" => 10 }), None)
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let _edge = G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
@@ -297,7 +297,7 @@ fn test_dedup() {
             node2.id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     let _edge2 = G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
@@ -307,7 +307,7 @@ fn test_dedup() {
             node2.id(),
             false,
         )
-        .collect_to_obj();
+        .collect_to_obj().unwrap();
 
     txn.commit().unwrap();
 
@@ -315,7 +315,7 @@ fn test_dedup() {
     let traversal = G::new(&storage, &txn, &arena)
         .n_from_type("person")
         .out_node("knows")
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 2);
 
@@ -323,7 +323,7 @@ fn test_dedup() {
         .n_from_type("person")
         .out_node("knows")
         .dedup()
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(traversal.len(), 1);
     assert_eq!(traversal[0].id(), node2.id());

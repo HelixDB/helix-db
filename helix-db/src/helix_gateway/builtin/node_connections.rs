@@ -32,6 +32,7 @@ pub async fn node_connections_handler(
     let mut req = protocol::request::Request {
         name: "node_connections".to_string(),
         req_type: RequestType::Query,
+        api_key_hash: None,
         body: axum::body::Bytes::new(),
         in_fmt: protocol::Format::default(),
         out_fmt: protocol::Format::default(),
@@ -57,6 +58,7 @@ pub async fn node_connections_handler(
 pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     let db = Arc::clone(&input.graph.storage);
     let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
+    let arena = bumpalo::Bump::new();
 
     let node_id_str = if !input.request.body.is_empty() {
         match sonic_rs::from_slice::<sonic_rs::Value>(&input.request.body) {
@@ -92,13 +94,12 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
         .filter_map(|result| match result {
             Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                 Ok((edge_id, from_node)) => {
-                    if connected_node_ids.insert(from_node) {
-                        if let Ok(node) = db.get_node(&txn, &from_node) {
+                    if connected_node_ids.insert(from_node)
+                        && let Ok(node) = db.get_node(&txn, &from_node, &arena) {
                             connected_nodes.push(TraversalValue::Node(node));
                         }
-                    }
 
-                    match db.get_edge(&txn, &edge_id) {
+                    match db.get_edge(&txn, &edge_id, &arena) {
                         Ok(edge) => Some(TraversalValue::Edge(edge)),
                         Err(_) => None,
                     }
@@ -115,13 +116,12 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
         .filter_map(|result| match result {
             Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                 Ok((edge_id, to_node)) => {
-                    if connected_node_ids.insert(to_node) {
-                        if let Ok(node) = db.get_node(&txn, &to_node) {
+                    if connected_node_ids.insert(to_node)
+                        && let Ok(node) = db.get_node(&txn, &to_node, &arena) {
                             connected_nodes.push(TraversalValue::Node(node));
                         }
-                    }
 
-                    match db.get_edge(&txn, &edge_id) {
+                    match db.get_edge(&txn, &edge_id, &arena) {
                         Ok(edge) => Some(TraversalValue::Edge(edge)),
                         Err(_) => None,
                     }
@@ -139,11 +139,11 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
                 let id_str = ID::from(node.id).stringify();
                 let mut node_json = json!({
                     "id": id_str.clone(),
-                    "label": node.label(),
+                    "label": node.label,
                     "title": id_str
                 });
                 if let Some(properties) = &node.properties {
-                    for (key, value) in properties {
+                    for (key, value) in properties.iter() {
                         node_json[key] = sonic_rs::to_value(&value.inner_stringify())
                             .unwrap_or_else(|_| sonic_rs::Value::from(""));
                     }
@@ -163,7 +163,7 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
                     "id": ID::from(edge.id).stringify(),
                     "from_node": ID::from(edge.from_node).stringify(),
                     "to_node": ID::from(edge.to_node).stringify(),
-                    "label": edge.label.as_str()
+                    "label": edge.label
                 }))
             } else {
                 None
@@ -179,7 +179,7 @@ pub fn node_connections_inner(input: HandlerInput) -> Result<protocol::Response,
                     "id": ID::from(edge.id).stringify(),
                     "from_node": ID::from(edge.from_node).stringify(),
                     "to_node": ID::from(edge.to_node).stringify(),
-                    "label": edge.label.as_str()
+                    "label": edge.label
                 }))
             } else {
                 None
@@ -211,7 +211,6 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use axum::body::Bytes;
-    use crate::helix_engine::traversal_core::traversal_value::Traversable;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
@@ -221,7 +220,7 @@ mod tests {
                 ops::{
                     g::G,
                     source::{
-                        add_e::{AddEAdapter, EdgeType},
+                        add_e::AddEAdapter,
                         add_n::AddNAdapter,
                     },
                 },
@@ -230,6 +229,7 @@ mod tests {
         protocol::{request::Request, request::RequestType, Format},
         helix_gateway::router::router::HandlerInput,
         utils::id::ID,
+        helixc::generator::traversal_steps::EdgeType,
     };
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
@@ -245,21 +245,22 @@ mod tests {
     }
 
     #[test]
-    fn test_node_connections_with_outgoing() {
+    fn test_node_connections_with_outgoing() -> Result<(), Box<dyn std::error::Error>> {
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", None, None)
-            .collect_to_obj();
+        let node1 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), None, None)
+            .collect_to_obj()?;
 
-        let node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", None, None)
-            .collect_to_obj();
+        let node2 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), None, None)
+            .collect_to_obj()?;
 
-        let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
-            .collect_to_obj();
+        let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_edge(arena.alloc_str("knows"), None, node1.id(), node2.id(), false)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
@@ -269,6 +270,7 @@ mod tests {
         let request = Request {
             name: "node_connections".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -287,24 +289,26 @@ mod tests {
         let body_str = String::from_utf8(response.body).unwrap();
         assert!(body_str.contains("outgoing_edges"));
         assert!(body_str.contains("connected_nodes"));
+        Ok(())
     }
 
     #[test]
-    fn test_node_connections_with_incoming() {
+    fn test_node_connections_with_incoming() -> Result<(), Box<dyn std::error::Error>> {
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", None, None)
-            .collect_to_obj();
+        let node1 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), None, None)
+            .collect_to_obj()?;
 
-        let node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", None, None)
-            .collect_to_obj();
+        let node2 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), None, None)
+            .collect_to_obj()?;
 
-        let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
-            .collect_to_obj();
+        let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_edge(arena.alloc_str("knows"), None, node1.id(), node2.id(), false)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
@@ -314,6 +318,7 @@ mod tests {
         let request = Request {
             name: "node_connections".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -331,16 +336,18 @@ mod tests {
         let response = result.unwrap();
         let body_str = String::from_utf8(response.body).unwrap();
         assert!(body_str.contains("incoming_edges"));
+        Ok(())
     }
 
     #[test]
-    fn test_node_connections_no_connections() {
+    fn test_node_connections_no_connections() -> Result<(), Box<dyn std::error::Error>> {
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", None, None)
-            .collect_to_obj();
+        let node = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), None, None)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
@@ -350,6 +357,7 @@ mod tests {
         let request = Request {
             name: "node_connections".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -369,6 +377,7 @@ mod tests {
         assert!(body_str.contains("connected_nodes"));
         assert!(body_str.contains("incoming_edges"));
         assert!(body_str.contains("outgoing_edges"));
+        Ok(())
     }
 
     #[test]
@@ -380,6 +389,7 @@ mod tests {
         let request = Request {
             name: "node_connections".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -402,6 +412,7 @@ mod tests {
         let request = Request {
             name: "node_connections".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,

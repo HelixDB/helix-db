@@ -141,6 +141,7 @@ fn test_handler_invocation_success() {
         request: Request {
             name: "test".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -165,6 +166,7 @@ fn test_handler_invocation_error() {
         request: Request {
             name: "error".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -188,6 +190,7 @@ fn test_handler_invocation_echo() {
         request: Request {
             name: "test_path".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -218,6 +221,7 @@ fn test_handler_input_creation() {
         request: Request {
             name: "test".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -237,6 +241,7 @@ fn test_handler_input_with_body() {
         request: Request {
             name: "query".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(body_data.clone()),
             in_fmt: Format::Json,
             out_fmt: Format::Json,

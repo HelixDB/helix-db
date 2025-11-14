@@ -5,7 +5,7 @@ use crate::{
         types::{
             Assignment, BM25Search, Embed, EvaluatesToNumber, EvaluatesToNumberType,
             EvaluatesToString, ExistsExpression, Expression, ExpressionType, ForLoop, ForLoopVars,
-            SearchVector, ValueType, VectorData,
+            MathFunction, MathFunctionCall, SearchVector, ValueType, VectorData,
         },
         utils::{PairTools, PairsTools},
     },
@@ -136,6 +136,10 @@ impl HelixParser {
             Rule::bm25_search => Ok(Expression {
                 loc: pair.loc(),
                 expr: ExpressionType::BM25Search(self.parse_bm25_search(pair)?),
+            }),
+            Rule::math_function_call => Ok(Expression {
+                loc: pair.loc(),
+                expr: ExpressionType::MathFunctionCall(self.parse_math_function_call(pair)?),
             }),
             _ => Err(ParserError::from(format!(
                 "Unexpected expression type: {:?}",
@@ -487,6 +491,178 @@ impl HelixParser {
             k,
             pre_filter,
         })
+    }
+
+    pub(super) fn parse_math_function_call(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<MathFunctionCall, ParserError> {
+        let loc = pair.loc();
+        let mut inner = pair.into_inner();
+
+        // Parse function name
+        let function_name_pair = inner
+            .next()
+            .ok_or_else(|| ParserError::from("Missing function name"))?;
+        let function_name = function_name_pair.as_str();
+
+        // Map function name to MathFunction enum
+        let function = match function_name {
+            "ADD" => MathFunction::Add,
+            "SUB" => MathFunction::Sub,
+            "MUL" => MathFunction::Mul,
+            "DIV" => MathFunction::Div,
+            "POW" => MathFunction::Pow,
+            "MOD" => MathFunction::Mod,
+            "ABS" => MathFunction::Abs,
+            "SQRT" => MathFunction::Sqrt,
+            "LN" => MathFunction::Ln,
+            "LOG10" => MathFunction::Log10,
+            "LOG" => MathFunction::Log,
+            "EXP" => MathFunction::Exp,
+            "CEIL" => MathFunction::Ceil,
+            "FLOOR" => MathFunction::Floor,
+            "ROUND" => MathFunction::Round,
+            "SIN" => MathFunction::Sin,
+            "COS" => MathFunction::Cos,
+            "TAN" => MathFunction::Tan,
+            "ASIN" => MathFunction::Asin,
+            "ACOS" => MathFunction::Acos,
+            "ATAN" => MathFunction::Atan,
+            "ATAN2" => MathFunction::Atan2,
+            "PI" => MathFunction::Pi,
+            "E" => MathFunction::E,
+            "MIN" => MathFunction::Min,
+            "MAX" => MathFunction::Max,
+            "SUM" => MathFunction::Sum,
+            "AVG" => MathFunction::Avg,
+            "COUNT" => MathFunction::Count,
+            _ => {
+                return Err(ParserError::from(format!(
+                    "Unknown mathematical function: {}",
+                    function_name
+                )))
+            }
+        };
+
+        // Parse arguments (if any)
+        let mut args = Vec::new();
+        if let Some(args_pair) = inner.next() {
+            // args_pair is the function_args rule
+            for arg_pair in args_pair.into_inner() {
+                // Each arg_pair is a math_expression
+                args.push(self.parse_math_expression(arg_pair)?);
+            }
+        }
+
+        // Validate arity
+        let expected_arity = function.arity();
+        let actual_arity = args.len();
+        if expected_arity != actual_arity {
+            return Err(ParserError::from(format!(
+                "Function {} expects {} argument(s), but got {}",
+                function_name, expected_arity, actual_arity
+            )));
+        }
+
+        Ok(MathFunctionCall {
+            function,
+            args,
+            loc,
+        })
+    }
+
+    pub(super) fn parse_math_expression(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<Expression, ParserError> {
+        // math_expression can be: math_function_call | evaluates_to_number | anonymous_traversal
+        let inner = pair.try_inner_next()?;
+
+        match inner.as_rule() {
+            Rule::math_function_call => Ok(Expression {
+                loc: inner.loc(),
+                expr: ExpressionType::MathFunctionCall(self.parse_math_function_call(inner)?),
+            }),
+            Rule::evaluates_to_number => {
+                // evaluates_to_number is a compound rule, unwrap and parse its contents
+                let inner_inner = inner.try_inner_next()?;
+                match inner_inner.as_rule() {
+                    Rule::math_function_call => Ok(Expression {
+                        loc: inner_inner.loc(),
+                        expr: ExpressionType::MathFunctionCall(self.parse_math_function_call(inner_inner)?),
+                    }),
+                    Rule::float => inner_inner
+                        .as_str()
+                        .parse()
+                        .map(|f| Expression {
+                            loc: inner_inner.loc(),
+                            expr: ExpressionType::FloatLiteral(f),
+                        })
+                        .map_err(|_| ParserError::from("Invalid float literal")),
+                    Rule::integer => inner_inner
+                        .as_str()
+                        .parse()
+                        .map(|i| Expression {
+                            loc: inner_inner.loc(),
+                            expr: ExpressionType::IntegerLiteral(i),
+                        })
+                        .map_err(|_| ParserError::from("Invalid integer literal")),
+                    Rule::identifier => Ok(Expression {
+                        loc: inner_inner.loc(),
+                        expr: ExpressionType::Identifier(inner_inner.as_str().to_string()),
+                    }),
+                    Rule::traversal => Ok(Expression {
+                        loc: inner_inner.loc(),
+                        expr: ExpressionType::Traversal(Box::new(self.parse_traversal(inner_inner)?)),
+                    }),
+                    Rule::id_traversal => Ok(Expression {
+                        loc: inner_inner.loc(),
+                        expr: ExpressionType::Traversal(Box::new(self.parse_traversal(inner_inner)?)),
+                    }),
+                    _ => Err(ParserError::from(format!(
+                        "Unexpected evaluates_to_number type: {:?}",
+                        inner_inner.as_rule()
+                    ))),
+                }
+            }
+            Rule::float => inner
+                .as_str()
+                .parse()
+                .map(|f| Expression {
+                    loc: inner.loc(),
+                    expr: ExpressionType::FloatLiteral(f),
+                })
+                .map_err(|_| ParserError::from("Invalid float literal")),
+            Rule::integer => inner
+                .as_str()
+                .parse()
+                .map(|i| Expression {
+                    loc: inner.loc(),
+                    expr: ExpressionType::IntegerLiteral(i),
+                })
+                .map_err(|_| ParserError::from("Invalid integer literal")),
+            Rule::identifier => Ok(Expression {
+                loc: inner.loc(),
+                expr: ExpressionType::Identifier(inner.as_str().to_string()),
+            }),
+            Rule::traversal => Ok(Expression {
+                loc: inner.loc(),
+                expr: ExpressionType::Traversal(Box::new(self.parse_traversal(inner)?)),
+            }),
+            Rule::id_traversal => Ok(Expression {
+                loc: inner.loc(),
+                expr: ExpressionType::Traversal(Box::new(self.parse_traversal(inner)?)),
+            }),
+            Rule::anonymous_traversal => Ok(Expression {
+                loc: inner.loc(),
+                expr: ExpressionType::Traversal(Box::new(self.parse_anon_traversal(inner)?)),
+            }),
+            _ => Err(ParserError::from(format!(
+                "Unexpected math expression type: {:?}",
+                inner.as_rule()
+            ))),
+        }
     }
 }
 

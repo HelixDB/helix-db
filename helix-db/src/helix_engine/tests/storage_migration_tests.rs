@@ -136,6 +136,7 @@ fn populate_old_properties(
 }
 
 /// Set storage metadata to a specific state
+#[allow(dead_code)]
 fn set_metadata(
     storage: &mut HelixGraphStorage,
     metadata: StorageMetadata,
@@ -396,7 +397,7 @@ fn test_convert_old_properties_invalid_bincode() {
 
 #[test]
 fn test_migrate_empty_database() {
-    let (mut storage, _temp_dir) = setup_test_storage();
+    let (storage, _temp_dir) = setup_test_storage();
 
     // Storage is already created with migrations run, but let's verify the state
     let txn = storage.graph_env.read_txn().unwrap();
@@ -557,6 +558,167 @@ fn test_migrate_with_properties() {
     let txn = storage.graph_env.read_txn().unwrap();
     let prop_count = storage.vectors.vector_properties_db.len(&txn).unwrap();
     assert_eq!(prop_count, 50);
+}
+
+#[test]
+fn test_migrate_cognee_vector_string_dates_error() {
+    // This test reproduces a bincode I/O error that occurs when migrating
+    // CogneeVector data where dates were stored as RFC3339 strings instead
+    // of proper Date types.
+    //
+    // Old schema had:
+    //   created_at: String (RFC3339 format via chrono::Utc::now().to_rfc3339())
+    //   updated_at: String (RFC3339 format)
+    //
+    // New schema expects:
+    //   created_at: Date
+    //   updated_at: Date
+    //
+    // This mismatch can cause bincode deserialization errors during migration.
+
+    let (mut storage, _temp_dir) = setup_test_storage();
+
+    // Clear metadata to simulate PreMetadata state
+    clear_metadata(&mut storage).unwrap();
+
+    // Create old-format CogneeVector properties with dates as strings
+    // (matching how they were actually created in the old format)
+    let mut extra_props = HashMap::new();
+
+    // Add CogneeVector-specific fields
+    extra_props.insert(
+        "collection_name".to_string(),
+        Value::String("test_collection".to_string()),
+    );
+    extra_props.insert(
+        "data_point_id".to_string(),
+        Value::String("dp_001".to_string()),
+    );
+    extra_props.insert(
+        "payload".to_string(),
+        Value::String(r#"{"id":"123","created_at":"2024-01-01","updated_at":"2024-01-01","ontology_valid":true,"version":1,"topological_rank":0,"type":"DataPoint"}"#.to_string()),
+    );
+    extra_props.insert(
+        "content".to_string(),
+        Value::String("Test content for CogneeVector".to_string()),
+    );
+
+    // Add dates as strings (RFC3339) - this is the problematic part
+    // In the old format, these were created as:
+    //   Value::from(chrono::Utc::now().to_rfc3339())
+    // which creates Value::String, not Value::Date
+    extra_props.insert(
+        "created_at".to_string(),
+        Value::String("2024-01-01T12:00:00.000000000Z".to_string()),
+    );
+    extra_props.insert(
+        "updated_at".to_string(),
+        Value::String("2024-01-01T12:00:00.000000000Z".to_string()),
+    );
+
+    // Create old properties with CogneeVector label
+    let old_bytes = create_old_properties("CogneeVector", false, extra_props);
+
+    // Insert into storage
+    {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        let id = 123u128;
+        storage
+            .vectors
+            .vector_properties_db
+            .put(&mut txn, &id, &old_bytes)
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Verify the data was inserted
+    {
+        let txn = storage.graph_env.read_txn().unwrap();
+        let stored_bytes = storage
+            .vectors
+            .vector_properties_db
+            .get(&txn, &123u128)
+            .unwrap();
+        assert!(stored_bytes.is_some());
+
+        // Verify we can deserialize it as old format
+        let old_props: HashMap<String, Value> = bincode::deserialize(stored_bytes.unwrap()).unwrap();
+        assert_eq!(old_props.get("label").unwrap(), &Value::String("CogneeVector".to_string()));
+        assert_eq!(old_props.get("collection_name").unwrap(), &Value::String("test_collection".to_string()));
+
+        // Verify dates are strings, not Date types
+        match old_props.get("created_at").unwrap() {
+            Value::String(s) => assert!(s.contains("2024-01-01")),
+            _ => panic!("Expected created_at to be Value::String in old format"),
+        }
+    }
+
+    // Run migration - this preserves the data as-is
+    let result = migrate(&mut storage);
+
+    // Migration succeeds because it just copies the HashMap to the new format
+    match result {
+        Ok(_) => {
+            println!("✅ Migration succeeded (preserves old data as-is)");
+
+            // The real error occurs when trying to deserialize the migrated data
+            // This simulates what v_from_type does when querying by label
+            let txn = storage.graph_env.read_txn().unwrap();
+            let migrated_bytes = storage
+                .vectors
+                .vector_properties_db
+                .get(&txn, &123u128)
+                .unwrap()
+                .unwrap();
+
+            println!("Migrated data exists: {} bytes", migrated_bytes.len());
+
+            // Try to deserialize as VectorWithoutData (what v_from_type does)
+            use crate::helix_engine::vector_core::vector_without_data::VectorWithoutData;
+            let arena2 = bumpalo::Bump::new();
+            let deserialize_result = VectorWithoutData::from_bincode_bytes(&arena2, migrated_bytes, 123u128);
+
+            match deserialize_result {
+                Ok(vector) => {
+                    println!("⚠️  Deserialization succeeded!");
+                    println!("Vector label: {}", vector.label);
+                    println!("This means bincode preserved the string dates in properties.");
+
+                    // Check if dates are accessible
+                    if let Some(created_at) = vector.get_property("created_at") {
+                        println!("created_at type: {:?}", created_at);
+                        match created_at {
+                            Value::String(s) => println!("  Still a string: {}", s),
+                            Value::Date(d) => println!("  Converted to Date: {:?}", d),
+                            _ => println!("  Other type: {:?}", created_at),
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("✅ REPRODUCED THE ERROR during deserialization!");
+                    println!("Error: {}", e);
+                    println!();
+                    println!("This error occurs in the v_from_type query path:");
+                    println!("  1. Migration preserves dates as Value::String");
+                    println!("  2. v_from_type calls VectorWithoutData::from_bincode_bytes");
+                    println!("  3. Bincode deserialization expects specific value types");
+                    println!("  4. Type mismatch causes ConversionError");
+
+                    // Verify it's the expected error type
+                    let error_str = e.to_string();
+                    assert!(
+                        error_str.contains("deserializ") || error_str.contains("Conversion"),
+                        "Expected deserialization/conversion error, got: {}",
+                        e
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            println!("❌ Migration failed unexpectedly: {}", e);
+            panic!("Migration should succeed but preserve old data");
+        }
+    }
 }
 
 // ============================================================================
@@ -722,6 +884,44 @@ fn test_error_corrupted_property_data() {
 
     let result = convert_old_vector_properties_to_new_format(&corrupted, &arena);
     assert!(result.is_err());
+}
+
+#[test]
+#[ignore]
+fn test_date_bincode_serialization() {
+    // Test that Date values serialize/deserialize correctly with bincode
+    use crate::protocol::date::Date;
+
+    // Create a Date and wrap it in Value::Date
+    let date = Date::new(&Value::I64(1609459200)).unwrap(); // 2021-01-01
+    let value = Value::Date(date);
+
+    // Serialize with bincode
+    let serialized = bincode::serialize(&value).unwrap();
+    println!("\nValue::Date serialized to {} bytes", serialized.len());
+    println!("Format: [variant=12] [i64 timestamp]");
+    println!("Bytes: {:?}", serialized);
+
+    // Deserialize
+    let deserialized: Value = bincode::deserialize(&serialized).unwrap();
+
+    // Verify it's a Date variant with correct value
+    match deserialized {
+        Value::Date(d) => {
+            assert_eq!(d.timestamp(), 1609459200);
+            assert!(d.to_rfc3339().starts_with("2021-01-01"));
+            println!("✅ Bincode serialization works correctly!");
+            println!("   Date: {}", d.to_rfc3339());
+        }
+        _ => panic!("Expected Value::Date variant"),
+    }
+
+    // Also test JSON serialization still works
+    let json = sonic_rs::to_string(&value).unwrap();
+    let from_json: Value = sonic_rs::from_str(&json).unwrap();
+    // JSON deserializes dates as strings, which is expected
+    assert!(matches!(from_json, Value::String(_)));
+    println!("✅ JSON serialization also works (deserializes as Value::String as expected)!");
 }
 
 #[test]

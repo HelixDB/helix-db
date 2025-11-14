@@ -1,8 +1,10 @@
 use crate::config::{BuildMode, InstanceInfo};
 use crate::project::ProjectContext;
-use crate::utils::print_status;
+use crate::utils::{print_confirm, print_status, print_warning};
 use eyre::{Result, eyre};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 
 pub struct DockerManager<'a> {
     project: &'a ProjectContext,
@@ -105,6 +107,112 @@ impl<'a> DockerManager<'a> {
         Ok(output)
     }
 
+    /// Detect the current operating system platform
+    fn detect_platform() -> &'static str {
+        #[cfg(target_os = "macos")]
+        return "macos";
+
+        #[cfg(target_os = "linux")]
+        return "linux";
+
+        #[cfg(target_os = "windows")]
+        return "windows";
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        return "unknown";
+    }
+
+    /// Start the Docker daemon based on the platform
+    fn start_docker_daemon() -> Result<()> {
+        let platform = Self::detect_platform();
+
+        match platform {
+            "macos" => {
+                print_status("DOCKER", "Starting Docker Desktop for macOS...");
+                Command::new("open")
+                    .args(["-a", "Docker"])
+                    .output()
+                    .map_err(|e| eyre!("Failed to start Docker Desktop: {}", e))?;
+            }
+            "linux" => {
+                print_status("DOCKER", "Attempting to start Docker daemon on Linux...");
+                // Try systemctl first, then service command as fallback
+                let systemctl_result = Command::new("systemctl").args(["start", "docker"]).output();
+
+                match systemctl_result {
+                    Ok(output) if output.status.success() => {
+                        // systemctl succeeded
+                    }
+                    _ => {
+                        // Try service command as fallback
+                        let service_result = Command::new("service")
+                            .args(["docker", "start"])
+                            .output()
+                            .map_err(|e| eyre!("Failed to start Docker daemon: {}", e))?;
+
+                        if !service_result.status.success() {
+                            let stderr = String::from_utf8_lossy(&service_result.stderr);
+                            return Err(eyre!("Failed to start Docker daemon: {}", stderr));
+                        }
+                    }
+                }
+            }
+            "windows" => {
+                print_status("DOCKER", "Starting Docker Desktop for Windows...");
+                // Try Docker Desktop CLI (4.37+) first
+                let cli_result = Command::new("docker")
+                    .args(["desktop", "start"])
+                    .output();
+
+                match cli_result {
+                    Ok(output) if output.status.success() => {
+                        // Modern Docker Desktop CLI worked
+                    }
+                    _ => {
+                        // Fallback to direct executable path for older versions
+                        // Note: Empty string "" is required as window title parameter
+                        Command::new("cmd")
+                            .args(["/c", "start", "", "\"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\""])
+                            .output()
+                            .map_err(|e| eyre!("Failed to start Docker Desktop: {}", e))?;
+                    }
+                }
+            }
+            _ => {
+                return Err(eyre!("Unsupported platform for auto-starting Docker"));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Wait for Docker daemon to be ready
+    fn wait_for_docker(timeout_secs: u64) -> Result<()> {
+        print_status("DOCKER", "Waiting for Docker daemon to start...");
+
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        while start.elapsed() < timeout {
+            // Check if Docker daemon is responding
+            let output = Command::new("docker").args(["info"]).output();
+
+            if let Ok(output) = output
+                && output.status.success()
+            {
+                print_status("DOCKER", "Docker daemon is now running");
+                return Ok(());
+            }
+
+            // Wait a bit before retrying
+            thread::sleep(Duration::from_millis(500));
+        }
+
+        Err(eyre!(
+            "Timeout waiting for Docker daemon to start. Please start Docker manually and try again."
+        ))
+    }
+
     /// Check if Docker is installed and running
     pub fn check_docker_available() -> Result<()> {
         let output = Command::new("docker")
@@ -123,7 +231,33 @@ impl<'a> DockerManager<'a> {
             .map_err(|_| eyre!("Failed to check Docker daemon status"))?;
 
         if !output.status.success() {
-            return Err(eyre!("Docker daemon is not running. Please start Docker."));
+            // Docker daemon is not running - prompt user
+            let should_start =
+                print_confirm("Docker daemon is not running. Would you like to start Docker?")
+                    .unwrap_or(false);
+
+            if should_start {
+                // Try to start Docker
+                Self::start_docker_daemon()?;
+
+                // Wait for Docker to be ready
+                Self::wait_for_docker(15)?;
+
+                // Verify Docker is now running
+                let verify_output = Command::new("docker")
+                    .args(["info"])
+                    .output()
+                    .map_err(|_| eyre!("Failed to verify Docker daemon status"))?;
+
+                if !verify_output.status.success() {
+                    return Err(eyre!(
+                        "Docker daemon failed to start. Please start Docker manually and try again."
+                    ));
+                }
+            } else {
+                print_warning("Docker daemon must be running to execute this command.");
+                return Err(eyre!("Docker daemon is not running. Please start Docker."));
+            }
         }
 
         Ok(())

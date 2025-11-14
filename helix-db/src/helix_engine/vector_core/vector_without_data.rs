@@ -5,7 +5,7 @@ use crate::{
 };
 use bincode::Options;
 use core::fmt;
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeMap};
 use std::fmt::Debug;
 // TODO: make this generic over the type of encoding (f32, f64, etc)
 // TODO: use const param to set dimension
@@ -42,13 +42,19 @@ impl<'arena> Serialize for VectorWithoutData<'arena> {
         if serializer.is_human_readable() {
             // Include id for JSON serialization
             let mut buffer = [0u8; 36];
-            let mut state = serializer.serialize_struct("VectorWithoutData", 6)?;
-            state.serialize_field("id", uuid_str_from_buf(self.id, &mut buffer))?;
-            state.serialize_field("label", self.label)?;
-            state.serialize_field("version", &self.version)?;
-            state.serialize_field("deleted", &self.deleted)?;
-            state.serialize_field("level", &self.level)?;
-            state.serialize_field("properties", &self.properties)?;
+            let mut state = serializer.serialize_map(Some(
+                6 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            ))?;
+            state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
+            state.serialize_entry("label", self.label)?;
+            state.serialize_entry("version", &self.version)?;
+            state.serialize_entry("deleted", &self.deleted)?;
+            state.serialize_entry("level", &self.level)?;
+            if let Some(properties) = &self.properties {
+                for (key, value) in properties.iter() {
+                    state.serialize_entry(key, value)?;
+                }
+            }
             state.end()
         } else {
             // Skip id for bincode serialization

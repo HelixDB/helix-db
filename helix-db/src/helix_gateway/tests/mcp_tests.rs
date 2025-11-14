@@ -53,15 +53,18 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -111,10 +114,12 @@ mod mcp_tests {
 
         let _ = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
         let _ = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -148,7 +153,8 @@ mod mcp_tests {
         for _ in 0..5 {
             let _ = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
                 .add_n("person", None, None)
-                .collect_to_obj();
+                .collect_to_obj()
+                .unwrap();
         }
         txn.commit().unwrap();
 
@@ -169,6 +175,7 @@ mod mcp_tests {
             name: "collect".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -276,15 +283,18 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -316,6 +326,7 @@ mod mcp_tests {
             name: "out_step".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -342,15 +353,18 @@ mod mcp_tests {
 
         let person1 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -372,6 +386,7 @@ mod mcp_tests {
             name: "in_step".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -397,15 +412,18 @@ mod mcp_tests {
 
         let person1 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -426,6 +444,7 @@ mod mcp_tests {
             name: "out_e_step".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -452,15 +471,18 @@ mod mcp_tests {
 
         let person1 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -481,6 +503,7 @@ mod mcp_tests {
             name: "in_e_step".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -507,7 +530,8 @@ mod mcp_tests {
         for _ in 0..3 {
             G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
                 .add_n("person", None, None)
-                .collect_to_obj();
+                .collect_to_obj()
+                .unwrap();
         }
 
         txn.commit().unwrap();
@@ -525,6 +549,7 @@ mod mcp_tests {
             name: "n_from_type".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -551,15 +576,18 @@ mod mcp_tests {
 
         let person1 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -576,6 +604,7 @@ mod mcp_tests {
             name: "e_from_type".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -610,7 +639,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n(
@@ -622,7 +652,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -644,6 +675,7 @@ mod mcp_tests {
             name: "filter_items".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -678,7 +710,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n(
@@ -690,7 +723,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -711,6 +745,7 @@ mod mcp_tests {
             name: "order_by".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -748,7 +783,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let bob = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n(
@@ -760,7 +796,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let charlie = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n(
@@ -772,15 +809,18 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, alice.id(), bob.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, bob.id(), charlie.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -830,15 +870,18 @@ mod mcp_tests {
 
         let alice = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let bob = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, alice.id(), bob.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -882,7 +925,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n(
@@ -894,7 +938,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -950,7 +995,8 @@ mod mcp_tests {
                     )),
                     None,
                 )
-                .collect_to_obj();
+                .collect_to_obj()
+                .unwrap();
         }
 
         txn.commit().unwrap();
@@ -1001,7 +1047,8 @@ mod mcp_tests {
                     )),
                     None,
                 )
-                .collect_to_obj();
+                .collect_to_obj()
+                .unwrap();
         }
 
         txn.commit().unwrap();
@@ -1043,23 +1090,28 @@ mod mcp_tests {
 
         let alice = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let bob = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let charlie = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, alice.id(), bob.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, bob.id(), charlie.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -1100,19 +1152,23 @@ mod mcp_tests {
 
         let person1 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         let person2 = G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n("person", None, None)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("knows", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_edge("likes", None, person1.id(), person2.id(), false)
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -1163,7 +1219,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
             .add_n(
@@ -1179,7 +1236,8 @@ mod mcp_tests {
                 )),
                 None,
             )
-            .collect_to_obj();
+            .collect_to_obj()
+            .unwrap();
 
         txn.commit().unwrap();
 
@@ -1198,6 +1256,7 @@ mod mcp_tests {
             name: "search_keyword".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1235,6 +1294,7 @@ mod mcp_tests {
             name: "search_keyword".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1276,6 +1336,7 @@ mod mcp_tests {
             name: "search_keyword".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1346,6 +1407,7 @@ mod mcp_tests {
             name: "search_vector".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1381,6 +1443,7 @@ mod mcp_tests {
             name: "search_vector".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1423,6 +1486,7 @@ mod mcp_tests {
             name: "search_vector".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1459,6 +1523,7 @@ mod mcp_tests {
             name: "search_vector_text".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1495,6 +1560,7 @@ mod mcp_tests {
             name: "search_vector_text".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
@@ -1537,6 +1603,7 @@ mod mcp_tests {
             name: "search_vector_text".to_string(),
             req_type: RequestType::MCP,
             body: request_body,
+            api_key_hash: None,
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };

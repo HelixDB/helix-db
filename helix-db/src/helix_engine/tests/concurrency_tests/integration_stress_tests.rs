@@ -1,3 +1,5 @@
+use bumpalo::Bump;
+use std::sync::atomic::{AtomicUsize, Ordering};
 /// Integration Stress Tests for HelixDB
 ///
 /// This test suite performs comprehensive stress testing across all major components
@@ -15,23 +17,18 @@
 /// - Long-running transactions with concurrent modifications
 /// - Rapid node/edge creation with immediate traversals
 /// - Vector index updates during concurrent searches
-
 use std::sync::{Arc, Barrier};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-use bumpalo::Bump;
 use tempfile::TempDir;
 
 use crate::helix_engine::storage_core::HelixGraphStorage;
 use crate::helix_engine::traversal_core::config::Config;
 use crate::helix_engine::traversal_core::ops::g::G;
-use crate::helix_engine::traversal_core::ops::source::{
-    add_n::AddNAdapter,
-    add_e::AddEAdapter,
-    n_from_id::NFromIdAdapter,
-};
 use crate::helix_engine::traversal_core::ops::out::out::OutAdapter;
+use crate::helix_engine::traversal_core::ops::source::{
+    add_e::AddEAdapter, add_n::AddNAdapter, n_from_id::NFromIdAdapter,
+};
 
 /// Setup storage with appropriate configuration for stress testing
 fn setup_stress_storage() -> (Arc<HelixGraphStorage>, TempDir) {
@@ -77,17 +74,19 @@ fn test_stress_mixed_read_write_operations() {
 
                 let id1 = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label1, None, None)
-                    .collect_to::<Vec<_>>()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 let id2 = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label2, None, None)
-                    .collect_to::<Vec<_>>()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_edge("connects", None, id1, id2, false)
-                    .collect_to_obj();
+                    .collect_to_obj().unwrap();
 
                 wtxn.commit().unwrap();
                 write_ops.fetch_add(1, Ordering::Relaxed);
@@ -125,8 +124,10 @@ fn test_stress_mixed_read_write_operations() {
     let total_writes = write_ops.load(Ordering::Relaxed);
     let total_reads = read_ops.load(Ordering::Relaxed);
 
-    println!("Stress test: {} writes, {} reads in {:?}",
-             total_writes, total_reads, duration);
+    println!(
+        "Stress test: {} writes, {} reads in {:?}",
+        total_writes, total_reads, duration
+    );
     println!("Thread counts: {:?}", counts);
 
     // Verify significant work was done
@@ -152,7 +153,8 @@ fn test_stress_rapid_graph_growth() {
                 let label = format!("root_{}", i);
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect_to::<Vec<_>>()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id()
             })
             .collect();
@@ -186,14 +188,15 @@ fn test_stress_rapid_graph_growth() {
                 let label = format!("w{}_n{}", writer_id, local_count);
                 let new_id = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect_to::<Vec<_>>()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 // Connect to random root
                 let root_idx = local_count % root_ids.len();
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_edge("child_of", None, root_ids[root_idx], new_id, false)
-                    .collect_to_obj();
+                    .collect_to_obj().unwrap();
 
                 wtxn.commit().unwrap();
                 write_count.fetch_add(1, Ordering::Relaxed);
@@ -220,7 +223,8 @@ fn test_stress_rapid_graph_growth() {
                     let _children = G::new(&storage, &rtxn, &arena)
                         .n_from_id(root_id)
                         .out_node("child_of")
-                        .collect_to::<Vec<_>>();
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
                     local_count += 1;
                 }
 
@@ -237,20 +241,29 @@ fn test_stress_rapid_graph_growth() {
     let total_writes = write_count.load(Ordering::Relaxed);
     let total_reads = read_count.load(Ordering::Relaxed);
 
-    println!("Rapid growth: {} writes, {} reads in {:?}", total_writes, total_reads, duration);
+    println!(
+        "Rapid growth: {} writes, {} reads in {:?}",
+        total_writes, total_reads, duration
+    );
 
     // Verify significant work done
     assert!(total_writes > 100, "Should create many nodes");
     assert!(total_reads > 100, "Should perform many traversals");
 
     // Verify graph integrity
-    let arena = Bump::new();
+    let _arena = Bump::new();
     let rtxn = storage.graph_env.read_txn().unwrap();
     let final_node_count = storage.nodes_db.len(&rtxn).unwrap();
     let final_edge_count = storage.edges_db.len(&rtxn).unwrap();
 
-    println!("Final: {} nodes, {} edges", final_node_count, final_edge_count);
-    assert!(final_node_count > 100, "Graph should have grown significantly");
+    println!(
+        "Final: {} nodes, {} edges",
+        final_node_count, final_edge_count
+    );
+    assert!(
+        final_node_count > 100,
+        "Graph should have grown significantly"
+    );
 }
 
 #[test]
@@ -286,7 +299,8 @@ fn test_stress_transaction_contention() {
                         let label = format!("t{}_n{}", thread_id, local_count);
                         G::new_mut(&storage, &arena, &mut wtxn)
                             .add_n(&label, None, None)
-                            .collect_to::<Vec<_>>();
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
 
                         wtxn.commit().unwrap();
                         success_count.fetch_add(1, Ordering::Relaxed);
@@ -308,14 +322,20 @@ fn test_stress_transaction_contention() {
 
     let total_success = success_count.load(Ordering::Relaxed);
 
-    println!("Transaction contention: {} successful writes in {:?}", total_success, duration);
+    println!(
+        "Transaction contention: {} successful writes in {:?}",
+        total_success, duration
+    );
     println!("Per thread: {:?}", per_thread_counts);
 
     // Verify all writes succeeded
     let rtxn = storage.graph_env.read_txn().unwrap();
     let final_count = storage.nodes_db.len(&rtxn).unwrap();
 
-    assert_eq!(final_count, total_success as u64, "All commits should be visible");
+    assert_eq!(
+        final_count, total_success as u64,
+        "All commits should be visible"
+    );
     assert!(total_success > 50, "Should handle significant contention");
 }
 
@@ -336,7 +356,8 @@ fn test_stress_long_running_transactions() {
             let label = format!("initial_{}", i);
             G::new_mut(&storage, &arena, &mut wtxn)
                 .add_n(&label, None, None)
-                .collect_to::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
         }
 
         wtxn.commit().unwrap();
@@ -362,7 +383,10 @@ fn test_stress_long_running_transactions() {
 
         // Should still see initial count (snapshot isolation)
         let final_count = storage_clone.nodes_db.len(&rtxn).unwrap();
-        assert_eq!(final_count, initial_count, "Long-lived txn should see consistent snapshot");
+        assert_eq!(
+            final_count, initial_count,
+            "Long-lived txn should see consistent snapshot"
+        );
 
         final_count
     }));
@@ -381,7 +405,8 @@ fn test_stress_long_running_transactions() {
                 let label = format!("w{}_n{}", writer_id, count);
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect_to::<Vec<_>>();
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
 
                 wtxn.commit().unwrap();
                 write_count.fetch_add(1, Ordering::Relaxed);
@@ -397,7 +422,10 @@ fn test_stress_long_running_transactions() {
 
     let total_writes = write_count.load(Ordering::Relaxed);
 
-    println!("Long txns: {} writes completed during long-lived read", total_writes);
+    println!(
+        "Long txns: {} writes completed during long-lived read",
+        total_writes
+    );
 
     // New transaction should see all writes
     let rtxn = storage.graph_env.read_txn().unwrap();
@@ -438,7 +466,8 @@ fn test_stress_memory_stability() {
                         let label = format!("iter{}_w{}_n{}", iteration, worker_id, count);
                         G::new_mut(&storage, &arena, &mut wtxn)
                             .add_n(&label, None, None)
-                            .collect_to::<Vec<_>>();
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
 
                         wtxn.commit().unwrap();
                     }
@@ -461,7 +490,10 @@ fn test_stress_memory_stability() {
         }
 
         let ops = op_count.load(Ordering::Relaxed);
-        println!("Memory stability iteration {}: {} ops in {:?}", iteration, ops, duration);
+        println!(
+            "Memory stability iteration {}: {} ops in {:?}",
+            iteration, ops, duration
+        );
     }
 
     // If we reach here without panic/OOM, memory is stable

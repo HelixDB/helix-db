@@ -108,7 +108,6 @@ impl From<GenRef<String>> for String {
             }
             _ => {
                 // For other ref types, try to use the inner value
-                eprintln!("Warning: Unexpected GenRef variant in String conversion: {value:?}");
                 "compile_error!(\"Unsupported GenRef variant in code generation\")".to_string()
             }
         }
@@ -119,10 +118,7 @@ impl From<IdType> for GenRef<String> {
         match value {
             IdType::Literal { value: s, .. } => GenRef::Literal(s),
             IdType::Identifier { value: s, .. } => GenRef::Id(s),
-            _ => {
-                eprintln!("Warning: Unexpected IdType variant in GenRef conversion: {value:?}");
-                GenRef::Unknown
-            }
+            _ => GenRef::Unknown,
         }
     }
 }

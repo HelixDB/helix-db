@@ -9,7 +9,6 @@ use tracing::info;
 
 use crate::helix_engine::storage_core::graph_visualization::GraphVisualization;
 use crate::helix_engine::types::GraphError;
-use crate::helix_engine::vector_core::hnsw::HNSW;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
 use crate::protocol::{self, request::RequestType};
@@ -42,6 +41,7 @@ pub async fn nodes_edges_handler(
     let mut req = protocol::request::Request {
         name: "nodes_edges".to_string(),
         req_type: RequestType::Query,
+        api_key_hash: None,
         body: axum::body::Bytes::new(),
         in_fmt: protocol::Format::default(),
         out_fmt: protocol::Format::default(),
@@ -68,6 +68,7 @@ pub async fn nodes_edges_handler(
 pub fn nodes_edges_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     let db = Arc::clone(&input.graph.storage);
     let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
+    let arena = bumpalo::Bump::new();
 
     let (limit, node_label) = if !input.request.body.is_empty() {
         match sonic_rs::from_slice::<sonic_rs::Value>(&input.request.body) {
@@ -90,14 +91,14 @@ pub fn nodes_edges_inner(input: HandlerInput) -> Result<protocol::Response, Grap
     let json_result = if limit.is_some() {
         db.nodes_edges_to_json(&txn, limit, node_label)?
     } else {
-        get_all_nodes_edges_json(&db, &txn, node_label)?
+        get_all_nodes_edges_json(&db, &txn, node_label, &arena)?
     };
 
     let db_stats = db.get_db_stats_json(&txn)?;
 
     let vectors_result = db
         .vectors
-        .get_all_vectors(&txn, None)
+        .get_all_vectors(&txn, None, &arena)
         .map(|vecs| {
             let vectors_json: Vec<sonic_rs::Value> = vecs
                 .iter()
@@ -128,6 +129,7 @@ fn get_all_nodes_edges_json(
     db: &Arc<crate::helix_engine::storage_core::HelixGraphStorage>,
     txn: &RoTxn,
     node_label: Option<String>,
+    arena: &bumpalo::Bump,
 ) -> Result<String, GraphError> {
     use sonic_rs::json;
 
@@ -144,14 +146,13 @@ fn get_all_nodes_edges_json(
         });
 
         if let Some(prop) = &node_label {
-            let node = Node::decode_node(value, id)?;
-            json_node["label"] = json!(node.label());
-            if let Some(props) = node.properties {
-                if let Some(prop_value) = props.get(prop) {
+            let node = Node::from_bincode_bytes(id, value, arena)?;
+            json_node["label"] = json!(node.label);
+            if let Some(props) = node.properties
+                && let Some(prop_value) = props.get(prop) {
                     json_node["label"] = sonic_rs::to_value(&prop_value.inner_stringify())
                         .unwrap_or_else(|_| sonic_rs::Value::from(""));
                 }
-            }
         }
         nodes.push(json_node);
     }
@@ -161,7 +162,7 @@ fn get_all_nodes_edges_json(
     let edge_iter = db.edges_db.iter(txn)?;
     for result in edge_iter {
         let (id, value) = result?;
-        let edge = Edge::decode_edge(value, id)?;
+        let edge = Edge::from_bincode_bytes(id, value, arena)?;
         let id_str = ID::from(id).stringify();
 
         edges.push(json!({
@@ -192,7 +193,6 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use axum::body::Bytes;
-    use crate::helix_engine::traversal_core::traversal_value::Traversable;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
@@ -202,13 +202,14 @@ mod tests {
                 ops::{
                     g::G,
                     source::{
-                        add_e::{AddEAdapter, EdgeType},
+                        add_e::AddEAdapter,
                         add_n::AddNAdapter,
                     },
                 },
             },
         },
         protocol::{request::Request, request::RequestType, Format},
+        helixc::generator::traversal_steps::EdgeType,
     };
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
@@ -229,6 +230,7 @@ mod tests {
         let request = Request {
             name: "nodes_edges".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -253,29 +255,46 @@ mod tests {
     }
 
     #[test]
-    fn test_nodes_edges_with_data() {
+    fn test_nodes_edges_with_data() -> Result<(), Box<dyn std::error::Error>> {
         use crate::protocol::value::Value;
+        use crate::utils::properties::ImmutablePropertiesMap;
 
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let node1 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", Some(vec![("name".to_string(), Value::String("Alice".to_string()))]), None)
-            .collect_to_obj();
+        let props1 = vec![("name", Value::String("Alice".to_string()))];
+        let props_map1 = ImmutablePropertiesMap::new(
+            props1.len(),
+            props1.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            &arena,
+        );
 
-        let node2 = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", Some(vec![("name".to_string(), Value::String("Bob".to_string()))]), None)
-            .collect_to_obj();
+        let node1 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), Some(props_map1), None)
+            .collect_to_obj()?;
 
-        let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_e("knows", None, node1.id(), node2.id(), false, EdgeType::Node)
-            .collect_to_obj();
+        let props2 = vec![("name", Value::String("Bob".to_string()))];
+        let props_map2 = ImmutablePropertiesMap::new(
+            props2.len(),
+            props2.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            &arena,
+        );
+
+        let node2 = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), Some(props_map2), None)
+            .collect_to_obj()?;
+
+        let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_edge(arena.alloc_str("knows"), None, node1.id(), node2.id(), false)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
         let request = Request {
             name: "nodes_edges".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -294,28 +313,38 @@ mod tests {
         let body_str = String::from_utf8(response.body).unwrap();
         assert!(body_str.contains("\"nodes\""));
         assert!(body_str.contains("\"edges\""));
+        Ok(())
     }
 
     #[test]
-    fn test_nodes_edges_with_limit() {
+    fn test_nodes_edges_with_limit() -> Result<(), Box<dyn std::error::Error>> {
         use crate::protocol::value::Value;
+        use crate::utils::properties::ImmutablePropertiesMap;
 
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
         let mut nodes = Vec::new();
         for i in 0..10 {
-            let node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-                .add_n("person", Some(vec![("index".to_string(), Value::I64(i))]), None)
-                .collect_to_obj();
+            let props = vec![("index", Value::I64(i))];
+            let props_map = ImmutablePropertiesMap::new(
+                props.len(),
+                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                &arena,
+            );
+
+            let node = G::new_mut(&engine.storage, &arena, &mut txn)
+                .add_n(arena.alloc_str("person"), Some(props_map), None)
+                .collect_to_obj()?;
             nodes.push(node);
         }
 
         // Add some edges to satisfy the nodes_edges_to_json method
         for i in 0..5 {
-            let _edge = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-                .add_e("connects", None, nodes[i].id(), nodes[i+1].id(), false, EdgeType::Node)
-                .collect_to_obj();
+            let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
+                .add_edge(arena.alloc_str("connects"), None, nodes[i].id(), nodes[i+1].id(), false)
+                .collect_to_obj()?;
         }
 
         txn.commit().unwrap();
@@ -324,6 +353,7 @@ mod tests {
         let request = Request {
             name: "nodes_edges".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -340,18 +370,28 @@ mod tests {
             eprintln!("Error in test_nodes_edges_with_limit: {:?}", e);
         }
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_nodes_edges_with_node_label() {
+    fn test_nodes_edges_with_node_label() -> Result<(), Box<dyn std::error::Error>> {
         use crate::protocol::value::Value;
+        use crate::utils::properties::ImmutablePropertiesMap;
 
         let (engine, _temp_dir) = setup_test_engine();
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
+        let arena = bumpalo::Bump::new();
 
-        let _node = G::new_mut(Arc::clone(&engine.storage), &mut txn)
-            .add_n("person", Some(vec![("name".to_string(), Value::String("Test".to_string()))]), None)
-            .collect_to_obj();
+        let props = vec![("name", Value::String("Test".to_string()))];
+        let props_map = ImmutablePropertiesMap::new(
+            props.len(),
+            props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            &arena,
+        );
+
+        let _node = G::new_mut(&engine.storage, &arena, &mut txn)
+            .add_n(arena.alloc_str("person"), Some(props_map), None)
+            .collect_to_obj()?;
 
         txn.commit().unwrap();
 
@@ -359,6 +399,7 @@ mod tests {
         let request = Request {
             name: "nodes_edges".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from(params_json),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -372,6 +413,7 @@ mod tests {
 
         let result = nodes_edges_inner(input);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
@@ -380,6 +422,7 @@ mod tests {
         let request = Request {
             name: "nodes_edges".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,

@@ -10,9 +10,8 @@ E::File1Edge {
 }
 
 
-QUERY file1(name: String, id: ID) =>
+QUERY file1(name: String) =>
     user <- AddN<File1>({name: name, age: 50})
-    u <- N<File1>(id)
     RETURN user
 
 
@@ -21,3 +20,7 @@ QUERY edge(name1: String, name2: String) =>
     user2 <- AddN<File1>({name: name2, age: 50})
     edge <- AddE<File1Edge>::From(user1)::To(user2)
     RETURN user1
+
+QUERY get(id: ID) =>
+    user <- N<File1>(id)
+    RETURN user

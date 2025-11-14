@@ -34,14 +34,14 @@ HelixDB primarily operates with a graph + vector data model, but it can also sup
 
 ## Key Features
 
-|                                  |                                                                                                                                                                               |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Built-in MCP tools**           | Helix has built-in MCP support to allow your agents to discover data and walk the graph rather than generating human readable queries. |
-| **Built-in Embeddings**          | No need to embed your data before sending it to Helix, just use the `Embed` function to vectorize text.                                                     |
-| **Tooling for RAG**              | HelixDB has a built-in vector search, keyword search, and graph traversals that can be used to power any type of RAG applications.                                                      |
-| **Secure by Default**            | HelixDB is private by default. You can only access your data through your compiled HelixQL queries.                                                                           |
-| **Ultra-Low Latency**            | Helix is built in Rust and uses LMDB as its storage engine to provide extremely low latencies.                                                                                |
-| **Type-Safe Queries**            | HelixQL is 100% type-safe, which lets you develop and deploy with the confidence that your queries will execute in production                                                                                |
+|                         |                                                                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **Built-in MCP tools**  | Helix has built-in MCP support to allow your agents to discover data and walk the graph rather than generating human readable queries. |
+| **Built-in Embeddings** | No need to embed your data before sending it to Helix, just use the `Embed` function to vectorize text.                                |
+| **Tooling for RAG**     | HelixDB has a built-in vector search, keyword search, and graph traversals that can be used to power any type of RAG applications.     |
+| **Secure by Default**   | HelixDB is private by default. You can only access your data through your compiled HelixQL queries.                                    |
+| **Ultra-Low Latency**   | Helix is built in Rust and uses LMDB as its storage engine to provide extremely low latencies.                                         |
+| **Type-Safe Queries**   | HelixQL is 100% type-safe, which lets you develop and deploy with the confidence that your queries will execute in production          |
 
 ## Getting Started
 
@@ -66,8 +66,6 @@ Start by installing the Helix CLI tool to deploy Helix locally.
 
    Open your newly created `.hx` files and start writing your schema and queries.
    Head over to [our docs](https://docs.helix-db.com/documentation/hql/hql) for more information about writing queries.
-
-
 
    ```js
    N::User {

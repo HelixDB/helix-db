@@ -16,7 +16,7 @@ mod vector_serialization_tests {
     use crate::helix_engine::vector_core::vector::HVector;
     use crate::helix_engine::vector_core::vector_without_data::VectorWithoutData;
     use crate::protocol::value::Value;
-    use bincode::Options;
+    
     use bumpalo::Bump;
 
     // ========================================================================

@@ -22,7 +22,7 @@ use crate::{
     props,
 };
 
-fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
+fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().to_str().unwrap();
     let storage = HelixGraphStorage::new(
@@ -31,12 +31,12 @@ fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
         Default::default(),
     )
     .unwrap();
-    (Arc::new(storage), temp_dir)
+    (temp_dir, Arc::new(storage))
 }
 
 #[test]
 fn test_range_subset() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
@@ -45,7 +45,7 @@ fn test_range_subset() {
         .map(|_| {
             G::new_mut(&storage, &arena, &mut txn)
                 .add_n("person", None, None)
-                .collect_to::<Vec<_>>()
+                .collect::<Result<Vec<_>,_>>().unwrap()
                 .first()
                 .unwrap();
         })
@@ -63,7 +63,7 @@ fn test_range_subset() {
 
 #[test]
 fn test_range_chaining() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
 
@@ -72,7 +72,7 @@ fn test_range_chaining() {
         .map(|i| {
             G::new_mut(&storage, &arena, &mut txn)
                 .add_n("person", props_option(&arena, props! { "name" => i }), None)
-                .collect_to::<Vec<_>>()
+                .collect::<Result<Vec<_>,_>>().unwrap()
                 .first()
                 .unwrap()
                 .clone()
@@ -89,7 +89,7 @@ fn test_range_chaining() {
                 nodes[i + 1].id(),
                 false,
             )
-            .collect_to::<Vec<_>>();
+            .collect::<Result<Vec<_>,_>>().unwrap();
     }
 
     G::new_mut(&storage, &arena, &mut txn)
@@ -100,28 +100,28 @@ fn test_range_chaining() {
             nodes[0].id(),
             false,
         )
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let count = G::new(&storage, &txn, &arena)
         .n_from_type("person") // Get all nodes
         .range(0, 3) // Take first 3 nodes
         .out_node("knows") // Get their outgoing nodes
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(count.len(), 3);
 }
 
 #[test]
 fn test_range_empty() {
-    let (storage, _temp_dir) = setup_test_db();
+    let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
 
     let txn = storage.graph_env.read_txn().unwrap();
     let count = G::new(&storage, &txn, &arena)
         .n_from_type("person") // Get all nodes
         .range(0, 0) // Take first 3 nodes
-        .collect_to::<Vec<_>>();
+        .collect::<Result<Vec<_>,_>>().unwrap();
 
     assert_eq!(count.len(), 0);
 }

@@ -96,7 +96,7 @@ impl Display for AddE {
                 // From is plural - iterate over from, to already has .id()
                 write!(
                     f,
-                    "{}.iter().map(|from_val| {{\n        G::new_mut(&db, &arena, &mut txn)\n        .add_edge({}, {}, from_val.id(), {}, false)\n        .collect_to_obj()\n    }}).collect::<Vec<_>>()",
+                    "{}.iter().map(|from_val| {{\n        G::new_mut(&db, &arena, &mut txn)\n        .add_edge({}, {}, from_val.id(), {}, false)\n        .collect_to_obj()\n    }}).collect::<Result<Vec<_>,_>>()?",
                     self.from,
                     self.label,
                     write_properties(&self.properties),
@@ -107,7 +107,7 @@ impl Display for AddE {
                 // To is plural - iterate over to, from already has .id()
                 write!(
                     f,
-                    "{}.iter().map(|to_val| {{\n        G::new_mut(&db, &arena, &mut txn)\n        .add_edge({}, {}, {}, to_val.id(), false)\n        .collect_to_obj()\n    }}).collect::<Vec<_>>()",
+                    "{}.iter().map(|to_val| {{\n        G::new_mut(&db, &arena, &mut txn)\n        .add_edge({}, {}, {}, to_val.id(), false)\n        .collect_to_obj()\n    }}).collect::<Result<Vec<_>,_>>()?",
                     self.to,
                     self.label,
                     write_properties(&self.properties),
@@ -118,7 +118,7 @@ impl Display for AddE {
                 // Both plural - nested iteration
                 write!(
                     f,
-                    "{}.iter().flat_map(|from_val| {{\n        {}.iter().map(move |to_val| {{\n            G::new_mut(&db, &arena, &mut txn)\n            .add_edge({}, {}, from_val.id(), to_val.id(), false)\n            .collect_to_obj()\n        }})\n    }}).collect::<Vec<_>>()",
+                    "{}.iter().flat_map(|from_val| {{\n        {}.iter().map(move |to_val| {{\n            G::new_mut(&db, &arena, &mut txn)\n            .add_edge({}, {}, from_val.id(), to_val.id(), false)\n            .collect_to_obj()\n        }})\n    }}).collect::<Result<Vec<_>,_>>()?",
                     self.from,
                     self.to,
                     self.label,

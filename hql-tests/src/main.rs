@@ -130,13 +130,13 @@ async fn create_github_issue(
 }
 
 async fn handle_error_with_github(
-    github_config: &GitHubConfig,
+    _github_config: &GitHubConfig,
     error_type: &str,
     error_message: &str,
     test_name: &str,
-    query: &str,
-    schema: &str,
-    generated_rust_code: &str,
+    _query: &str,
+    _schema: &str,
+    _generated_rust_code: &str,
 ) -> Result<()> {
     let error_hash = generate_error_hash(error_type, error_message, test_name);
 

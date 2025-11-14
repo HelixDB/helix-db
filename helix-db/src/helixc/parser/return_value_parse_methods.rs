@@ -13,7 +13,6 @@ impl HelixParser {
         &self,
         pair: Pair<Rule>,
     ) -> Result<Vec<ReturnType>, ParserError> {
-        // println!("pair: {:?}", pair.clone().into_inner());
         let inner = pair.into_inner();
         let mut return_types = Vec::new();
         for pair in inner {

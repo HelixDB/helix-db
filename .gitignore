@@ -9,3 +9,4 @@ hack/
 /tmp
 /data
 claude.md
+.cargo/

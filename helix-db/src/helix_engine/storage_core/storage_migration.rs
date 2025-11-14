@@ -7,6 +7,7 @@ use crate::{
     protocol::value::Value,
     utils::properties::ImmutablePropertiesMap,
 };
+use bincode::Options;
 use itertools::Itertools;
 use std::{collections::HashMap, ops::Bound};
 
@@ -275,7 +276,10 @@ pub(crate) fn convert_old_vector_properties_to_new_format(
     property_bytes: &[u8],
     arena: &bumpalo::Bump,
 ) -> Result<Vec<u8>, GraphError> {
-    let mut old_properties: HashMap<String, Value> = bincode::deserialize(property_bytes)?;
+    let mut old_properties: HashMap<String, Value> = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .deserialize(property_bytes)?;
 
     let label = old_properties
         .remove("label")

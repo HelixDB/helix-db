@@ -224,7 +224,7 @@ let data = input.request.in_fmt.deserialize::<CreateUserInput>(&input.request.bo
 let arena = Bump::new();
 let mut txn = db.graph_env.write_txn().map_err(|e| GraphError::New(format!("Failed to start write transaction: {:?}", e)))?;
     let user = G::new_mut(&db, &arena, &mut txn)
-.add_n("User", Some(ImmutablePropertiesMap::new(3, vec![("name", Value::from(&data.name)), ("age", Value::from(&data.age)), ("email", Value::from(&data.email))].into_iter(), &arena)), None).collect_to_obj();
+.add_n("User", Some(ImmutablePropertiesMap::new(3, vec![("name", Value::from(&data.name)), ("age", Value::from(&data.age)), ("email", Value::from(&data.email))].into_iter(), &arena)), None).collect_to_obj()?;
 let response = json!({
     "user": CreateUserUserReturnType {
         id: uuid_str(user.id(), &arena),
@@ -260,11 +260,11 @@ let data = input.request.in_fmt.deserialize::<CreatePostInput>(&input.request.bo
 let arena = Bump::new();
 let mut txn = db.graph_env.write_txn().map_err(|e| GraphError::New(format!("Failed to start write transaction: {:?}", e)))?;
     let user = G::new(&db, &txn, &arena)
-.n_from_id(&data.user_id).collect_to_obj();
+.n_from_id(&data.user_id).collect_to_obj()?;
     let post = G::new_mut(&db, &arena, &mut txn)
-.add_n("Post", Some(ImmutablePropertiesMap::new(2, vec![("content", Value::from(&data.content)), ("title", Value::from(&data.title))].into_iter(), &arena)), None).collect_to_obj();
+.add_n("Post", Some(ImmutablePropertiesMap::new(2, vec![("content", Value::from(&data.content)), ("title", Value::from(&data.title))].into_iter(), &arena)), None).collect_to_obj()?;
     G::new_mut(&db, &arena, &mut txn)
-.add_edge("HasPost", None, user.id(), post.id(), false).collect_to_obj();
+.add_edge("HasPost", None, user.id(), post.id(), false).collect_to_obj()?;
 let response = json!({
     "post": CreatePostPostReturnType {
         id: uuid_str(post.id(), &arena),
@@ -293,7 +293,7 @@ let data = input.request.in_fmt.deserialize::<GetUserPostsWorking2Input>(&input.
 let arena = Bump::new();
 let txn = db.graph_env.read_txn().map_err(|e| GraphError::New(format!("Failed to start read transaction: {:?}", e)))?;
     let user = G::new(&db, &txn, &arena)
-.n_from_id(&data.user_id).collect_to_obj();
+.n_from_id(&data.user_id).collect_to_obj()?;
     let posts = G::from_iter(&db, &txn, std::iter::once(user.clone()), &arena)
 
 .out_node("HasPost").collect::<Result<Vec<_>, _>>()?;
@@ -333,7 +333,7 @@ let data = input.request.in_fmt.deserialize::<GetUserPostsInput>(&input.request.
 let arena = Bump::new();
 let txn = db.graph_env.read_txn().map_err(|e| GraphError::New(format!("Failed to start read transaction: {:?}", e)))?;
     let user = G::new(&db, &txn, &arena)
-.n_from_id(&data.user_id).collect_to_obj();
+.n_from_id(&data.user_id).collect_to_obj()?;
     let posts = G::from_iter(&db, &txn, std::iter::once(user.clone()), &arena)
 
 .out_node("HasPost").collect::<Result<Vec<_>, _>>()?;
@@ -371,7 +371,7 @@ let data = input.request.in_fmt.deserialize::<GetUserPostsWorkingInput>(&input.r
 let arena = Bump::new();
 let txn = db.graph_env.read_txn().map_err(|e| GraphError::New(format!("Failed to start read transaction: {:?}", e)))?;
     let user = G::new(&db, &txn, &arena)
-.n_from_id(&data.user_id).collect_to_obj();
+.n_from_id(&data.user_id).collect_to_obj()?;
     let posts = G::from_iter(&db, &txn, std::iter::once(user.clone()), &arena)
 
 .out_node("HasPost").collect::<Result<Vec<_>, _>>()?;

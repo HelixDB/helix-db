@@ -171,6 +171,113 @@ impl Query {
                         struct_def.source_variable,
                         struct_def.source_variable
                     )?;
+                } else if struct_def.source_variable.is_empty() {
+                    // Object literal - construct from multiple sources
+                    // Generate each field from the object literal
+                    for (field_idx, field) in struct_def.fields.iter().enumerate() {
+                        if field_idx > 0 {
+                            write!(f, ",")?;
+                            writeln!(f)?;
+                        }
+
+                        let field_info = &struct_def.field_infos[field_idx];
+
+                        // Determine how to construct this field based on its source
+                        let field_value = match &field_info.source {
+                            crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
+                                closure_source_var: Some(source_var),
+                                accessed_field_name: Some(prop_name),
+                                nested_struct_name: None,
+                                ..
+                            } => {
+                                // Simple property access like app::{name}
+                                if prop_name == "id" {
+                                    format!("uuid_str({}.id(), &arena)", source_var)
+                                } else if prop_name == "label" {
+                                    format!("{}.label()", source_var)
+                                } else {
+                                    format!("{}.get_property(\"{}\")", source_var, prop_name)
+                                }
+                            }
+                            _ if matches!(
+                                field_info.field_type,
+                                crate::helixc::generator::return_values::ReturnFieldType::Nested(_)
+                            ) => {
+                                // Nested struct or object - need to construct recursively
+                                let nested_fields = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(fields) = &field_info.field_type {
+                                    fields
+                                } else {
+                                    panic!("Expected nested field type");
+                                };
+
+                                // Extract nested struct name and source var from field info
+                                let (nested_struct_name, source_var) = match &field_info.source {
+                                    crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
+                                        closure_source_var: Some(src),
+                                        nested_struct_name: Some(name),
+                                        ..
+                                    } => (Some(name.clone()), Some(src.clone())),
+                                    crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
+                                        closure_source_var: Some(src),
+                                        ..
+                                    } => (None, Some(src.clone())),
+                                    _ => (None, None),
+                                };
+
+                                // Check if this is a collection (Vec)
+                                let is_vec = field.field_type.starts_with("Vec<");
+
+                                if is_vec {
+                                    // Generate construction for each element
+                                    if let Some(src_var) = source_var {
+                                        let struct_name = nested_struct_name.as_deref().unwrap_or("UnknownStruct");
+
+                                        format!("vec![{}].into_iter().map(|item| {} {{\n{}            \n}}).collect::<Vec<_>>()",
+                                            src_var,
+                                            struct_name,
+                                            nested_fields.iter().map(|f| {
+                                                let val = if f.name == "id" {
+                                                    "uuid_str(item.id(), &arena)".to_string()
+                                                } else if f.name == "label" {
+                                                    "item.label()".to_string()
+                                                } else {
+                                                    format!("item.get_property(\"{}\")", f.name)
+                                                };
+                                                format!("                {}: {},", f.name, val)
+                                            }).collect::<Vec<_>>().join("\n")
+                                        )
+                                    } else {
+                                        "Vec::new()".to_string()
+                                    }
+                                } else {
+                                    // Single nested object
+                                    if let (Some(struct_name), Some(src_var)) = (nested_struct_name.as_ref(), source_var.as_ref()) {
+                                        format!("{} {{\n{}            \n}}",
+                                            struct_name,
+                                            nested_fields.iter().map(|f| {
+                                                let val = if f.name == "id" {
+                                                    format!("uuid_str({}.id(), &arena)", src_var)
+                                                } else if f.name == "label" {
+                                                    format!("{}.label()", src_var)
+                                                } else {
+                                                    format!("{}.get_property(\"{}\")", src_var, f.name)
+                                                };
+                                                format!("                {}: {},", f.name, val)
+                                            }).collect::<Vec<_>>().join("\n")
+                                        )
+                                    } else {
+                                        "serde_json::Value::Null".to_string()
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Fallback
+                                "serde_json::Value::Null".to_string()
+                            }
+                        };
+
+                        write!(f, "    \"{}\": {}", field.name, field_value)?;
+                    }
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code
                     let singular_var = struct_def.source_variable.trim_end_matches('s');
@@ -211,8 +318,8 @@ impl Query {
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" placeholder to actual iteration variable
-                                let resolved_var = if closure_var == "_" {
+                                // Resolve "_" and "val" placeholders to actual iteration variable
+                                let resolved_var = if closure_var == "_" || closure_var == "val" {
                                     singular_var
                                 } else {
                                     closure_var.as_str()
@@ -235,6 +342,8 @@ impl Query {
                                 nested_struct_name: Some(nested_name),
                                 traversal_type,
                                 closure_source_var,
+                                closure_param_name,
+                                own_closure_param,
                                 ..
                             } = &field_info.source {
                                 // Generate nested traversal code
@@ -245,18 +354,20 @@ impl Query {
                                 };
 
                                 // Extract the actual source variable from the traversal type
-                                // Resolve "_" placeholder to actual iteration variable
+                                // Resolve "_" and "val" placeholders to actual iteration variable
                                 let (source_var, is_single_source) = if let Some(trav_type) = traversal_type {
                                     use crate::helixc::generator::traversal_steps::TraversalType;
                                     match trav_type {
                                         TraversalType::FromSingle(var) => {
                                             let v = var.inner();
-                                            let resolved = if v == "_" { singular_var } else { v.as_str() };
+                                            // Resolve placeholders: both "_" and "val" should use the iteration variable
+                                            let resolved = if v == "_" || v == "val" { singular_var } else { v.as_str() };
                                             (resolved.to_string(), true)
                                         }
                                         TraversalType::FromIter(var) => {
                                             let v = var.inner();
-                                            let resolved = if v == "_" { singular_var } else { v.as_str() };
+                                            // Resolve placeholders: both "_" and "val" should use the iteration variable
+                                            let resolved = if v == "_" || v == "val" { singular_var } else { v.as_str() };
                                             (resolved.to_string(), false)
                                         }
                                         _ => {
@@ -274,6 +385,14 @@ impl Query {
                                     format!("{}.iter().cloned()", source_var)
                                 };
 
+                                // Determine the closure parameter name to use in .map(|param| ...)
+                                // Prefer own_closure_param (this traversal's closure), otherwise use closure_param_name (parent context)
+                                let closure_param = own_closure_param.as_ref()
+                                    .or(closure_param_name.as_ref())
+                                    .map(|s| s.as_str())
+                                    .filter(|s| !s.is_empty() && *s != "_" && *s != "val")
+                                    .unwrap_or("item");
+
                                 // Generate field assignments for nested struct
                                 // Check if we're in a closure context, resolve "_" placeholder
                                 let _closure_context_var = closure_source_var.as_ref()
@@ -286,9 +405,26 @@ impl Query {
                                     let nested_val = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                         traversal_code: Some(inner_trav_code),
                                         nested_struct_name: Some(inner_nested_name),
+                                        traversal_type: inner_traversal_type,
                                         ..
                                     } = &nested_field.source {
                                         // This is a deeply nested traversal - generate nested traversal code
+
+                                        // Extract the source variable for this deeply nested traversal
+                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                            use crate::helixc::generator::traversal_steps::TraversalType;
+                                            match inner_trav_type {
+                                                TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
+                                                    let v = var.inner();
+                                                    // Resolve placeholders: "_" and "val" should use "item" in nested context
+                                                    if v == "_" || v == "val" { "item" } else { v }
+                                                }
+                                                _ => "item"
+                                            }
+                                        } else {
+                                            "item"
+                                        };
+
                                         // Get the nested fields if available
                                         let inner_fields_str = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(inner_fields) = &nested_field.field_type {
                                             // Generate field assignments for the deeply nested struct
@@ -307,7 +443,7 @@ impl Query {
                                         } else {
                                             ".collect::<Vec<_>>()".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once(item.clone()), &arena){}{}", inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
@@ -323,7 +459,7 @@ impl Query {
                                                 .unwrap_or(nested_field.name.as_str());
                                             (closure_var.as_str(), field_to_access)
                                         } else {
-                                            ("item", nested_field.name.as_str())
+                                            (closure_param, nested_field.name.as_str())
                                         };
 
                                         if accessed_field_name == "id" || accessed_field_name == "ID" {
@@ -352,11 +488,11 @@ impl Query {
 
                                 if has_deeply_nested {
                                     // Use and_then so the closure can return Result and use ?
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.and_then(|item| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.and_then(|{}| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 } else {
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.map(|item| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.map(|{}| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 }
                             } else {
                                 "Vec::new()".to_string()
@@ -411,8 +547,8 @@ impl Query {
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" placeholder to actual iteration variable
-                                let resolved_var = if closure_var == "_" {
+                                // Resolve "_" and "val" placeholders to actual iteration variable
+                                let resolved_var = if closure_var == "_" || closure_var == "val" {
                                     singular_var
                                 } else {
                                     closure_var.as_str()
@@ -435,6 +571,8 @@ impl Query {
                                 nested_struct_name: Some(nested_name),
                                 traversal_type,
                                 closure_source_var,
+                                closure_param_name,
+                                own_closure_param,
                                 ..
                             } = &field_info.source {
                                 let nested_fields = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(fields) = &field_info.field_type {
@@ -461,6 +599,14 @@ impl Query {
                                 // Determine if we need iter().cloned() or std::iter::once()
                                 let iterator_expr = format!("{}.iter().cloned()", source_var);
 
+                                // Determine the closure parameter name to use in .map(|param| ...)
+                                // Prefer own_closure_param (this traversal's closure), otherwise use closure_param_name (parent context)
+                                let closure_param = own_closure_param.as_ref()
+                                    .or(closure_param_name.as_ref())
+                                    .map(|s| s.as_str())
+                                    .filter(|s| !s.is_empty() && *s != "_" && *s != "val")
+                                    .unwrap_or("item");
+
                                 // Check if we're in a closure context
                                 let _closure_context_var = closure_source_var.as_ref().map(|s| s.as_str()).unwrap_or(&struct_def.source_variable);
 
@@ -470,9 +616,26 @@ impl Query {
                                     let nested_val = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                         traversal_code: Some(inner_trav_code),
                                         nested_struct_name: Some(inner_nested_name),
+                                        traversal_type: inner_traversal_type,
                                         ..
                                     } = &nested_field.source {
                                         // This is a deeply nested traversal - generate nested traversal code
+
+                                        // Extract the source variable for this deeply nested traversal
+                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                            use crate::helixc::generator::traversal_steps::TraversalType;
+                                            match inner_trav_type {
+                                                TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
+                                                    let v = var.inner();
+                                                    // Resolve placeholders: "_" and "val" should use "item" in nested context
+                                                    if v == "_" || v == "val" { "item" } else { v }
+                                                }
+                                                _ => "item"
+                                            }
+                                        } else {
+                                            "item"
+                                        };
+
                                         // Get the nested fields if available
                                         let inner_fields_str = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(inner_fields) = &nested_field.field_type {
                                             // Generate field assignments for the deeply nested struct
@@ -491,7 +654,7 @@ impl Query {
                                         } else {
                                             ".collect::<Vec<_>>()".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once(item.clone()), &arena){}{}", inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
@@ -507,7 +670,7 @@ impl Query {
                                                 .unwrap_or(nested_field.name.as_str());
                                             (closure_var.as_str(), field_to_access)
                                         } else {
-                                            ("item", nested_field.name.as_str())
+                                            (closure_param, nested_field.name.as_str())
                                         };
 
                                         if accessed_field_name == "id" || accessed_field_name == "ID" {
@@ -536,11 +699,11 @@ impl Query {
 
                                 if has_deeply_nested {
                                     // Use and_then so the closure can return Result and use ?
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.and_then(|item| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.and_then(|{}| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 } else {
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.map(|item| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.map(|{}| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 }
                             } else {
                                 "Vec::new()".to_string()
@@ -771,8 +934,8 @@ impl Query {
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" placeholder to actual iteration variable
-                                let resolved_var = if closure_var == "_" {
+                                // Resolve "_" and "val" placeholders to actual iteration variable
+                                let resolved_var = if closure_var == "_" || closure_var == "val" {
                                     singular_var
                                 } else {
                                     closure_var.as_str()
@@ -795,6 +958,8 @@ impl Query {
                                 nested_struct_name: Some(nested_name),
                                 traversal_type,
                                 closure_source_var,
+                                closure_param_name,
+                                own_closure_param,
                                 ..
                             } = &field_info.source {
                                 // Generate nested traversal code
@@ -805,18 +970,20 @@ impl Query {
                                 };
 
                                 // Extract the actual source variable from the traversal type
-                                // Resolve "_" placeholder to actual iteration variable
+                                // Resolve "_" and "val" placeholders to actual iteration variable
                                 let (source_var, is_single_source) = if let Some(trav_type) = traversal_type {
                                     use crate::helixc::generator::traversal_steps::TraversalType;
                                     match trav_type {
                                         TraversalType::FromSingle(var) => {
                                             let v = var.inner();
-                                            let resolved = if v == "_" { singular_var } else { v.as_str() };
+                                            // Resolve placeholders: both "_" and "val" should use the iteration variable
+                                            let resolved = if v == "_" || v == "val" { singular_var } else { v.as_str() };
                                             (resolved.to_string(), true)
                                         }
                                         TraversalType::FromIter(var) => {
                                             let v = var.inner();
-                                            let resolved = if v == "_" { singular_var } else { v.as_str() };
+                                            // Resolve placeholders: both "_" and "val" should use the iteration variable
+                                            let resolved = if v == "_" || v == "val" { singular_var } else { v.as_str() };
                                             (resolved.to_string(), false)
                                         }
                                         _ => {
@@ -834,6 +1001,14 @@ impl Query {
                                     format!("{}.iter().cloned()", source_var)
                                 };
 
+                                // Determine the closure parameter name to use in .map(|param| ...)
+                                // Prefer own_closure_param (this traversal's closure), otherwise use closure_param_name (parent context)
+                                let closure_param = own_closure_param.as_ref()
+                                    .or(closure_param_name.as_ref())
+                                    .map(|s| s.as_str())
+                                    .filter(|s| !s.is_empty() && *s != "_" && *s != "val")
+                                    .unwrap_or("item");
+
                                 // Generate field assignments for nested struct
                                 // Check if we're in a closure context, resolve "_" placeholder
                                 let _closure_context_var = closure_source_var.as_ref()
@@ -846,9 +1021,26 @@ impl Query {
                                     let nested_val = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                         traversal_code: Some(inner_trav_code),
                                         nested_struct_name: Some(inner_nested_name),
+                                        traversal_type: inner_traversal_type,
                                         ..
                                     } = &nested_field.source {
                                         // This is a deeply nested traversal - generate nested traversal code
+
+                                        // Extract the source variable for this deeply nested traversal
+                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                            use crate::helixc::generator::traversal_steps::TraversalType;
+                                            match inner_trav_type {
+                                                TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
+                                                    let v = var.inner();
+                                                    // Resolve placeholders: "_" and "val" should use "item" in nested context
+                                                    if v == "_" || v == "val" { "item" } else { v }
+                                                }
+                                                _ => "item"
+                                            }
+                                        } else {
+                                            "item"
+                                        };
+
                                         // Get the nested fields if available
                                         let inner_fields_str = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(inner_fields) = &nested_field.field_type {
                                             // Generate field assignments for the deeply nested struct
@@ -867,7 +1059,7 @@ impl Query {
                                         } else {
                                             ".collect::<Vec<_>>()".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once(item.clone()), &arena){}{}", inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
@@ -883,7 +1075,7 @@ impl Query {
                                                 .unwrap_or(nested_field.name.as_str());
                                             (closure_var.as_str(), field_to_access)
                                         } else {
-                                            ("item", nested_field.name.as_str())
+                                            (closure_param, nested_field.name.as_str())
                                         };
 
                                         if accessed_field_name == "id" || accessed_field_name == "ID" {
@@ -912,11 +1104,11 @@ impl Query {
 
                                 if has_deeply_nested {
                                     // Use and_then so the closure can return Result and use ?
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.and_then(|item| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.and_then(|{}| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 } else {
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.map(|item| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.map(|{}| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 }
                             } else {
                                 "Vec::new()".to_string()
@@ -943,7 +1135,7 @@ impl Query {
                     // Check if any field is a nested traversal (needs Result handling)
                     let has_nested = struct_def.fields.iter().any(|f| f.is_nested_traversal);
                     if has_nested {
-                        write!(f, "    }})).collect::<Result<Vec<_>, GraphError>>()?")
+                        write!(f, "    }})).collect::<Vec<_>>()")
                     } else {
                         write!(f, "    }}).collect::<Vec<_>>()")
                     }?;
@@ -971,8 +1163,8 @@ impl Query {
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" placeholder to actual iteration variable
-                                let resolved_var = if closure_var == "_" {
+                                // Resolve "_" and "val" placeholders to actual iteration variable
+                                let resolved_var = if closure_var == "_" || closure_var == "val" {
                                     singular_var
                                 } else {
                                     closure_var.as_str()
@@ -995,6 +1187,8 @@ impl Query {
                                 nested_struct_name: Some(nested_name),
                                 traversal_type,
                                 closure_source_var,
+                                closure_param_name,
+                                own_closure_param,
                                 ..
                             } = &field_info.source {
                                 let nested_fields = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(fields) = &field_info.field_type {
@@ -1021,6 +1215,14 @@ impl Query {
                                 // Determine if we need iter().cloned() or std::iter::once()
                                 let iterator_expr = format!("{}.iter().cloned()", source_var);
 
+                                // Determine the closure parameter name to use in .map(|param| ...)
+                                // Prefer own_closure_param (this traversal's closure), otherwise use closure_param_name (parent context)
+                                let closure_param = own_closure_param.as_ref()
+                                    .or(closure_param_name.as_ref())
+                                    .map(|s| s.as_str())
+                                    .filter(|s| !s.is_empty() && *s != "_" && *s != "val")
+                                    .unwrap_or("item");
+
                                 // Check if we're in a closure context
                                 let _closure_context_var = closure_source_var.as_ref().map(|s| s.as_str()).unwrap_or(&struct_def.source_variable);
 
@@ -1030,9 +1232,26 @@ impl Query {
                                     let nested_val = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                         traversal_code: Some(inner_trav_code),
                                         nested_struct_name: Some(inner_nested_name),
+                                        traversal_type: inner_traversal_type,
                                         ..
                                     } = &nested_field.source {
                                         // This is a deeply nested traversal - generate nested traversal code
+
+                                        // Extract the source variable for this deeply nested traversal
+                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                            use crate::helixc::generator::traversal_steps::TraversalType;
+                                            match inner_trav_type {
+                                                TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
+                                                    let v = var.inner();
+                                                    // Resolve placeholders: "_" and "val" should use "item" in nested context
+                                                    if v == "_" || v == "val" { "item" } else { v }
+                                                }
+                                                _ => "item"
+                                            }
+                                        } else {
+                                            "item"
+                                        };
+
                                         // Get the nested fields if available
                                         let inner_fields_str = if let crate::helixc::generator::return_values::ReturnFieldType::Nested(inner_fields) = &nested_field.field_type {
                                             // Generate field assignments for the deeply nested struct
@@ -1049,9 +1268,9 @@ impl Query {
                                             }
                                             format!(".map(|inner_item| inner_item.map(|inner_item| {} {{{}\n}})).collect::<Result<Vec<_>, _>>()?", inner_nested_name, inner_assigns)
                                         } else {
-                                            ".collect::<Vec<_>>()".to_string()
+                                            ".collect::<Result<Vec<_>,_>>()?".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once(item.clone()), &arena){}{}", inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
@@ -1067,7 +1286,7 @@ impl Query {
                                                 .unwrap_or(nested_field.name.as_str());
                                             (closure_var.as_str(), field_to_access)
                                         } else {
-                                            ("item", nested_field.name.as_str())
+                                            (closure_param, nested_field.name.as_str())
                                         };
 
                                         if accessed_field_name == "id" || accessed_field_name == "ID" {
@@ -1096,11 +1315,11 @@ impl Query {
 
                                 if has_deeply_nested {
                                     // Use and_then so the closure can return Result and use ?
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.and_then(|item| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.and_then(|{}| Ok({} {{{}\n                    }}))).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 } else {
-                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|item| item.map(|item| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
-                                        iterator_expr, trav_code, nested_name, nested_field_assigns)
+                                    format!("G::from_iter(&db, &txn, {}, &arena){}.map(|{}| {}.map(|{}| {} {{{}\n                    }})).collect::<Result<Vec<_>, _>>()?",
+                                        iterator_expr, trav_code, closure_param, closure_param, closure_param, nested_name, nested_field_assigns)
                                 }
                             } else {
                                 "Vec::new()".to_string()

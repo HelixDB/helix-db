@@ -1,6 +1,6 @@
 [package]
 name = "helix-db"
-version = "1.0.141"
+version = "1.1.2"
 edition = "2024"
 description = "HelixDB is a powerful, open-source, graph-vector database built in Rust for intelligent data storage for RAG and AI."
 license = "AGPL-3.0"
@@ -60,6 +60,8 @@ polars = { version = "0.46.0", features = [
     "lazy",
     "json",
 ], optional = true }
+subtle = "2.6.1"
+sha_256 = "=0.1.1"
 
 [dev-dependencies]
 rand = "0.9.0"
@@ -76,7 +78,7 @@ compiler = ["pest", "pest_derive"]
 
 # vector features
 cosine = []
-
+api-key = []
 build = ["compiler"]
 vectors = ["cosine", "url"]
 server = ["build", "compiler", "vectors", "reqwest"]
@@ -87,13 +89,4 @@ dev-instance = []
 lmdb = []
 rocks = []
 default = ["server", "rocks"]
-
-# benches/tests
-[[test]]
-name = "bm25_benches"
-path = "benches/bm25_benches.rs"
-
-[[test]]
-name = "hnsw_benches"
-path = "benches/hnsw_benches.rs"
-
+production = ["api-key","server", "lmdb"]

@@ -49,38 +49,44 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             .inner
             .filter_map(move |item| {
                 let edge_label_hash = hash_label(edge_label, None);
-                match item {
-                    Ok(item) => {
-                        let prefix = HelixGraphStorage::out_edge_key(&item.id(), &edge_label_hash);
-                        match self.storage.out_edges_db.get_duplicates(self.txn, &prefix) {
-                            Ok(Some(iter)) => Some(iter.filter_map(move |item| {
-                                if let Ok((_, data)) = item {
+
+                let prefix = HelixGraphStorage::out_edge_key(
+                    &match item {
+                        Ok(item) => item.id(),
+                        Err(_) => return None,
+                    },
+                    &edge_label_hash,
+                );
+                match self
+                    .storage
+                    .out_edges_db
+                    .lazily_decode_data()
+                    .get_duplicates(self.txn, &prefix)
+                {
+                    Ok(Some(iter)) => {
+                        let iter = iter.map(|item| match item {
+                            Ok((_, data)) => match data.decode() {
+                                Ok(data) => {
                                     let (edge_id, _) =
                                         match HelixGraphStorage::unpack_adj_edge_data(data) {
                                             Ok(data) => data,
-                                            Err(e) => {
-                                                println!("Error unpacking edge data: {e:?}");
-                                                return Some(Err(e));
-                                            }
+                                            Err(e) => return Err(e),
                                         };
-                                    if let Ok(edge) =
-                                        self.storage.get_edge(self.txn, &edge_id, self.arena)
-                                    {
-                                        return Some(Ok(TraversalValue::Edge(edge)));
+                                    match self.storage.get_edge(self.txn, &edge_id, self.arena) {
+                                        Ok(edge) => Ok(TraversalValue::Edge(edge)),
+                                        Err(e) => Err(e),
                                     }
                                 }
-                                None
-                            })),
-                            Ok(None) => None,
-                            Err(e) => {
-                                println!("{} Error getting out edges: {:?}", line!(), e);
-                                // return Err(e);
-                                None
-                            }
-                        }
+                                Err(e) => Err(GraphError::DecodeError(e.to_string())),
+                            },
+                            Err(e) => Err(e.into()),
+                        });
+                        Some(iter)
                     }
+                    Ok(None) => None,
                     Err(e) => {
-                        println!("{} Error getting oupt edges: {:?}", line!(), e);
+                        println!("Error getting in edges: {e:?}");
+                        // return Err(e);
                         None
                     }
                 }

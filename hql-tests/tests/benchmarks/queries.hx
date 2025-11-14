@@ -20,24 +20,71 @@ E::Interacted {
     To: Item
 }
 
+// HelixQL Query Definitions
+// Insertion queries for the three types
+
+// Query 1: Insert a User node
+// Creates a new User record with the provided country code
+QUERY InsertUser(country: U8) =>
+    user <- AddN<User>({
+        country: country
+    })
+    RETURN user::{id}
+
+// Query 2: Insert an Item vector node
+// Creates a new Item record with embedding and category
+// The embedding parameter is explicit as an array of F64 values
+QUERY InsertItem(embedding: [F64], category: U16) =>
+    item <- AddV<Item>(embedding, {
+        category: category
+    })
+    RETURN item::{id}
+
+// Query 3: Insert a UserItem edge
+// Creates an edge connecting a User to an Item using their IDs
+QUERY InsertInteractedEdge(user_id: ID, item_id: ID) =>
+    e <- AddE<Interacted>::From(user_id)::To(item_id)
+    RETURN NONE
+
 N::Metadata {
     INDEX key: String,
     value: String
 }
 
+QUERY CreateDatasetId(dataset_id: String) =>
+    metadata <- AddN<Metadata>({
+        key: "dataset_id",
+        value: dataset_id
+    })
+    RETURN metadata
+
+QUERY UpdateDatasetId(dataset_id: String) =>
+    DROP N<Metadata>({ key: "dataset_id" })
+    metadata <- AddN<Metadata>({
+        key: "dataset_id",
+        value: dataset_id
+    })
+    RETURN metadata
+
+// Query to get dataset_id
+QUERY GetDatasetId() =>
+    dataset_id <- N<Metadata>({ key: "dataset_id" })
+    RETURN dataset_id::{value}
+
+// --------------------------
+// Benchmarks
+//
 
 QUERY PointGet(item_id: ID) =>
     item <- V<Item>(item_id)
     RETURN item::{id, category}
 
 QUERY OneHop(user_id: ID) =>
-    user <- N<User>(user_id)
-    items <- user::Out<Interacted>
+    items <- N<User>(user_id)::Out<Interacted>
     RETURN items::{id, category}
 
 QUERY OneHopFilter(user_id: ID, category: U16) =>
-    user <- N<User>(user_id)
-    items <- user::Out<Interacted>::WHERE(_::{category}::EQ(category))
+    items <- N<User>(user_id)::Out<Interacted>::WHERE(_::{category}::EQ(category))
     RETURN items::{id, category}
 
 QUERY Vector(vector: [F64], top_k: I64) =>
@@ -45,10 +92,5 @@ QUERY Vector(vector: [F64], top_k: I64) =>
     RETURN items::{id, score, category}
 
 QUERY VectorHopFilter(vector: [F64], top_k: I64, country: U8) =>
-    similar_items <- SearchV<Item>(vector, top_k)
-    items <- similar_items::WHERE(EXISTS(_::In<Interacted>::WHERE(_::{country}::EQ(country))))
+    items <- SearchV<Item>(vector, top_k)::WHERE(EXISTS(_::In<Interacted>::WHERE(_::{country}::EQ(country))))
     RETURN items::{id, category}
-    
-QUERY GetDatasetId() =>
-    dataset_id <- N<Metadata>({ key: "dataset_id" })
-    RETURN dataset_id::{value}

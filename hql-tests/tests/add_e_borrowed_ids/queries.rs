@@ -169,7 +169,7 @@ let arena = Bump::new();
 let mut txn = db.graph_env.write_txn().map_err(|e| GraphError::New(format!("Failed to start write transaction: {:?}", e)))?;
     for edgesData { from_id, to_id, since } in &data.edges {
     G::new_mut(&db, &arena, &mut txn)
-.add_edge("Knows", Some(ImmutablePropertiesMap::new(1, vec![("since", Value::from(since.clone()))].into_iter(), &arena)), from_id.id(), to_id.id(), false).collect_to_obj();
+.add_edge("Knows", Some(ImmutablePropertiesMap::new(1, vec![("since", Value::from(since.clone()))].into_iter(), &arena)), from_id.id(), to_id.id(), false).collect_to_obj()?;
 }
 ;
 let response = json!({

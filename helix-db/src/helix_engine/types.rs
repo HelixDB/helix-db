@@ -30,6 +30,8 @@ pub enum GraphError {
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
     RerankerError(String),
+
+ 
 }
 
 impl std::error::Error for GraphError {}

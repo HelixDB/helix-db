@@ -16,3 +16,4 @@ uuid = { version = "1.18.0", features = ["v7", "fast-rng"] }
 tokio = { version = "1.39", features = ["full"] }
 async-trait = "0.1.88"
 flume = "0.11.1"
+num_cpus = "1.17.0"

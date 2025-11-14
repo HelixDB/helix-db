@@ -41,17 +41,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .collect::<B>()
     }
 
-    pub fn collect_to<B: FromIterator<TraversalValue<'arena>>>(self) -> B {
-        self.inner.filter_map(|item| item.ok()).collect::<B>()
-    }
-
-    // pub fn collect_in<'arena, B: FromIterator<TraversalValue<'arena>>>(
-    //     self,
-    //     arena: &'arena Arena,
-    // ) -> B {
-    //     //
-    // }
-
     pub fn collect_dedup<B: FromIterator<TraversalValue<'arena>>>(self) -> B {
         self.inner
             .filter_map(|item| item.ok())
@@ -59,11 +48,8 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .collect::<B>()
     }
 
-    pub fn collect_to_obj(self) -> TraversalValue<'arena> {
-        match self.inner.filter_map(|item| item.ok()).next() {
-            Some(val) => val,
-            None => TraversalValue::Empty,
-        }
+    pub fn collect_to_obj(mut self) -> Result<TraversalValue<'arena>, GraphError> {
+        self.inner.next().unwrap_or(Err(GraphError::New("No value found".to_string())))
     }
 
     pub fn collect_to_value(self) -> Value {
@@ -136,10 +122,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .collect::<B>()
     }
 
-    pub fn collect_to<B: FromIterator<TraversalValue<'arena>>>(self) -> B {
-        self.inner.filter_map(|item| item.ok()).collect::<B>()
-    }
-
     pub fn collect_dedup<B: FromIterator<TraversalValue<'arena>>>(self) -> B {
         self.inner
             .filter_map(|item| item.ok())
@@ -147,11 +129,8 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .collect::<B>()
     }
 
-    pub fn collect_to_obj(self) -> TraversalValue<'arena> {
-        match self.inner.filter_map(|item| item.ok()).next() {
-            Some(val) => val,
-            None => TraversalValue::Empty,
-        }
+    pub fn collect_to_obj(mut self) -> Result<TraversalValue<'arena>, GraphError> {
+        self.inner.next().unwrap_or(Err(GraphError::New("No value found".to_string())))
     }
 
     pub fn map_value_or(

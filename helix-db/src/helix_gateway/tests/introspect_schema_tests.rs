@@ -33,7 +33,7 @@ fn create_test_app_state(schema_json: Option<String>) -> Arc<AppState> {
     );
 
     let cores = core_affinity::get_core_ids().unwrap_or_default();
-    let core_setter = Arc::new(CoreSetter::new(cores, 1));
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
     let worker_pool = WorkerPool::new(core_setter, graph, router, rt);
 
     Arc::new(AppState {

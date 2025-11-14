@@ -29,9 +29,9 @@ pub enum MetricsLevel {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetricsConfig {
     pub level: MetricsLevel,
-    pub user_id: Option<String>,
-    pub email: Option<String>,
-    pub name: Option<String>,
+    pub user_id: Option<&'static str>,
+    pub email: Option<&'static str>,
+    pub name: Option<&'static str>,
     pub last_updated: u64,
     pub install_event_sent: bool,
 }
@@ -53,7 +53,7 @@ impl Default for MetricsConfig {
 }
 impl MetricsConfig {
     #[allow(unused)]
-    pub fn new(user_id: Option<String>) -> Self {
+    pub fn new(user_id: Option<&'static str>) -> Self {
         Self {
             level: MetricsLevel::default(),
             user_id,
@@ -148,8 +148,8 @@ pub(crate) fn load_metrics_config() -> Result<MetricsConfig> {
         return Ok(MetricsConfig::default());
     }
 
-    let content = fs::read_to_string(&config_path)?;
-    let config = toml::from_str(&content)?;
+    let content: &'static str = fs::read_to_string(&config_path)?.leak();
+    let config = toml::from_str(content)?;
     Ok(config)
 }
 
@@ -393,15 +393,15 @@ impl MetricsSender {
     }
 }
 
-fn get_os_string() -> String {
-    std::env::consts::OS.to_string()
+fn get_os_string() -> &'static str {
+    std::env::consts::OS
 }
 
-fn get_user_id() -> Option<String> {
+fn get_user_id() -> Option<&'static str> {
     load_metrics_config().ok().and_then(|config| config.user_id)
 }
 
-fn get_email() -> Option<String> {
+fn get_email() -> Option<&'static str> {
     load_metrics_config().ok().and_then(|config| config.email)
 }
 

@@ -332,17 +332,13 @@ impl PartialEq<Value> for FieldType {
             }
             (FieldType::Date, value) => match value {
                 Value::String(date) => {
-                    println!("date: {}, {:?}", date, date.parse::<NaiveDate>());
                     date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
                 }
                 Value::I64(timestamp) => DateTime::from_timestamp(*timestamp, 0).is_some(),
                 Value::U64(timestamp) => DateTime::from_timestamp(*timestamp as i64, 0).is_some(),
                 _ => false,
             },
-            l => {
-                println!("l: {l:?}");
-                false
-            }
+            _ => false,
         }
     }
 }
@@ -374,7 +370,6 @@ impl PartialEq<DefaultValue> for FieldType {
             ) => true,
             (FieldType::Boolean, DefaultValue::Boolean(_)) => true,
             (FieldType::Date, DefaultValue::String(date)) => {
-                println!("date: {}, {:?}", date, date.parse::<NaiveDate>());
                 date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
             }
             (FieldType::Date, DefaultValue::I64(timestamp)) => {
@@ -466,6 +461,111 @@ pub struct ExistsExpression {
     pub expr: Box<Expression>,
 }
 
+/// Mathematical function types
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MathFunction {
+    // Arithmetic (binary operations)
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    Mod,
+
+    // Unary math functions
+    Abs,
+    Sqrt,
+    Ln,
+    Log10,
+    Log,    // Binary: LOG(x, base)
+    Exp,
+    Ceil,
+    Floor,
+    Round,
+
+    // Trigonometry
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,  // Binary: ATAN2(y, x)
+
+    // Constants (nullary)
+    Pi,
+    E,
+
+    // Aggregates (unary, operates on collections)
+    Min,
+    Max,
+    Sum,
+    Avg,
+    Count,
+}
+
+impl MathFunction {
+    /// Returns the expected number of arguments for this function
+    pub fn arity(&self) -> usize {
+        match self {
+            MathFunction::Pi | MathFunction::E => 0,
+            MathFunction::Abs | MathFunction::Sqrt | MathFunction::Ln |
+            MathFunction::Log10 | MathFunction::Exp | MathFunction::Ceil |
+            MathFunction::Floor | MathFunction::Round | MathFunction::Sin |
+            MathFunction::Cos | MathFunction::Tan | MathFunction::Asin |
+            MathFunction::Acos | MathFunction::Atan | MathFunction::Min |
+            MathFunction::Max | MathFunction::Sum | MathFunction::Avg |
+            MathFunction::Count => 1,
+            MathFunction::Add | MathFunction::Sub | MathFunction::Mul |
+            MathFunction::Div | MathFunction::Pow | MathFunction::Mod |
+            MathFunction::Atan2 | MathFunction::Log => 2,
+        }
+    }
+
+    /// Returns the function name as a string
+    pub fn name(&self) -> &'static str {
+        match self {
+            MathFunction::Add => "ADD",
+            MathFunction::Sub => "SUB",
+            MathFunction::Mul => "MUL",
+            MathFunction::Div => "DIV",
+            MathFunction::Pow => "POW",
+            MathFunction::Mod => "MOD",
+            MathFunction::Abs => "ABS",
+            MathFunction::Sqrt => "SQRT",
+            MathFunction::Ln => "LN",
+            MathFunction::Log10 => "LOG10",
+            MathFunction::Log => "LOG",
+            MathFunction::Exp => "EXP",
+            MathFunction::Ceil => "CEIL",
+            MathFunction::Floor => "FLOOR",
+            MathFunction::Round => "ROUND",
+            MathFunction::Sin => "SIN",
+            MathFunction::Cos => "COS",
+            MathFunction::Tan => "TAN",
+            MathFunction::Asin => "ASIN",
+            MathFunction::Acos => "ACOS",
+            MathFunction::Atan => "ATAN",
+            MathFunction::Atan2 => "ATAN2",
+            MathFunction::Pi => "PI",
+            MathFunction::E => "E",
+            MathFunction::Min => "MIN",
+            MathFunction::Max => "MAX",
+            MathFunction::Sum => "SUM",
+            MathFunction::Avg => "AVG",
+            MathFunction::Count => "COUNT",
+        }
+    }
+}
+
+/// Function call AST node
+#[derive(Debug, Clone)]
+pub struct MathFunctionCall {
+    pub function: MathFunction,
+    pub args: Vec<Expression>,
+    pub loc: Loc,
+}
+
 #[derive(Clone)]
 pub enum ExpressionType {
     Traversal(Box<Traversal>),
@@ -484,6 +584,7 @@ pub enum ExpressionType {
     Or(Vec<Expression>),
     SearchVector(SearchVector),
     BM25Search(BM25Search),
+    MathFunctionCall(MathFunctionCall),
     Empty,
 }
 
@@ -514,6 +615,7 @@ impl Debug for ExpressionType {
             ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
             ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
             ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
+            ExpressionType::MathFunctionCall(mfc) => write!(f, "MathFunctionCall({mfc:?})"),
             ExpressionType::Empty => write!(f, "Empty"),
         }
     }
@@ -537,6 +639,7 @@ impl Display for ExpressionType {
             ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
             ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
             ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
+            ExpressionType::MathFunctionCall(mfc) => write!(f, "{}({:?})", mfc.function.name(), mfc.args),
             ExpressionType::Empty => write!(f, "Empty"),
         }
     }
@@ -719,6 +822,7 @@ pub enum GraphStepType {
     ShortestPath(ShortestPath),
     ShortestPathDijkstras(ShortestPathDijkstras),
     ShortestPathBFS(ShortestPathBFS),
+    ShortestPathAStar(ShortestPathAStar),
     SearchVector(SearchVector),
 }
 impl GraphStep {
@@ -742,6 +846,17 @@ pub struct ShortestPath {
     pub type_arg: Option<String>,
 }
 
+/// Weight calculation expression for shortest path
+#[derive(Debug, Clone)]
+pub enum WeightExpression {
+    /// Simple property access: _::{weight}
+    Property(String),
+    /// Mathematical expression (can include function calls)
+    Expression(Box<Expression>),
+    /// Default weight (constant 1.0)
+    Default,
+}
+
 #[derive(Debug, Clone)]
 pub struct ShortestPathDijkstras {
     pub loc: Loc,
@@ -749,6 +864,8 @@ pub struct ShortestPathDijkstras {
     pub to: Option<IdType>,
     pub type_arg: Option<String>,
     pub inner_traversal: Option<Traversal>,
+    // New field for better weight expression handling
+    pub weight_expr: Option<WeightExpression>,
 }
 
 #[derive(Debug, Clone)]
@@ -757,6 +874,17 @@ pub struct ShortestPathBFS {
     pub from: Option<IdType>,
     pub to: Option<IdType>,
     pub type_arg: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShortestPathAStar {
+    pub loc: Loc,
+    pub from: Option<IdType>,
+    pub to: Option<IdType>,
+    pub type_arg: Option<String>,
+    pub inner_traversal: Option<Traversal>,
+    pub weight_expr: Option<WeightExpression>,
+    pub heuristic_property: String,
 }
 
 // PathAlgorithm enum removed - now using distinct function names

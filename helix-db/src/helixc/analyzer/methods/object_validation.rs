@@ -1,8 +1,10 @@
 //! Semantic analyzer for Helix‑QL.
+use crate::helixc::analyzer::utils::DEFAULT_VAR_NAME;
 use crate::helixc::analyzer::{
     error_codes::ErrorCode, errors::push_query_err, utils::get_field_type_from_item_fields,
 };
 use crate::helixc::generator::source_steps::SourceStep;
+use crate::helixc::parser::errors::ParserError;
 use crate::{
     generate_error,
     helixc::{
@@ -94,7 +96,7 @@ pub(crate) fn validate_object<'a>(
     fields_out: &mut Vec<ReturnValueField>,
     scope: &mut std::collections::HashMap<&'a str, crate::helixc::analyzer::utils::VariableInfo>,
     gen_query: &mut crate::helixc::generator::queries::Query,
-) -> Type {
+) -> Result<Type, ParserError> {
     match &cur_ty {
         Type::Node(Some(node_ty)) | Type::Nodes(Some(node_ty)) => validate_property_access(
             ctx,
@@ -147,7 +149,7 @@ pub(crate) fn validate_object<'a>(
                 E203,
                 &obj.fields[0].value.loc.span
             );
-            Type::Unknown
+            Ok(Type::Unknown)
         }
     }
 }
@@ -219,7 +221,7 @@ fn validate_property_access<'a>(
     fields_out: &mut Vec<ReturnValueField>,
     scope: &mut std::collections::HashMap<&'a str, crate::helixc::analyzer::utils::VariableInfo>,
     gen_query: &mut crate::helixc::generator::queries::Query,
-) -> Type {
+) -> Result<Type, ParserError> {
     match fields {
         Some(_) => {
             // if there is only one field then it is a single property access
@@ -269,7 +271,9 @@ fn validate_property_access<'a>(
                             }
                         }
                         let field_type = get_field_type_from_item_fields(ctx, cur_ty, lit.as_str());
-                        Type::Scalar(field_type.unwrap())
+                        Ok(Type::Scalar(field_type.ok_or(ParserError::ParseError(
+                            "field is none".to_string(),
+                        ))?))
                     }
                     _ => unreachable!(),
                 }
@@ -311,33 +315,23 @@ fn validate_property_access<'a>(
                                 StartNode::Identifier(ident) => {
                                     if let Some(var_info) = scope.get(ident.as_str()) {
                                         // Found a closure parameter - capture its name and the actual source variable
-                                        let source_var = var_info.source_var.clone().unwrap_or_else(|| ident.clone());
-                                        eprintln!("DEBUG object_validation: traversal '{}' starts with closure param '{}', source_var='{}'",
-                                            field_addition.key, ident, source_var);
+                                        let source_var = var_info
+                                            .source_var
+                                            .clone()
+                                            .unwrap_or_else(|| ident.clone());
                                         (Some(ident.clone()), Some(source_var))
                                     } else {
                                         (None, None)
                                     }
                                 }
-                                StartNode::Anonymous => {
-                                    // Anonymous traversal (_::...) - map to current iteration variable
-                                    // For collection context like posts::{ field: _::traversal },
-                                    // the _ refers to the current post being iterated
-                                    // The iteration variable name is the singular form of the parent variable
-                                    // (e.g., "posts" -> "post")
-
-                                    // We need to look at the parent context to find what variable we're iterating over
-                                    // For now, we'll use a placeholder that will be resolved during code generation
-                                    // based on the source_variable name
-                                    eprintln!("DEBUG object_validation: traversal '{}' starts with anonymous '_'", field_addition.key);
-                                    (Some("_".to_string()), Some("_".to_string()))
-                                }
-                                _ => (None, None)
+                                StartNode::Anonymous => (
+                                    Some(DEFAULT_VAR_NAME.to_string()),
+                                    Some(DEFAULT_VAR_NAME.to_string()),
+                                ),
+                                _ => (None, None),
                             };
 
                             // Validate the nested traversal
-                            eprintln!("DEBUG object_validation: validating '{}', parsed traversal has {} steps, first_step={:?}",
-                                field_addition.key, tr.steps.len(), tr.steps.first().map(|s| &s.step));
                             let mut nested_gen_traversal =
                                 crate::helixc::generator::traversal_steps::Traversal::default();
                             let nested_type = validate_traversal(
@@ -350,8 +344,12 @@ fn validate_property_access<'a>(
                                 gen_query,
                             );
 
-                            eprintln!("DEBUG object_validation: after validation, object_fields={:?}, has_object_step={}",
-                                nested_gen_traversal.object_fields, nested_gen_traversal.has_object_step);
+                            // Check if this nested traversal ends with a Closure step
+                            let own_closure_param = tr.steps.last()
+                                .and_then(|step| match &step.step {
+                                    crate::helixc::parser::types::StepType::Closure(cl) => Some(cl.identifier.clone()),
+                                    _ => None,
+                                });
 
                             let nested_info = NestedTraversalInfo {
                                 traversal: Box::new(nested_gen_traversal),
@@ -360,9 +358,8 @@ fn validate_property_access<'a>(
                                 parsed_traversal: Some(tr.clone()),
                                 closure_param_name: closure_param,
                                 closure_source_var: closure_source,
+                                own_closure_param,
                             };
-                            eprintln!("DEBUG object_validation: adding nested traversal '{}' with type {:?}, closure_source={:?}",
-                                field_addition.key, nested_type, nested_info.closure_source_var);
                             gen_traversal
                                 .nested_traversals
                                 .insert(field_addition.key.clone(), nested_info);
@@ -388,13 +385,21 @@ fn validate_property_access<'a>(
                                     gen_query,
                                 );
 
+                                // Check if this nested traversal ends with a Closure step
+                                let own_closure_param = tr.steps.last()
+                                    .and_then(|step| match &step.step {
+                                        crate::helixc::parser::types::StepType::Closure(cl) => Some(cl.identifier.clone()),
+                                        _ => None,
+                                    });
+
                                 let nested_info = NestedTraversalInfo {
                                     traversal: Box::new(nested_gen_traversal),
                                     return_type: nested_type,
                                     field_name: field_addition.key.clone(),
                                     parsed_traversal: Some(tr.clone()),
-                                    closure_param_name: None,  // Will be set by closure handling code
-                                    closure_source_var: None,  // Will be set by closure handling code
+                                    closure_param_name: None, // Will be set by closure handling code
+                                    closure_source_var: None, // Will be set by closure handling code
+                                    own_closure_param,
                                 };
                                 gen_traversal
                                     .nested_traversals
@@ -424,11 +429,11 @@ fn validate_property_access<'a>(
                 }
 
                 // Return the current type as we're just selecting fields from it
-                cur_ty.clone()
+                Ok(cur_ty.clone())
             } else {
                 // error - empty object
                 generate_error!(ctx, original_query, obj.fields[0].value.loc.clone(), E645);
-                Type::Unknown
+                Ok(Type::Unknown)
             }
         }
         None => {
@@ -439,7 +444,7 @@ fn validate_property_access<'a>(
                 E201,
                 &cur_ty.get_type_name()
             );
-            Type::Unknown
+            Ok(Type::Unknown)
         }
     }
 }

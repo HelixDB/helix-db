@@ -16,6 +16,7 @@ pub type ReqMsg = (Request, RetChan);
 pub struct Request {
     pub name: String,
     pub req_type: RequestType,
+    pub api_key_hash: Option<[u8; 32]>,
     /// This contains the input parameters serialized with in_fmt
     pub body: Bytes,
     pub in_fmt: Format,
@@ -64,6 +65,23 @@ where
             None => Format::default(),
         };
 
+        let api_key_hash = {
+            #[cfg(feature = "api-key")]
+            match headers.get("x-api-key") {
+                Some(v) => match v.to_str() {
+                    Ok(s) => {
+                        let mut hasher = sha_256::Sha256::new();
+                        let hash = hasher.digest(s.as_bytes());
+                        Some(hash)
+                    }
+                    Err(_) => return Err(StatusCode::BAD_REQUEST),
+                },
+                None => return Err(StatusCode::BAD_REQUEST),
+            }
+            #[cfg(not(feature = "api-key"))]
+            None::<[u8; 32]>
+        };
+
         let out_fmt = match headers.get(ACCEPT) {
             Some(v) => match v.to_str() {
                 Ok(s) => s.parse().unwrap_or_default(),
@@ -82,6 +100,7 @@ where
         let out = Request {
             name,
             req_type,
+            api_key_hash,
             body,
             in_fmt,
             out_fmt,
@@ -105,6 +124,7 @@ mod tests {
         let request = Request {
             name: "test_query".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: body.clone(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -121,6 +141,7 @@ mod tests {
         let request = Request {
             name: "original".to_string(),
             req_type: RequestType::MCP,
+            api_key_hash: None,
             body: body.clone(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -136,6 +157,7 @@ mod tests {
         let request = Request {
             name: "debug_test".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from("test"),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -196,6 +218,7 @@ mod tests {
         let request = Request {
             name: "empty_body".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::new(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -212,6 +235,7 @@ mod tests {
         let request = Request {
             name: "large_body".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: body.clone(),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
@@ -225,11 +249,108 @@ mod tests {
         let request = Request {
             name: "test_世界_query".to_string(),
             req_type: RequestType::Query,
+            api_key_hash: None,
             body: Bytes::from("test"),
             in_fmt: Format::Json,
             out_fmt: Format::Json,
         };
 
         assert!(request.name.contains("世界"));
+    }
+
+    // ============================================================================
+    // API Key Hash Tests
+    // ============================================================================
+
+    #[cfg(feature = "api-key")]
+    #[test]
+    fn test_request_with_api_key_hash() {
+        let hash = [42u8; 32];
+        let request = Request {
+            name: "secure_query".to_string(),
+            req_type: RequestType::Query,
+            api_key_hash: Some(hash),
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert!(request.api_key_hash.is_some());
+        assert_eq!(request.api_key_hash.unwrap(), hash);
+    }
+
+    #[cfg(feature = "api-key")]
+    #[test]
+    fn test_api_key_hash_length() {
+        // Verify that API key hashes are always 32 bytes (SHA-256)
+        let hash = [0u8; 32];
+        let request = Request {
+            name: "test".to_string(),
+            req_type: RequestType::Query,
+            api_key_hash: Some(hash),
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert_eq!(request.api_key_hash.unwrap().len(), 32);
+    }
+
+    #[cfg(feature = "api-key")]
+    #[test]
+    fn test_api_key_hash_different_values() {
+        let hash1 = [1u8; 32];
+        let hash2 = [2u8; 32];
+
+        let request1 = Request {
+            name: "test1".to_string(),
+            req_type: RequestType::Query,
+            api_key_hash: Some(hash1),
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let request2 = Request {
+            name: "test2".to_string(),
+            req_type: RequestType::Query,
+            api_key_hash: Some(hash2),
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert_ne!(request1.api_key_hash.unwrap(), request2.api_key_hash.unwrap());
+    }
+
+    #[test]
+    fn test_request_without_api_key_hash() {
+        let request = Request {
+            name: "unsecured_query".to_string(),
+            req_type: RequestType::Query,
+            api_key_hash: None,
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        assert!(request.api_key_hash.is_none());
+    }
+
+    #[cfg(feature = "api-key")]
+    #[test]
+    fn test_api_key_hash_clone() {
+        let hash = [99u8; 32];
+        let request = Request {
+            name: "test".to_string(),
+            req_type: RequestType::Query,
+            api_key_hash: Some(hash),
+            body: Bytes::from("test"),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+        };
+
+        let cloned = request.clone();
+        assert_eq!(cloned.api_key_hash, request.api_key_hash);
     }
 }

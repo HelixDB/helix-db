@@ -346,6 +346,68 @@ verify_installation() {
     fi
 }
 
+# Check if Homebrew is installed (Mac only)
+check_homebrew() {
+    if command -v brew >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Check if Docker Desktop is installed and prompt for installation (Mac only)
+check_docker_desktop() {
+    # Only run on macOS
+    if [[ "$OSTYPE" != "darwin"* ]]; then
+        return 0
+    fi
+
+    log_info "Checking for Docker Desktop..."
+
+    # Check if Docker Desktop is installed
+    # Check both /Applications/Docker.app and docker command availability
+    if [[ -d "/Applications/Docker.app" ]] || command -v docker >/dev/null 2>&1; then
+        log_success "Docker Desktop is installed"
+        return 0
+    fi
+
+    log_warn "Docker Desktop is not installed"
+    log_info "Helix CLI requires Docker to be running for local development"
+
+    # Check if Homebrew is available
+    if ! check_homebrew; then
+        log_warn "Homebrew is not installed"
+        log_warn "Please ensure you have Docker Desktop installed and running"
+        log_info "You can install Docker Desktop from: https://www.docker.com/products/docker-desktop"
+        return 0
+    fi
+
+    # Prompt user for installation
+    echo ""
+    read -p "Would you like to install Docker Desktop via Homebrew? (y/n): " -n 1 -r
+    echo ""
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Installing Docker Desktop via Homebrew..."
+        log_info "This may take several minutes..."
+
+        if brew install --cask docker; then
+            log_success "Docker Desktop installed successfully"
+            log_info "Please start Docker Desktop from your Applications folder"
+            log_info "You'll need to complete the Docker Desktop setup before using Helix CLI"
+        else
+            log_error "Failed to install Docker Desktop via Homebrew"
+            log_warn "Please install Docker Desktop manually from: https://www.docker.com/products/docker-desktop"
+        fi
+    else
+        log_warn "Skipping Docker Desktop installation"
+        log_warn "IMPORTANT: You need to have the Docker daemon running to use Helix CLI"
+        log_info "Install Docker Desktop from: https://www.docker.com/products/docker-desktop"
+    fi
+
+    echo ""
+}
+
 # Main installation function
 main() {
     log_info "Helix CLI Installer"
@@ -382,7 +444,10 @@ main() {
     install_binary "$latest_version" "$binary_filename"
     setup_path
     verify_installation
-    
+
+    # Check for Docker Desktop on Mac
+    check_docker_desktop
+
     log_success "Installation complete!"
     log_info ""
     log_info "Next steps:"
