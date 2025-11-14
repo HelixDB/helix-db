@@ -134,76 +134,94 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         let arena = self.arena;
         let txn = self.txn;
 
-        // Collect results using raw iterator
-        let mut results = Vec::new();
         let mut iter = txn.raw_iterator_cf(&storage.vectors.vector_properties_db);
         iter.seek_to_first();
 
-        while iter.valid() {
-            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                // Extract ID from key
-                let id = match key.try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => {
+        let label_len = label.len();
+
+        let inner = std::iter::from_fn(move || {
+            while iter.valid() {
+                if let Some((key, value)) = iter.item() {
+                    // Extract ID from key
+                    let id = match key.try_into() {
+                        Ok(bytes) => u128::from_be_bytes(bytes),
+                        Err(_) => {
+                            iter.next();
+                            continue;
+                        }
+                    };
+
+                    // Check label with bincode header pattern
+                    if value.len() < LMDB_STRING_HEADER_LENGTH {
+                        panic!(
+                            "value length does not contain header which means the `label` field was missing from the vector on insertion"
+                        );
+                    }
+
+                    let length_of_label_in_db =
+                        u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap())
+                            as usize;
+
+                    if length_of_label_in_db != label_len {
                         iter.next();
                         continue;
                     }
-                };
 
-                // Check label with bincode header pattern
-                assert!(
-                    value.len() >= LMDB_STRING_HEADER_LENGTH,
-                    "value length does not contain header which means the `label` field was missing from the vector on insertion"
-                );
-                let length_of_label_in_db =
-                    u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap())
-                        as usize;
+                    let end = LMDB_STRING_HEADER_LENGTH + length_of_label_in_db;
+                    if value.len() < end {
+                        panic!(
+                            "value length is not at least the header length plus the label length meaning there has been a corruption on vector insertion"
+                        );
+                    }
 
-                if length_of_label_in_db != label.len() {
-                    iter.next();
-                    continue;
-                }
+                    let label_in_db = &value[LMDB_STRING_HEADER_LENGTH..end];
 
-                assert!(
-                    value.len() >= length_of_label_in_db + LMDB_STRING_HEADER_LENGTH,
-                    "value length is not at least the header length plus the label length meaning there has been a corruption on vector insertion"
-                );
-                let label_in_db = &value
-                    [LMDB_STRING_HEADER_LENGTH..LMDB_STRING_HEADER_LENGTH + length_of_label_in_db];
-
-                if label_in_db == label_bytes {
-                    if get_vector_data {
-                        match storage.vectors.get_full_vector(txn, id, arena) {
-                            Ok(vector) => {
-                                results.push(Ok(TraversalValue::Vector(vector)));
+                    if label_in_db == label_bytes {
+                        if get_vector_data {
+                            match storage.vectors.get_full_vector(txn, id, arena) {
+                                Ok(vector) => {
+                                    iter.next();
+                                    return Some(Ok(TraversalValue::Vector(vector)));
+                                }
+                                Err(VectorError::VectorDeleted) => {
+                                    // Skip deleted vectors
+                                    iter.next();
+                                    continue;
+                                }
+                                Err(e) => {
+                                    iter.next();
+                                    return Some(Err(GraphError::from(e)));
+                                }
                             }
-                            Err(VectorError::VectorDeleted) => {
-                                // Skip deleted vectors
-                            }
-                            Err(e) => {
-                                results.push(Err(GraphError::from(e)));
+                        } else {
+                            match VectorWithoutData::from_bincode_bytes(arena, value, id) {
+                                Ok(v) => {
+                                    iter.next();
+                                    return Some(Ok(TraversalValue::VectorNodeWithoutVectorData(v)));
+                                }
+                                Err(e) => {
+                                    iter.next();
+                                    return Some(Err(GraphError::ConversionError(e.to_string())));
+                                }
                             }
                         }
                     } else {
-                        match VectorWithoutData::from_bincode_bytes(arena, value, id) {
-                            Ok(v) => {
-                                results.push(Ok(TraversalValue::VectorNodeWithoutVectorData(v)));
-                            }
-                            Err(e) => {
-                                results.push(Err(GraphError::ConversionError(e.to_string())));
-                            }
-                        }
+                        iter.next();
+                        continue;
                     }
+                } else {
+                    // no key/value, advance
+                    iter.next();
                 }
             }
-            iter.next();
-        }
+            None
+        });
 
         RoTraversalIterator {
             storage,
             arena,
             txn,
-            inner: results.into_iter(),
+            inner,
         }
     }
 }

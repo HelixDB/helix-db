@@ -117,63 +117,76 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         let arena = self.arena;
         let txn = self.txn;
 
-        // Collect results using raw iterator
-        let mut results = Vec::new();
         let mut iter = txn.raw_iterator_cf(&storage.nodes_db);
         iter.seek_to_first();
 
-        while iter.valid() {
-            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
-                // Extract node ID from key
-                let id = match key.try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => {
-                        println!("{} Error converting key to node ID", line!());
+        let label_len = label.len();
+
+        let inner = std::iter::from_fn(move || {
+            while iter.valid() {
+                if let Some((key, value)) = iter.item() {
+                    let id = match key.try_into() {
+                        Ok(bytes) => u128::from_be_bytes(bytes),
+                        Err(_) => {
+                            println!("{} Error converting key to node ID", line!());
+                            iter.next();
+                            continue;
+                        }
+                    };
+
+                    if value.len() < LMDB_STRING_HEADER_LENGTH {
+                        panic!(
+                            "value length does not contain header which means the `label` field was missing from the node on insertion"
+                        );
+                    }
+
+                    let length_of_label_in_db =
+                        u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap())
+                            as usize;
+
+                    if length_of_label_in_db != label_len {
                         iter.next();
                         continue;
                     }
-                };
 
-                assert!(
-                    value.len() >= LMDB_STRING_HEADER_LENGTH,
-                    "value length does not contain header which means the `label` field was missing from the node on insertion"
-                );
-                let length_of_label_in_db =
-                    u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap())
-                        as usize;
-
-                if length_of_label_in_db != label.len() {
-                    iter.next();
-                    continue;
-                }
-
-                assert!(
-                    value.len() >= length_of_label_in_db + LMDB_STRING_HEADER_LENGTH,
-                    "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
-                );
-                let label_in_db = &value
-                    [LMDB_STRING_HEADER_LENGTH..LMDB_STRING_HEADER_LENGTH + length_of_label_in_db];
-
-                if label_in_db == label_as_bytes {
-                    match Node::<'arena>::from_bincode_bytes(id, value, arena) {
-                        Ok(node) => {
-                            results.push(Ok(TraversalValue::Node(node)));
-                        }
-                        Err(e) => {
-                            println!("{} Error decoding node: {:?}", line!(), e);
-                            results.push(Err(GraphError::ConversionError(e.to_string())));
-                        }
+                    let end = LMDB_STRING_HEADER_LENGTH + length_of_label_in_db;
+                    if value.len() < end {
+                        panic!(
+                            "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
+                        );
                     }
+
+                    let label_in_db = &value[LMDB_STRING_HEADER_LENGTH..end];
+
+                    if label_in_db == label_as_bytes {
+                        match Node::<'arena>::from_bincode_bytes(id, value, arena) {
+                            Ok(node) => {
+                                iter.next();
+                                return Some(Ok(TraversalValue::Node(node)));
+                            }
+                            Err(e) => {
+                                iter.next();
+                                println!("{} Error decoding node: {:?}", line!(), e);
+                                return Some(Err(GraphError::ConversionError(e.to_string())));
+                            }
+                        }
+                    } else {
+                        iter.next();
+                        continue;
+                    }
+                } else {
+                    // no key/value, advance
+                    iter.next();
                 }
             }
-            iter.next();
-        }
+            None
+        });
 
         RoTraversalIterator {
             storage,
             arena,
             txn,
-            inner: results.into_iter(),
+            inner,
         }
     }
 }

@@ -136,12 +136,12 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                             return None;
                                         }
 
-                                        // Extract edge_id from value
-                                        let edge_id = match HelixGraphStorage::unpack_adj_edge_data(value.as_ref()) {
-                                            Ok(id) => id,
-                                            Err(e) => {
-                                                println!("Error unpacking edge data: {e:?}");
-                                                return Some(Err(e));
+                                        // Extract edge_id from value (16 bytes)
+                                        let edge_id = match value.as_ref().try_into() {
+                                            Ok(bytes) => u128::from_be_bytes(bytes),
+                                            Err(_) => {
+                                                println!("Error: value is not 16 bytes");
+                                                return Some(Err(GraphError::SliceLengthError));
                                             }
                                         };
 

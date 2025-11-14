@@ -146,7 +146,10 @@ fn hnsw_edges_merge(
 }
 
 impl<'db> VectorCore<'db> {
-    pub fn new(db: &'db rocksdb::TransactionDB, config: HNSWConfig) -> Result<Self, VectorError> {
+    pub fn new(
+        db: &'db rocksdb::TransactionDB<rocksdb::MultiThreaded>,
+        config: HNSWConfig,
+    ) -> Result<Self, VectorError> {
         let vectors_db = db.cf_handle("vectors").unwrap();
         let vector_properties_db = db.cf_handle("vector_properties").unwrap();
         let edges_db = db.cf_handle("hnsw_edges").unwrap();

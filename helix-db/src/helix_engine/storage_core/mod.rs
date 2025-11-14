@@ -13,7 +13,7 @@ use crate::{
         },
         traversal_core::config::Config,
         types::GraphError,
-        vector_core::{HNSWConfig, VectorCore, hnsw::HNSW},
+        vector_core::{HNSW, HNSWConfig, VectorCore},
     },
     utils::{
         items::{Edge, Node},
@@ -585,7 +585,7 @@ pub fn default_helix_rocksdb_options() -> rocksdb::Options {
 #[cfg(feature = "rocks")]
 impl<'db> HelixGraphStorage<'db> {
     pub fn new(
-        path: &str,
+        path: &'db str,
         config: Config,
         version_info: VersionInfo,
     ) -> Result<HelixGraphStorage, GraphError> {
@@ -657,7 +657,7 @@ impl<'db> HelixGraphStorage<'db> {
         // Initialize vector storage (needs migration to RocksDB too)
         let vector_config = config.get_vector_config();
         let vectors = VectorCore::new(
-            Arc::clone(&db),
+            &db,
             HNSWConfig::new(
                 vector_config.m,
                 vector_config.ef_construction,
@@ -810,13 +810,23 @@ impl<'db> HelixGraphStorage<'db> {
         key
     }
 
-    /// In edge key generator. Creates a 20 byte array and copies in the node id and 4 byte label.
+    /// In edge key prefix generator. Creates a 20 byte array with the to_node_id and label.
+    /// Used for prefix iteration in RocksDB.
     ///
     /// key = `to-node(16)` | `label-id(4)`                 ← 20 B
+    #[inline(always)]
+    pub fn in_edge_key_prefix(to_node_id: u128, label: &[u8; 4]) -> [u8; 20] {
+        let mut key = [0u8; 20];
+        key[0..16].copy_from_slice(&to_node_id.to_be_bytes());
+        key[16..20].copy_from_slice(label);
+        key
+    }
+
+    /// In edge key generator. Creates a 36 byte array with to_node, label, and from_node.
     ///
-    /// The generated in edge key will remain the same for the same to_node_id and label.
-    /// To save space, the key is only stored once,
-    /// with the values being stored in a sorted sub-tree, with this key being the root.
+    /// key = `to-node(16)` | `label-id(4)` | `from-node(16)`    ← 36 B
+    ///
+    /// The generated in edge key will be unique for each edge.
     #[inline(always)]
     pub fn in_edge_key(to_node_id: u128, label: &[u8; 4], from_node_id: u128) -> [u8; 36] {
         let mut key = [0u8; 36];
