@@ -50,7 +50,7 @@ pub(super) trait HeapOps<'a, T> {
 
 impl<'a, T> HeapOps<'a, T> for BinaryHeap<'a, T> {
     #[inline(always)]
-    fn take_inord(&mut self, k: usize) -> BinaryHeap<'a, T>
+    fn take_inord(&mut self, k: usize) -> Self
     where
         T: Ord,
     {
@@ -112,11 +112,11 @@ impl<'db, 'arena, 'txn, 'q> VectorFilter<'db, 'arena, 'txn, 'q>
                 let properties = match db.get(txn, &item.id)? {
                     Some(bytes) => {
                         // println!("decoding");
-                        let res = Some(VectorWithoutData::from_bincode_bytes(
-                            arena, bytes, item.id,
-                        )?);
+                        
                         // println!("decoded: {res:?}");
-                        res
+                        Some(VectorWithoutData::from_bincode_bytes(
+                            arena, bytes, item.id,
+                        )?)
                     }
                     None => None, // TODO: maybe should be an error?
                 };

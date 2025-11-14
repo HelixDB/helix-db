@@ -14,7 +14,7 @@ use crate::helixc::{
 
 impl From<NodeSchema> for GeneratedNodeSchema {
     fn from(generated: NodeSchema) -> Self {
-        GeneratedNodeSchema {
+        Self {
             name: generated.name.1,
             properties: generated
                 .fields
@@ -32,7 +32,7 @@ impl From<NodeSchema> for GeneratedNodeSchema {
 
 impl From<EdgeSchema> for GeneratedEdgeSchema {
     fn from(generated: EdgeSchema) -> Self {
-        GeneratedEdgeSchema {
+        Self {
             name: generated.name.1,
             from: generated.from.1,
             to: generated.to.1,
@@ -53,7 +53,7 @@ impl From<EdgeSchema> for GeneratedEdgeSchema {
 
 impl From<VectorSchema> for GeneratedVectorSchema {
     fn from(generated: VectorSchema) -> Self {
-        GeneratedVectorSchema {
+        Self {
             name: generated.name,
             properties: generated
                 .fields
@@ -72,12 +72,12 @@ impl From<VectorSchema> for GeneratedVectorSchema {
 impl GeneratedParameter {
     pub fn unwrap_param(
         param: Parameter,
-        parameters: &mut Vec<GeneratedParameter>,
-        sub_parameters: &mut Vec<(String, Vec<GeneratedParameter>)>,
+        parameters: &mut Vec<Self>,
+        sub_parameters: &mut Vec<(String, Vec<Self>)>,
     ) {
         match param.param_type.1 {
             FieldType::Identifier(ref id) => {
-                parameters.push(GeneratedParameter {
+                parameters.push(Self {
                     name: param.name.1,
                     field_type: GeneratedType::Variable(GenRef::Std(id.clone())),
                     is_optional: param.is_optional,
@@ -86,7 +86,7 @@ impl GeneratedParameter {
             FieldType::Array(inner) => match inner.as_ref() {
                 FieldType::Object(obj) => {
                     unwrap_object(format!("{}Data", param.name.1), obj, sub_parameters);
-                    parameters.push(GeneratedParameter {
+                    parameters.push(Self {
                         name: param.name.1.clone(),
                         field_type: GeneratedType::Vec(Box::new(GeneratedType::Object(
                             GenRef::Std(format!("{}Data", param.name.1)),
@@ -95,7 +95,7 @@ impl GeneratedParameter {
                     });
                 }
                 param_type => {
-                    parameters.push(GeneratedParameter {
+                    parameters.push(Self {
                         name: param.name.1,
                         field_type: GeneratedType::Vec(Box::new(param_type.clone().into())),
                         is_optional: param.is_optional,
@@ -104,7 +104,7 @@ impl GeneratedParameter {
             },
             FieldType::Object(obj) => {
                 unwrap_object(format!("{}Data", param.name.1), &obj, sub_parameters);
-                parameters.push(GeneratedParameter {
+                parameters.push(Self {
                     name: param.name.1.clone(),
                     field_type: GeneratedType::Variable(GenRef::Std(format!(
                         "{}Data",
@@ -114,7 +114,7 @@ impl GeneratedParameter {
                 });
             }
             param_type => {
-                parameters.push(GeneratedParameter {
+                parameters.push(Self {
                     name: param.name.1,
                     field_type: param_type.into(),
                     is_optional: param.is_optional,
@@ -171,23 +171,23 @@ fn unwrap_object(
 impl From<FieldType> for GeneratedType {
     fn from(generated: FieldType) -> Self {
         match generated {
-            FieldType::String => GeneratedType::RustType(GeneratedRustType::String),
-            FieldType::F32 => GeneratedType::RustType(GeneratedRustType::F32),
-            FieldType::F64 => GeneratedType::RustType(GeneratedRustType::F64),
-            FieldType::I8 => GeneratedType::RustType(GeneratedRustType::I8),
-            FieldType::I16 => GeneratedType::RustType(GeneratedRustType::I16),
-            FieldType::I32 => GeneratedType::RustType(GeneratedRustType::I32),
-            FieldType::I64 => GeneratedType::RustType(GeneratedRustType::I64),
-            FieldType::U8 => GeneratedType::RustType(GeneratedRustType::U8),
-            FieldType::U16 => GeneratedType::RustType(GeneratedRustType::U16),
-            FieldType::U32 => GeneratedType::RustType(GeneratedRustType::U32),
-            FieldType::U64 => GeneratedType::RustType(GeneratedRustType::U64),
-            FieldType::U128 => GeneratedType::RustType(GeneratedRustType::U128),
-            FieldType::Boolean => GeneratedType::RustType(GeneratedRustType::Bool),
-            FieldType::Uuid => GeneratedType::RustType(GeneratedRustType::Uuid),
-            FieldType::Date => GeneratedType::RustType(GeneratedRustType::Date),
-            FieldType::Array(inner) => GeneratedType::Vec(Box::new(GeneratedType::from(*inner))),
-            FieldType::Identifier(ref id) => GeneratedType::Variable(GenRef::Std(id.clone())),
+            FieldType::String => Self::RustType(GeneratedRustType::String),
+            FieldType::F32 => Self::RustType(GeneratedRustType::F32),
+            FieldType::F64 => Self::RustType(GeneratedRustType::F64),
+            FieldType::I8 => Self::RustType(GeneratedRustType::I8),
+            FieldType::I16 => Self::RustType(GeneratedRustType::I16),
+            FieldType::I32 => Self::RustType(GeneratedRustType::I32),
+            FieldType::I64 => Self::RustType(GeneratedRustType::I64),
+            FieldType::U8 => Self::RustType(GeneratedRustType::U8),
+            FieldType::U16 => Self::RustType(GeneratedRustType::U16),
+            FieldType::U32 => Self::RustType(GeneratedRustType::U32),
+            FieldType::U64 => Self::RustType(GeneratedRustType::U64),
+            FieldType::U128 => Self::RustType(GeneratedRustType::U128),
+            FieldType::Boolean => Self::RustType(GeneratedRustType::Bool),
+            FieldType::Uuid => Self::RustType(GeneratedRustType::Uuid),
+            FieldType::Date => Self::RustType(GeneratedRustType::Date),
+            FieldType::Array(inner) => Self::Vec(Box::new(Self::from(*inner))),
+            FieldType::Identifier(ref id) => Self::Variable(GenRef::Std(id.clone())),
             // FieldType::Object(obj) => GeneratedType::Object(
             //     obj.iter()
             //         .map(|(name, field_type)| {
@@ -205,23 +205,23 @@ impl From<FieldType> for GeneratedType {
 impl From<DefaultValue> for GeneratedValue {
     fn from(generated: DefaultValue) -> Self {
         match generated {
-            DefaultValue::String(s) => GeneratedValue::Primitive(GenRef::Std(s)),
-            DefaultValue::F32(f) => GeneratedValue::Primitive(GenRef::Std(f.to_string())),
-            DefaultValue::F64(f) => GeneratedValue::Primitive(GenRef::Std(f.to_string())),
-            DefaultValue::I8(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::I16(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::I32(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::I64(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::U8(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::U16(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::U32(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::U64(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::U128(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
-            DefaultValue::Boolean(b) => GeneratedValue::Primitive(GenRef::Std(b.to_string())),
-            DefaultValue::Now => GeneratedValue::Primitive(GenRef::Std(
+            DefaultValue::String(s) => Self::Primitive(GenRef::Std(s)),
+            DefaultValue::F32(f) => Self::Primitive(GenRef::Std(f.to_string())),
+            DefaultValue::F64(f) => Self::Primitive(GenRef::Std(f.to_string())),
+            DefaultValue::I8(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::I16(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::I32(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::I64(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::U8(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::U16(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::U32(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::U64(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::U128(i) => Self::Primitive(GenRef::Std(i.to_string())),
+            DefaultValue::Boolean(b) => Self::Primitive(GenRef::Std(b.to_string())),
+            DefaultValue::Now => Self::Primitive(GenRef::Std(
                 "chrono::Utc::now().to_rfc3339()".to_string(),
             )),
-            DefaultValue::Empty => GeneratedValue::Unknown,
+            DefaultValue::Empty => Self::Unknown,
         }
     }
 }
@@ -256,37 +256,37 @@ pub enum Type {
 impl Type {
     pub fn kind_str(&self) -> &'static str {
         match self {
-            Type::Aggregate(_) => "aggregate",
-            Type::Node(_) => "node",
-            Type::Nodes(_) => "nodes",
-            Type::Edge(_) => "edge",
-            Type::Edges(_) => "edges",
-            Type::Vector(_) => "vector",
-            Type::Vectors(_) => "vectors",
-            Type::Scalar(_) => "scalar",
-            Type::Object(_) => "object",
-            Type::Array(_) => "array",
-            Type::Boolean => "boolean",
-            Type::Unknown => "unknown",
-            Type::Anonymous(ty) => ty.kind_str(),
+            Self::Aggregate(_) => "aggregate",
+            Self::Node(_) => "node",
+            Self::Nodes(_) => "nodes",
+            Self::Edge(_) => "edge",
+            Self::Edges(_) => "edges",
+            Self::Vector(_) => "vector",
+            Self::Vectors(_) => "vectors",
+            Self::Scalar(_) => "scalar",
+            Self::Object(_) => "object",
+            Self::Array(_) => "array",
+            Self::Boolean => "boolean",
+            Self::Unknown => "unknown",
+            Self::Anonymous(ty) => ty.kind_str(),
         }
     }
 
     pub fn get_type_name(&self) -> String {
         match self {
-            Type::Aggregate(_) => "aggregate".to_string(),
-            Type::Node(Some(name)) => name.clone(),
-            Type::Nodes(Some(name)) => name.clone(),
-            Type::Edge(Some(name)) => name.clone(),
-            Type::Edges(Some(name)) => name.clone(),
-            Type::Vector(Some(name)) => name.clone(),
-            Type::Vectors(Some(name)) => name.clone(),
-            Type::Scalar(ft) => ft.to_string(),
-            Type::Anonymous(ty) => ty.get_type_name(),
-            Type::Array(ty) => ty.get_type_name(),
-            Type::Boolean => "boolean".to_string(),
-            Type::Unknown => "unknown".to_string(),
-            Type::Object(fields) => {
+            Self::Aggregate(_) => "aggregate".to_string(),
+            Self::Node(Some(name)) => name.clone(),
+            Self::Nodes(Some(name)) => name.clone(),
+            Self::Edge(Some(name)) => name.clone(),
+            Self::Edges(Some(name)) => name.clone(),
+            Self::Vector(Some(name)) => name.clone(),
+            Self::Vectors(Some(name)) => name.clone(),
+            Self::Scalar(ft) => ft.to_string(),
+            Self::Anonymous(ty) => ty.get_type_name(),
+            Self::Array(ty) => ty.get_type_name(),
+            Self::Boolean => "boolean".to_string(),
+            Self::Unknown => "unknown".to_string(),
+            Self::Object(fields) => {
                 let field_names = fields.keys().cloned().collect::<Vec<_>>();
                 format!("object({})", field_names.join(", "))
             }
@@ -295,18 +295,18 @@ impl Type {
     }
 
     /// Recursively strip <code>Anonymous</code> layers and return the base type.
-    pub fn base(&self) -> &Type {
+    pub fn base(&self) -> &Self {
         match self {
-            Type::Anonymous(inner) => inner.base(),
+            Self::Anonymous(inner) => inner.base(),
             _ => self,
         }
     }
 
     #[allow(dead_code)]
     /// Same, but returns an owned clone for convenience.
-    pub fn cloned_base(&self) -> Type {
+    pub fn cloned_base(&self) -> Self {
         match self {
-            Type::Anonymous(inner) => inner.cloned_base(),
+            Self::Anonymous(inner) => inner.cloned_base(),
             _ => self.clone(),
         }
     }
@@ -315,7 +315,7 @@ impl Type {
     pub fn is_numeric(&self) -> bool {
         matches!(
             self,
-            Type::Scalar(
+            Self::Scalar(
                 FieldType::I8
                     | FieldType::I16
                     | FieldType::I32
@@ -334,7 +334,7 @@ impl Type {
     pub fn is_integer(&self) -> bool {
         matches!(
             self,
-            Type::Scalar(
+            Self::Scalar(
                 FieldType::I8
                     | FieldType::I16
                     | FieldType::I32
@@ -348,21 +348,21 @@ impl Type {
         )
     }
 
-    pub fn into_single(self) -> Type {
+    pub fn into_single(self) -> Self {
         match self {
-            Type::Scalar(ft) => Type::Scalar(ft),
-            Type::Object(fields) => Type::Object(fields),
-            Type::Boolean => Type::Boolean,
-            Type::Unknown => Type::Unknown,
-            Type::Anonymous(inner) => Type::Anonymous(Box::new(inner.into_single())),
-            Type::Aggregate(info) => Type::Aggregate(info),
-            Type::Node(name) => Type::Node(name),
-            Type::Nodes(name) => Type::Node(name),
-            Type::Edge(name) => Type::Edge(name),
-            Type::Edges(name) => Type::Edge(name),
-            Type::Vector(name) => Type::Vector(name),
-            Type::Vectors(name) => Type::Vector(name),
-            Type::Array(inner) => *inner,
+            Self::Scalar(ft) => Self::Scalar(ft),
+            Self::Object(fields) => Self::Object(fields),
+            Self::Boolean => Self::Boolean,
+            Self::Unknown => Self::Unknown,
+            Self::Anonymous(inner) => Self::Anonymous(Box::new(inner.into_single())),
+            Self::Aggregate(info) => Self::Aggregate(info),
+            Self::Node(name) => Self::Node(name),
+            Self::Nodes(name) => Self::Node(name),
+            Self::Edge(name) => Self::Edge(name),
+            Self::Edges(name) => Self::Edge(name),
+            Self::Vector(name) => Self::Vector(name),
+            Self::Vectors(name) => Self::Vector(name),
+            Self::Array(inner) => *inner,
         }
     }
 }
@@ -370,19 +370,19 @@ impl Type {
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Type::Scalar(ft), Type::Scalar(other_ft)) => ft == other_ft,
-            (Type::Object(fields), Type::Object(other_fields)) => fields == other_fields,
-            (Type::Boolean, Type::Boolean) => true,
-            (Type::Unknown, Type::Unknown) => true,
-            (Type::Anonymous(inner), Type::Anonymous(other_inner)) => inner == other_inner,
-            (Type::Node(name), Type::Node(other_name)) => name == other_name,
-            (Type::Nodes(name), Type::Nodes(other_name)) => name == other_name,
-            (Type::Edge(name), Type::Edge(other_name)) => name == other_name,
-            (Type::Edges(name), Type::Edges(other_name)) => name == other_name,
-            (Type::Vector(name), Type::Vector(other_name)) => name == other_name,
-            (Type::Vectors(name), Type::Vectors(other_name)) => name == other_name,
-            (Type::Array(inner), Type::Array(other_inner)) => inner == other_inner,
-            (Type::Vector(name), Type::Vectors(other_name)) => name == other_name,
+            (Self::Scalar(ft), Self::Scalar(other_ft)) => ft == other_ft,
+            (Self::Object(fields), Self::Object(other_fields)) => fields == other_fields,
+            (Self::Boolean, Self::Boolean) => true,
+            (Self::Unknown, Self::Unknown) => true,
+            (Self::Anonymous(inner), Self::Anonymous(other_inner)) => inner == other_inner,
+            (Self::Node(name), Self::Node(other_name)) => name == other_name,
+            (Self::Nodes(name), Self::Nodes(other_name)) => name == other_name,
+            (Self::Edge(name), Self::Edge(other_name)) => name == other_name,
+            (Self::Edges(name), Self::Edges(other_name)) => name == other_name,
+            (Self::Vector(name), Self::Vector(other_name)) => name == other_name,
+            (Self::Vectors(name), Self::Vectors(other_name)) => name == other_name,
+            (Self::Array(inner), Self::Array(other_inner)) => inner == other_inner,
+            (Self::Vector(name), Self::Vectors(other_name)) => name == other_name,
             _ => unreachable!(),
         }
     }
@@ -393,10 +393,10 @@ impl From<FieldType> for Type {
         use FieldType::*;
         match ft {
             String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128
-            | Uuid | Date => Type::Scalar(ft.clone()),
-            Array(inner_ft) => Type::Array(Box::new(Type::from(*inner_ft))),
-            Object(obj) => Type::Object(obj.into_iter().map(|(k, v)| (k, Type::from(v))).collect()),
-            Identifier(id) => Type::Scalar(FieldType::Identifier(id)),
+            | Uuid | Date => Self::Scalar(ft.clone()),
+            Array(inner_ft) => Self::Array(Box::new(Self::from(*inner_ft))),
+            Object(obj) => Self::Object(obj.into_iter().map(|(k, v)| (k, Self::from(v))).collect()),
+            Identifier(id) => Self::Scalar(FieldType::Identifier(id)),
         }
     }
 }
@@ -406,10 +406,10 @@ impl From<&FieldType> for Type {
         use FieldType::*;
         match ft {
             String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128
-            | Uuid | Date => Type::Scalar(ft.clone()),
-            Array(inner_ft) => Type::Array(Box::new(Type::from(*inner_ft.clone()))),
-            Object(obj) => Type::Object(obj.iter().map(|(k, v)| (k.clone(), Type::from(v))).collect()),
-            Identifier(id) => Type::Scalar(FieldType::Identifier(id.clone())),
+            | Uuid | Date => Self::Scalar(ft.clone()),
+            Array(inner_ft) => Self::Array(Box::new(Self::from(*inner_ft.clone()))),
+            Object(obj) => Self::Object(obj.iter().map(|(k, v)| (k.clone(), Self::from(v))).collect()),
+            Identifier(id) => Self::Scalar(FieldType::Identifier(id.clone())),
         }
     }
 }

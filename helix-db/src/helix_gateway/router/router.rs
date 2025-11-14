@@ -110,32 +110,32 @@ pub enum RouterError {
 impl fmt::Display for RouterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RouterError::Io(e) => write!(f, "IO error: {e}"),
-            RouterError::New(msg) => write!(f, "Graph error: {msg}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::New(msg) => write!(f, "Graph error: {msg}"),
         }
     }
 }
 
 impl From<String> for RouterError {
     fn from(error: String) -> Self {
-        RouterError::New(error)
+        Self::New(error)
     }
 }
 
 impl From<std::io::Error> for RouterError {
     fn from(error: std::io::Error) -> Self {
-        RouterError::Io(error)
+        Self::Io(error)
     }
 }
 
 impl From<GraphError> for RouterError {
     fn from(error: GraphError) -> Self {
-        RouterError::New(error.to_string())
+        Self::New(error.to_string())
     }
 }
 
 impl From<RouterError> for GraphError {
     fn from(error: RouterError) -> Self {
-        GraphError::New(error.to_string())
+        Self::New(error.to_string())
     }
 }

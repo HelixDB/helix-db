@@ -33,7 +33,7 @@ pub struct HelixGraphEngineOpts {
 }
 
 impl HelixGraphEngine {
-    pub fn new(opts: HelixGraphEngineOpts) -> Result<HelixGraphEngine, GraphError> {
+    pub fn new(opts: HelixGraphEngineOpts) -> Result<Self, GraphError> {
         let should_use_mcp = opts.config.mcp;
         let storage =
             match HelixGraphStorage::new(opts.path.as_str(), opts.config, opts.version_info) {

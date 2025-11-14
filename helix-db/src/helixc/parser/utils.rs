@@ -99,7 +99,7 @@ pub trait PairsTools<'a> {
 
 impl<'a> PairTools<'a> for Pair<'a, Rule> {
     #[track_caller]
-    fn try_inner_next(self) -> Result<Pair<'a, Rule>, ParserError> {
+    fn try_inner_next(self) -> Result<Self, ParserError> {
         let err_msg = format!("Expected inner next got {self:?}");
         self.into_inner()
             .next()
@@ -109,7 +109,7 @@ impl<'a> PairTools<'a> for Pair<'a, Rule> {
 
 impl<'a> PairTools<'a> for Result<Pair<'a, Rule>, ParserError> {
     #[track_caller]
-    fn try_inner_next(self) -> Result<Pair<'a, Rule>, ParserError> {
+    fn try_inner_next(self) -> Self {
         match self {
             Ok(pair) => pair
                 .into_inner()
@@ -126,7 +126,7 @@ impl<'a> PairsTools<'a> for Pairs<'a, Rule> {
             .ok_or_else(|| ParserError::from("Expected next"))
     }
 
-    fn try_next_inner(&mut self) -> Result<Pairs<'a, Rule>, ParserError> {
+    fn try_next_inner(&mut self) -> Result<Self, ParserError> {
         match self.next() {
             Some(pair) => Ok(pair.into_inner()),
             None => Err(ParserError::from("Expected next inner")),
@@ -142,7 +142,7 @@ impl<'a> PairsTools<'a> for Result<Pairs<'a, Rule>, ParserError> {
         }
     }
 
-    fn try_next_inner(&mut self) -> Result<Pairs<'a, Rule>, ParserError> {
+    fn try_next_inner(&mut self) -> Self {
         match self {
             Ok(pairs) => pairs.try_next_inner(),
             Err(e) => Err(e.clone()),

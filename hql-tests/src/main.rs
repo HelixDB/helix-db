@@ -23,7 +23,7 @@ impl GitHubConfig {
         let owner = env::var("GITHUB_OWNER").unwrap_or_else(|_| "HelixDB".to_string());
         let repo = env::var("GITHUB_REPO").unwrap_or_else(|_| "helix-db".to_string());
 
-        Ok(GitHubConfig { token, owner, repo })
+        Ok(Self { token, owner, repo })
     }
 }
 

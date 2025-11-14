@@ -37,10 +37,10 @@ pub enum TraversalType {
 impl Debug for TraversalType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TraversalType::FromSingle(_) => write!(f, "FromSingle"),
-            TraversalType::FromIter(_) => write!(f, "FromIter"),
-            TraversalType::Ref => write!(f, "Ref"),
-            TraversalType::Standalone => write!(f, "Standalone"),
+            Self::FromSingle(_) => write!(f, "FromSingle"),
+            Self::FromIter(_) => write!(f, "FromIter"),
+            Self::Ref => write!(f, "Ref"),
+            Self::Standalone => write!(f, "Standalone"),
             _ => write!(f, "other"),
         }
     }
@@ -73,11 +73,11 @@ pub enum ShouldCollect {
 impl Display for ShouldCollect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ShouldCollect::ToVec => write!(f, ".collect::<Result<Vec<_>, _>>()?"),
-            ShouldCollect::ToObj => write!(f, ".collect_to_obj()?"),
-            ShouldCollect::Try => write!(f, "?"),
-            ShouldCollect::No => write!(f, ""),
-            ShouldCollect::ToValue => write!(f, ".collect_to_value()"),
+            Self::ToVec => write!(f, ".collect::<Result<Vec<_>, _>>()?"),
+            Self::ToObj => write!(f, ".collect_to_obj()?"),
+            Self::Try => write!(f, "?"),
+            Self::No => write!(f, ""),
+            Self::ToValue => write!(f, ".collect_to_value()"),
         }
     }
 }
@@ -258,14 +258,14 @@ pub enum Step {
 impl Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Step::Count => write!(f, "count_to_val()"),
-            Step::Dedup => write!(f, "dedup()"),
-            Step::FromN => write!(f, "from_n()"),
-            Step::FromV(from_v) => write!(f, "{from_v}"),
-            Step::ToN => write!(f, "to_n()"),
-            Step::ToV(to_v) => write!(f, "{to_v}"),
-            Step::PropertyFetch(property) => write!(f, "get_property({property})"),
-            Step::ReservedPropertyAccess(prop) => match prop {
+            Self::Count => write!(f, "count_to_val()"),
+            Self::Dedup => write!(f, "dedup()"),
+            Self::FromN => write!(f, "from_n()"),
+            Self::FromV(from_v) => write!(f, "{from_v}"),
+            Self::ToN => write!(f, "to_n()"),
+            Self::ToV(to_v) => write!(f, "{to_v}"),
+            Self::PropertyFetch(property) => write!(f, "get_property({property})"),
+            Self::ReservedPropertyAccess(prop) => match prop {
                 ReservedProp::Id => write!(f, "map(|item| Ok(Value::from(uuid_str(item.id, &arena))))"),
                 ReservedProp::Label => write!(f, "map(|item| Ok(Value::from(item.label())))"),
                 // ReservedProp::Version => write!(f, "map(|item| Ok(Value::from(item.version)))"),
@@ -277,56 +277,56 @@ impl Display for Step {
                 // ReservedProp::Data => write!(f, "map(|item| Ok(Value::from(item.data)))"),
             },
 
-            Step::Out(out) => write!(f, "{out}"),
-            Step::In(in_) => write!(f, "{in_}"),
-            Step::OutE(out_e) => write!(f, "{out_e}"),
-            Step::InE(in_e) => write!(f, "{in_e}"),
-            Step::Where(where_) => write!(f, "{where_}"),
-            Step::Range(range) => write!(f, "{range}"),
-            Step::OrderBy(order_by) => write!(f, "{order_by}"),
-            Step::BoolOp(bool_op) => write!(f, "{bool_op}"),
-            Step::ShortestPath(shortest_path) => write!(f, "{shortest_path}"),
-            Step::ShortestPathDijkstras(shortest_path_dijkstras) => {
+            Self::Out(out) => write!(f, "{out}"),
+            Self::In(in_) => write!(f, "{in_}"),
+            Self::OutE(out_e) => write!(f, "{out_e}"),
+            Self::InE(in_e) => write!(f, "{in_e}"),
+            Self::Where(where_) => write!(f, "{where_}"),
+            Self::Range(range) => write!(f, "{range}"),
+            Self::OrderBy(order_by) => write!(f, "{order_by}"),
+            Self::BoolOp(bool_op) => write!(f, "{bool_op}"),
+            Self::ShortestPath(shortest_path) => write!(f, "{shortest_path}"),
+            Self::ShortestPathDijkstras(shortest_path_dijkstras) => {
                 write!(f, "{shortest_path_dijkstras}")
             }
-            Step::ShortestPathBFS(shortest_path_bfs) => write!(f, "{shortest_path_bfs}"),
-            Step::ShortestPathAStar(shortest_path_astar) => write!(f, "{shortest_path_astar}"),
-            Step::SearchVector(search_vector) => write!(f, "{search_vector}"),
-            Step::GroupBy(group_by) => write!(f, "{group_by}"),
-            Step::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
-            Step::RerankRRF(rerank_rrf) => write!(f, "{rerank_rrf}"),
-            Step::RerankMMR(rerank_mmr) => write!(f, "{rerank_mmr}"),
+            Self::ShortestPathBFS(shortest_path_bfs) => write!(f, "{shortest_path_bfs}"),
+            Self::ShortestPathAStar(shortest_path_astar) => write!(f, "{shortest_path_astar}"),
+            Self::SearchVector(search_vector) => write!(f, "{search_vector}"),
+            Self::GroupBy(group_by) => write!(f, "{group_by}"),
+            Self::AggregateBy(aggregate_by) => write!(f, "{aggregate_by}"),
+            Self::RerankRRF(rerank_rrf) => write!(f, "{rerank_rrf}"),
+            Self::RerankMMR(rerank_mmr) => write!(f, "{rerank_mmr}"),
         }
     }
 }
 impl Debug for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Step::Count => write!(f, "Count"),
-            Step::Dedup => write!(f, "Dedup"),
-            Step::FromN => write!(f, "FromN"),
-            Step::ToN => write!(f, "ToN"),
-            Step::PropertyFetch(property) => write!(f, "get_property({property})"),
-            Step::ReservedPropertyAccess(prop) => write!(f, "ReservedProperty({:?})", prop),
-            Step::FromV(_) => write!(f, "FromV"),
-            Step::ToV(_) => write!(f, "ToV"),
-            Step::Out(_) => write!(f, "Out"),
-            Step::In(_) => write!(f, "In"),
-            Step::OutE(_) => write!(f, "OutE"),
-            Step::InE(_) => write!(f, "InE"),
-            Step::Where(_) => write!(f, "Where"),
-            Step::Range(_) => write!(f, "Range"),
-            Step::OrderBy(_) => write!(f, "OrderBy"),
-            Step::BoolOp(_) => write!(f, "Bool"),
-            Step::ShortestPath(_) => write!(f, "ShortestPath"),
-            Step::ShortestPathDijkstras(_) => write!(f, "ShortestPathDijkstras"),
-            Step::ShortestPathBFS(_) => write!(f, "ShortestPathBFS"),
-            Step::ShortestPathAStar(_) => write!(f, "ShortestPathAStar"),
-            Step::SearchVector(_) => write!(f, "SearchVector"),
-            Step::GroupBy(_) => write!(f, "GroupBy"),
-            Step::AggregateBy(_) => write!(f, "AggregateBy"),
-            Step::RerankRRF(_) => write!(f, "RerankRRF"),
-            Step::RerankMMR(_) => write!(f, "RerankMMR"),
+            Self::Count => write!(f, "Count"),
+            Self::Dedup => write!(f, "Dedup"),
+            Self::FromN => write!(f, "FromN"),
+            Self::ToN => write!(f, "ToN"),
+            Self::PropertyFetch(property) => write!(f, "get_property({property})"),
+            Self::ReservedPropertyAccess(prop) => write!(f, "ReservedProperty({:?})", prop),
+            Self::FromV(_) => write!(f, "FromV"),
+            Self::ToV(_) => write!(f, "ToV"),
+            Self::Out(_) => write!(f, "Out"),
+            Self::In(_) => write!(f, "In"),
+            Self::OutE(_) => write!(f, "OutE"),
+            Self::InE(_) => write!(f, "InE"),
+            Self::Where(_) => write!(f, "Where"),
+            Self::Range(_) => write!(f, "Range"),
+            Self::OrderBy(_) => write!(f, "OrderBy"),
+            Self::BoolOp(_) => write!(f, "Bool"),
+            Self::ShortestPath(_) => write!(f, "ShortestPath"),
+            Self::ShortestPathDijkstras(_) => write!(f, "ShortestPathDijkstras"),
+            Self::ShortestPathBFS(_) => write!(f, "ShortestPathBFS"),
+            Self::ShortestPathAStar(_) => write!(f, "ShortestPathAStar"),
+            Self::SearchVector(_) => write!(f, "SearchVector"),
+            Self::GroupBy(_) => write!(f, "GroupBy"),
+            Self::AggregateBy(_) => write!(f, "AggregateBy"),
+            Self::RerankRRF(_) => write!(f, "RerankRRF"),
+            Self::RerankMMR(_) => write!(f, "RerankMMR"),
         }
     }
 }
@@ -360,8 +360,8 @@ pub enum EdgeType {
 impl Display for EdgeType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EdgeType::Node => write!(f, "node"),
-            EdgeType::Vec => write!(f, "vec"),
+            Self::Node => write!(f, "node"),
+            Self::Vec => write!(f, "vec"),
         }
     }
 }
@@ -422,7 +422,7 @@ pub enum Where {
 }
 impl Display for Where {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Where::Ref(wr) = self;
+        let Self::Ref(wr) = self;
         write!(f, "{wr}")
     }
 }
@@ -840,10 +840,10 @@ pub enum MMRDistanceMethod {
 impl Display for MMRDistanceMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MMRDistanceMethod::Cosine => write!(f, "DistanceMethod::Cosine"),
-            MMRDistanceMethod::Euclidean => write!(f, "DistanceMethod::Euclidean"),
-            MMRDistanceMethod::DotProduct => write!(f, "DistanceMethod::DotProduct"),
-            MMRDistanceMethod::Identifier(id) => write!(f, "match {id}.as_str() {{ \"cosine\" => DistanceMethod::Cosine, \"euclidean\" => DistanceMethod::Euclidean, \"dotproduct\" => DistanceMethod::DotProduct, _ => DistanceMethod::Cosine }}"),
+            Self::Cosine => write!(f, "DistanceMethod::Cosine"),
+            Self::Euclidean => write!(f, "DistanceMethod::Euclidean"),
+            Self::DotProduct => write!(f, "DistanceMethod::DotProduct"),
+            Self::Identifier(id) => write!(f, "match {id}.as_str() {{ \"cosine\" => DistanceMethod::Cosine, \"euclidean\" => DistanceMethod::Euclidean, \"dotproduct\" => DistanceMethod::DotProduct, _ => DistanceMethod::Cosine }}"),
         }
     }
 }

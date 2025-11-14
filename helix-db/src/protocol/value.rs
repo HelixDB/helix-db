@@ -43,27 +43,27 @@ pub enum Value {
 impl Value {
     pub fn inner_stringify(&self) -> String {
         match self {
-            Value::String(s) => s.to_string(),
-            Value::F32(f) => f.to_string(),
-            Value::F64(f) => f.to_string(),
-            Value::I8(i) => i.to_string(),
-            Value::I16(i) => i.to_string(),
-            Value::I32(i) => i.to_string(),
-            Value::I64(i) => i.to_string(),
-            Value::U8(u) => u.to_string(),
-            Value::U16(u) => u.to_string(),
-            Value::U32(u) => u.to_string(),
-            Value::U64(u) => u.to_string(),
-            Value::U128(u) => u.to_string(),
-            Value::Date(d) => d.to_string(),
-            Value::Boolean(b) => b.to_string(),
-            Value::Id(id) => id.stringify(),
-            Value::Array(arr) => arr
+            Self::String(s) => s.to_string(),
+            Self::F32(f) => f.to_string(),
+            Self::F64(f) => f.to_string(),
+            Self::I8(i) => i.to_string(),
+            Self::I16(i) => i.to_string(),
+            Self::I32(i) => i.to_string(),
+            Self::I64(i) => i.to_string(),
+            Self::U8(u) => u.to_string(),
+            Self::U16(u) => u.to_string(),
+            Self::U32(u) => u.to_string(),
+            Self::U64(u) => u.to_string(),
+            Self::U128(u) => u.to_string(),
+            Self::Date(d) => d.to_string(),
+            Self::Boolean(b) => b.to_string(),
+            Self::Id(id) => id.stringify(),
+            Self::Array(arr) => arr
                 .iter()
                 .map(|v| v.inner_stringify())
                 .collect::<Vec<String>>()
                 .join(" "),
-            Value::Object(obj) => obj
+            Self::Object(obj) => obj
                 .iter()
                 .map(|(k, v)| format!("{k} {}", v.inner_stringify()))
                 .collect::<Vec<String>>()
@@ -74,51 +74,51 @@ impl Value {
 
     pub fn inner_str(&self) -> Cow<'_, str> {
         match self {
-            Value::String(s) => Cow::Borrowed(s.as_str()),
-            Value::F32(f) => Cow::Owned(f.to_string()),
-            Value::F64(f) => Cow::Owned(f.to_string()),
-            Value::I8(i) => Cow::Owned(i.to_string()),
-            Value::I16(i) => Cow::Owned(i.to_string()),
-            Value::I32(i) => Cow::Owned(i.to_string()),
-            Value::I64(i) => Cow::Owned(i.to_string()),
-            Value::U8(u) => Cow::Owned(u.to_string()),
-            Value::U16(u) => Cow::Owned(u.to_string()),
-            Value::U32(u) => Cow::Owned(u.to_string()),
-            Value::U64(u) => Cow::Owned(u.to_string()),
-            Value::U128(u) => Cow::Owned(u.to_string()),
-            Value::Date(d) => Cow::Owned(d.to_string()),
-            Value::Id(id) => Cow::Owned(id.stringify()),
-            Value::Boolean(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
+            Self::String(s) => Cow::Borrowed(s.as_str()),
+            Self::F32(f) => Cow::Owned(f.to_string()),
+            Self::F64(f) => Cow::Owned(f.to_string()),
+            Self::I8(i) => Cow::Owned(i.to_string()),
+            Self::I16(i) => Cow::Owned(i.to_string()),
+            Self::I32(i) => Cow::Owned(i.to_string()),
+            Self::I64(i) => Cow::Owned(i.to_string()),
+            Self::U8(u) => Cow::Owned(u.to_string()),
+            Self::U16(u) => Cow::Owned(u.to_string()),
+            Self::U32(u) => Cow::Owned(u.to_string()),
+            Self::U64(u) => Cow::Owned(u.to_string()),
+            Self::U128(u) => Cow::Owned(u.to_string()),
+            Self::Date(d) => Cow::Owned(d.to_string()),
+            Self::Id(id) => Cow::Owned(id.stringify()),
+            Self::Boolean(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
             _ => panic!("Not primitive"),
         }
     }
 
     pub fn to_variant_string(&self) -> &str {
         match self {
-            Value::String(_) => "String",
-            Value::F32(_) => "F32",
-            Value::F64(_) => "F64",
-            Value::I8(_) => "I8",
-            Value::I16(_) => "I16",
-            Value::I32(_) => "I32",
-            Value::I64(_) => "I64",
-            Value::U8(_) => "U8",
-            Value::U16(_) => "U16",
-            Value::U32(_) => "U32",
-            Value::U64(_) => "U64",
-            Value::U128(_) => "U128",
-            Value::Date(_) => "Date",
-            Value::Boolean(_) => "Boolean",
-            Value::Id(_) => "Id",
-            Value::Array(_) => "Array",
-            Value::Object(_) => "Object",
-            Value::Empty => "Empty",
+            Self::String(_) => "String",
+            Self::F32(_) => "F32",
+            Self::F64(_) => "F64",
+            Self::I8(_) => "I8",
+            Self::I16(_) => "I16",
+            Self::I32(_) => "I32",
+            Self::I64(_) => "I64",
+            Self::U8(_) => "U8",
+            Self::U16(_) => "U16",
+            Self::U32(_) => "U32",
+            Self::U64(_) => "U64",
+            Self::U128(_) => "U128",
+            Self::Date(_) => "Date",
+            Self::Boolean(_) => "Boolean",
+            Self::Id(_) => "Id",
+            Self::Array(_) => "Array",
+            Self::Object(_) => "Object",
+            Self::Empty => "Empty",
         }
     }
 
     pub fn as_str(&self) -> &str {
         match self {
-            Value::String(s) => s.as_str(),
+            Self::String(s) => s.as_str(),
             _ => panic!("Not a string"),
         }
     }
@@ -134,7 +134,7 @@ impl Value {
     pub fn map_value_or(
         self,
         default: bool,
-        f: impl Fn(&Value) -> bool,
+        f: impl Fn(&Self) -> bool,
     ) -> Result<bool, GraphError> {
         Ok(f(&self))
     }
@@ -143,7 +143,7 @@ impl Value {
     pub fn is_in<T>(&self, values: &[T]) -> bool
     where
         T: PartialEq,
-        Value: IntoPrimitive<T> + Into<T>,
+        Self: IntoPrimitive<T> + Into<T>,
     {
         values.contains(self.into_primitive())
     }
@@ -151,17 +151,17 @@ impl Value {
 
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> Ordering {
-        let to_i128 = |value: &Value| -> Option<i128> {
+        let to_i128 = |value: &Self| -> Option<i128> {
             match value {
-                Value::I8(v) => Some(*v as i128),
-                Value::I16(v) => Some(*v as i128),
-                Value::I32(v) => Some(*v as i128),
-                Value::I64(v) => Some(*v as i128),
-                Value::U8(v) => Some(*v as i128),
-                Value::U16(v) => Some(*v as i128),
-                Value::U32(v) => Some(*v as i128),
-                Value::U64(v) => Some(*v as i128),
-                Value::U128(v) => {
+                Self::I8(v) => Some(*v as i128),
+                Self::I16(v) => Some(*v as i128),
+                Self::I32(v) => Some(*v as i128),
+                Self::I64(v) => Some(*v as i128),
+                Self::U8(v) => Some(*v as i128),
+                Self::U16(v) => Some(*v as i128),
+                Self::U32(v) => Some(*v as i128),
+                Self::U64(v) => Some(*v as i128),
+                Self::U128(v) => {
                     if *v <= i128::MAX as u128 {
                         Some(*v as i128)
                     } else {
@@ -171,43 +171,43 @@ impl Ord for Value {
                 _ => None,
             }
         };
-        let is_integer = |value: &Value| -> bool {
+        let is_integer = |value: &Self| -> bool {
             matches!(
                 value,
-                Value::I8(_)
-                    | Value::I16(_)
-                    | Value::I32(_)
-                    | Value::I64(_)
-                    | Value::U8(_)
-                    | Value::U16(_)
-                    | Value::U32(_)
-                    | Value::U64(_)
-                    | Value::U128(_)
+                Self::I8(_)
+                    | Self::I16(_)
+                    | Self::I32(_)
+                    | Self::I64(_)
+                    | Self::U8(_)
+                    | Self::U16(_)
+                    | Self::U32(_)
+                    | Self::U64(_)
+                    | Self::U128(_)
             )
         };
 
         match (self, other) {
-            (Value::String(s), Value::String(o)) => s.cmp(o),
-            (Value::F32(s), Value::F32(o)) => match s.partial_cmp(o) {
+            (Self::String(s), Self::String(o)) => s.cmp(o),
+            (Self::F32(s), Self::F32(o)) => match s.partial_cmp(o) {
                 Some(o) => o,
                 None => Ordering::Equal,
             },
-            (Value::F64(s), Value::F64(o)) => match s.partial_cmp(o) {
+            (Self::F64(s), Self::F64(o)) => match s.partial_cmp(o) {
                 Some(o) => o,
                 None => Ordering::Equal,
             },
-            (Value::Date(s), Value::Date(o)) => s.cmp(o),
-            (Value::Boolean(s), Value::Boolean(o)) => s.cmp(o),
-            (Value::Array(s), Value::Array(o)) => s.cmp(o),
-            (Value::Empty, Value::Empty) => Ordering::Equal,
-            (Value::Empty, _) => Ordering::Less,
-            (_, Value::Empty) => Ordering::Greater,
+            (Self::Date(s), Self::Date(o)) => s.cmp(o),
+            (Self::Boolean(s), Self::Boolean(o)) => s.cmp(o),
+            (Self::Array(s), Self::Array(o)) => s.cmp(o),
+            (Self::Empty, Self::Empty) => Ordering::Equal,
+            (Self::Empty, _) => Ordering::Less,
+            (_, Self::Empty) => Ordering::Greater,
             (s, o) if is_integer(s) && is_integer(o) => match (to_i128(s), to_i128(o)) {
                 (Some(s), Some(o)) => s.cmp(&o),
                 (None, Some(_)) => Ordering::Greater,
                 (Some(_), None) => Ordering::Less,
                 (None, None) => match (self, other) {
-                    (Value::U128(s), Value::U128(o)) => s.cmp(o),
+                    (Self::U128(s), Self::U128(o)) => s.cmp(o),
                     _ => unreachable!(),
                 },
             },
@@ -223,55 +223,55 @@ impl PartialOrd for Value {
 
 impl Eq for Value {}
 
-impl PartialEq<Value> for Value {
-    fn eq(&self, other: &Value) -> bool {
-        let to_f64 = |value: &Value| -> Option<f64> {
+impl PartialEq<Self> for Value {
+    fn eq(&self, other: &Self) -> bool {
+        let to_f64 = |value: &Self| -> Option<f64> {
             match value {
-                Value::I8(v) => Some(*v as f64),
-                Value::I16(v) => Some(*v as f64),
-                Value::I32(v) => Some(*v as f64),
-                Value::I64(v) => Some(*v as f64),
-                Value::U8(v) => Some(*v as f64),
-                Value::U16(v) => Some(*v as f64),
-                Value::U32(v) => Some(*v as f64),
-                Value::U64(v) => Some(*v as f64),
-                Value::U128(v) => Some(*v as f64),
-                Value::F32(v) => Some(*v as f64),
-                Value::F64(v) => Some(*v),
+                Self::I8(v) => Some(*v as f64),
+                Self::I16(v) => Some(*v as f64),
+                Self::I32(v) => Some(*v as f64),
+                Self::I64(v) => Some(*v as f64),
+                Self::U8(v) => Some(*v as f64),
+                Self::U16(v) => Some(*v as f64),
+                Self::U32(v) => Some(*v as f64),
+                Self::U64(v) => Some(*v as f64),
+                Self::U128(v) => Some(*v as f64),
+                Self::F32(v) => Some(*v as f64),
+                Self::F64(v) => Some(*v),
                 _ => None,
             }
         };
 
-        let is_numeric = |value: &Value| -> bool {
+        let is_numeric = |value: &Self| -> bool {
             matches!(
                 value,
-                Value::I8(_)
-                    | Value::I16(_)
-                    | Value::I32(_)
-                    | Value::I64(_)
-                    | Value::U8(_)
-                    | Value::U16(_)
-                    | Value::U32(_)
-                    | Value::U64(_)
-                    | Value::U128(_)
-                    | Value::F32(_)
-                    | Value::F64(_)
+                Self::I8(_)
+                    | Self::I16(_)
+                    | Self::I32(_)
+                    | Self::I64(_)
+                    | Self::U8(_)
+                    | Self::U16(_)
+                    | Self::U32(_)
+                    | Self::U64(_)
+                    | Self::U128(_)
+                    | Self::F32(_)
+                    | Self::F64(_)
             )
         };
 
         match (self, other) {
-            (Value::String(s), Value::String(o)) => s == o,
-            (Value::Date(s), Value::Date(o)) => s == o,
-            (Value::Boolean(s), Value::Boolean(o)) => s == o,
-            (Value::Array(s), Value::Array(o)) => s == o,
-            (Value::Empty, Value::Empty) => true,
-            (Value::Empty, _) => false,
-            (_, Value::Empty) => false,
+            (Self::String(s), Self::String(o)) => s == o,
+            (Self::Date(s), Self::Date(o)) => s == o,
+            (Self::Boolean(s), Self::Boolean(o)) => s == o,
+            (Self::Array(s), Self::Array(o)) => s == o,
+            (Self::Empty, Self::Empty) => true,
+            (Self::Empty, _) => false,
+            (_, Self::Empty) => false,
 
             (s, o) if is_numeric(s) && is_numeric(o) => match (to_f64(s), to_f64(o)) {
                 (Some(s_val), Some(o_val)) => {
-                    if !matches!(self, Value::F32(_) | Value::F64(_))
-                        && !matches!(other, Value::F32(_) | Value::F64(_))
+                    if !matches!(self, Self::F32(_) | Self::F64(_))
+                        && !matches!(other, Self::F32(_) | Self::F64(_))
                     {
                         self.cmp(other) == Ordering::Equal
                     } else {
@@ -289,74 +289,74 @@ impl PartialEq<Value> for Value {
 impl PartialEq<ID> for Value {
     fn eq(&self, other: &ID) -> bool {
         match self {
-            Value::Id(id) => id == other,
-            Value::String(s) => &ID::from(s) == other,
-            Value::U128(u) => &ID::from(*u) == other,
+            Self::Id(id) => id == other,
+            Self::String(s) => &ID::from(s) == other,
+            Self::U128(u) => &ID::from(*u) == other,
             _ => false,
         }
     }
 }
 impl PartialEq<u8> for Value {
     fn eq(&self, other: &u8) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<u16> for Value {
     fn eq(&self, other: &u16) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<u32> for Value {
     fn eq(&self, other: &u32) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<u64> for Value {
     fn eq(&self, other: &u64) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<u128> for Value {
     fn eq(&self, other: &u128) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<i8> for Value {
     fn eq(&self, other: &i8) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<i16> for Value {
     fn eq(&self, other: &i16) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<i32> for Value {
     fn eq(&self, other: &i32) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<i64> for Value {
     fn eq(&self, other: &i64) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 
 impl PartialEq<f32> for Value {
     fn eq(&self, other: &f32) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 impl PartialEq<f64> for Value {
     fn eq(&self, other: &f64) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 
 impl PartialEq<String> for Value {
     fn eq(&self, other: &String) -> bool {
         match self {
-            Value::String(s) => s == other,
+            Self::String(s) => s == other,
             _ => false,
         }
     }
@@ -364,84 +364,84 @@ impl PartialEq<String> for Value {
 
 impl PartialEq<bool> for Value {
     fn eq(&self, other: &bool) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 
 impl PartialEq<&str> for Value {
     fn eq(&self, other: &&str) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 
 impl PartialEq<DateTime<Utc>> for Value {
     fn eq(&self, other: &DateTime<Utc>) -> bool {
-        self == &Value::from(*other)
+        self == &Self::from(*other)
     }
 }
 
 impl PartialOrd<i8> for Value {
     fn partial_cmp(&self, other: &i8) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<i16> for Value {
     fn partial_cmp(&self, other: &i16) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<i32> for Value {
     fn partial_cmp(&self, other: &i32) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<i64> for Value {
     fn partial_cmp(&self, other: &i64) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<f32> for Value {
     fn partial_cmp(&self, other: &f32) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<f64> for Value {
     fn partial_cmp(&self, other: &f64) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<u8> for Value {
     fn partial_cmp(&self, other: &u8) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<u16> for Value {
     fn partial_cmp(&self, other: &u16) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<u32> for Value {
     fn partial_cmp(&self, other: &u32) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<u64> for Value {
     fn partial_cmp(&self, other: &u64) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 impl PartialOrd<u128> for Value {
     fn partial_cmp(&self, other: &u128) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 
 impl PartialOrd<ID> for Value {
     fn partial_cmp(&self, other: &ID) -> Option<Ordering> {
         match self {
-            Value::Id(id) => id.partial_cmp(other),
-            Value::String(s) => Some(ID::from(s).partial_cmp(other)?),
-            Value::U128(u) => Some(u.partial_cmp(other)?),
+            Self::Id(id) => id.partial_cmp(other),
+            Self::String(s) => Some(ID::from(s).partial_cmp(other)?),
+            Self::U128(u) => Some(u.partial_cmp(other)?),
             _ => None,
         }
     }
@@ -449,7 +449,7 @@ impl PartialOrd<ID> for Value {
 
 impl PartialOrd<DateTime<Utc>> for Value {
     fn partial_cmp(&self, other: &DateTime<Utc>) -> Option<Ordering> {
-        self.partial_cmp(&Value::from(*other))
+        self.partial_cmp(&Self::from(*other))
     }
 }
 
@@ -462,22 +462,22 @@ impl Serialize for Value {
     {
         if serializer.is_human_readable() {
             match self {
-                Value::String(s) => s.serialize(serializer),
-                Value::F32(f) => f.serialize(serializer),
-                Value::F64(f) => f.serialize(serializer),
-                Value::I8(i) => i.serialize(serializer),
-                Value::I16(i) => i.serialize(serializer),
-                Value::I32(i) => i.serialize(serializer),
-                Value::I64(i) => i.serialize(serializer),
-                Value::U8(i) => i.serialize(serializer),
-                Value::U16(i) => i.serialize(serializer),
-                Value::U32(i) => i.serialize(serializer),
-                Value::U64(i) => i.serialize(serializer),
-                Value::U128(i) => i.serialize(serializer),
-                Value::Boolean(b) => b.serialize(serializer),
-                Value::Date(d) => d.serialize(serializer),
-                Value::Id(id) => id.serialize(serializer),
-                Value::Array(arr) => {
+                Self::String(s) => s.serialize(serializer),
+                Self::F32(f) => f.serialize(serializer),
+                Self::F64(f) => f.serialize(serializer),
+                Self::I8(i) => i.serialize(serializer),
+                Self::I16(i) => i.serialize(serializer),
+                Self::I32(i) => i.serialize(serializer),
+                Self::I64(i) => i.serialize(serializer),
+                Self::U8(i) => i.serialize(serializer),
+                Self::U16(i) => i.serialize(serializer),
+                Self::U32(i) => i.serialize(serializer),
+                Self::U64(i) => i.serialize(serializer),
+                Self::U128(i) => i.serialize(serializer),
+                Self::Boolean(b) => b.serialize(serializer),
+                Self::Date(d) => d.serialize(serializer),
+                Self::Id(id) => id.serialize(serializer),
+                Self::Array(arr) => {
                     use serde::ser::SerializeSeq;
                     let mut seq = serializer.serialize_seq(Some(arr.len()))?;
                     for value in arr {
@@ -485,7 +485,7 @@ impl Serialize for Value {
                     }
                     seq.end()
                 }
-                Value::Object(obj) => {
+                Self::Object(obj) => {
                     use serde::ser::SerializeMap;
                     let mut map = serializer.serialize_map(Some(obj.len()))?;
                     for (k, v) in obj {
@@ -493,32 +493,32 @@ impl Serialize for Value {
                     }
                     map.end()
                 }
-                Value::Empty => serializer.serialize_none(),
+                Self::Empty => serializer.serialize_none(),
             }
         } else {
             match self {
-                Value::String(s) => serializer.serialize_newtype_variant("Value", 0, "String", s),
-                Value::F32(f) => serializer.serialize_newtype_variant("Value", 1, "F32", f),
-                Value::F64(f) => serializer.serialize_newtype_variant("Value", 2, "F64", f),
-                Value::I8(i) => serializer.serialize_newtype_variant("Value", 3, "I8", i),
-                Value::I16(i) => serializer.serialize_newtype_variant("Value", 4, "I16", i),
-                Value::I32(i) => serializer.serialize_newtype_variant("Value", 5, "I32", i),
-                Value::I64(i) => serializer.serialize_newtype_variant("Value", 6, "I64", i),
-                Value::U8(i) => serializer.serialize_newtype_variant("Value", 7, "U8", i),
-                Value::U16(i) => serializer.serialize_newtype_variant("Value", 8, "U16", i),
-                Value::U32(i) => serializer.serialize_newtype_variant("Value", 9, "U32", i),
-                Value::U64(i) => serializer.serialize_newtype_variant("Value", 10, "U64", i),
-                Value::U128(i) => serializer.serialize_newtype_variant("Value", 11, "U128", i),
-                Value::Date(d) => serializer.serialize_newtype_variant("Value", 12, "Date", d),
-                Value::Boolean(b) => {
+                Self::String(s) => serializer.serialize_newtype_variant("Value", 0, "String", s),
+                Self::F32(f) => serializer.serialize_newtype_variant("Value", 1, "F32", f),
+                Self::F64(f) => serializer.serialize_newtype_variant("Value", 2, "F64", f),
+                Self::I8(i) => serializer.serialize_newtype_variant("Value", 3, "I8", i),
+                Self::I16(i) => serializer.serialize_newtype_variant("Value", 4, "I16", i),
+                Self::I32(i) => serializer.serialize_newtype_variant("Value", 5, "I32", i),
+                Self::I64(i) => serializer.serialize_newtype_variant("Value", 6, "I64", i),
+                Self::U8(i) => serializer.serialize_newtype_variant("Value", 7, "U8", i),
+                Self::U16(i) => serializer.serialize_newtype_variant("Value", 8, "U16", i),
+                Self::U32(i) => serializer.serialize_newtype_variant("Value", 9, "U32", i),
+                Self::U64(i) => serializer.serialize_newtype_variant("Value", 10, "U64", i),
+                Self::U128(i) => serializer.serialize_newtype_variant("Value", 11, "U128", i),
+                Self::Date(d) => serializer.serialize_newtype_variant("Value", 12, "Date", d),
+                Self::Boolean(b) => {
                     serializer.serialize_newtype_variant("Value", 13, "Boolean", b)
                 }
-                Value::Id(id) => serializer.serialize_newtype_variant("Value", 14, "Id", id),
-                Value::Array(a) => serializer.serialize_newtype_variant("Value", 15, "Array", a),
-                Value::Object(obj) => {
+                Self::Id(id) => serializer.serialize_newtype_variant("Value", 14, "Id", id),
+                Self::Array(a) => serializer.serialize_newtype_variant("Value", 15, "Array", a),
+                Self::Object(obj) => {
                     serializer.serialize_newtype_variant("Value", 16, "Object", obj)
                 }
-                Value::Empty => serializer.serialize_unit_variant("Value", 17, "Empty"),
+                Self::Empty => serializer.serialize_unit_variant("Value", 17, "Empty"),
             }
         }
     }
@@ -814,195 +814,195 @@ pub mod properties_format {
 impl From<&str> for Value {
     #[inline]
     fn from(s: &str) -> Self {
-        Value::String(s.trim_matches('"').to_string())
+        Self::String(s.trim_matches('"').to_string())
     }
 }
 
 impl From<String> for Value {
     #[inline]
     fn from(s: String) -> Self {
-        Value::String(s.trim_matches('"').to_string())
+        Self::String(s.trim_matches('"').to_string())
     }
 }
 impl From<bool> for Value {
     #[inline]
     fn from(b: bool) -> Self {
-        Value::Boolean(b)
+        Self::Boolean(b)
     }
 }
 
 impl From<f32> for Value {
     #[inline]
     fn from(f: f32) -> Self {
-        Value::F32(f)
+        Self::F32(f)
     }
 }
 
 impl From<f64> for Value {
     #[inline]
     fn from(f: f64) -> Self {
-        Value::F64(f)
+        Self::F64(f)
     }
 }
 
 impl From<i8> for Value {
     #[inline]
     fn from(i: i8) -> Self {
-        Value::I8(i)
+        Self::I8(i)
     }
 }
 
 impl From<i16> for Value {
     #[inline]
     fn from(i: i16) -> Self {
-        Value::I16(i)
+        Self::I16(i)
     }
 }
 
 impl From<i32> for Value {
     #[inline]
     fn from(i: i32) -> Self {
-        Value::I32(i)
+        Self::I32(i)
     }
 }
 
 impl From<i64> for Value {
     #[inline]
     fn from(i: i64) -> Self {
-        Value::I64(i)
+        Self::I64(i)
     }
 }
 
 impl From<u8> for Value {
     #[inline]
     fn from(i: u8) -> Self {
-        Value::U8(i)
+        Self::U8(i)
     }
 }
 
 impl From<u16> for Value {
     #[inline]
     fn from(i: u16) -> Self {
-        Value::U16(i)
+        Self::U16(i)
     }
 }
 
 impl From<u32> for Value {
     #[inline]
     fn from(i: u32) -> Self {
-        Value::U32(i)
+        Self::U32(i)
     }
 }
 
 impl From<u64> for Value {
     #[inline]
     fn from(i: u64) -> Self {
-        Value::U64(i)
+        Self::U64(i)
     }
 }
 
 impl From<u128> for Value {
     #[inline]
     fn from(i: u128) -> Self {
-        Value::U128(i)
+        Self::U128(i)
     }
 }
 
-impl From<Vec<Value>> for Value {
+impl From<Vec<Self>> for Value {
     #[inline]
-    fn from(v: Vec<Value>) -> Self {
-        Value::Array(v)
+    fn from(v: Vec<Self>) -> Self {
+        Self::Array(v)
     }
 }
 
 impl From<Vec<bool>> for Value {
     #[inline(always)]
     fn from(v: Vec<bool>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<String>> for Value {
     #[inline(always)]
     fn from(v: Vec<String>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<i64>> for Value {
     #[inline(always)]
     fn from(v: Vec<i64>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<i32>> for Value {
     #[inline(always)]
     fn from(v: Vec<i32>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<i16>> for Value {
     #[inline(always)]
     fn from(v: Vec<i16>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<i8>> for Value {
     #[inline(always)]
     fn from(v: Vec<i8>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<u128>> for Value {
     #[inline(always)]
     fn from(v: Vec<u128>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<u64>> for Value {
     #[inline(always)]
     fn from(v: Vec<u64>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<u32>> for Value {
     #[inline(always)]
     fn from(v: Vec<u32>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<u16>> for Value {
     #[inline(always)]
     fn from(v: Vec<u16>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<u8>> for Value {
     #[inline(always)]
     fn from(v: Vec<u8>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<f64>> for Value {
     #[inline(always)]
     fn from(v: Vec<f64>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
 impl From<Vec<f32>> for Value {
     #[inline(always)]
     fn from(v: Vec<f32>) -> Self {
-        Value::Array(v.into_iter().map(|v| v.into()).collect())
+        Self::Array(v.into_iter().map(|v| v.into()).collect())
     }
 }
 
@@ -1010,9 +1010,9 @@ impl From<usize> for Value {
     #[inline]
     fn from(v: usize) -> Self {
         if cfg!(target_pointer_width = "64") {
-            Value::U64(v as u64)
+            Self::U64(v as u64)
         } else {
-            Value::U128(v as u128)
+            Self::U128(v as u128)
         }
     }
 }
@@ -1030,13 +1030,13 @@ impl From<Value> for String {
 impl From<ID> for Value {
     #[inline]
     fn from(id: ID) -> Self {
-        Value::String(id.to_string())
+        Self::String(id.to_string())
     }
 }
 
 impl<'a, K> From<&'a K> for Value
 where
-    K: Into<Value> + Serialize + Clone,
+    K: Into<Self> + Serialize + Clone,
 {
     #[inline]
     fn from(k: &'a K) -> Self {
@@ -1047,31 +1047,31 @@ where
 impl From<chrono::DateTime<Utc>> for Value {
     #[inline]
     fn from(dt: chrono::DateTime<Utc>) -> Self {
-        Value::String(dt.to_rfc3339())
+        Self::String(dt.to_rfc3339())
     }
 }
 
 impl From<Value> for GenRef<String> {
     fn from(v: Value) -> Self {
         match v {
-            Value::String(s) => GenRef::Literal(s),
-            Value::I8(i) => GenRef::Std(format!("{i}")),
-            Value::I16(i) => GenRef::Std(format!("{i}")),
-            Value::I32(i) => GenRef::Std(format!("{i}")),
-            Value::I64(i) => GenRef::Std(format!("{i}")),
-            Value::F32(f) => GenRef::Std(format!("{f:?}")), // {:?} forces decimal point
-            Value::F64(f) => GenRef::Std(format!("{f:?}")),
-            Value::Boolean(b) => GenRef::Std(format!("{b}")),
-            Value::U8(u) => GenRef::Std(format!("{u}")),
-            Value::U16(u) => GenRef::Std(format!("{u}")),
-            Value::U32(u) => GenRef::Std(format!("{u}")),
-            Value::U64(u) => GenRef::Std(format!("{u}")),
-            Value::U128(u) => GenRef::Std(format!("{u}")),
-            Value::Date(d) => GenRef::Std(format!("{d:?}")),
-            Value::Id(id) => GenRef::Literal(id.stringify()),
+            Value::String(s) => Self::Literal(s),
+            Value::I8(i) => Self::Std(format!("{i}")),
+            Value::I16(i) => Self::Std(format!("{i}")),
+            Value::I32(i) => Self::Std(format!("{i}")),
+            Value::I64(i) => Self::Std(format!("{i}")),
+            Value::F32(f) => Self::Std(format!("{f:?}")), // {:?} forces decimal point
+            Value::F64(f) => Self::Std(format!("{f:?}")),
+            Value::Boolean(b) => Self::Std(format!("{b}")),
+            Value::U8(u) => Self::Std(format!("{u}")),
+            Value::U16(u) => Self::Std(format!("{u}")),
+            Value::U32(u) => Self::Std(format!("{u}")),
+            Value::U64(u) => Self::Std(format!("{u}")),
+            Value::U128(u) => Self::Std(format!("{u}")),
+            Value::Date(d) => Self::Std(format!("{d:?}")),
+            Value::Id(id) => Self::Literal(id.stringify()),
             Value::Array(_a) => unimplemented!(),
             Value::Object(_o) => unimplemented!(),
-            Value::Empty => GenRef::Literal("".to_string()),
+            Value::Empty => Self::Literal("".to_string()),
         }
     }
 }
@@ -1080,18 +1080,18 @@ impl FilterValues for Value {
     #[inline]
     fn compare(&self, value: &Value, operator: Option<Operator>) -> bool {
         debug_println!("comparing value1: {:?}, value2: {:?}", self, value);
-        let comparison = match (self, value) {
-            (Value::Array(a1), Value::Array(a2)) => a1
+        
+        debug_println!("comparison: {:?}", comparison);
+        match (self, value) {
+            (Self::Array(a1), Self::Array(a2)) => a1
                 .iter()
                 .any(|a1_item| a2.iter().any(|a2_item| a1_item.compare(a2_item, operator))),
-            (value, Value::Array(a)) => a.iter().any(|a_item| value.compare(a_item, operator)),
+            (value, Self::Array(a)) => a.iter().any(|a_item| value.compare(a_item, operator)),
             (value1, value2) => match operator {
                 Some(op) => op.execute(value1, value2),
                 None => value1 == value2,
             },
-        };
-        debug_println!("comparison: {:?}", comparison);
-        comparison
+        }
     }
 }
 
@@ -1099,18 +1099,18 @@ impl From<Value> for i8 {
     fn from(val: Value) -> Self {
         match val {
             Value::I8(i) => i,
-            Value::I16(i) => i as i8,
-            Value::I32(i) => i as i8,
-            Value::I64(i) => i as i8,
-            Value::U8(i) => i as i8,
-            Value::U16(i) => i as i8,
-            Value::U32(i) => i as i8,
-            Value::U64(i) => i as i8,
-            Value::U128(i) => i as i8,
-            Value::F32(i) => i as i8,
-            Value::F64(i) => i as i8,
-            Value::Boolean(i) => i as i8,
-            Value::String(s) => s.parse::<i8>().unwrap(),
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to i8"),
         }
     }
@@ -1120,18 +1120,18 @@ impl From<Value> for i16 {
     fn from(val: Value) -> Self {
         match val {
             Value::I16(i) => i,
-            Value::I8(i) => i as i16,
-            Value::I32(i) => i as i16,
-            Value::I64(i) => i as i16,
-            Value::U8(i) => i as i16,
-            Value::U16(i) => i as i16,
-            Value::U32(i) => i as i16,
-            Value::U64(i) => i as i16,
-            Value::U128(i) => i as i16,
-            Value::F32(i) => i as i16,
-            Value::F64(i) => i as i16,
-            Value::Boolean(i) => i as i16,
-            Value::String(s) => s.parse::<i16>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to i16"),
         }
     }
@@ -1141,18 +1141,18 @@ impl From<Value> for i32 {
     fn from(val: Value) -> Self {
         match val {
             Value::I32(i) => i,
-            Value::I8(i) => i as i32,
-            Value::I16(i) => i as i32,
-            Value::I64(i) => i as i32,
-            Value::U8(i) => i as i32,
-            Value::U16(i) => i as i32,
-            Value::U32(i) => i as i32,
-            Value::U64(i) => i as i32,
-            Value::U128(i) => i as i32,
-            Value::F32(i) => i as i32,
-            Value::F64(i) => i as i32,
-            Value::Boolean(i) => i as i32,
-            Value::String(s) => s.parse::<i32>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to i32"),
         }
     }
@@ -1162,18 +1162,18 @@ impl From<Value> for i64 {
     fn from(val: Value) -> Self {
         match val {
             Value::I64(i) => i,
-            Value::I8(i) => i as i64,
-            Value::I16(i) => i as i64,
-            Value::I32(i) => i as i64,
-            Value::U8(i) => i as i64,
-            Value::U16(i) => i as i64,
-            Value::U32(i) => i as i64,
-            Value::U64(i) => i as i64,
-            Value::U128(i) => i as i64,
-            Value::F32(i) => i as i64,
-            Value::F64(i) => i as i64,
-            Value::Boolean(i) => i as i64,
-            Value::String(s) => s.parse::<i64>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to i64"),
         }
     }
@@ -1183,18 +1183,18 @@ impl From<Value> for u8 {
     fn from(val: Value) -> Self {
         match val {
             Value::U8(i) => i,
-            Value::I8(i) => i as u8,
-            Value::I16(i) => i as u8,
-            Value::I32(i) => i as u8,
-            Value::I64(i) => i as u8,
-            Value::U16(i) => i as u8,
-            Value::U32(i) => i as u8,
-            Value::U64(i) => i as u8,
-            Value::U128(i) => i as u8,
-            Value::F32(i) => i as u8,
-            Value::F64(i) => i as u8,
-            Value::Boolean(i) => i as u8,
-            Value::String(s) => s.parse::<u8>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to u8"),
         }
     }
@@ -1204,18 +1204,18 @@ impl From<Value> for u16 {
     fn from(val: Value) -> Self {
         match val {
             Value::U16(i) => i,
-            Value::I8(i) => i as u16,
-            Value::I16(i) => i as u16,
-            Value::I32(i) => i as u16,
-            Value::I64(i) => i as u16,
-            Value::U8(i) => i as u16,
-            Value::U32(i) => i as u16,
-            Value::U64(i) => i as u16,
-            Value::U128(i) => i as u16,
-            Value::F32(i) => i as u16,
-            Value::F64(i) => i as u16,
-            Value::Boolean(i) => i as u16,
-            Value::String(s) => s.parse::<u16>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to u16"),
         }
     }
@@ -1225,18 +1225,18 @@ impl From<Value> for u32 {
     fn from(val: Value) -> Self {
         match val {
             Value::U32(i) => i,
-            Value::I8(i) => i as u32,
-            Value::I16(i) => i as u32,
-            Value::I32(i) => i as u32,
-            Value::I64(i) => i as u32,
-            Value::U8(i) => i as u32,
-            Value::U16(i) => i as u32,
-            Value::U64(i) => i as u32,
-            Value::U128(i) => i as u32,
-            Value::F32(i) => i as u32,
-            Value::F64(i) => i as u32,
-            Value::Boolean(i) => i as u32,
-            Value::String(s) => s.parse::<u32>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to u32"),
         }
     }
@@ -1246,17 +1246,17 @@ impl From<Value> for u64 {
     fn from(val: Value) -> Self {
         match val {
             Value::U64(i) => i,
-            Value::I8(i) => i as u64,
-            Value::I16(i) => i as u64,
-            Value::I32(i) => i as u64,
-            Value::U8(i) => i as u64,
-            Value::U16(i) => i as u64,
-            Value::U32(i) => i as u64,
-            Value::U128(i) => i as u64,
-            Value::F32(i) => i as u64,
-            Value::F64(i) => i as u64,
-            Value::Boolean(i) => i as u64,
-            Value::String(s) => s.parse::<u64>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to u64"),
         }
     }
@@ -1266,18 +1266,18 @@ impl From<Value> for u128 {
     fn from(val: Value) -> Self {
         match val {
             Value::U128(i) => i,
-            Value::I8(i) => i as u128,
-            Value::I16(i) => i as u128,
-            Value::I32(i) => i as u128,
-            Value::I64(i) => i as u128,
-            Value::U8(i) => i as u128,
-            Value::U16(i) => i as u128,
-            Value::U32(i) => i as u128,
-            Value::U64(i) => i as u128,
-            Value::F32(i) => i as u128,
-            Value::F64(i) => i as u128,
-            Value::Boolean(i) => i as u128,
-            Value::String(s) => s.parse::<u128>().unwrap(),
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::F32(i) => i as Self,
+            Value::F64(i) => i as Self,
+            Value::Boolean(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to u128"),
         }
     }
@@ -1286,9 +1286,9 @@ impl From<Value> for u128 {
 impl From<Value> for Date {
     fn from(val: Value) -> Self {
         match val {
-            Value::String(s) => Date::new(&Value::String(s)).unwrap(),
-            Value::I64(i) => Date::new(&Value::I64(i)).unwrap(),
-            Value::U64(i) => Date::new(&Value::U64(i)).unwrap(),
+            Value::String(s) => Self::new(&Value::String(s)).unwrap(),
+            Value::I64(i) => Self::new(&Value::I64(i)).unwrap(),
+            Value::U64(i) => Self::new(&Value::U64(i)).unwrap(),
             _ => panic!("Value cannot be cast to date"),
         }
     }
@@ -1306,8 +1306,8 @@ impl From<Value> for ID {
     fn from(val: Value) -> Self {
         match val {
             Value::Id(id) => id,
-            Value::String(s) => ID::from(s),
-            Value::U128(i) => ID::from(i),
+            Value::String(s) => Self::from(s),
+            Value::U128(i) => Self::from(i),
             _ => panic!("Value cannot be cast to id"),
         }
     }
@@ -1335,17 +1335,17 @@ impl From<Value> for f32 {
     fn from(val: Value) -> Self {
         match val {
             Value::F32(f) => f,
-            Value::F64(f) => f as f32,
-            Value::I8(i) => i as f32,
-            Value::I16(i) => i as f32,
-            Value::I32(i) => i as f32,
-            Value::I64(i) => i as f32,
-            Value::U8(i) => i as f32,
-            Value::U16(i) => i as f32,
-            Value::U32(i) => i as f32,
-            Value::U64(i) => i as f32,
-            Value::U128(i) => i as f32,
-            Value::String(s) => s.parse::<f32>().unwrap(),
+            Value::F64(f) => f as Self,
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to f32"),
         }
     }
@@ -1355,17 +1355,17 @@ impl From<Value> for f64 {
     fn from(val: Value) -> Self {
         match val {
             Value::F64(f) => f,
-            Value::F32(f) => f as f64,
-            Value::I8(i) => i as f64,
-            Value::I16(i) => i as f64,
-            Value::I32(i) => i as f64,
-            Value::I64(i) => i as f64,
-            Value::U8(i) => i as f64,
-            Value::U16(i) => i as f64,
-            Value::U32(i) => i as f64,
-            Value::U64(i) => i as f64,
-            Value::U128(i) => i as f64,
-            Value::String(s) => s.parse::<f64>().unwrap(),
+            Value::F32(f) => f as Self,
+            Value::I8(i) => i as Self,
+            Value::I16(i) => i as Self,
+            Value::I32(i) => i as Self,
+            Value::I64(i) => i as Self,
+            Value::U8(i) => i as Self,
+            Value::U16(i) => i as Self,
+            Value::U32(i) => i as Self,
+            Value::U64(i) => i as Self,
+            Value::U128(i) => i as Self,
+            Value::String(s) => s.parse::<Self>().unwrap(),
             _ => panic!("Value cannot be cast to f64"),
         }
     }
@@ -1424,24 +1424,24 @@ pub mod casting {
     impl std::fmt::Display for CastType {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                CastType::String => write!(f, "String"),
-                CastType::I8 => write!(f, "I8"),
-                CastType::I16 => write!(f, "I16"),
-                CastType::I32 => write!(f, "I32"),
-                CastType::I64 => write!(f, "I64"),
-                CastType::U8 => write!(f, "U8"),
-                CastType::U16 => write!(f, "U16"),
-                CastType::U32 => write!(f, "U32"),
-                CastType::U64 => write!(f, "U64"),
-                CastType::U128 => write!(f, "U128"),
-                CastType::F32 => write!(f, "F32"),
-                CastType::F64 => write!(f, "F64"),
-                CastType::Date => write!(f, "Date"),
-                CastType::Boolean => write!(f, "Boolean"),
-                CastType::Id => write!(f, "Id"),
-                CastType::Array => write!(f, "Array"),
-                CastType::Object => write!(f, "Object"),
-                CastType::Empty => write!(f, "Empty"),
+                Self::String => write!(f, "String"),
+                Self::I8 => write!(f, "I8"),
+                Self::I16 => write!(f, "I16"),
+                Self::I32 => write!(f, "I32"),
+                Self::I64 => write!(f, "I64"),
+                Self::U8 => write!(f, "U8"),
+                Self::U16 => write!(f, "U16"),
+                Self::U32 => write!(f, "U32"),
+                Self::U64 => write!(f, "U64"),
+                Self::U128 => write!(f, "U128"),
+                Self::F32 => write!(f, "F32"),
+                Self::F64 => write!(f, "F64"),
+                Self::Date => write!(f, "Date"),
+                Self::Boolean => write!(f, "Boolean"),
+                Self::Id => write!(f, "Id"),
+                Self::Array => write!(f, "Array"),
+                Self::Object => write!(f, "Object"),
+                Self::Empty => write!(f, "Empty"),
             }
         }
     }
@@ -1449,24 +1449,24 @@ pub mod casting {
     impl From<FieldType> for CastType {
         fn from(value: FieldType) -> Self {
             match value {
-                FieldType::String => CastType::String,
-                FieldType::I8 => CastType::I8,
-                FieldType::I16 => CastType::I16,
-                FieldType::I32 => CastType::I32,
-                FieldType::I64 => CastType::I64,
-                FieldType::U8 => CastType::U8,
-                FieldType::U16 => CastType::U16,
-                FieldType::U32 => CastType::U32,
-                FieldType::U64 => CastType::U64,
-                FieldType::U128 => CastType::U128,
-                FieldType::F32 => CastType::F32,
-                FieldType::F64 => CastType::F64,
-                FieldType::Date => CastType::Date,
-                FieldType::Boolean => CastType::Boolean,
-                FieldType::Uuid => CastType::Id,
-                FieldType::Array(_) => CastType::Array,
-                FieldType::Object(_) => CastType::Object,
-                _ => CastType::Empty,
+                FieldType::String => Self::String,
+                FieldType::I8 => Self::I8,
+                FieldType::I16 => Self::I16,
+                FieldType::I32 => Self::I32,
+                FieldType::I64 => Self::I64,
+                FieldType::U8 => Self::U8,
+                FieldType::U16 => Self::U16,
+                FieldType::U32 => Self::U32,
+                FieldType::U64 => Self::U64,
+                FieldType::U128 => Self::U128,
+                FieldType::F32 => Self::F32,
+                FieldType::F64 => Self::F64,
+                FieldType::Date => Self::Date,
+                FieldType::Boolean => Self::Boolean,
+                FieldType::Uuid => Self::Id,
+                FieldType::Array(_) => Self::Array,
+                FieldType::Object(_) => Self::Object,
+                _ => Self::Empty,
             }
         }
     }
@@ -1479,7 +1479,7 @@ pub trait IntoPrimitive<T> {
 impl IntoPrimitive<String> for Value {
     fn into_primitive(&self) -> &String {
         match self {
-            Value::String(s) => s,
+            Self::String(s) => s,
             _ => panic!("Value is not a string"),
         }
     }
@@ -1488,7 +1488,7 @@ impl IntoPrimitive<String> for Value {
 impl IntoPrimitive<i8> for Value {
     fn into_primitive(&self) -> &i8 {
         match self {
-            Value::I8(i) => i,
+            Self::I8(i) => i,
             _ => panic!("Value is not an i8"),
         }
     }
@@ -1497,7 +1497,7 @@ impl IntoPrimitive<i8> for Value {
 impl IntoPrimitive<i16> for Value {
     fn into_primitive(&self) -> &i16 {
         match self {
-            Value::I16(i) => i,
+            Self::I16(i) => i,
             _ => panic!("Value is not an i16"),
         }
     }
@@ -1506,7 +1506,7 @@ impl IntoPrimitive<i16> for Value {
 impl IntoPrimitive<i32> for Value {
     fn into_primitive(&self) -> &i32 {
         match self {
-            Value::I32(i) => i,
+            Self::I32(i) => i,
             _ => panic!("Value is not an i32"),
         }
     }
@@ -1515,7 +1515,7 @@ impl IntoPrimitive<i32> for Value {
 impl IntoPrimitive<i64> for Value {
     fn into_primitive(&self) -> &i64 {
         match self {
-            Value::I64(i) => i,
+            Self::I64(i) => i,
             _ => panic!("Value is not an i64"),
         }
     }
@@ -1524,7 +1524,7 @@ impl IntoPrimitive<i64> for Value {
 impl IntoPrimitive<u8> for Value {
     fn into_primitive(&self) -> &u8 {
         match self {
-            Value::U8(i) => i,
+            Self::U8(i) => i,
             _ => panic!("Value is not an u8"),
         }
     }
@@ -1533,7 +1533,7 @@ impl IntoPrimitive<u8> for Value {
 impl IntoPrimitive<u16> for Value {
     fn into_primitive(&self) -> &u16 {
         match self {
-            Value::U16(i) => i,
+            Self::U16(i) => i,
             _ => panic!("Value is not an u16"),
         }
     }
@@ -1542,7 +1542,7 @@ impl IntoPrimitive<u16> for Value {
 impl IntoPrimitive<u32> for Value {
     fn into_primitive(&self) -> &u32 {
         match self {
-            Value::U32(i) => i,
+            Self::U32(i) => i,
             _ => panic!("Value is not an u32"),
         }
     }
@@ -1551,7 +1551,7 @@ impl IntoPrimitive<u32> for Value {
 impl IntoPrimitive<u64> for Value {
     fn into_primitive(&self) -> &u64 {
         match self {
-            Value::U64(i) => i,
+            Self::U64(i) => i,
             _ => panic!("Value is not an u64"),
         }
     }
@@ -1560,7 +1560,7 @@ impl IntoPrimitive<u64> for Value {
 impl IntoPrimitive<u128> for Value {
     fn into_primitive(&self) -> &u128 {
         match self {
-            Value::U128(i) => i,
+            Self::U128(i) => i,
             _ => panic!("Value is not an u128"),
         }
     }
@@ -1569,7 +1569,7 @@ impl IntoPrimitive<u128> for Value {
 impl IntoPrimitive<f32> for Value {
     fn into_primitive(&self) -> &f32 {
         match self {
-            Value::F32(i) => i,
+            Self::F32(i) => i,
             _ => panic!("Value is not an f32"),
         }
     }
@@ -1578,7 +1578,7 @@ impl IntoPrimitive<f32> for Value {
 impl IntoPrimitive<f64> for Value {
     fn into_primitive(&self) -> &f64 {
         match self {
-            Value::F64(i) => i,
+            Self::F64(i) => i,
             _ => panic!("Value is not an f64"),
         }
     }
@@ -1587,7 +1587,7 @@ impl IntoPrimitive<f64> for Value {
 impl IntoPrimitive<bool> for Value {
     fn into_primitive(&self) -> &bool {
         match self {
-            Value::Boolean(i) => i,
+            Self::Boolean(i) => i,
             _ => panic!("Value is not a boolean"),
         }
     }
@@ -1596,25 +1596,25 @@ impl IntoPrimitive<bool> for Value {
 impl IntoPrimitive<ID> for Value {
     fn into_primitive(&self) -> &ID {
         match self {
-            Value::Id(i) => i,
+            Self::Id(i) => i,
             _ => panic!("Value is not an id"),
         }
     }
 }
 
-impl IntoPrimitive<Vec<Value>> for Value {
-    fn into_primitive(&self) -> &Vec<Value> {
+impl IntoPrimitive<Vec<Self>> for Value {
+    fn into_primitive(&self) -> &Vec<Self> {
         match self {
-            Value::Array(i) => i,
+            Self::Array(i) => i,
             _ => panic!("Value is not an array"),
         }
     }
 }
 
-impl IntoPrimitive<HashMap<String, Value>> for Value {
-    fn into_primitive(&self) -> &HashMap<String, Value> {
+impl IntoPrimitive<HashMap<String, Self>> for Value {
+    fn into_primitive(&self) -> &HashMap<String, Self> {
         match self {
-            Value::Object(i) => i,
+            Self::Object(i) => i,
             _ => panic!("Value is not an object"),
         }
     }
@@ -1623,7 +1623,7 @@ impl IntoPrimitive<HashMap<String, Value>> for Value {
 impl IntoPrimitive<Date> for Value {
     fn into_primitive(&self) -> &Date {
         match self {
-            Value::Date(i) => i,
+            Self::Date(i) => i,
             _ => panic!("Value is not a date"),
         }
     }

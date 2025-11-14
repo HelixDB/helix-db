@@ -85,24 +85,24 @@ impl Deref for ID {
 
 impl From<u128> for ID {
     fn from(id: u128) -> Self {
-        ID(id)
+        Self(id)
     }
 }
 
 impl From<String> for ID {
     fn from(id: String) -> Self {
-        ID(uuid::Uuid::parse_str(&id).unwrap().as_u128())
+        Self(uuid::Uuid::parse_str(&id).unwrap().as_u128())
     }
 }
 impl From<&String> for ID {
     fn from(id: &String) -> Self {
-        ID(uuid::Uuid::parse_str(id).unwrap().as_u128())
+        Self(uuid::Uuid::parse_str(id).unwrap().as_u128())
     }
 }
 
 impl From<&str> for ID {
     fn from(id: &str) -> Self {
-        ID(uuid::Uuid::parse_str(id).unwrap().as_u128())
+        Self(uuid::Uuid::parse_str(id).unwrap().as_u128())
     }
 }
 

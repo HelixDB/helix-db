@@ -111,9 +111,9 @@ pub enum CloudConfig {
 impl CloudConfig {
     pub fn get_cluster_id(&self) -> Option<&str> {
         match self {
-            CloudConfig::Helix(config) => Some(&config.cluster_id),
-            CloudConfig::FlyIo(_) => Some("flyio"),
-            CloudConfig::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
+            Self::Helix(config) => Some(&config.cluster_id),
+            Self::FlyIo(_) => Some("flyio"),
+            Self::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
         }
     }
 }
@@ -173,7 +173,7 @@ fn is_default_graph_config(value: &GraphConfig) -> bool {
 
 impl Default for VectorConfig {
     fn default() -> Self {
-        VectorConfig {
+        Self {
             m: default_m(),
             ef_construction: default_ef_construction(),
             ef_search: default_ef_search(),
@@ -184,7 +184,7 @@ impl Default for VectorConfig {
 
 impl Default for DbConfig {
     fn default() -> Self {
-        DbConfig {
+        Self {
             vector_config: VectorConfig::default(),
             graph_config: GraphConfig::default(),
             mcp: true,
@@ -279,9 +279,9 @@ impl<'a> InstanceInfo<'a> {
 impl From<InstanceInfo<'_>> for CloudConfig {
     fn from(instance_info: InstanceInfo<'_>) -> Self {
         match instance_info {
-            InstanceInfo::Helix(config) => CloudConfig::Helix(config.clone()),
-            InstanceInfo::FlyIo(config) => CloudConfig::FlyIo(config.clone()),
-            InstanceInfo::Ecr(config) => CloudConfig::Ecr(config.clone()),
+            InstanceInfo::Helix(config) => Self::Helix(config.clone()),
+            InstanceInfo::FlyIo(config) => Self::FlyIo(config.clone()),
+            InstanceInfo::Ecr(config) => Self::Ecr(config.clone()),
             InstanceInfo::Local(_) => unimplemented!(),
         }
     }
@@ -292,7 +292,7 @@ impl HelixConfig {
         let content =
             fs::read_to_string(path).map_err(|e| eyre!("Failed to read helix.toml: {}", e))?;
 
-        let config: HelixConfig =
+        let config: Self =
             toml::from_str(&content).map_err(|e| eyre!("Failed to parse helix.toml: {}", e))?;
 
         config.validate()?;
@@ -382,7 +382,7 @@ impl HelixConfig {
             },
         );
 
-        HelixConfig {
+        Self {
             project: ProjectConfig {
                 name: project_name.to_string(),
                 queries: default_queries_path(),

@@ -43,10 +43,10 @@ pub struct PropertyAccess {
 impl Display for MathExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MathExpr::FunctionCall(call) => write!(f, "{}", call),
-            MathExpr::NumericLiteral(n) => write!(f, "{}", n),
-            MathExpr::PropertyAccess(prop) => write!(f, "{}", prop),
-            MathExpr::Identifier(id) => write!(f, "{}", id),
+            Self::FunctionCall(call) => write!(f, "{}", call),
+            Self::NumericLiteral(n) => write!(f, "{}", n),
+            Self::PropertyAccess(prop) => write!(f, "{}", prop),
+            Self::Identifier(id) => write!(f, "{}", id),
         }
     }
 }

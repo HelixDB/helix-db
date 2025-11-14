@@ -72,7 +72,7 @@ impl HelixGraphStorage {
         path: &str,
         config: Config,
         version_info: VersionInfo,
-    ) -> Result<HelixGraphStorage, GraphError> {
+    ) -> Result<Self, GraphError> {
         fs::create_dir_all(path)?;
 
         let db_size = if config.db_max_size_gb.unwrap_or(100) >= 9999 {
@@ -280,7 +280,7 @@ impl StorageConfig {
         schema: Option<String>,
         graphvis_node_label: Option<String>,
         embedding_model: Option<String>,
-    ) -> StorageConfig {
+    ) -> Self {
         Self {
             schema,
             graphvis_node_label,

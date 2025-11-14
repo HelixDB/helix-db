@@ -193,7 +193,7 @@ struct ToolCallArgs {
 }
 impl Parse for ToolCallArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(ToolCallArgs {
+        Ok(Self {
             name: input.parse()?,
             _comma: input.parse()?,
             txn_type: input.parse()?,
@@ -290,7 +290,7 @@ pub fn tool_call(args: TokenStream, input: TokenStream) -> TokenStream {
 
 impl Parse for MigrationArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(MigrationArgs {
+        Ok(Self {
             item: input.parse()?,
             _comma: input.parse()?,
             from_version: input.parse()?,

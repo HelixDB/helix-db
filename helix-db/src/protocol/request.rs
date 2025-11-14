@@ -97,7 +97,7 @@ where
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         };
-        let out = Request {
+        let out = Self {
             name,
             req_type,
             api_key_hash,

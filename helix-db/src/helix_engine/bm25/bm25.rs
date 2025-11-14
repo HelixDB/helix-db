@@ -73,7 +73,7 @@ pub struct HBM25Config {
 }
 
 impl HBM25Config {
-    pub fn new(graph_env: &Env, wtxn: &mut RwTxn) -> Result<HBM25Config, GraphError> {
+    pub fn new(graph_env: &Env, wtxn: &mut RwTxn) -> Result<Self, GraphError> {
         let inverted_index_db: Database<Bytes, Bytes> = graph_env
             .database_options()
             .types::<Bytes, Bytes>()
@@ -100,7 +100,7 @@ impl HBM25Config {
             .name(DB_BM25_METADATA)
             .create(wtxn)?;
 
-        Ok(HBM25Config {
+        Ok(Self {
             graph_env: graph_env.clone(),
             inverted_index_db,
             doc_lengths_db,
@@ -115,7 +115,7 @@ impl HBM25Config {
         graph_env: &Env,
         wtxn: &mut RwTxn,
         uuid: &str,
-    ) -> Result<HBM25Config, GraphError> {
+    ) -> Result<Self, GraphError> {
         let inverted_index_db: Database<Bytes, Bytes> = graph_env
             .database_options()
             .types::<Bytes, Bytes>()
@@ -142,7 +142,7 @@ impl HBM25Config {
             .name(format!("{DB_BM25_METADATA}_{uuid}").as_str())
             .create(wtxn)?;
 
-        Ok(HBM25Config {
+        Ok(Self {
             graph_env: graph_env.clone(),
             inverted_index_db,
             doc_lengths_db,

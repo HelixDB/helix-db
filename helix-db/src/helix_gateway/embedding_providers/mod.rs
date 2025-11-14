@@ -61,7 +61,7 @@ impl EmbeddingModelImpl {
             _ => None,
         };
 
-        Ok(EmbeddingModelImpl {
+        Ok(Self {
             provider,
             api_key,
             client: Client::new(),

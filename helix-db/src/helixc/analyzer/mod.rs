@@ -194,7 +194,7 @@ impl SchemaData {
         let vectors = ctx.vector_fields.iter().map(NodeData::from_entry).collect();
         let edges = ctx.edge_map.iter().map(EdgeData::from_entry).collect();
 
-        SchemaData {
+        Self {
             nodes,
             vectors,
             edges,
@@ -215,7 +215,7 @@ impl NodeData {
             .iter()
             .map(|(n, f)| (n.to_string(), f.field_type.to_string()))
             .collect();
-        NodeData {
+        Self {
             name: val.0.to_string(),
             properties,
         }
@@ -239,7 +239,7 @@ impl EdgeData {
             .map(|f| (f.name.to_string(), f.field_type.to_string()))
             .collect();
 
-        EdgeData {
+        Self {
             name: name.to_string(),
             from: es.from.1.clone(),
             to: es.to.1.clone(),
@@ -279,7 +279,7 @@ impl QueryData {
             })
             .collect();
 
-        QueryData {
+        Self {
             name: query.name.to_string(),
             parameters,
             returns,

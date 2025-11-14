@@ -277,7 +277,7 @@ pub(super) trait FieldLookup {
 impl FieldLookup for Type {
     fn item_fields_contains_key(&self, ctx: &Ctx, key: &str) -> bool {
         match self {
-            Type::Node(Some(node_type)) | Type::Nodes(Some(node_type)) => ctx
+            Self::Node(Some(node_type)) | Self::Nodes(Some(node_type)) => ctx
                 .node_fields
                 .get(node_type.as_str())
                 .map(|fields| match key {
@@ -285,7 +285,7 @@ impl FieldLookup for Type {
                     _ => fields.contains_key(key),
                 })
                 .unwrap_or(true),
-            Type::Edge(Some(edge_type)) | Type::Edges(Some(edge_type)) => ctx
+            Self::Edge(Some(edge_type)) | Self::Edges(Some(edge_type)) => ctx
                 .edge_fields
                 .get(edge_type.as_str())
                 .map(|fields| match key {
@@ -293,7 +293,7 @@ impl FieldLookup for Type {
                     _ => fields.contains_key(key),
                 })
                 .unwrap_or(true),
-            Type::Vector(Some(vector_type)) | Type::Vectors(Some(vector_type)) => ctx
+            Self::Vector(Some(vector_type)) | Self::Vectors(Some(vector_type)) => ctx
                 .vector_fields
                 .get(vector_type.as_str())
                 .map(|fields| match key {
@@ -307,7 +307,7 @@ impl FieldLookup for Type {
 
     fn item_fields_contains_key_with_type(&self, ctx: &Ctx, key: &str) -> (bool, String) {
         let (is_valid_field, item_type) = match self {
-            Type::Node(Some(node_type)) | Type::Nodes(Some(node_type)) => (
+            Self::Node(Some(node_type)) | Self::Nodes(Some(node_type)) => (
                 ctx.node_fields
                     .get(node_type.as_str())
                     .map(|fields| match key {
@@ -317,7 +317,7 @@ impl FieldLookup for Type {
                     .unwrap_or(true),
                 node_type.as_str(),
             ),
-            Type::Edge(Some(edge_type)) | Type::Edges(Some(edge_type)) => (
+            Self::Edge(Some(edge_type)) | Self::Edges(Some(edge_type)) => (
                 ctx.edge_fields
                     .get(edge_type.as_str())
                     .map(|fields| match key {
@@ -327,7 +327,7 @@ impl FieldLookup for Type {
                     .unwrap_or(true),
                 edge_type.as_str(),
             ),
-            Type::Vector(Some(vector_type)) | Type::Vectors(Some(vector_type)) => (
+            Self::Vector(Some(vector_type)) | Self::Vectors(Some(vector_type)) => (
                 ctx.vector_fields
                     .get(vector_type.as_str())
                     .map(|fields| match key {
@@ -345,7 +345,7 @@ impl FieldLookup for Type {
 
     fn get_field_type_from_item_fields(&self, ctx: &Ctx, key: &str) -> Option<FieldType> {
         match self {
-            Type::Node(Some(node_type)) | Type::Nodes(Some(node_type)) => ctx
+            Self::Node(Some(node_type)) | Self::Nodes(Some(node_type)) => ctx
                 .node_fields
                 .get(node_type.as_str())
                 .map(|fields| match key {
@@ -357,7 +357,7 @@ impl FieldLookup for Type {
                         .unwrap_or(None),
                 })
                 .unwrap_or(None),
-            Type::Edge(Some(edge_type)) | Type::Edges(Some(edge_type)) => ctx
+            Self::Edge(Some(edge_type)) | Self::Edges(Some(edge_type)) => ctx
                 .edge_fields
                 .get(edge_type.as_str())
                 .map(|fields| match key {
@@ -371,7 +371,7 @@ impl FieldLookup for Type {
                 })
                 .unwrap_or(None),
 
-            Type::Vector(Some(vector_type)) | Type::Vectors(Some(vector_type)) => ctx
+            Self::Vector(Some(vector_type)) | Self::Vectors(Some(vector_type)) => ctx
                 .vector_fields
                 .get(vector_type.as_str())
                 .map(|fields| match key {

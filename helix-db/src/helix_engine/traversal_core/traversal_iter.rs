@@ -64,15 +64,15 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         default: bool,
         f: impl Fn(&Value) -> bool,
     ) -> Result<bool, GraphError> {
-        let val = match &self.inner.next() {
+        
+        match &self.inner.next() {
             Some(Ok(TraversalValue::Value(val))) => Ok(f(val)),
             Some(Ok(_)) => Err(GraphError::ConversionError(
                 "Expected value, got something else".to_string(),
             )),
             Some(Err(err)) => Err(GraphError::from(err.to_string())),
             None => Ok(default),
-        };
-        val
+        }
     }
 }
 
@@ -138,14 +138,14 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         default: bool,
         f: impl Fn(&Value) -> bool,
     ) -> Result<bool, GraphError> {
-        let val = match &self.inner.next() {
+        
+        match &self.inner.next() {
             Some(Ok(TraversalValue::Value(val))) => Ok(f(val)),
             Some(Ok(_)) => Err(GraphError::ConversionError(
                 "Expected value, got something else".to_string(),
             )),
             Some(Err(err)) => Err(GraphError::from(err.to_string())),
             None => Ok(default),
-        };
-        val
+        }
     }
 }

@@ -8,14 +8,14 @@ pub struct BinaryHeap<'arena, T> {
 }
 
 impl<'arena, T: Ord> BinaryHeap<'arena, T> {
-    pub fn new(arena: &'arena bumpalo::Bump) -> BinaryHeap<'arena, T> {
+    pub fn new(arena: &'arena bumpalo::Bump) -> Self {
         BinaryHeap {
             arena,
             data: bumpalo::collections::Vec::with_capacity_in(0, arena),
         }
     }
 
-    pub fn with_capacity(arena: &'arena bumpalo::Bump, capacity: usize) -> BinaryHeap<'arena, T> {
+    pub fn with_capacity(arena: &'arena bumpalo::Bump, capacity: usize) -> Self {
         BinaryHeap {
             arena,
             data: bumpalo::collections::Vec::with_capacity_in(capacity, arena),
@@ -50,7 +50,7 @@ impl<'arena, T: Ord> BinaryHeap<'arena, T> {
     pub fn from(
         arena: &'arena bumpalo::Bump,
         data: bumpalo::collections::Vec<'arena, T>,
-    ) -> BinaryHeap<'arena, T> {
+    ) -> Self {
         BinaryHeap { arena, data }
     }
 

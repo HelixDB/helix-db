@@ -24,7 +24,7 @@ impl ProjectContext {
         let config = HelixConfig::from_file(&config_path)?;
         let helix_dir = root.join(".helix");
 
-        Ok(ProjectContext {
+        Ok(Self {
             root,
             config,
             helix_dir,

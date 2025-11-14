@@ -25,7 +25,7 @@ pub struct HxFile {
 
 impl Default for HelixParser {
     fn default() -> Self {
-        HelixParser {
+        Self {
             source: Source {
                 source: String::new(),
                 schema: HashMap::new(),
@@ -116,19 +116,19 @@ pub enum MigrationItem {
 impl MigrationItem {
     pub fn inner(&self) -> &str {
         match self {
-            MigrationItem::Node(s) => s,
-            MigrationItem::Edge(s) => s,
-            MigrationItem::Vector(s) => s,
+            Self::Node(s) => s,
+            Self::Edge(s) => s,
+            Self::Vector(s) => s,
         }
     }
 }
 
-impl PartialEq<MigrationItem> for MigrationItem {
-    fn eq(&self, other: &MigrationItem) -> bool {
+impl PartialEq<Self> for MigrationItem {
+    fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (MigrationItem::Node(a), MigrationItem::Node(b)) => a == b,
-            (MigrationItem::Edge(a), MigrationItem::Edge(b)) => a == b,
-            (MigrationItem::Vector(a), MigrationItem::Vector(b)) => a == b,
+            (Self::Node(a), Self::Node(b)) => a == b,
+            (Self::Edge(a), Self::Edge(b)) => a == b,
+            (Self::Vector(a), Self::Vector(b)) => a == b,
             _ => false,
         }
     }
@@ -198,7 +198,7 @@ pub enum FieldPrefix {
 }
 impl FieldPrefix {
     pub fn is_indexed(&self) -> bool {
-        matches!(self, FieldPrefix::Index)
+        matches!(self, Self::Index)
     }
 }
 
@@ -228,35 +228,35 @@ pub enum FieldType {
 impl PartialEq for FieldType {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (FieldType::String, FieldType::String) => true,
-            (FieldType::F32 | FieldType::F64, FieldType::F32 | FieldType::F64) => true,
+            (Self::String, Self::String) => true,
+            (Self::F32 | Self::F64, Self::F32 | Self::F64) => true,
             (
-                FieldType::I8
-                | FieldType::I16
-                | FieldType::I32
-                | FieldType::I64
-                | FieldType::U8
-                | FieldType::U16
-                | FieldType::U32
-                | FieldType::U64
-                | FieldType::U128,
-                FieldType::I8
-                | FieldType::I16
-                | FieldType::I32
-                | FieldType::I64
-                | FieldType::U8
-                | FieldType::U16
-                | FieldType::U32
-                | FieldType::U64
-                | FieldType::U128,
+                Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
+                | Self::U8
+                | Self::U16
+                | Self::U32
+                | Self::U64
+                | Self::U128,
+                Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
+                | Self::U8
+                | Self::U16
+                | Self::U32
+                | Self::U64
+                | Self::U128,
             ) => true,
 
-            (FieldType::Boolean, FieldType::Boolean) => true,
-            (FieldType::Uuid, FieldType::Uuid) => true,
-            (FieldType::Date, FieldType::Date) => true,
-            (FieldType::Array(a), FieldType::Array(b)) => a == b,
-            (FieldType::Identifier(a), FieldType::Identifier(b)) => a == b,
-            (FieldType::Object(a), FieldType::Object(b)) => a == b,
+            (Self::Boolean, Self::Boolean) => true,
+            (Self::Uuid, Self::Uuid) => true,
+            (Self::Date, Self::Date) => true,
+            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Identifier(a), Self::Identifier(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => a == b,
             // (FieldType::Closure(a, b), FieldType::Closure(c, d)) => a == c && b == d,
             _ => false,
         }
@@ -266,24 +266,24 @@ impl PartialEq for FieldType {
 impl Display for FieldType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FieldType::String => write!(f, "String"),
-            FieldType::F32 => write!(f, "F32"),
-            FieldType::F64 => write!(f, "F64"),
-            FieldType::I8 => write!(f, "I8"),
-            FieldType::I16 => write!(f, "I16"),
-            FieldType::I32 => write!(f, "I32"),
-            FieldType::I64 => write!(f, "I64"),
-            FieldType::U8 => write!(f, "U8"),
-            FieldType::U16 => write!(f, "U16"),
-            FieldType::U32 => write!(f, "U32"),
-            FieldType::U64 => write!(f, "U64"),
-            FieldType::U128 => write!(f, "U128"),
-            FieldType::Boolean => write!(f, "Boolean"),
-            FieldType::Uuid => write!(f, "ID"),
-            FieldType::Date => write!(f, "Date"),
-            FieldType::Array(t) => write!(f, "Array({t})"),
-            FieldType::Identifier(s) => write!(f, "{s}"),
-            FieldType::Object(m) => {
+            Self::String => write!(f, "String"),
+            Self::F32 => write!(f, "F32"),
+            Self::F64 => write!(f, "F64"),
+            Self::I8 => write!(f, "I8"),
+            Self::I16 => write!(f, "I16"),
+            Self::I32 => write!(f, "I32"),
+            Self::I64 => write!(f, "I64"),
+            Self::U8 => write!(f, "U8"),
+            Self::U16 => write!(f, "U16"),
+            Self::U32 => write!(f, "U32"),
+            Self::U64 => write!(f, "U64"),
+            Self::U128 => write!(f, "U128"),
+            Self::Boolean => write!(f, "Boolean"),
+            Self::Uuid => write!(f, "ID"),
+            Self::Date => write!(f, "Date"),
+            Self::Array(t) => write!(f, "Array({t})"),
+            Self::Identifier(s) => write!(f, "{s}"),
+            Self::Object(m) => {
                 write!(f, "{{")?;
                 for (k, v) in m {
                     write!(f, "{k}: {v}")?;
@@ -297,18 +297,18 @@ impl Display for FieldType {
 impl PartialEq<Value> for FieldType {
     fn eq(&self, other: &Value) -> bool {
         match (self, other) {
-            (FieldType::String, Value::String(_)) => true,
-            (FieldType::F32 | FieldType::F64, Value::F32(_) | Value::F64(_)) => true,
+            (Self::String, Value::String(_)) => true,
+            (Self::F32 | Self::F64, Value::F32(_) | Value::F64(_)) => true,
             (
-                FieldType::I8
-                | FieldType::I16
-                | FieldType::I32
-                | FieldType::I64
-                | FieldType::U8
-                | FieldType::U16
-                | FieldType::U32
-                | FieldType::U64
-                | FieldType::U128,
+                Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
+                | Self::U8
+                | Self::U16
+                | Self::U32
+                | Self::U64
+                | Self::U128,
                 Value::I8(_)
                 | Value::I16(_)
                 | Value::I32(_)
@@ -319,18 +319,18 @@ impl PartialEq<Value> for FieldType {
                 | Value::U64(_)
                 | Value::U128(_),
             ) => true,
-            (FieldType::Boolean, Value::Boolean(_)) => true,
-            (FieldType::Array(inner_type), Value::Array(values)) => {
+            (Self::Boolean, Value::Boolean(_)) => true,
+            (Self::Array(inner_type), Value::Array(values)) => {
                 values.iter().all(|v| inner_type.as_ref().eq(v))
             }
-            (FieldType::Object(fields), Value::Object(values)) => {
+            (Self::Object(fields), Value::Object(values)) => {
                 fields.len() == values.len()
                     && fields.iter().all(|(k, field_type)| match values.get(k) {
                         Some(value) => field_type.eq(value),
                         None => false,
                     })
             }
-            (FieldType::Date, value) => match value {
+            (Self::Date, value) => match value {
                 Value::String(date) => {
                     date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
                 }
@@ -346,18 +346,18 @@ impl PartialEq<Value> for FieldType {
 impl PartialEq<DefaultValue> for FieldType {
     fn eq(&self, other: &DefaultValue) -> bool {
         match (self, other) {
-            (FieldType::String, DefaultValue::String(_)) => true,
-            (FieldType::F32 | FieldType::F64, DefaultValue::F32(_) | DefaultValue::F64(_)) => true,
+            (Self::String, DefaultValue::String(_)) => true,
+            (Self::F32 | Self::F64, DefaultValue::F32(_) | DefaultValue::F64(_)) => true,
             (
-                FieldType::I8
-                | FieldType::I16
-                | FieldType::I32
-                | FieldType::I64
-                | FieldType::U8
-                | FieldType::U16
-                | FieldType::U32
-                | FieldType::U64
-                | FieldType::U128,
+                Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
+                | Self::U8
+                | Self::U16
+                | Self::U32
+                | Self::U64
+                | Self::U128,
                 DefaultValue::I8(_)
                 | DefaultValue::I16(_)
                 | DefaultValue::I32(_)
@@ -368,17 +368,17 @@ impl PartialEq<DefaultValue> for FieldType {
                 | DefaultValue::U64(_)
                 | DefaultValue::U128(_),
             ) => true,
-            (FieldType::Boolean, DefaultValue::Boolean(_)) => true,
-            (FieldType::Date, DefaultValue::String(date)) => {
+            (Self::Boolean, DefaultValue::Boolean(_)) => true,
+            (Self::Date, DefaultValue::String(date)) => {
                 date.parse::<NaiveDate>().is_ok() || date.parse::<DateTime<Utc>>().is_ok()
             }
-            (FieldType::Date, DefaultValue::I64(timestamp)) => {
+            (Self::Date, DefaultValue::I64(timestamp)) => {
                 DateTime::from_timestamp(*timestamp, 0).is_some()
             }
-            (FieldType::Date, DefaultValue::U64(timestamp)) => {
+            (Self::Date, DefaultValue::U64(timestamp)) => {
                 DateTime::from_timestamp(*timestamp as i64, 0).is_some()
             }
-            (FieldType::Date, DefaultValue::Now) => true,
+            (Self::Date, DefaultValue::Now) => true,
             _ => false,
         }
     }
@@ -508,52 +508,52 @@ impl MathFunction {
     /// Returns the expected number of arguments for this function
     pub fn arity(&self) -> usize {
         match self {
-            MathFunction::Pi | MathFunction::E => 0,
-            MathFunction::Abs | MathFunction::Sqrt | MathFunction::Ln |
-            MathFunction::Log10 | MathFunction::Exp | MathFunction::Ceil |
-            MathFunction::Floor | MathFunction::Round | MathFunction::Sin |
-            MathFunction::Cos | MathFunction::Tan | MathFunction::Asin |
-            MathFunction::Acos | MathFunction::Atan | MathFunction::Min |
-            MathFunction::Max | MathFunction::Sum | MathFunction::Avg |
-            MathFunction::Count => 1,
-            MathFunction::Add | MathFunction::Sub | MathFunction::Mul |
-            MathFunction::Div | MathFunction::Pow | MathFunction::Mod |
-            MathFunction::Atan2 | MathFunction::Log => 2,
+            Self::Pi | Self::E => 0,
+            Self::Abs | Self::Sqrt | Self::Ln |
+            Self::Log10 | Self::Exp | Self::Ceil |
+            Self::Floor | Self::Round | Self::Sin |
+            Self::Cos | Self::Tan | Self::Asin |
+            Self::Acos | Self::Atan | Self::Min |
+            Self::Max | Self::Sum | Self::Avg |
+            Self::Count => 1,
+            Self::Add | Self::Sub | Self::Mul |
+            Self::Div | Self::Pow | Self::Mod |
+            Self::Atan2 | Self::Log => 2,
         }
     }
 
     /// Returns the function name as a string
     pub fn name(&self) -> &'static str {
         match self {
-            MathFunction::Add => "ADD",
-            MathFunction::Sub => "SUB",
-            MathFunction::Mul => "MUL",
-            MathFunction::Div => "DIV",
-            MathFunction::Pow => "POW",
-            MathFunction::Mod => "MOD",
-            MathFunction::Abs => "ABS",
-            MathFunction::Sqrt => "SQRT",
-            MathFunction::Ln => "LN",
-            MathFunction::Log10 => "LOG10",
-            MathFunction::Log => "LOG",
-            MathFunction::Exp => "EXP",
-            MathFunction::Ceil => "CEIL",
-            MathFunction::Floor => "FLOOR",
-            MathFunction::Round => "ROUND",
-            MathFunction::Sin => "SIN",
-            MathFunction::Cos => "COS",
-            MathFunction::Tan => "TAN",
-            MathFunction::Asin => "ASIN",
-            MathFunction::Acos => "ACOS",
-            MathFunction::Atan => "ATAN",
-            MathFunction::Atan2 => "ATAN2",
-            MathFunction::Pi => "PI",
-            MathFunction::E => "E",
-            MathFunction::Min => "MIN",
-            MathFunction::Max => "MAX",
-            MathFunction::Sum => "SUM",
-            MathFunction::Avg => "AVG",
-            MathFunction::Count => "COUNT",
+            Self::Add => "ADD",
+            Self::Sub => "SUB",
+            Self::Mul => "MUL",
+            Self::Div => "DIV",
+            Self::Pow => "POW",
+            Self::Mod => "MOD",
+            Self::Abs => "ABS",
+            Self::Sqrt => "SQRT",
+            Self::Ln => "LN",
+            Self::Log10 => "LOG10",
+            Self::Log => "LOG",
+            Self::Exp => "EXP",
+            Self::Ceil => "CEIL",
+            Self::Floor => "FLOOR",
+            Self::Round => "ROUND",
+            Self::Sin => "SIN",
+            Self::Cos => "COS",
+            Self::Tan => "TAN",
+            Self::Asin => "ASIN",
+            Self::Acos => "ACOS",
+            Self::Atan => "ATAN",
+            Self::Atan2 => "ATAN2",
+            Self::Pi => "PI",
+            Self::E => "E",
+            Self::Min => "MIN",
+            Self::Max => "MAX",
+            Self::Sum => "SUM",
+            Self::Avg => "AVG",
+            Self::Count => "COUNT",
         }
     }
 }
@@ -599,48 +599,48 @@ pub enum ReturnType {
 impl Debug for ExpressionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExpressionType::Traversal(traversal) => write!(f, "Traversal({traversal:?})"),
-            ExpressionType::Identifier(s) => write!(f, "{s}"),
-            ExpressionType::StringLiteral(s) => write!(f, "{s}"),
-            ExpressionType::IntegerLiteral(i) => write!(f, "{i}"),
-            ExpressionType::FloatLiteral(fl) => write!(f, "{fl}"),
-            ExpressionType::BooleanLiteral(b) => write!(f, "{b}"),
-            ExpressionType::ArrayLiteral(a) => write!(f, "Array({a:?})"),
-            ExpressionType::Exists(e) => write!(f, "Exists({e:?})"),
-            ExpressionType::AddVector(av) => write!(f, "AddVector({av:?})"),
-            ExpressionType::AddNode(an) => write!(f, "AddNode({an:?})"),
-            ExpressionType::AddEdge(ae) => write!(f, "AddEdge({ae:?})"),
-            ExpressionType::Not(expr) => write!(f, "Not({expr:?})"),
-            ExpressionType::And(exprs) => write!(f, "And({exprs:?})"),
-            ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
-            ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
-            ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
-            ExpressionType::MathFunctionCall(mfc) => write!(f, "MathFunctionCall({mfc:?})"),
-            ExpressionType::Empty => write!(f, "Empty"),
+            Self::Traversal(traversal) => write!(f, "Traversal({traversal:?})"),
+            Self::Identifier(s) => write!(f, "{s}"),
+            Self::StringLiteral(s) => write!(f, "{s}"),
+            Self::IntegerLiteral(i) => write!(f, "{i}"),
+            Self::FloatLiteral(fl) => write!(f, "{fl}"),
+            Self::BooleanLiteral(b) => write!(f, "{b}"),
+            Self::ArrayLiteral(a) => write!(f, "Array({a:?})"),
+            Self::Exists(e) => write!(f, "Exists({e:?})"),
+            Self::AddVector(av) => write!(f, "AddVector({av:?})"),
+            Self::AddNode(an) => write!(f, "AddNode({an:?})"),
+            Self::AddEdge(ae) => write!(f, "AddEdge({ae:?})"),
+            Self::Not(expr) => write!(f, "Not({expr:?})"),
+            Self::And(exprs) => write!(f, "And({exprs:?})"),
+            Self::Or(exprs) => write!(f, "Or({exprs:?})"),
+            Self::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
+            Self::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
+            Self::MathFunctionCall(mfc) => write!(f, "MathFunctionCall({mfc:?})"),
+            Self::Empty => write!(f, "Empty"),
         }
     }
 }
 impl Display for ExpressionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExpressionType::Traversal(traversal) => write!(f, "Traversal({traversal:?})"),
-            ExpressionType::Identifier(s) => write!(f, "{s}"),
-            ExpressionType::StringLiteral(s) => write!(f, "{s}"),
-            ExpressionType::IntegerLiteral(i) => write!(f, "{i}"),
-            ExpressionType::FloatLiteral(fl) => write!(f, "{fl}"),
-            ExpressionType::BooleanLiteral(b) => write!(f, "{b}"),
-            ExpressionType::ArrayLiteral(a) => write!(f, "Array({a:?})"),
-            ExpressionType::Exists(e) => write!(f, "Exists({e:?})"),
-            ExpressionType::AddVector(av) => write!(f, "AddVector({av:?})"),
-            ExpressionType::AddNode(an) => write!(f, "AddNode({an:?})"),
-            ExpressionType::AddEdge(ae) => write!(f, "AddEdge({ae:?})"),
-            ExpressionType::Not(expr) => write!(f, "Not({expr:?})"),
-            ExpressionType::And(exprs) => write!(f, "And({exprs:?})"),
-            ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
-            ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
-            ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
-            ExpressionType::MathFunctionCall(mfc) => write!(f, "{}({:?})", mfc.function.name(), mfc.args),
-            ExpressionType::Empty => write!(f, "Empty"),
+            Self::Traversal(traversal) => write!(f, "Traversal({traversal:?})"),
+            Self::Identifier(s) => write!(f, "{s}"),
+            Self::StringLiteral(s) => write!(f, "{s}"),
+            Self::IntegerLiteral(i) => write!(f, "{i}"),
+            Self::FloatLiteral(fl) => write!(f, "{fl}"),
+            Self::BooleanLiteral(b) => write!(f, "{b}"),
+            Self::ArrayLiteral(a) => write!(f, "Array({a:?})"),
+            Self::Exists(e) => write!(f, "Exists({e:?})"),
+            Self::AddVector(av) => write!(f, "AddVector({av:?})"),
+            Self::AddNode(an) => write!(f, "AddNode({an:?})"),
+            Self::AddEdge(ae) => write!(f, "AddEdge({ae:?})"),
+            Self::Not(expr) => write!(f, "Not({expr:?})"),
+            Self::And(exprs) => write!(f, "And({exprs:?})"),
+            Self::Or(exprs) => write!(f, "Or({exprs:?})"),
+            Self::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
+            Self::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
+            Self::MathFunctionCall(mfc) => write!(f, "{}({:?})", mfc.function.name(), mfc.args),
+            Self::Empty => write!(f, "Empty"),
         }
     }
 }
@@ -751,29 +751,29 @@ pub enum StepType {
     RerankRRF(RerankRRF),
     RerankMMR(RerankMMR),
 }
-impl PartialEq<StepType> for StepType {
-    fn eq(&self, other: &StepType) -> bool {
+impl PartialEq<Self> for StepType {
+    fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (&StepType::Node(_), &StepType::Node(_))
-                | (&StepType::Edge(_), &StepType::Edge(_))
-                | (&StepType::Where(_), &StepType::Where(_))
+            (&Self::Node(_), &Self::Node(_))
+                | (&Self::Edge(_), &Self::Edge(_))
+                | (&Self::Where(_), &Self::Where(_))
                 | (
-                    &StepType::BooleanOperation(_),
-                    &StepType::BooleanOperation(_)
+                    &Self::BooleanOperation(_),
+                    &Self::BooleanOperation(_)
                 )
-                | (&StepType::Count, &StepType::Count)
-                | (&StepType::Update(_), &StepType::Update(_))
-                | (&StepType::Object(_), &StepType::Object(_))
-                | (&StepType::Exclude(_), &StepType::Exclude(_))
-                | (&StepType::Closure(_), &StepType::Closure(_))
-                | (&StepType::Range(_), &StepType::Range(_))
-                | (&StepType::OrderBy(_), &StepType::OrderBy(_))
-                | (&StepType::AddEdge(_), &StepType::AddEdge(_))
-                | (&StepType::Aggregate(_), &StepType::Aggregate(_))
-                | (&StepType::GroupBy(_), &StepType::GroupBy(_))
-                | (&StepType::RerankRRF(_), &StepType::RerankRRF(_))
-                | (&StepType::RerankMMR(_), &StepType::RerankMMR(_))
+                | (&Self::Count, &Self::Count)
+                | (&Self::Update(_), &Self::Update(_))
+                | (&Self::Object(_), &Self::Object(_))
+                | (&Self::Exclude(_), &Self::Exclude(_))
+                | (&Self::Closure(_), &Self::Closure(_))
+                | (&Self::Range(_), &Self::Range(_))
+                | (&Self::OrderBy(_), &Self::OrderBy(_))
+                | (&Self::AddEdge(_), &Self::AddEdge(_))
+                | (&Self::Aggregate(_), &Self::Aggregate(_))
+                | (&Self::GroupBy(_), &Self::GroupBy(_))
+                | (&Self::RerankRRF(_), &Self::RerankRRF(_))
+                | (&Self::RerankMMR(_), &Self::RerankMMR(_))
         )
     }
 }
@@ -1017,9 +1017,9 @@ pub enum IdType {
 impl Display for IdType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IdType::Literal { value, loc: _ } => write!(f, "{value}"),
-            IdType::Identifier { value, loc: _ } => write!(f, "{value}"),
-            IdType::ByIndex {
+            Self::Literal { value, loc: _ } => write!(f, "{value}"),
+            Self::Identifier { value, loc: _ } => write!(f, "{value}"),
+            Self::ByIndex {
                 index,
                 value: _,
                 loc: _,
@@ -1044,14 +1044,14 @@ pub enum ValueType {
     },
 }
 impl ValueType {
-    pub fn new(value: Value, loc: Loc) -> ValueType {
-        ValueType::Literal { value, loc }
+    pub fn new(value: Value, loc: Loc) -> Self {
+        Self::Literal { value, loc }
     }
     pub fn to_string(&self) -> String {
         match self {
-            ValueType::Literal { value, loc: _ } => value.inner_stringify(),
-            ValueType::Identifier { value, loc: _ } => value.clone(),
-            ValueType::Object { fields, loc: _ } => {
+            Self::Literal { value, loc: _ } => value.inner_stringify(),
+            Self::Identifier { value, loc: _ } => value.clone(),
+            Self::Object { fields, loc: _ } => {
                 fields.keys().cloned().collect::<Vec<String>>().join(", ")
             }
         }
@@ -1059,29 +1059,29 @@ impl ValueType {
 }
 
 impl From<Value> for ValueType {
-    fn from(value: Value) -> ValueType {
+    fn from(value: Value) -> Self {
         match value {
-            Value::String(s) => ValueType::Literal {
+            Value::String(s) => Self::Literal {
                 value: Value::String(s),
                 loc: Loc::empty(),
             },
-            Value::I32(i) => ValueType::Literal {
+            Value::I32(i) => Self::Literal {
                 value: Value::I32(i),
                 loc: Loc::empty(),
             },
-            Value::F64(f) => ValueType::Literal {
+            Value::F64(f) => Self::Literal {
                 value: Value::F64(f),
                 loc: Loc::empty(),
             },
-            Value::Boolean(b) => ValueType::Literal {
+            Value::Boolean(b) => Self::Literal {
                 value: Value::Boolean(b),
                 loc: Loc::empty(),
             },
-            Value::Array(arr) => ValueType::Literal {
+            Value::Array(arr) => Self::Literal {
                 value: Value::Array(arr),
                 loc: Loc::empty(),
             },
-            Value::Empty => ValueType::Literal {
+            Value::Empty => Self::Literal {
                 value: Value::Empty,
                 loc: Loc::empty(),
             },
@@ -1091,7 +1091,7 @@ impl From<Value> for ValueType {
 }
 
 impl From<IdType> for String {
-    fn from(id_type: IdType) -> String {
+    fn from(id_type: IdType) -> Self {
         match id_type {
             IdType::Literal { mut value, loc: _ } => {
                 value.retain(|c| c != '"');
@@ -1102,15 +1102,15 @@ impl From<IdType> for String {
                 index,
                 value: _,
                 loc: _,
-            } => String::from(*index),
+            } => Self::from(*index),
         }
     }
 }
 
 impl From<String> for IdType {
-    fn from(mut s: String) -> IdType {
+    fn from(mut s: String) -> Self {
         s.retain(|c| c != '"');
-        IdType::Literal {
+        Self::Literal {
             value: s,
             loc: Loc::empty(),
         }

@@ -349,13 +349,13 @@ impl std::error::Error for MetricError {}
 
 impl From<sonic_rs::Error> for MetricError {
     fn from(e: sonic_rs::Error) -> Self {
-        MetricError(e.to_string())
+        Self(e.to_string())
     }
 }
 
 impl From<reqwest::Error> for MetricError {
     fn from(e: reqwest::Error) -> Self {
-        MetricError(e.to_string())
+        Self(e.to_string())
     }
 }
 

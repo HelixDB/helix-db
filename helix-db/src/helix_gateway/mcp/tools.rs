@@ -123,12 +123,12 @@ impl Operator {
     #[inline]
     pub fn execute(&self, lhs: &Value, rhs: &Value) -> bool {
         match self {
-            Operator::Eq => lhs == rhs,
-            Operator::Neq => lhs != rhs,
-            Operator::Gt => lhs > rhs,
-            Operator::Lt => lhs < rhs,
-            Operator::Gte => lhs >= rhs,
-            Operator::Lte => lhs <= rhs,
+            Self::Eq => lhs == rhs,
+            Self::Neq => lhs != rhs,
+            Self::Gt => lhs > rhs,
+            Self::Lt => lhs < rhs,
+            Self::Gte => lhs >= rhs,
+            Self::Lte => lhs <= rhs,
         }
     }
 }
@@ -189,7 +189,7 @@ where
         }
     }
 
-    pub fn map<I, F>(self, f: F) -> TraversalStream<'db, 'arena, 'txn>
+    pub fn map<I, F>(self, f: F) -> Self
     where
         I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>> + 'txn,
         F: FnOnce(

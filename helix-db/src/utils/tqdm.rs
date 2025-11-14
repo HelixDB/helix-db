@@ -11,8 +11,8 @@ pub enum ProgChar {
 impl fmt::Display for ProgChar {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let c = match self {
-            ProgChar::Block => '█',
-            ProgChar::Hash => '#', };
+            Self::Block => '█',
+            Self::Hash => '#', };
         write!(f, "{c}")
     }
 }
@@ -32,7 +32,7 @@ impl<T: Iterator> tqdm<T> {
     /// Creates a new tqdm progress bar with an optional message (max 50 chars)
     pub fn new(iter: T, total: usize, prog_char: Option<ProgChar>, message: Option<&str>) -> Self {
         let message = message.map(|s| s.chars().take(50).collect());
-        tqdm {
+        Self {
             iter,
             total,
             current: 0,
