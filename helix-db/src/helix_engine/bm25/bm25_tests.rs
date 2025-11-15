@@ -2,12 +2,14 @@
 mod tests {
     use crate::{
         helix_engine::{
-            bm25::bm25::{
-                BM25, BM25Flatten, BM25Metadata, HBM25Config, HybridSearch, METADATA_KEY,
+            bm25::{BM25, BM25Flatten, BM25Metadata, HBM25Config, HybridSearch, METADATA_KEY},
+            storage_core::{
+                HelixGraphStorage, Txn,
+                txn::{ReadTransaction, WriteTransaction},
+                version_info::VersionInfo,
             },
-            storage_core::{HelixGraphStorage, version_info::VersionInfo},
             traversal_core::config::Config,
-            vector_core::{hnsw::HNSW, vector::HVector},
+            vector_core::{HNSW, vector::HVector},
         },
         protocol::value::Value,
         utils::properties::ImmutablePropertiesMap,
@@ -17,12 +19,19 @@ mod tests {
     use heed3::{Env, EnvOpenOptions, RoTxn};
     use rand::Rng;
     use std::collections::HashMap;
+    #[cfg(feature = "rocks")]
+    use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn setup_test_env() -> (Env, tempfile::TempDir) {
+    #[cfg(feature = "lmdb")]
+    type DB = heed3::Env;
+    #[cfg(feature = "rocks")]
+    type DB = Arc<rocksdb::TransactionDB>;
+
+    fn setup_test_env() -> (DB, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let path = temp_dir.path();
-
+        #[cfg(feature = "lmdb")]
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(4 * 1024 * 1024 * 1024) // 4GB
@@ -31,13 +40,47 @@ mod tests {
                 .unwrap()
         };
 
+        #[cfg(feature = "rocks")]
+        let env = {
+            use crate::helix_engine::storage_core::default_helix_rocksdb_options;
+
+            let db_opts = default_helix_rocksdb_options();
+            let bm25_cf_descriptors = vec![
+                rocksdb::ColumnFamilyDescriptor::new("inverted_index", rocksdb::Options::default()),
+                rocksdb::ColumnFamilyDescriptor::new("doc_lengths", rocksdb::Options::default()),
+                rocksdb::ColumnFamilyDescriptor::new(
+                    "term_frequencies",
+                    rocksdb::Options::default(),
+                ),
+                rocksdb::ColumnFamilyDescriptor::new("bm25_metadata", rocksdb::Options::default()),
+            ];
+
+            let txn_db_opts = rocksdb::TransactionDBOptions::new();
+
+            // Open database with optimistic transactions
+            let db = Arc::new(
+                rocksdb::TransactionDB::<rocksdb::MultiThreaded>::open_cf_descriptors(
+                    &db_opts,
+                    &txn_db_opts,
+                    path,
+                    bm25_cf_descriptors,
+                )
+                .unwrap(),
+            );
+            db
+        };
         (env, temp_dir)
     }
 
     fn setup_bm25_config() -> (HBM25Config, tempfile::TempDir) {
         let (env, temp_dir) = setup_test_env();
         let mut wtxn = env.write_txn().unwrap();
+
+        #[cfg(feature = "lmdb")]
         let config = HBM25Config::new(&env, &mut wtxn).unwrap();
+        #[cfg(feature = "rocks")]
+        let config = HBM25Config::new(Arc::clone(&env), &mut wtxn).unwrap();
+
         wtxn.commit().unwrap();
         (config, temp_dir)
     }
@@ -119,17 +162,23 @@ mod tests {
         assert!(result.is_ok());
 
         // check that document length was stored
-        let doc_length = bm25.doc_lengths_db.get(&wtxn, &doc_id).unwrap();
-        assert!(doc_length.is_some());
-        assert!(doc_length.unwrap() > 0);
+        #[cfg(feature = "lmdb")]
+        {
+            let doc_length = bm25.doc_lengths_db.get(&wtxn, &doc_id).unwrap();
+            assert!(doc_length.is_some());
+            assert!(doc_length.unwrap() > 0);
+        }
 
         // check that metadata was updated
-        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap();
-        assert!(metadata_bytes.is_some());
+        #[cfg(feature = "lmdb")]
+        {
+            let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap();
+            assert!(metadata_bytes.is_some());
 
-        let metadata: BM25Metadata = bincode::deserialize(metadata_bytes.unwrap()).unwrap();
-        assert_eq!(metadata.total_docs, 1);
-        assert!(metadata.avgdl > 0.0);
+            let metadata: BM25Metadata = bincode::deserialize(metadata_bytes.unwrap()).unwrap();
+            assert_eq!(metadata.total_docs, 1);
+            assert!(metadata.avgdl > 0.0);
+        }
 
         wtxn.commit().unwrap();
     }
@@ -151,9 +200,12 @@ mod tests {
         }
 
         // check metadata
-        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
-        let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
-        assert_eq!(metadata.total_docs, 3);
+        #[cfg(feature = "lmdb")]
+        {
+            let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
+            let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
+            assert_eq!(metadata.total_docs, 3);
+        }
 
         wtxn.commit().unwrap();
     }
@@ -203,7 +255,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -271,7 +325,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1258,7 +1314,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1321,8 +1379,11 @@ mod tests {
             .unwrap();
 
         // check that document length was updated
-        let doc_length = bm25.doc_lengths_db.get(&wtxn, &doc_id).unwrap().unwrap();
-        assert!(doc_length > 2); // Should reflect the new document length
+        #[cfg(feature = "lmdb")]
+        {
+            let doc_length = bm25.doc_lengths_db.get(&wtxn, &doc_id).unwrap().unwrap();
+            assert!(doc_length > 2); // Should reflect the new document length
+        }
 
         wtxn.commit().unwrap();
 
@@ -1353,13 +1414,19 @@ mod tests {
         bm25.delete_doc(&mut wtxn, 2u128).unwrap();
 
         // check that document length was removed
-        let doc_length = bm25.doc_lengths_db.get(&wtxn, &2u128).unwrap();
-        assert!(doc_length.is_none());
+        #[cfg(feature = "lmdb")]
+        {
+            let doc_length = bm25.doc_lengths_db.get(&wtxn, &2u128).unwrap();
+            assert!(doc_length.is_none());
+        }
 
         // check that metadata was updated
-        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
-        let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
-        assert_eq!(metadata.total_docs, 2); // Should be reduced by 1
+        #[cfg(feature = "lmdb")]
+        {
+            let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
+            let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
+            assert_eq!(metadata.total_docs, 2); // Should be reduced by 1
+        }
 
         wtxn.commit().unwrap();
 
@@ -1418,8 +1485,11 @@ mod tests {
         assert!(result.is_ok());
 
         // document length should be 0
-        let doc_length = bm25.doc_lengths_db.get(&wtxn, &1u128).unwrap().unwrap();
-        assert_eq!(doc_length, 0);
+        #[cfg(feature = "lmdb")]
+        {
+            let doc_length = bm25.doc_lengths_db.get(&wtxn, &1u128).unwrap().unwrap();
+            assert_eq!(doc_length, 0);
+        }
 
         wtxn.commit().unwrap();
     }
@@ -1448,7 +1518,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert::<fn(&HVector, &Txn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1493,7 +1563,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert::<fn(&HVector, &Txn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1539,7 +1609,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert::<fn(&HVector, &Txn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1589,23 +1659,31 @@ mod tests {
             bm25.insert_doc(&mut wtxn, *doc_id, doc).unwrap();
         }
 
-        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
-        let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
+        #[cfg(feature = "lmdb")]
+        {
+            let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
+            let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
 
-        assert_eq!(metadata.total_docs, 3);
-        assert!(metadata.avgdl > 0.0);
-        assert_eq!(metadata.k1, 1.2);
-        assert_eq!(metadata.b, 0.75);
+            assert_eq!(metadata.total_docs, 3);
+            assert!(metadata.avgdl > 0.0);
+            assert_eq!(metadata.k1, 1.2);
+            assert_eq!(metadata.b, 0.75);
 
-        bm25.delete_doc(&mut wtxn, 2u128).unwrap();
+            bm25.delete_doc(&mut wtxn, 2u128).unwrap();
 
-        // check updated metadata
-        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
-        let updated_metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
+            // check updated metadata
+            let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
+            let updated_metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
 
-        assert_eq!(updated_metadata.total_docs, 2);
-        // average document length should be recalculated
-        assert_ne!(updated_metadata.avgdl, metadata.avgdl);
+            assert_eq!(updated_metadata.total_docs, 2);
+            // average document length should be recalculated
+            assert_ne!(updated_metadata.avgdl, metadata.avgdl);
+        }
+
+        #[cfg(feature = "rocks")]
+        {
+            bm25.delete_doc(&mut wtxn, 2u128).unwrap();
+        }
 
         wtxn.commit().unwrap();
     }

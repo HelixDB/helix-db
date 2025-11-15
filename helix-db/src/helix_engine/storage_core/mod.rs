@@ -4,6 +4,7 @@ pub mod metadata;
 pub mod storage_methods;
 #[cfg(feature = "lmdb")]
 pub mod storage_migration;
+pub mod txn;
 pub mod version_info;
 
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
         bm25::HBM25Config,
         storage_core::{
             storage_methods::{DBMethods, StorageMethods},
+            txn::{ReadTransaction, WriteTransaction},
             version_info::VersionInfo,
         },
         traversal_core::config::Config,
