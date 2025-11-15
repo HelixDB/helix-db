@@ -408,6 +408,9 @@ fn create_v2_config(ctx: &MigrationContext) -> Result<()> {
         graph_config,
         mcp: ctx.v1_config.mcp,
         bm25: ctx.v1_config.bm25,
+        schema: None,
+        embedding_model: Some("text-embedding-ada-002".to_string()),
+        graphvis_node_label: None,
     };
 
     // Create local instance config

@@ -75,6 +75,12 @@ pub struct DbConfig {
     pub mcp: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub bm25: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default = "default_embedding_model", skip_serializing_if = "is_default_embedding_model")]
+    pub embedding_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphvis_node_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +165,14 @@ fn default_db_max_size_gb() -> u32 {
     20
 }
 
+fn default_embedding_model() -> Option<String> {
+    Some("text-embedding-ada-002".to_string())
+}
+
+fn is_default_embedding_model(value: &Option<String>) -> bool {
+    *value == default_embedding_model()
+}
+
 fn is_true(value: &bool) -> bool {
     *value
 }
@@ -189,6 +203,9 @@ impl Default for DbConfig {
             graph_config: GraphConfig::default(),
             mcp: true,
             bm25: true,
+            schema: None,
+            embedding_model: default_embedding_model(),
+            graphvis_node_label: None,
         }
     }
 }
@@ -259,7 +276,7 @@ impl<'a> InstanceInfo<'a> {
     pub fn to_legacy_json(&self) -> serde_json::Value {
         let db_config = self.db_config();
 
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "vector_config": {
                 "m": db_config.vector_config.m,
                 "ef_construction": db_config.vector_config.ef_construction,
@@ -272,7 +289,22 @@ impl<'a> InstanceInfo<'a> {
             "db_max_size_gb": db_config.vector_config.db_max_size_gb,
             "mcp": db_config.mcp,
             "bm25": db_config.bm25
-        })
+        });
+
+        // Add optional fields if they exist
+        if let Some(schema) = &db_config.schema {
+            json["schema"] = serde_json::Value::String(schema.clone());
+        }
+
+        if let Some(embedding_model) = &db_config.embedding_model {
+            json["embedding_model"] = serde_json::Value::String(embedding_model.clone());
+        }
+
+        if let Some(graphvis_node_label) = &db_config.graphvis_node_label {
+            json["graphvis_node_label"] = serde_json::Value::String(graphvis_node_label.clone());
+        }
+
+        json
     }
 }
 
