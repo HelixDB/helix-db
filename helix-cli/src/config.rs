@@ -255,25 +255,30 @@ impl<'a> InstanceInfo<'a> {
         }
     }
 
-    /// Convert instance config to the legacy config.hx.json format
-    pub fn to_legacy_json(&self) -> serde_json::Value {
+    /// Convert instance config to config.toml format
+    pub fn to_config_toml(&self) -> String {
         let db_config = self.db_config();
 
-        serde_json::json!({
-            "vector_config": {
-                "m": db_config.vector_config.m,
-                "ef_construction": db_config.vector_config.ef_construction,
-                "ef_search": db_config.vector_config.ef_search,
-                "db_max_size": db_config.vector_config.db_max_size_gb
-            },
-            "graph_config": {
-                "secondary_indices": db_config.graph_config.secondary_indices
-            },
-            "db_max_size_gb": db_config.vector_config.db_max_size_gb,
-            "mcp": db_config.mcp,
-            "bm25": db_config.bm25
-        })
+        format!(
+            r#"[vector_config]
+m = {}
+ef_construction = {}
+ef_search = {}
+
+
+db_max_size_gb = {}
+mcp = {}
+bm25 = {}
+"#,
+            db_config.vector_config.m,
+            db_config.vector_config.ef_construction,
+            db_config.vector_config.ef_search,
+            db_config.vector_config.db_max_size_gb,
+            db_config.mcp,
+            db_config.bm25
+        )
     }
+
 }
 
 impl From<InstanceInfo<'_>> for CloudConfig {

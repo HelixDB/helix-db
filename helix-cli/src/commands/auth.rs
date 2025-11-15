@@ -187,7 +187,7 @@ struct ApiKeyMsg {
     key: String,
 }
 pub async fn github_login() -> Result<(String, String)> {
-    let url = format!("ws://{}/login", *CLOUD_AUTHORITY);
+    let url = format!("ws://{}/login", CLOUD_AUTHORITY.unwrap());
     let (mut ws_stream, _) = connect_async(url).await?;
 
     let init_msg: UserCodeMsg = match ws_stream.next().await {

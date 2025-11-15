@@ -46,6 +46,7 @@ impl<'a> DockerManager<'a> {
     }
 
     /// Get environment variables for an instance
+    /// Loads from .env file and shell environment
     pub(crate) fn environment_variables(&self, instance_name: &str) -> Vec<String> {
         // Load .env file (silently ignore if it doesn't exist)
         let _ = dotenvy::dotenv();
@@ -369,6 +370,14 @@ CMD ["helix-container"]
         let image_name = self.image_name(instance_name, instance_config.build_mode());
         let container_name = self.container_name(instance_name);
         let network_name = self.network_name(instance_name); // Get all environment variables dynamically
+        let env_vars = self.environment_variables(instance_name);
+        let env_section = env_vars
+            .iter()
+            .map(|var| format!("      - {var}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Get all environment variables dynamically
         let env_vars = self.environment_variables(instance_name);
         let env_section = env_vars
             .iter()

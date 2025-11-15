@@ -76,7 +76,7 @@ impl Config {
         }
 
         let config = std::fs::read_to_string(config_path)?;
-        let mut config = sonic_rs::from_str::<Config>(&config)?;
+        let mut config = toml::from_str::<Config>(&config)?;
 
         if schema_path.exists() {
             let schema_string = std::fs::read_to_string(schema_path)?;
@@ -95,8 +95,8 @@ impl Config {
         }
 
         let config = std::fs::read_to_string(config_path)?;
-        let mut config = sonic_rs::from_str::<Config>(&config)?;
-        
+        let mut config = toml::from_str::<Config>(&config)?;
+
         // Schema will be populated from INTROSPECTION_DATA during code generation
         config.schema = None;
 
@@ -105,26 +105,26 @@ impl Config {
 
     pub fn init_config() -> String {
         r#"
-{
-	"vector_config": {
-		"m": 16,
-		"ef_construction": 128,
-		"ef_search": 768
-	},
-	"graph_config": {
-		"secondary_indices": []
-	},
-	"db_max_size_gb": 10,
-	"mcp": true,
-	"bm25": true,
-	"embedding_model": "text-embedding-ada-002",
-	"graphvis_node_label": ""
-}
+[vector_config]
+m = 16
+ef_construction = 128
+ef_search = 768
+
+db_max_size_gb = 10
+mcp = true
+bm25 = true
+embedding_model = "text-embedding-ada-002"
+graphvis_node_label = ""
         "#
         .trim()
         .to_string()
     }
 
+    pub fn to_toml(&self) -> String {
+        toml::to_string_pretty(self).unwrap()
+    }
+
+    // Keep to_json for backward compatibility
     pub fn to_json(&self) -> String {
         sonic_rs::to_string_pretty(self).unwrap()
     }
