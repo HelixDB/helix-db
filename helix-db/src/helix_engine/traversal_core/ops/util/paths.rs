@@ -1,13 +1,17 @@
 use crate::{
     helix_engine::{
         storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
-        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
+        traversal_core::{
+            RTxn, traversal_iter::RoTraversalIterator, traversal_value::TraversalValue,
+        },
         types::GraphError,
     },
     protocol::value::Value,
-    utils::{items::{Edge, Node}, label_hash::hash_label},
+    utils::{
+        items::{Edge, Node},
+        label_hash::hash_label,
+    },
 };
-use heed3::RoTxn;
 use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
@@ -85,8 +89,14 @@ pub enum PathAlgorithm {
     AStar,
 }
 
-pub struct ShortestPathIterator<'db, 'arena, 'txn, I, F, H = fn(&Node<'arena>) -> Result<f64, GraphError>>
-where
+pub struct ShortestPathIterator<
+    'db,
+    'arena,
+    'txn,
+    I,
+    F,
+    H = fn(&Node<'arena>) -> Result<f64, GraphError>,
+> where
     'db: 'arena,
     'arena: 'txn,
     F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
@@ -97,7 +107,7 @@ where
     path_type: PathType,
     edge_label: Option<&'arena str>,
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn RTxn<'db>,
     algorithm: PathAlgorithm,
     weight_fn: F,
     heuristic_fn: Option<H>,
@@ -165,6 +175,7 @@ impl PartialOrd for AStarState {
     }
 }
 
+#[cfg(feature = "lmdb")]
 impl<
     'db: 'arena,
     'arena: 'txn,
@@ -197,6 +208,7 @@ impl<
     }
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, I, F, H> ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
 where
     F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
@@ -205,8 +217,8 @@ where
     fn reconstruct_path(
         &self,
         parent: &HashMap<u128, (u128, u128)>,
-        start_id: &u128,
-        end_id: &u128,
+        start_id: u128,
+        end_id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<TraversalValue<'arena>, GraphError> {
         let mut nodes = Vec::with_capacity(parent.len());
@@ -217,9 +229,9 @@ where
         while current != start_id {
             nodes.push(self.storage.get_node(self.txn, current, arena)?);
 
-            let (prev_node, edge) = &parent[current];
-            edges.push(self.storage.get_edge(self.txn, edge, arena)?);
-            current = prev_node;
+            let (prev_node, edge) = &parent[&current];
+            edges.push(self.storage.get_edge(self.txn, *edge, arena)?);
+            current = *prev_node;
         }
 
         nodes.push(self.storage.get_node(self.txn, start_id, arena)?);
@@ -243,7 +255,7 @@ where
 
         // find shortest-path from one node to itself
         if from == to {
-            return Some(self.reconstruct_path(&parent, &from, &to, self.arena));
+            return Some(self.reconstruct_path(&parent, from, to, self.arena));
         }
 
         while let Some(current_id) = queue.pop_front() {
@@ -334,26 +346,31 @@ where
                 let (_, value) = result.unwrap(); // TODO: handle error
                 let (edge_id, to_node) = HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
 
-                let edge = match self.storage.get_edge(self.txn, &edge_id, self.arena) {
-                    Ok(e) => e,
-                    Err(e) => return Some(Err(e)),
-                };
+                let edge = self
+                    .storage
+                    .get_edge(self.txn, &edge_id, self.arena)
+                    .unwrap(); // TODO: handle error
 
-                // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, &current_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dst_node = match self.storage.get_node(self.txn, &to_node, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Call custom weight function with full context
-                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
-                    Ok(w) => w,
-                    Err(e) => return Some(Err(e)),
-                };
+                // Extract weight from edge properties, default to 1.0 if not present
+                let weight = edge
+                    .properties
+                    .as_ref()
+                    .and_then(|props| props.get("weight"))
+                    .and_then(|w| match w {
+                        Value::F32(f) => Some(*f as f64),
+                        Value::F64(f) => Some(*f),
+                        Value::I8(i) => Some(*i as f64),
+                        Value::I16(i) => Some(*i as f64),
+                        Value::I32(i) => Some(*i as f64),
+                        Value::I64(i) => Some(*i as f64),
+                        Value::U8(i) => Some(*i as f64),
+                        Value::U16(i) => Some(*i as f64),
+                        Value::U32(i) => Some(*i as f64),
+                        Value::U64(i) => Some(*i as f64),
+                        Value::Boolean(i) => Some(*i as i8 as f64),
+                        _ => None,
+                    })
+                    .unwrap_or(1.0);
 
                 if weight < 0.0 {
                     return Some(Err(GraphError::TraversalError(
@@ -391,7 +408,7 @@ where
             None => {
                 return Some(Err(GraphError::TraversalError(
                     "A* algorithm requires a heuristic function".to_string(),
-                )))
+                )));
             }
         };
 
@@ -590,7 +607,13 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
         >,
     > {
-        self.shortest_path_with_algorithm(edge_label, from, to, PathAlgorithm::BFS, default_weight_fn)
+        self.shortest_path_with_algorithm(
+            edge_label,
+            from,
+            to,
+            PathAlgorithm::BFS,
+            default_weight_fn,
+        )
     }
 
     #[inline]

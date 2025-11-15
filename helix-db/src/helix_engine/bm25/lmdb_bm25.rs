@@ -62,6 +62,7 @@ pub trait BM25 {
     ) -> Result<Vec<(u128, f32)>, GraphError>;
 }
 
+
 pub struct HBM25Config {
     pub graph_env: Env,
     pub inverted_index_db: Database<Bytes, Bytes>,
@@ -71,6 +72,7 @@ pub struct HBM25Config {
     k1: f64,
     b: f64,
 }
+
 
 impl HBM25Config {
     pub fn new(graph_env: &Env, wtxn: &mut RwTxn) -> Result<HBM25Config, GraphError> {
@@ -154,6 +156,7 @@ impl HBM25Config {
     }
 }
 
+
 impl BM25 for HBM25Config {
     /// Converts text to lowercase, removes non-alphanumeric chars, splits into words
     fn tokenize<const SHOULD_FILTER: bool>(&self, text: &str) -> Vec<String> {
@@ -217,7 +220,7 @@ impl BM25 for HBM25Config {
         Ok(())
     }
 
-    fn delete_doc(&self, txn: &mut RwTxn, doc_id: u128) -> Result<(), GraphError> {
+    fn delete_doc(&self, txn: &mut WTxn, doc_id: u128) -> Result<(), GraphError> {
         let terms_to_update = {
             let mut terms = Vec::new();
             let mut iter = self.inverted_index_db.iter(txn)?;
@@ -418,8 +421,8 @@ impl HybridSearch for HelixGraphStorage {
             }
         });
 
-        let vector_handle = task::spawn_blocking(
-            move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
+        let vector_handle =
+            task::spawn_blocking(move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
                 let txn = graph_env_vector.read_txn()?;
                 let arena = Bump::new(); // MOVE 
                 let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
@@ -437,8 +440,7 @@ impl HybridSearch for HelixGraphStorage {
                     .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))
                     .collect::<Vec<(u128, f64)>>();
                 Ok(Some(scores))
-            },
-        );
+            });
 
         let (bm25_results, vector_results) = match tokio::try_join!(bm25_handle, vector_handle) {
             Ok((a, b)) => (a, b),

@@ -1,12 +1,14 @@
 use crate::{
     helix_engine::{
-        storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::label_hash::hash_label,
 };
 
+#[cfg(feature = "lmdb")]
+use crate::helix_engine::storage_core::storage_methods::StorageMethods;
 pub trait InEdgesAdapter<'db, 'arena, 'txn, 's, I>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
@@ -27,6 +29,7 @@ pub trait InEdgesAdapter<'db, 'arena, 'txn, 's, I>:
     >;
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     InEdgesAdapter<'db, 'arena, 'txn, 's, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -88,6 +91,85 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             })
             .flatten();
 
+        RoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: iter,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    InEdgesAdapter<'db, 'arena, 'txn, 's, I> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn in_e(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let edge_label_hash = hash_label(edge_label, None);
+                match item {
+                    Ok(item) => {
+                        let prefix =
+                            HelixGraphStorage::in_edge_key_prefix(item.id(), &edge_label_hash);
+                        let prefix_vec = prefix.to_vec();
+
+                        let edge_iter = self
+                            .txn
+                            .prefix_iterator_cf(&self.storage.cf_in_edges(), &prefix_vec)
+                            .filter_map(move |result| {
+                                match result {
+                                    Ok((key, value)) => {
+                                        // Manual prefix check for RocksDB
+                                        if !key.starts_with(&prefix_vec) {
+                                            return None;
+                                        }
+
+                                        // Extract edge_id from value (16 bytes)
+                                        let edge_id = match value.as_ref().try_into() {
+                                            Ok(bytes) => u128::from_be_bytes(bytes),
+                                            Err(_) => {
+                                                println!("Error: value is not 16 bytes");
+                                                return Some(Err(GraphError::SliceLengthError));
+                                            }
+                                        };
+
+                                        // Get the full edge object
+                                        match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                                            Ok(edge) => Some(Ok(TraversalValue::Edge(edge))),
+                                            Err(e) => {
+                                                println!("Error getting edge {edge_id}: {e:?}");
+                                                None
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("{} Error iterating in edges: {:?}", line!(), e);
+                                        None
+                                    }
+                                }
+                            })
+                            .collect::<Vec<_>>();
+
+                        Some(edge_iter.into_iter())
+                    }
+                    Err(e) => {
+                        println!("{} Error getting in edges: {:?}", line!(), e);
+                        None
+                    }
+                }
+            })
+            .flatten();
         RoTraversalIterator {
             storage: self.storage,
             arena: self.arena,

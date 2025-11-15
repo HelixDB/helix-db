@@ -3,7 +3,7 @@ use heed3::RoTxn;
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+    vector_core::{HNSW, vector::HVector},
 };
 use std::iter::once;
 
@@ -23,10 +23,15 @@ pub trait SearchVAdapter<'db, 'arena, 'txn>:
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     >
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &Txn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug;
 }
+
+#[cfg(feature = "lmdb")]
+type Txn<'db> = heed3::RoTxn<'db>;
+#[cfg(feature = "rocks")]
+type Txn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
 
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     SearchVAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
@@ -44,7 +49,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     >
     where
-        F: Fn(&HVector, &RoTxn) -> bool,
+        F: Fn(&HVector, &Txn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
