@@ -1,6 +1,8 @@
+#[cfg(feature = "lmdb")]
 pub mod graph_visualization;
 pub mod metadata;
 pub mod storage_methods;
+#[cfg(feature = "lmdb")]
 pub mod storage_migration;
 pub mod version_info;
 
@@ -545,19 +547,12 @@ impl StorageMethods for HelixGraphStorage {
 }
 
 #[cfg(feature = "rocks")]
-pub struct HelixGraphStorage<'db> {
-    pub graph_env: rocksdb::TransactionDB<rocksdb::MultiThreaded>,
-
-    pub nodes_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub out_edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub in_edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub secondary_indices: HashMap<String, Arc<rocksdb::BoundColumnFamily<'db>>>,
-    pub vectors: VectorCore<'db>,
-    pub bm25: Option<HBM25Config<'db>>,
-    pub metadata_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+pub struct HelixGraphStorage {
+    pub graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
+    pub secondary_indices: HashMap<String, String>, // Store CF names instead of handles
+    pub vectors: VectorCore,
+    pub bm25: Option<HBM25Config>,
     pub version_info: VersionInfo,
-
     pub storage_config: StorageConfig,
 }
 
@@ -583,9 +578,45 @@ pub fn default_helix_rocksdb_options() -> rocksdb::Options {
 }
 
 #[cfg(feature = "rocks")]
-impl<'db> HelixGraphStorage<'db> {
+impl HelixGraphStorage {
+    // Helper methods to get column family handles on-demand
+    #[inline(always)]
+    pub fn cf_nodes(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("nodes").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_edges(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("edges").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_out_edges(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("out_edges").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_in_edges(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("in_edges").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_metadata(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("metadata").unwrap()
+    }
+
+    /// Create a read transaction (snapshot)
+    pub fn read_txn(&self) -> Result<rocksdb::Transaction<rocksdb::TransactionDB>, GraphError> {
+        Ok(self.graph_env.transaction())
+    }
+
+    /// Create a write transaction
+    pub fn write_txn(&self) -> Result<rocksdb::Transaction<rocksdb::TransactionDB>, GraphError> {
+        Ok(self.graph_env.transaction())
+    }
+
     pub fn new(
-        path: &'db str,
+        path: &str,
         config: Config,
         version_info: VersionInfo,
     ) -> Result<HelixGraphStorage, GraphError> {
@@ -631,43 +662,36 @@ impl<'db> HelixGraphStorage<'db> {
         let txn_db_opts = rocksdb::TransactionDBOptions::new();
 
         // Open database with optimistic transactions
-        let db = rocksdb::TransactionDB::<rocksdb::MultiThreaded>::open_cf_descriptors(
-            &db_opts,
-            &txn_db_opts,
-            path,
-            cf_descriptors,
-        )
-        .unwrap();
+        let db = Arc::new(
+            rocksdb::TransactionDB::<rocksdb::MultiThreaded>::open_cf_descriptors(
+                &db_opts,
+                &txn_db_opts,
+                path,
+                cf_descriptors,
+            )
+            .unwrap(),
+        );
 
-        // Get column family handles
-        let nodes_db = db.cf_handle("nodes").unwrap();
-        let edges_db = db.cf_handle("edges").unwrap();
-        let out_edges_db = db.cf_handle("out_edges").unwrap();
-        let in_edges_db = db.cf_handle("in_edges").unwrap();
-        let metadata_db = db.cf_handle("metadata").unwrap();
-
+        // Store secondary index names (not handles)
         let mut secondary_indices = HashMap::new();
         if let Some(indexes) = config.get_graph_config().secondary_indices.as_ref() {
             for index in indexes {
                 let cf_name = format!("idx_{}", index);
-                secondary_indices.insert(index.clone(), db.cf_handle(&cf_name).unwrap());
+                secondary_indices.insert(index.clone(), cf_name);
             }
         }
 
-        // Initialize vector storage (needs migration to RocksDB too)
+        // Initialize vector storage
         let vector_config = config.get_vector_config();
         let vectors = VectorCore::new(
-            &db,
+            Arc::clone(&db),
             HNSWConfig::new(
                 vector_config.m,
                 vector_config.ef_construction,
                 vector_config.ef_search,
             ),
         )?;
-        // let bm25 = config
-        //     .get_bm25()
-        //     .then(|| HBM25Config::new_rocksdb(Arc::clone(&db)))
-        //     .transpose()?;
+
         let bm25 = None;
 
         let storage_config = StorageConfig::new(
@@ -678,11 +702,6 @@ impl<'db> HelixGraphStorage<'db> {
 
         let mut storage = Self {
             graph_env: db,
-            nodes_db,
-            edges_db,
-            out_edges_db,
-            in_edges_db,
-            metadata_db,
             secondary_indices,
             vectors,
             bm25,
@@ -690,7 +709,8 @@ impl<'db> HelixGraphStorage<'db> {
             version_info,
         };
 
-        storage_migration::migrate(&mut storage)?;
+        // TODO: Implement RocksDB-specific migration if needed
+        // storage_migration is LMDB-specific for now
 
         Ok(storage)
     }
@@ -714,6 +734,7 @@ impl<'db> HelixGraphStorage<'db> {
         opts
     }
 
+    // TODO CHANGE THIS
     fn secondary_index_cf_options() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         opts.set_merge_operator_associative("append", Self::merge_append);
@@ -733,6 +754,13 @@ impl<'db> HelixGraphStorage<'db> {
         Some(result)
     }
 
+    pub fn get_secondary_index_cf_handle(
+        &self,
+        name: &str,
+    ) -> Option<Arc<rocksdb::BoundColumnFamily>> {
+        self.graph_env.cf_handle(name)
+    }
+
     /// Used because in the case the key changes in the future.
     /// Believed to not introduce any overhead being inline and using a reference.
     #[must_use]
@@ -750,16 +778,14 @@ impl<'db> HelixGraphStorage<'db> {
     }
 
     #[inline]
-    pub fn get_node<'arena>(
+    pub fn get_node<'db, 'arena>(
         &self,
         txn: &Txn<'db>,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<Node<'arena>, GraphError> {
-        let node = match txn
-            .get_pinned_cf(&self.nodes_db, Self::node_key(id))
-            .unwrap()
-        {
+        let cf = self.cf_nodes();
+        let node = match txn.get_pinned_cf(&cf, Self::node_key(id)).unwrap() {
             Some(data) => data,
             None => return Err(GraphError::NodeNotFound),
         };
@@ -769,16 +795,14 @@ impl<'db> HelixGraphStorage<'db> {
     }
 
     #[inline]
-    pub fn get_edge<'arena>(
+    pub fn get_edge<'db, 'arena>(
         &self,
         txn: &Txn<'db>,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<Edge<'arena>, GraphError> {
-        let edge = match txn
-            .get_pinned_cf(&self.edges_db, Self::edge_key(id))
-            .unwrap()
-        {
+        let cf = self.cf_edges();
+        let edge = match txn.get_pinned_cf(&cf, Self::edge_key(id)).unwrap() {
             Some(data) => data,
             None => return Err(GraphError::EdgeNotFound),
         };
@@ -891,19 +915,21 @@ impl<'db> HelixGraphStorage<'db> {
         buf
     }
 
-    pub fn drop_node(&self, txn: &mut Txn<'db>, id: &u128) -> Result<(), GraphError> {
+    pub fn drop_node<'db>(&self, txn: &mut Txn<'db>, id: &u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
-        // Get node to get its label
-        //let node = self.get_node(txn, id)?;
         let mut edges = HashSet::new();
         let mut out_edges = HashSet::new();
         let mut in_edges = HashSet::new();
 
         let mut other_out_edges = Vec::new();
         let mut other_in_edges = Vec::new();
+
+        let cf_out_edges = self.cf_out_edges();
+        let cf_in_edges = self.cf_in_edges();
+        let cf_edges = self.cf_edges();
+
         // Delete outgoing edges
-        //
-        let iter = txn.prefix_iterator_cf(&self.out_edges_db, &id.to_be_bytes());
+        let iter = txn.prefix_iterator_cf(&cf_out_edges, &id.to_be_bytes());
 
         for result in iter {
             let (key, value) = result?;
@@ -916,8 +942,7 @@ impl<'db> HelixGraphStorage<'db> {
         }
 
         // Delete incoming edges
-
-        let iter = txn.prefix_iterator_cf(&self.in_edges_db, &id.to_be_bytes());
+        let iter = txn.prefix_iterator_cf(&cf_in_edges, &id.to_be_bytes());
 
         for result in iter {
             let (key, value) = result?;
@@ -929,50 +954,47 @@ impl<'db> HelixGraphStorage<'db> {
             other_out_edges.push((from_node_id, label, edge_id));
         }
 
-        // println!("In edges: {}", in_edges.len());
-
-        // println!("Deleting edges: {}", );
         // Delete all related data
         for edge in edges {
-            txn.delete_cf(&self.edges_db, Self::edge_key(edge))?;
+            txn.delete_cf(&cf_edges, Self::edge_key(edge))?;
         }
         for (label_bytes, to_node_id) in out_edges.iter() {
             txn.delete_cf(
-                &self.edges_db,
+                &cf_out_edges,
                 &Self::out_edge_key(*id, label_bytes, *to_node_id),
             )?;
         }
         for (label_bytes, from_node_id) in in_edges.iter() {
             txn.delete_cf(
-                &self.edges_db,
+                &cf_in_edges,
                 &Self::in_edge_key(*id, label_bytes, *from_node_id),
             )?;
         }
 
         for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
             txn.delete_cf(
-                &self.edges_db,
+                &cf_out_edges,
                 &Self::out_edge_key(*other_node_id, label_bytes, *edge_id),
             )?;
         }
         for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
             txn.delete_cf(
-                &self.in_edges_db,
-                &Self::out_edge_key(*other_node_id, label_bytes, *edge_id),
+                &cf_in_edges,
+                &Self::in_edge_key(*other_node_id, label_bytes, *edge_id),
             )?;
         }
 
         // delete secondary indices
         let node = self.get_node(txn, *id, &arena)?;
 
-        for (index_name, db) in &self.secondary_indices {
+        for (index_name, cf_name) in &self.secondary_indices {
+            let cf = self.graph_env.cf_handle(cf_name).unwrap();
             let mut buf = bumpalo::collections::Vec::new_in(&arena);
-            // Use get_property like we do when adding, to handle id, label, and regular properties consistently
             match node.get_property(index_name) {
                 Some(value) => match bincode::serialize(value) {
                     Ok(serialized) => {
                         txn.delete_cf(
-                            db,
+                            &cf,
                             Self::secondary_index_key(&mut buf, &serialized, node.id),
                         )?;
                     }
@@ -980,30 +1002,36 @@ impl<'db> HelixGraphStorage<'db> {
                 },
                 None => {
                     // Property not found - this is expected for some indices
-                    // Continue to next index
                 }
             }
         }
 
-        // Delete node data and label
-        txn.delete_cf(&self.nodes_db, Self::node_key(*id))
+        // Delete node data
+        let cf_nodes = self.cf_nodes();
+        txn.delete_cf(&cf_nodes, Self::node_key(*id))
             .map_err(GraphError::from)
     }
 
-    pub fn drop_edge(&self, txn: &mut Txn<'db>, edge_id: &u128) -> Result<(), GraphError> {
+    pub fn drop_edge<'db>(&self, txn: &mut Txn<'db>, edge_id: &u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
         let edge = self.get_edge(txn, *edge_id, &arena)?;
         let label_hash = hash_label(edge.label, None);
-        let out_edge_value = Self::out_edge_key(edge.from_node, &label_hash, edge.to_node);
-        let in_edge_value = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node);
+        let out_edge_key = Self::out_edge_key(edge.from_node, &label_hash, edge.to_node);
+        let in_edge_key = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node);
+
+        // Get column family handles
+        let cf_edges = self.cf_edges();
+        let cf_out_edges = self.cf_out_edges();
+        let cf_in_edges = self.cf_in_edges();
+
         // Delete all edge-related data
-        txn.delete(Self::edge_key(*edge_id))?;
-        txn.delete(out_edge_value)?;
-        txn.delete(in_edge_value)?;
+        txn.delete_cf(&cf_edges, &Self::edge_key(*edge_id))?;
+        txn.delete_cf(&cf_out_edges, &out_edge_key)?;
+        txn.delete_cf(&cf_in_edges, &in_edge_key)?;
         Ok(())
     }
 
-    pub fn drop_vector(&self, txn: &mut Txn<'db>, id: &u128) -> Result<(), GraphError> {
+    pub fn drop_vector<'db>(&self, txn: &mut Txn<'db>, id: &u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
         let mut edges = HashSet::new();
         let mut out_edges = HashSet::new();
@@ -1011,9 +1039,13 @@ impl<'db> HelixGraphStorage<'db> {
 
         let mut other_out_edges = Vec::new();
         let mut other_in_edges = Vec::new();
-        // Delete outgoing edges
 
-        let iter = txn.prefix_iterator_cf(&self.out_edges_db, &id.to_be_bytes());
+        let cf_out_edges = self.cf_out_edges();
+        let cf_in_edges = self.cf_in_edges();
+        let cf_edges = self.cf_edges();
+
+        // Delete outgoing edges
+        let iter = txn.prefix_iterator_cf(&cf_out_edges, &id.to_be_bytes());
 
         for result in iter {
             let (key, value) = result?;
@@ -1026,8 +1058,7 @@ impl<'db> HelixGraphStorage<'db> {
         }
 
         // Delete incoming edges
-
-        let iter = txn.prefix_iterator_cf(&self.in_edges_db, &id.to_be_bytes());
+        let iter = txn.prefix_iterator_cf(&cf_in_edges, &id.to_be_bytes());
 
         for result in iter {
             let (key, value) = result?;
@@ -1039,36 +1070,33 @@ impl<'db> HelixGraphStorage<'db> {
             other_out_edges.push((from_node_id, label, edge_id));
         }
 
-        // println!("In edges: {}", in_edges.len());
-
-        // println!("Deleting edges: {}", );
         // Delete all related data
         for edge in edges {
-            txn.delete_cf(&self.edges_db, Self::edge_key(edge))?;
+            txn.delete_cf(&cf_edges, Self::edge_key(edge))?;
         }
         for (label_bytes, to_node_id) in out_edges.iter() {
             txn.delete_cf(
-                &self.edges_db,
+                &cf_out_edges,
                 &Self::out_edge_key(*id, label_bytes, *to_node_id),
             )?;
         }
         for (label_bytes, from_node_id) in in_edges.iter() {
             txn.delete_cf(
-                &self.edges_db,
+                &cf_in_edges,
                 &Self::in_edge_key(*id, label_bytes, *from_node_id),
             )?;
         }
 
         for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
             txn.delete_cf(
-                &self.edges_db,
+                &cf_out_edges,
                 &Self::out_edge_key(*other_node_id, label_bytes, *edge_id),
             )?;
         }
         for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
             txn.delete_cf(
-                &self.in_edges_db,
-                &Self::out_edge_key(*other_node_id, label_bytes, *edge_id),
+                &cf_in_edges,
+                &Self::in_edge_key(*other_node_id, label_bytes, *edge_id),
             )?;
         }
 

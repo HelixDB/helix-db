@@ -4,7 +4,7 @@ use crate::{
         storage_core::HelixGraphStorage,
         traversal_core::{RTxn, WTxn},
         types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector},
+        vector_core::{HNSW, vector::HVector},
     },
     utils::properties::ImmutablePropertiesMap,
 };
@@ -58,50 +58,59 @@ pub trait BM25 {
     -> Result<Vec<(u128, f32)>, GraphError>;
 }
 
-pub struct HBM25Config<'db> {
-    pub graph_env: &'db rocksdb::TransactionDB<rocksdb::MultiThreaded>,
-    pub inverted_index_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub doc_lengths_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub term_frequencies_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub metadata_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+pub struct HBM25Config {
+    pub graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
     k1: f64,
     b: f64,
 }
 
-impl<'db> HBM25Config<'db> {
-    pub fn new(
-        graph_env: &'db rocksdb::TransactionDB<rocksdb::MultiThreaded>,
+impl HBM25Config {
+    // Helper methods to get column family handles on-demand
+    #[inline(always)]
+    fn cf_inverted_index(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("inverted_index").unwrap()
+    }
+
+    #[inline(always)]
+    fn cf_doc_lengths(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("doc_lengths").unwrap()
+    }
+
+    #[inline(always)]
+    fn cf_term_frequencies(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("term_frequencies").unwrap()
+    }
+
+    #[inline(always)]
+    fn cf_metadata(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.graph_env.cf_handle("bm25_metadata").unwrap()
+    }
+
+    pub fn new<'db>(
+        graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
         _wtxn: &mut WTxn<'db>,
-    ) -> Result<HBM25Config<'db>, GraphError> {
+    ) -> Result<HBM25Config, GraphError> {
         Ok(HBM25Config {
             graph_env,
-            inverted_index_db: graph_env.cf_handle("inverted_index").unwrap(),
-            doc_lengths_db: graph_env.cf_handle("doc_lengths").unwrap(),
-            term_frequencies_db: graph_env.cf_handle("term_frequencies").unwrap(),
-            metadata_db: graph_env.cf_handle("metadata").unwrap(),
             k1: 1.2,
             b: 0.75,
         })
     }
 
-    pub fn new_temp(
-        graph_env: &'db rocksdb::TransactionDB<rocksdb::MultiThreaded>,
+    pub fn new_temp<'db>(
+        graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
         _wtxn: &mut WTxn<'db>,
         _uuid: &str,
-    ) -> Result<HBM25Config<'db>, GraphError> {
+    ) -> Result<HBM25Config, GraphError> {
         Ok(HBM25Config {
-            graph_env: graph_env.clone(),
-            inverted_index_db: graph_env.cf_handle("inverted_index").unwrap(),
-            doc_lengths_db: graph_env.cf_handle("doc_lengths").unwrap(),
-            term_frequencies_db: graph_env.cf_handle("term_frequencies").unwrap(),
-            metadata_db: graph_env.cf_handle("metadata").unwrap(),
+            graph_env,
             k1: 1.2,
             b: 0.75,
         })
     }
 }
 
-impl<'db> BM25 for HBM25Config<'db> {
+impl BM25 for HBM25Config {
     /// Converts text to lowercase, removes non-alphanumeric chars, splits into words
     fn tokenize<const SHOULD_FILTER: bool>(&self, text: &str) -> Vec<String> {
         text.to_lowercase()
@@ -122,11 +131,15 @@ impl<'db> BM25 for HBM25Config<'db> {
             *term_counts.entry(token).or_insert(0) += 1;
         }
 
+        let cf_doc_lengths = self.cf_doc_lengths();
         txn.put_cf(
-            &self.doc_lengths_db,
+            &cf_doc_lengths,
             &doc_id.to_be_bytes(),
             &doc_length.to_be_bytes(),
         )?;
+
+        let cf_inverted = self.cf_inverted_index();
+        let cf_term_freq = self.cf_term_frequencies();
 
         for (term, tf) in term_counts {
             let term_bytes = term.as_bytes();
@@ -138,19 +151,16 @@ impl<'db> BM25 for HBM25Config<'db> {
 
             let posting_bytes = bincode::serialize(&posting_entry)?;
 
-            txn.put_cf(&self.inverted_index_db, term_bytes, &posting_bytes)?;
+            txn.put_cf(&cf_inverted, term_bytes, &posting_bytes)?;
 
             let current_df = txn
-                .get_cf(&self.term_frequencies_db, term_bytes)?
+                .get_cf(&cf_term_freq, term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
-            txn.put_cf(
-                &self.term_frequencies_db,
-                term_bytes,
-                &(current_df + 1).to_be_bytes(),
-            )?;
+            txn.put_cf(&cf_term_freq, term_bytes, &(current_df + 1).to_be_bytes())?;
         }
 
-        let mut metadata = if let Some(data) = txn.get_cf(&self.metadata_db, METADATA_KEY)? {
+        let cf_metadata = self.cf_metadata();
+        let mut metadata = if let Some(data) = txn.get_cf(&cf_metadata, METADATA_KEY)? {
             bincode::deserialize::<BM25Metadata>(&data)?
         } else {
             BM25Metadata {
@@ -167,16 +177,16 @@ impl<'db> BM25 for HBM25Config<'db> {
             / metadata.total_docs as f64;
 
         let metadata_bytes = bincode::serialize(&metadata)?;
-        txn.put_cf(&self.metadata_db, METADATA_KEY, &metadata_bytes)?;
+        txn.put_cf(&cf_metadata, METADATA_KEY, &metadata_bytes)?;
 
         Ok(())
     }
 
     fn delete_doc(&self, txn: &mut WTxn, doc_id: u128) -> Result<(), GraphError> {
+        let cf_inverted = self.cf_inverted_index();
         let terms_to_update = {
             let mut terms = Vec::new();
-            let mut iter = txn
-                .iterator_cf(&self.inverted_index_db, rocksdb::IteratorMode::Start);
+            let mut iter = txn.iterator_cf(&cf_inverted, rocksdb::IteratorMode::Start);
 
             while let Some((term_bytes, posting_bytes)) = iter.next().transpose()? {
                 let posting: PostingListEntry = bincode::deserialize(&posting_bytes)?;
@@ -187,14 +197,13 @@ impl<'db> BM25 for HBM25Config<'db> {
             terms
         };
 
+        let cf_term_freq = self.cf_term_frequencies();
         // remove postings and update term frequencies
         for term_bytes in terms_to_update {
             // collect entries to keep
             let entries_to_keep = {
                 let mut entries = Vec::new();
-                for result in txn
-                    .prefix_iterator_cf(&self.inverted_index_db, &term_bytes)
-                {
+                for result in txn.prefix_iterator_cf(&cf_inverted, &term_bytes) {
                     let (_, posting_bytes) = result?;
                     let posting: PostingListEntry = bincode::deserialize(&posting_bytes)?;
                     if posting.doc_id != doc_id {
@@ -205,32 +214,30 @@ impl<'db> BM25 for HBM25Config<'db> {
             };
 
             // delete all entries for this term
-            txn.delete_cf(&self.inverted_index_db, &term_bytes)?;
+            txn.delete_cf(&cf_inverted, &term_bytes)?;
 
             // re-add the entries we want to keep
             for entry_bytes in entries_to_keep {
-                txn.put_cf(&self.inverted_index_db, &term_bytes, &entry_bytes)?;
+                txn.put_cf(&cf_inverted, &term_bytes, &entry_bytes)?;
             }
 
             let current_df = txn
-                .get_cf(&self.term_frequencies_db, &term_bytes)?
+                .get_cf(&cf_term_freq, &term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
             if current_df > 0 {
-                txn.put_cf(
-                    &self.term_frequencies_db,
-                    &term_bytes,
-                    &(current_df - 1).to_be_bytes(),
-                )?;
+                txn.put_cf(&cf_term_freq, &term_bytes, &(current_df - 1).to_be_bytes())?;
             }
         }
 
+        let cf_doc_lengths = self.cf_doc_lengths();
         let doc_length = txn
-            .get_cf(&self.doc_lengths_db, &doc_id.to_be_bytes())?
+            .get_cf(&cf_doc_lengths, &doc_id.to_be_bytes())?
             .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
 
-        txn.delete_cf(&self.doc_lengths_db, &doc_id.to_be_bytes())?;
+        txn.delete_cf(&cf_doc_lengths, &doc_id.to_be_bytes())?;
 
-        let metadata_data = txn.get_cf(&self.metadata_db, METADATA_KEY)?;
+        let cf_metadata = self.cf_metadata();
+        let metadata_data = txn.get_cf(&cf_metadata, METADATA_KEY)?;
 
         if let Some(data) = metadata_data {
             let mut metadata: BM25Metadata = bincode::deserialize(&data.to_vec())?;
@@ -245,7 +252,7 @@ impl<'db> BM25 for HBM25Config<'db> {
                 metadata.total_docs -= 1;
 
                 let metadata_bytes = bincode::serialize(&metadata)?;
-                txn.put_cf(&self.metadata_db, METADATA_KEY, &metadata_bytes)?;
+                txn.put_cf(&cf_metadata, METADATA_KEY, &metadata_bytes)?;
             }
         }
 
@@ -296,30 +303,29 @@ impl<'db> BM25 for HBM25Config<'db> {
         // (node uuid, score)
         let mut doc_scores: HashMap<u128, f32> = HashMap::with_capacity(limit);
 
+        let cf_metadata = self.cf_metadata();
         let metadata = txn
-            .txn
-            .get_cf(&self.metadata_db, METADATA_KEY)?
+            .get_cf(&cf_metadata, METADATA_KEY)?
             .ok_or(GraphError::New("BM25 metadata not found".to_string()))?;
         let metadata: BM25Metadata = bincode::deserialize(&metadata)?;
+
+        let cf_term_freq = self.cf_term_frequencies();
+        let cf_inverted = self.cf_inverted_index();
+        let cf_doc_lengths = self.cf_doc_lengths();
 
         // for each query term, calculate scores
         for term in query_terms {
             let term_bytes = term.as_bytes();
 
             let doc_frequency = txn
-                .txn
-                .get_cf(&self.term_frequencies_db, term_bytes)?
+                .get_cf(&cf_term_freq, term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
             if doc_frequency == 0 {
                 continue;
             }
 
             // Get all documents containing this term
-
-            for result in txn
-                .txn
-                .prefix_iterator_cf(&self.inverted_index_db, term_bytes)
-            {
+            for result in txn.prefix_iterator_cf(&cf_inverted, term_bytes) {
                 let (key, posting_bytes) = result?;
                 if key.as_ref() != term_bytes {
                     break;
@@ -328,8 +334,7 @@ impl<'db> BM25 for HBM25Config<'db> {
 
                 // Get document length
                 let doc_length = txn
-                    .txn
-                    .get_cf(&self.doc_lengths_db, &posting.doc_id.to_be_bytes())?
+                    .get_cf(&cf_doc_lengths, &posting.doc_id.to_be_bytes())?
                     .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
 
                 // Calculate BM25 score for this term in this document
@@ -367,7 +372,7 @@ pub trait HybridSearch {
     ) -> impl std::future::Future<Output = Result<Vec<(u128, f32)>, GraphError>> + Send;
 }
 
-impl<'db> HybridSearch for HelixGraphStorage<'db> {
+impl HybridSearch for HelixGraphStorage {
     async fn hybrid_search(
         self,
         query: &str,
@@ -378,11 +383,11 @@ impl<'db> HybridSearch for HelixGraphStorage<'db> {
         let query_owned = query.to_string();
         let query_vector_owned = query_vector.to_vec();
 
-        let graph_env_bm25 = self.graph_env;
-        let graph_env_vector = self.graph_env;
+        let graph_env_bm25 = Arc::clone(&self.graph_env);
+        let graph_env_vector = Arc::clone(&self.graph_env);
 
         let bm25_handle = task::spawn_blocking(move || -> Result<Vec<(u128, f32)>, GraphError> {
-            let txn = RTxn::new(&graph_env_bm25);
+            let txn = graph_env_bm25.transaction();
             match self.bm25.as_ref() {
                 Some(s) => s.search(&txn, &query_owned, limit * 2),
                 None => Err(GraphError::from("BM25 not enabled!")),
@@ -391,18 +396,16 @@ impl<'db> HybridSearch for HelixGraphStorage<'db> {
 
         let vector_handle =
             task::spawn_blocking(move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
-                let txn = RTxn::new(&graph_env_vector);
+                let txn = graph_env_vector.transaction();
                 let arena = Bump::new(); // MOVE
                 let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
-                let results = self.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
-                    &txn,
-                    query_slice,
-                    limit * 2,
-                    "vector",
-                    None,
-                    false,
-                    &arena,
-                )?;
+                let results =
+                    self.vectors.search::<fn(
+                        &HVector,
+                        &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+                    ) -> bool>(
+                        &txn, query_slice, limit * 2, "vector", None, false, &arena
+                    )?;
                 let scores = results
                     .into_iter()
                     .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))

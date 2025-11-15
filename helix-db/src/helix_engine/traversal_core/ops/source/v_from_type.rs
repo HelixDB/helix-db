@@ -134,7 +134,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         let arena = self.arena;
         let txn = self.txn;
 
-        let mut iter = txn.raw_iterator_cf(&storage.vectors.vector_properties_db);
+        let mut iter = txn.raw_iterator_cf(&storage.vectors.cf_vector_properties());
         iter.seek_to_first();
 
         let label_len = label.len();

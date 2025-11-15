@@ -106,7 +106,7 @@ pub struct ShortestPathIterator<
     pub iter: I,
     path_type: PathType,
     edge_label: Option<&'arena str>,
-    storage: &'db HelixGraphStorage<'db>,
+    storage: &'db HelixGraphStorage,
     txn: &'txn RTxn<'db>,
     algorithm: PathAlgorithm,
     weight_fn: F,

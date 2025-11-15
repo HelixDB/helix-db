@@ -158,7 +158,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         match bincode::serialize(&node) {
             Ok(bytes) => {
                 if let Err(e) = self.txn.put_cf(
-                    &self.storage.nodes_db,
+                    &self.storage.cf_nodes(),
                     &HelixGraphStorage::node_key(node.id),
                     &bytes,
                 ) {
@@ -170,7 +170,8 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
         for index in secondary_indices {
             match self.storage.secondary_indices.get(index) {
-                Some(db) => {
+                Some(cf_name) => {
+                    let cf = self.storage.get_secondary_index_cf_handle(cf_name).unwrap();
                     let key = match node.get_property(index) {
                         Some(value) => value,
                         None => continue,
@@ -186,7 +187,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                 node.id,
                             );
 
-                            if let Err(e) = self.txn.put_cf(db, composite_key, &[]) {
+                            if let Err(e) = self.txn.put_cf(&cf, composite_key, &[]) {
                                 println!(
                                     "{} Error adding node to secondary index: {:?}",
                                     line!(),

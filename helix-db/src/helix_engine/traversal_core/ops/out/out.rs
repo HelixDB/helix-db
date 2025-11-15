@@ -203,7 +203,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                 let iter = self
                     .txn
-                    .prefix_iterator_cf(&self.storage.out_edges_db, &prefix);
+                    .prefix_iterator_cf(&self.storage.cf_out_edges(), &prefix);
 
                 Some(iter.filter_map(move |result| {
                     match result {
@@ -279,7 +279,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                 let iter = self
                     .txn
-                    .prefix_iterator_cf(&self.storage.out_edges_db, &prefix);
+                    .prefix_iterator_cf(&self.storage.cf_out_edges(), &prefix);
 
                 Some(iter.filter_map(move |result| {
                     match result {

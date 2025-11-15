@@ -66,8 +66,11 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 {self.storage.nodes_db.get(self.txn, *id)}
 
                 #[cfg(feature= "rocks")]
-                {self.txn.get_pinned_cf(&self.storage.nodes_db, &id.to_be_bytes())}
-                };
+                {
+                    let cf = self.storage.cf_nodes();
+                    self.txn.get_pinned_cf(&cf, &id.to_be_bytes())
+                }
+            };
 
             if let Ok(Some(value)) = &node {
                 assert!(

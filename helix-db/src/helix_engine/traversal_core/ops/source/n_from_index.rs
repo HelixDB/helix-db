@@ -150,7 +150,7 @@ impl<
     where
         K: Into<Value> + Serialize + Clone,
     {
-        let db = self
+        let cf_name = self
             .storage
             .secondary_indices
             .get(index)
@@ -159,6 +159,7 @@ impl<
             )))
             .unwrap();
 
+        let cf = self.storage.get_secondary_index_cf_handle(cf_name).unwrap();
         let search_key = bincode::serialize(&Value::from(key)).unwrap();
 
         let storage = self.storage;
@@ -166,7 +167,7 @@ impl<
         let txn = self.txn;
 
         let res = txn
-            .prefix_iterator_cf(db, &search_key)
+            .prefix_iterator_cf(&cf, &search_key)
             .filter_map(move |result| {
                 match result {
                     Ok((key_bytes, _value)) => {

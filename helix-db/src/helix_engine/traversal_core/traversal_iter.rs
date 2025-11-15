@@ -13,7 +13,7 @@ where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub storage: &'db HelixGraphStorage<'db>,
+    pub storage: &'db HelixGraphStorage,
     pub arena: &'arena bumpalo::Bump,
     pub txn: &'txn RTxn<'db>,
     pub inner: I,
@@ -81,7 +81,7 @@ where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub storage: &'db HelixGraphStorage<'db>,
+    pub storage: &'db HelixGraphStorage,
     pub arena: &'arena bumpalo::Bump,
     pub txn: &'txn mut WTxn<'db>,
     pub inner: I,

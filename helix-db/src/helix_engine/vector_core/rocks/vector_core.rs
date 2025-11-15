@@ -67,11 +67,8 @@ impl HNSWConfig {
     }
 }
 
-pub struct VectorCore<'db> {
-    pub vectors_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub vector_properties_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub edges_db: Arc<rocksdb::BoundColumnFamily<'db>>,
-    pub ep_db: Arc<rocksdb::BoundColumnFamily<'db>>,
+pub struct VectorCore {
+    pub db: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
     pub config: HNSWConfig,
 }
 
@@ -145,22 +142,33 @@ fn hnsw_edges_merge(
     None
 }
 
-impl<'db> VectorCore<'db> {
+impl VectorCore {
+    // Helper methods to get column family handles on-demand
+    #[inline(always)]
+    pub fn cf_vectors(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.db.cf_handle("vectors").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_vector_properties(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.db.cf_handle("vector_data").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_edges(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.db.cf_handle("hnsw_edges").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_ep(&self) -> Arc<rocksdb::BoundColumnFamily> {
+        self.db.cf_handle("ep").unwrap()
+    }
+
     pub fn new(
-        db: &'db rocksdb::TransactionDB<rocksdb::MultiThreaded>,
+        db: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
         config: HNSWConfig,
     ) -> Result<Self, VectorError> {
-        let vectors_db = db.cf_handle("vectors").unwrap();
-        let vector_properties_db = db.cf_handle("vector_properties").unwrap();
-        let edges_db = db.cf_handle("hnsw_edges").unwrap();
-        let ep_db = db.cf_handle("ep").unwrap();
-        Ok(Self {
-            vectors_db,
-            vector_properties_db,
-            edges_db,
-            ep_db,
-            config,
-        })
+        Ok(Self { db, config })
     }
 
     /// VECTOR KEY STRUCTURE
@@ -214,13 +222,14 @@ impl<'db> VectorCore<'db> {
     }
 
     #[inline]
-    fn get_entry_point<'arena: 'txn, 'txn>(
+    fn get_entry_point<'db, 'arena: 'txn, 'txn>(
         &self,
         txn: &'txn Txn<'db>,
         label: &'arena str,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let ep_id = txn.get_pinned_cf(&self.ep_db, ENTRY_POINT_KEY)?;
+        let cf = self.cf_ep();
+        let ep_id = txn.get_pinned_cf(&cf, ENTRY_POINT_KEY)?;
         if let Some(ep_id) = ep_id {
             let mut arr = [0u8; 16];
             let len = std::cmp::min(ep_id.len(), 16);
@@ -236,26 +245,28 @@ impl<'db> VectorCore<'db> {
     }
 
     #[inline]
-    fn set_entry_point(&self, txn: &Txn<'db>, entry: &HVector) -> Result<(), VectorError> {
-        txn.put_cf(&self.ep_db, ENTRY_POINT_KEY, &entry.id.to_be_bytes())
+    fn set_entry_point<'db>(&self, txn: &Txn<'db>, entry: &HVector) -> Result<(), VectorError> {
+        let cf = self.cf_ep();
+        txn.put_cf(&cf, ENTRY_POINT_KEY, &entry.id.to_be_bytes())
             .map_err(VectorError::from)?;
-        // TODO try again on try again error
         Ok(())
     }
 
     #[inline(always)]
-    pub fn put_vector<'arena>(
+    pub fn put_vector<'db, 'arena>(
         &self,
         txn: &Txn<'db>,
         vector: &HVector<'arena>,
     ) -> Result<(), VectorError> {
+        let cf_vectors = self.cf_vectors();
+        let cf_props = self.cf_vector_properties();
         txn.put_cf(
-            &self.vectors_db,
+            &cf_vectors,
             vector.id.to_be_bytes(),
             vector.vector_data_to_bytes()?,
         )?;
         txn.put_cf(
-            &self.vector_properties_db,
+            &cf_props,
             vector.id.to_be_bytes(),
             &bincode::serialize(&vector)?,
         )?;
@@ -263,7 +274,7 @@ impl<'db> VectorCore<'db> {
     }
 
     #[inline(always)]
-    fn get_neighbors<'arena: 'txn, 'txn, F>(
+    fn get_neighbors<'db, 'arena: 'txn, 'txn, F>(
         &self,
         txn: &'txn Txn<'db>,
         label: &'arena str,
@@ -281,7 +292,8 @@ impl<'db> VectorCore<'db> {
             arena,
         );
 
-        let mut iter = txn.raw_prefix_iter(&self.edges_db, &out_key);
+        let cf_edges = self.cf_edges();
+        let mut iter = txn.raw_prefix_iter(&cf_edges, &out_key);
 
         let prefix_len = out_key.len();
 
@@ -330,8 +342,8 @@ impl<'db> VectorCore<'db> {
             .collect()
     }
     #[inline(always)]
-    fn set_neighbours<'arena: 'txn, 'txn>(
-        &'db self,
+    fn set_neighbours<'db, 'arena: 'txn, 'txn>(
+        &self,
         txn: &'txn Txn<'db>,
         id: u128,
         neighbors: &BinaryHeap<'arena, HVector<'arena>>,
@@ -351,9 +363,11 @@ impl<'db> VectorCore<'db> {
         desired.sort_unstable();
         desired.dedup();
 
+        let cf_edges = self.cf_edges();
+
         // then determine the changes needed
         let mut existing = txn
-            .get_pinned_cf(&self.edges_db, key)?
+            .get_pinned_cf(&cf_edges, key)?
             .map(|buf| Self::decode_edges(buf.as_ref()))
             .unwrap_or_default();
         existing.sort_unstable();
@@ -384,29 +398,29 @@ impl<'db> VectorCore<'db> {
 
         for entry in removes {
             let operand = EdgeOp::encode(EdgeOp::Remove, &entry);
-            txn.merge_cf(&self.edges_db, &key, &operand)?;
+            txn.merge_cf(&cf_edges, &key, &operand)?;
 
             let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
             let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
             let reciprocal_operand = EdgeOp::encode(EdgeOp::Remove, &reciprocal);
-            txn.merge_cf(&self.edges_db, &neighbor_key, &reciprocal_operand)?;
+            txn.merge_cf(&cf_edges, &neighbor_key, &reciprocal_operand)?;
         }
 
         for entry in adds {
             let operand = EdgeOp::encode(EdgeOp::Add, &entry);
-            txn.merge_cf(&self.edges_db, &key, &operand)?;
+            txn.merge_cf(&cf_edges, &key, &operand)?;
 
             let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
             let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
             let reciprocal_operand = EdgeOp::encode(EdgeOp::Add, &reciprocal);
-            txn.merge_cf(&self.edges_db, &neighbor_key, &reciprocal_operand)?;
+            txn.merge_cf(&cf_edges, &neighbor_key, &reciprocal_operand)?;
         }
 
         Ok(())
     }
 
-    fn select_neighbors<'arena: 'txn, 'txn, 's, F>(
-        &'db self,
+    fn select_neighbors<'db, 'arena: 'txn, 'txn, 's, F>(
+        &self,
         txn: &'txn Txn<'db>,
         label: &'arena str,
         query: &'s HVector<'arena>,
@@ -458,7 +472,7 @@ impl<'db> VectorCore<'db> {
         Ok(result.take_inord(m))
     }
 
-    fn search_level<'arena: 'txn, 'txn, 'q, F>(
+    fn search_level<'db, 'arena: 'txn, 'txn, 'q, F>(
         &self,
         txn: &'txn Txn<'db>,
         label: &'arena str,
@@ -530,19 +544,20 @@ impl<'db> VectorCore<'db> {
     }
 
     // Not possible to implement in RocksDB unless iterating over all keys
-    pub fn num_inserted_vectors(&self, txn: &Txn<'db>) -> Result<u64, VectorError> {
+    pub fn num_inserted_vectors<'db>(&self, txn: &Txn<'db>) -> Result<u64, VectorError> {
         unimplemented!()
     }
 
     #[inline]
-    pub fn get_vector_properties<'arena: 'txn, 'txn>(
+    pub fn get_vector_properties<'db, 'arena: 'txn, 'txn>(
         &self,
         txn: &'txn Txn<'db>,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<Option<VectorWithoutData<'arena>>, VectorError> {
+        let cf = self.cf_vector_properties();
         let vector: Option<VectorWithoutData<'arena>> =
-            match txn.get_pinned_cf(&self.vector_properties_db, &id.to_be_bytes())? {
+            match txn.get_pinned_cf(&cf, &id.to_be_bytes())? {
                 Some(bytes) => Some(VectorWithoutData::from_bincode_bytes(arena, &bytes, id)?),
                 None => None,
             };
@@ -557,20 +572,22 @@ impl<'db> VectorCore<'db> {
     }
 
     #[inline(always)]
-    pub fn get_full_vector<'arena>(
+    pub fn get_full_vector<'db, 'arena>(
         &self,
         txn: &Txn<'db>,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
         let key = Self::vector_key(id);
+        let cf_vectors = self.cf_vectors();
+        let cf_props = self.cf_vector_properties();
         let vector_data_bytes =
-            txn.get_pinned_cf(&self.vectors_db, &key)?
+            txn.get_pinned_cf(&cf_vectors, &key)?
                 .ok_or(VectorError::VectorNotFound(
                     uuid::Uuid::from_u128(id).to_string(),
                 ))?;
 
-        let properties_bytes = txn.get_pinned_cf(&self.vector_properties_db, &key)?;
+        let properties_bytes = txn.get_pinned_cf(&cf_props, &key)?;
 
         let vector = HVector::from_bincode_bytes(
             arena,
@@ -585,26 +602,26 @@ impl<'db> VectorCore<'db> {
     }
 
     #[inline(always)]
-    pub fn get_raw_vector_data<'arena: 'txn, 'txn>(
+    pub fn get_raw_vector_data<'db, 'arena: 'txn, 'txn>(
         &self,
         txn: &'txn Txn<'db>,
         id: u128,
         label: &'arena str,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let vector_data_bytes = txn
-            .get_pinned_cf(&self.vectors_db, &Self::vector_key(id))?
-            .ok_or(VectorError::VectorNotFound(
-                uuid::Uuid::from_u128(id).to_string(),
-            ))?;
+        let cf = self.cf_vectors();
+        let vector_data_bytes =
+            txn.get_pinned_cf(&cf, &Self::vector_key(id))?
+                .ok_or(VectorError::VectorNotFound(
+                    uuid::Uuid::from_u128(id).to_string(),
+                ))?;
 
-        // println!("Found vector {}, data len: {}", uuid::Uuid::from_u128(id), vector_data_bytes.len());
         HVector::from_raw_vector_data(arena, &vector_data_bytes, label, id)
     }
 }
 
-impl<'db> HNSW<'db> for VectorCore<'db> {
-    fn search<'arena, 'txn, F>(
+impl HNSW for VectorCore {
+    fn search<'db, 'arena, 'txn, F>(
         &self,
         txn: &'txn Txn<'db>,
         query: &'arena [f64],
@@ -665,7 +682,7 @@ impl<'db> HNSW<'db> for VectorCore<'db> {
             filter,
             label,
             txn,
-            Arc::clone(&self.vector_properties_db),
+            Arc::clone(&self.cf_vector_properties()),
             arena,
         )?;
 
@@ -673,8 +690,8 @@ impl<'db> HNSW<'db> for VectorCore<'db> {
         Ok(results)
     }
 
-    fn insert<'arena, 'txn, F>(
-        &'db self,
+    fn insert<'db, 'arena, 'txn, F>(
+        &self,
         txn: &'txn Txn<'db>,
         label: &'arena str,
         data: &'arena [f64],
@@ -754,7 +771,12 @@ impl<'db> HNSW<'db> for VectorCore<'db> {
         Ok(query)
     }
 
-    fn delete(&self, txn: &Txn<'db>, id: u128, arena: &bumpalo::Bump) -> Result<(), VectorError> {
+    fn delete<'db>(
+        &self,
+        txn: &Txn<'db>,
+        id: u128,
+        arena: &bumpalo::Bump,
+    ) -> Result<(), VectorError> {
         match self.get_vector_properties(txn, id, arena)? {
             Some(mut properties) => {
                 debug_println!("properties: {properties:?}");
@@ -763,7 +785,7 @@ impl<'db> HNSW<'db> for VectorCore<'db> {
                 }
                 properties.deleted = true;
                 txn.put_cf(
-                    &self.vector_properties_db,
+                    &self.cf_vector_properties(),
                     &id.to_be_bytes(),
                     &bincode::serialize(&properties)?,
                 );

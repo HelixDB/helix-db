@@ -3,7 +3,7 @@ use crate::{helix_engine::types::VectorError, utils::properties::ImmutableProper
 
 use heed3::{RoTxn, RwTxn};
 
-pub trait HNSW<'db> {
+pub trait HNSW {
     /// Search for the k nearest neighbors of a query vector
     ///
     /// # Arguments
@@ -15,8 +15,8 @@ pub trait HNSW<'db> {
     /// # Returns
     ///
     /// A vector of tuples containing the id and distance of the nearest neighbors
-    fn search<'arena, 'txn, F>(
-        &'db self,
+    fn search<'db, 'arena, 'txn, F>(
+        &self,
         txn: &'txn rocksdb::Transaction<'db, rocksdb::TransactionDB>,
         query: &'arena [f64],
         k: usize,
@@ -40,8 +40,8 @@ pub trait HNSW<'db> {
     /// # Returns
     ///
     /// An HVector of the data inserted
-    fn insert<'arena, 'txn, F>(
-        &'db self,
+    fn insert<'db, 'arena, 'txn, F>(
+        &self,
         txn: &'txn rocksdb::Transaction<'db, rocksdb::TransactionDB>,
         label: &'arena str,
         data: &'arena [f64],
@@ -59,7 +59,7 @@ pub trait HNSW<'db> {
     ///
     /// * `txn` - The transaction to use
     /// * `id` - The id of the vector
-    fn delete(
+    fn delete<'db>(
         &self,
         txn: &rocksdb::Transaction<'db, rocksdb::TransactionDB>,
         id: u128,

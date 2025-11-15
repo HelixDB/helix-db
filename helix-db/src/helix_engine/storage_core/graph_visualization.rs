@@ -1,3 +1,5 @@
+#![cfg(feature = "lmdb")]
+
 use crate::{
     debug_println,
     helix_engine::{storage_core::HelixGraphStorage, types::GraphError},

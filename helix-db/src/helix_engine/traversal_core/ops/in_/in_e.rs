@@ -126,7 +126,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                         let edge_iter = self
                             .txn
-                            .prefix_iterator_cf(&self.storage.in_edges_db, &prefix_vec)
+                            .prefix_iterator_cf(&self.storage.cf_in_edges(), &prefix_vec)
                             .filter_map(move |result| {
                                 match result {
                                     Ok((key, value)) => {

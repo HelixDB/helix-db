@@ -284,9 +284,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             None => {
                                 // Insert secondary indices
                                 for (k, v) in props.iter() {
-                                    let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                    let Some(cf_name) = self.storage.secondary_indices.get(*k) else {
                                         continue;
                                     };
+                                    let cf = self.storage.graph_env.cf_handle(cf_name).unwrap();
 
                                     match bincode::serialize(v) {
                                         Ok(v_serialized) => {
@@ -298,7 +299,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                     &v_serialized,
                                                     node.id,
                                                 );
-                                            if let Err(e) = self.txn.put_cf(db, composite_key, &[])
+                                            if let Err(e) = self.txn.put_cf(&cf, composite_key, &[])
                                             {
                                                 results.push(Err(GraphError::from(e)));
                                             }
@@ -318,9 +319,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             }
                             Some(old) => {
                                 for (k, v) in props.iter() {
-                                    let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                    let Some(cf_name) = self.storage.secondary_indices.get(*k) else {
                                         continue;
                                     };
+                                    let cf = self.storage.graph_env.cf_handle(cf_name).unwrap();
 
                                     // delete secondary indexes for the props changed
                                     let Some(old_value) = old.get(k) else {
@@ -337,7 +339,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                     &old_serialized,
                                                     node.id,
                                                 );
-                                            if let Err(e) = self.txn.delete_cf(db, composite_key) {
+                                            if let Err(e) = self.txn.delete_cf(&cf, composite_key) {
                                                 results.push(Err(GraphError::from(e)));
                                                 continue;
                                             }
@@ -359,7 +361,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                     &v_serialized,
                                                     node.id,
                                                 );
-                                            if let Err(e) = self.txn.put_cf(db, composite_key, &[])
+                                            if let Err(e) = self.txn.put_cf(&cf, composite_key, &[])
                                             {
                                                 results.push(Err(GraphError::from(e)));
                                             }
@@ -402,7 +404,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                         match bincode::serialize(&node) {
                             Ok(serialized_node) => {
                                 match self.txn.put_cf(
-                                    &self.storage.nodes_db,
+                                    &self.storage.cf_nodes(),
                                     &HelixGraphStorage::node_key(node.id),
                                     &serialized_node,
                                 ) {
@@ -460,7 +462,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                         match bincode::serialize(&edge) {
                             Ok(serialized_edge) => {
                                 match self.txn.put_cf(
-                                    &self.storage.edges_db,
+                                    &self.storage.cf_edges(),
                                     &HelixGraphStorage::edge_key(edge.id),
                                     &serialized_edge,
                                 ) {

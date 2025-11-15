@@ -136,7 +136,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         let arena = self.arena;
         let txn = self.txn;
 
-        let mut iter = txn.raw_iterator_cf(&storage.edges_db);
+        let mut iter = txn.raw_iterator_cf(&storage.cf_edges());
         iter.seek_to_first();
 
         let label_len = label.len();
