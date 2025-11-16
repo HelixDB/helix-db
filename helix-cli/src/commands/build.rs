@@ -45,26 +45,14 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
 
     print_status("BUILD", &format!("Building instance '{instance_name}'"));
 
-    // Ensure Helix repo is cached
-    spinner::with_spinner(
-        "Caching Helix repository...",
-        ensure_helix_repo_cached(),
-    )
-    .await?;
+    // Ensure Helix repo is cached (has its own status messages, so no spinner needed)
+    ensure_helix_repo_cached().await?;
 
-    // Prepare instance workspace
-    spinner::with_spinner(
-        &format!("Preparing workspace for '{instance_name}'..."),
-        prepare_instance_workspace(&project, &instance_name),
-    )
-    .await?;
+    // Prepare instance workspace (has its own status messages, so no spinner needed)
+    prepare_instance_workspace(&project, &instance_name).await?;
 
-    // Compile project queries into the workspace
-    let compile_result = spinner::with_spinner(
-        "Compiling Helix queries...",
-        compile_project(&project, &instance_name),
-    )
-    .await;
+    // Compile project queries into the workspace (has its own status messages, so no spinner needed)
+    let compile_result = compile_project(&project, &instance_name).await;
 
     // Collect metrics data
     let compile_time = start_time.elapsed().as_secs() as u32;
@@ -93,12 +81,8 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
     // Propagate compilation error if any
     compile_result?;
 
-    // Generate Docker files
-    spinner::with_spinner(
-        "Generating Docker configuration...",
-        generate_docker_files(&project, &instance_name, instance_config.clone()),
-    )
-    .await?;
+    // Generate Docker files (has its own status messages, so no spinner needed)
+    generate_docker_files(&project, &instance_name, instance_config.clone()).await?;
 
     // For local instances, build Docker image (has its own status messages, so no spinner needed)
     if instance_config.should_build_docker_image() {
