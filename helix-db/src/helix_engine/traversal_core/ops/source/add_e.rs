@@ -65,7 +65,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 if let Err(e) = self.storage.edges_db.put_with_flags(
                     self.txn,
                     PutFlags::APPEND,
-                    HelixGraphStorage::edge_key(&edge.id),
+                    &HelixGraphStorage::edge_key(edge.id),
                     &bytes,
                 ) {
                     result = Err(GraphError::from(e));
@@ -79,8 +79,8 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         match self.storage.out_edges_db.put_with_flags(
             self.txn,
             PutFlags::APPEND_DUP,
-            &HelixGraphStorage::out_edge_key(&from_node, &label_hash),
-            &HelixGraphStorage::pack_edge_data(&edge.id, &to_node),
+            &HelixGraphStorage::out_edge_key(from_node, &label_hash),
+            &HelixGraphStorage::pack_edge_data(edge.id, to_node),
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -94,8 +94,8 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         match self.storage.in_edges_db.put_with_flags(
             self.txn,
             PutFlags::APPEND_DUP,
-            &HelixGraphStorage::in_edge_key(&to_node, &label_hash),
-            &HelixGraphStorage::pack_edge_data(&edge.id, &from_node),
+            &HelixGraphStorage::in_edge_key(to_node, &label_hash),
+            &HelixGraphStorage::pack_edge_data(edge.id, from_node),
         ) {
             Ok(_) => {}
             Err(e) => {

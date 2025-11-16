@@ -266,7 +266,7 @@ where
             let out_prefix = self.edge_label.map_or_else(
                 || current_id.to_be_bytes().to_vec(),
                 |label| {
-                    HelixGraphStorage::out_edge_key(&current_id, &hash_label(label, None)).to_vec()
+                    HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None)).to_vec()
                 },
             );
 
@@ -291,7 +291,7 @@ where
                     parent.insert(to_node, (current_id, edge_id));
 
                     if to_node == to {
-                        return Some(self.reconstruct_path(&parent, &from, &to, self.arena));
+                        return Some(self.reconstruct_path(&parent, from, to, self.arena));
                     }
 
                     queue.push_back(to_node);
@@ -330,13 +330,13 @@ where
 
             // Found the target
             if current_id == to {
-                return Some(self.reconstruct_path(&parent, &from, &to, self.arena));
+                return Some(self.reconstruct_path(&parent, from, to, self.arena));
             }
 
             let out_prefix = self.edge_label.map_or_else(
                 || current_id.to_be_bytes().to_vec(),
                 |label| {
-                    HelixGraphStorage::out_edge_key(&current_id, &hash_label(label, None)).to_vec()
+                    HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None)).to_vec()
                 },
             );
 
@@ -350,17 +350,17 @@ where
                 let (_, value) = result.unwrap(); // TODO: handle error
                 let (edge_id, to_node) = HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
 
-                let edge = match self.storage.get_edge(self.txn, &edge_id, self.arena) {
+                let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
                     Ok(e) => e,
                     Err(e) => return Some(Err(e)),
                 };
 
                 // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, &current_id, self.arena) {
+                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
                     Ok(n) => n,
                     Err(e) => return Some(Err(e)),
                 };
-                let dst_node = match self.storage.get_node(self.txn, &to_node, self.arena) {
+                let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
                     Ok(n) => n,
                     Err(e) => return Some(Err(e)),
                 };
@@ -416,7 +416,7 @@ where
         let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
 
         // Calculate initial heuristic for start node
-        let start_node = match self.storage.get_node(self.txn, &from, self.arena) {
+        let start_node = match self.storage.get_node(self.txn, from, self.arena) {
             Ok(node) => node,
             Err(e) => return Some(Err(e)),
         };
@@ -441,7 +441,7 @@ where
         {
             // Found the target
             if current_id == to {
-                return Some(self.reconstruct_path(&parent, &from, &to, self.arena));
+                return Some(self.reconstruct_path(&parent, from, to, self.arena));
             }
 
             // Already found a better path
@@ -454,7 +454,7 @@ where
             let out_prefix = self.edge_label.map_or_else(
                 || current_id.to_be_bytes().to_vec(),
                 |label| {
-                    HelixGraphStorage::out_edge_key(&current_id, &hash_label(label, None)).to_vec()
+                    HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None)).to_vec()
                 },
             );
 
@@ -468,17 +468,17 @@ where
                 let (_, value) = result.unwrap(); // TODO: handle error
                 let (edge_id, to_node) = HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
 
-                let edge = match self.storage.get_edge(self.txn, &edge_id, self.arena) {
+                let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
                     Ok(e) => e,
                     Err(e) => return Some(Err(e)),
                 };
 
                 // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, &current_id, self.arena) {
+                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
                     Ok(n) => n,
                     Err(e) => return Some(Err(e)),
                 };
-                let dst_node = match self.storage.get_node(self.txn, &to_node, self.arena) {
+                let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
                     Ok(n) => n,
                     Err(e) => return Some(Err(e)),
                 };

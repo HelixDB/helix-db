@@ -26,14 +26,14 @@ fn setup_test_storage() -> (HelixGraphStorage, TempDir) {
 fn test_node_key() {
     let id = 12345u128;
     let key = HelixGraphStorage::node_key(id);
-    assert_eq!(*key, id);
+    assert_eq!(key, id);
 }
 
 #[test]
 fn test_edge_key() {
     let id = 67890u128;
-    let key = HelixGraphStorage::edge_key(&id);
-    assert_eq!(*key, id);
+    let key = HelixGraphStorage::edge_key(id);
+    assert_eq!(key, id);
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn test_out_edge_key() {
     let from_node_id = 100u128;
     let label = [1, 2, 3, 4];
 
-    let key = HelixGraphStorage::out_edge_key(&from_node_id, &label);
+    let key = HelixGraphStorage::out_edge_key(from_node_id, &label);
 
     // Verify key structure
     assert_eq!(key.len(), 20);
@@ -63,7 +63,7 @@ fn test_in_edge_key() {
     let to_node_id = 200u128;
     let label = [5, 6, 7, 8];
 
-    let key = HelixGraphStorage::in_edge_key(&to_node_id, &label);
+    let key = HelixGraphStorage::in_edge_key(to_node_id, &label);
 
     // Verify key structure
     assert_eq!(key.len(), 20);
@@ -85,8 +85,8 @@ fn test_out_edge_key_deterministic() {
     let from_node_id = 42u128;
     let label = [9, 8, 7, 6];
 
-    let key1 = HelixGraphStorage::out_edge_key(&from_node_id, &label);
-    let key2 = HelixGraphStorage::out_edge_key(&from_node_id, &label);
+    let key1 = HelixGraphStorage::out_edge_key(from_node_id, &label);
+    let key2 = HelixGraphStorage::out_edge_key(from_node_id, &label);
 
     assert_eq!(key1, key2);
 }
@@ -96,8 +96,8 @@ fn test_in_edge_key_deterministic() {
     let to_node_id = 84u128;
     let label = [1, 1, 1, 1];
 
-    let key1 = HelixGraphStorage::in_edge_key(&to_node_id, &label);
-    let key2 = HelixGraphStorage::in_edge_key(&to_node_id, &label);
+    let key1 = HelixGraphStorage::in_edge_key(to_node_id, &label);
+    let key2 = HelixGraphStorage::in_edge_key(to_node_id, &label);
 
     assert_eq!(key1, key2);
 }
@@ -107,7 +107,7 @@ fn test_pack_edge_data() {
     let edge_id = 123u128;
     let node_id = 456u128;
 
-    let packed = HelixGraphStorage::pack_edge_data(&edge_id, &node_id);
+    let packed = HelixGraphStorage::pack_edge_data(edge_id, node_id);
 
     // Verify packed data structure
     assert_eq!(packed.len(), 32);
@@ -132,7 +132,7 @@ fn test_unpack_adj_edge_data() {
     let edge_id = 789u128;
     let node_id = 1011u128;
 
-    let packed = HelixGraphStorage::pack_edge_data(&edge_id, &node_id);
+    let packed = HelixGraphStorage::pack_edge_data(edge_id, node_id);
     let (unpacked_edge_id, unpacked_node_id) =
         HelixGraphStorage::unpack_adj_edge_data(&packed).unwrap();
 
@@ -151,7 +151,7 @@ fn test_pack_unpack_edge_data_roundtrip() {
     ];
 
     for (edge_id, node_id) in test_cases {
-        let packed = HelixGraphStorage::pack_edge_data(&edge_id, &node_id);
+        let packed = HelixGraphStorage::pack_edge_data(edge_id, node_id);
         let (unpacked_edge, unpacked_node) =
             HelixGraphStorage::unpack_adj_edge_data(&packed).unwrap();
 
@@ -282,15 +282,15 @@ fn test_storage_with_large_db_size() {
 #[test]
 fn test_edge_key_with_zero_id() {
     let id = 0u128;
-    let key = HelixGraphStorage::edge_key(&id);
-    assert_eq!(*key, 0);
+    let key = HelixGraphStorage::edge_key(id);
+    assert_eq!(key, 0);
 }
 
 #[test]
 fn test_edge_key_with_max_id() {
     let id = u128::MAX;
-    let key = HelixGraphStorage::edge_key(&id);
-    assert_eq!(*key, u128::MAX);
+    let key = HelixGraphStorage::edge_key(id);
+    assert_eq!(key, u128::MAX);
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn test_out_edge_key_with_zero_values() {
     let from_node_id = 0u128;
     let label = [0, 0, 0, 0];
 
-    let key = HelixGraphStorage::out_edge_key(&from_node_id, &label);
+    let key = HelixGraphStorage::out_edge_key(from_node_id, &label);
     assert_eq!(key, [0u8; 20]);
 }
 
@@ -307,7 +307,7 @@ fn test_out_edge_key_with_max_values() {
     let from_node_id = u128::MAX;
     let label = [255, 255, 255, 255];
 
-    let key = HelixGraphStorage::out_edge_key(&from_node_id, &label);
+    let key = HelixGraphStorage::out_edge_key(from_node_id, &label);
 
     // All bytes should be 255
     assert!(key.iter().all(|&b| b == 255));
@@ -318,7 +318,7 @@ fn test_pack_edge_data_with_zero_values() {
     let edge_id = 0u128;
     let node_id = 0u128;
 
-    let packed = HelixGraphStorage::pack_edge_data(&edge_id, &node_id);
+    let packed = HelixGraphStorage::pack_edge_data(edge_id, node_id);
     assert_eq!(packed, [0u8; 32]);
 }
 
@@ -327,6 +327,6 @@ fn test_pack_edge_data_with_max_values() {
     let edge_id = u128::MAX;
     let node_id = u128::MAX;
 
-    let packed = HelixGraphStorage::pack_edge_data(&edge_id, &node_id);
+    let packed = HelixGraphStorage::pack_edge_data(edge_id, node_id);
     assert!(packed.iter().all(|&b| b == 255));
 }

@@ -22,7 +22,7 @@ where
         iter.into_iter().filter_map(|item| item.ok()).try_for_each(
             |item| -> Result<(), GraphError> {
                 match item {
-                    TraversalValue::Node(node) => match storage.drop_node(txn, &node.id) {
+                    TraversalValue::Node(node) => match storage.drop_node(txn, node.id) {
                         Ok(_) => {
                             if let Some(bm25) = &storage.bm25
                                 && let Err(e) = bm25.delete_doc(txn, node.id)
@@ -34,16 +34,16 @@ where
                         }
                         Err(e) => Err(e),
                     },
-                    TraversalValue::Edge(edge) => match storage.drop_edge(txn, &edge.id) {
+                    TraversalValue::Edge(edge) => match storage.drop_edge(txn, edge.id) {
                         Ok(_) => Ok(()),
                         Err(e) => Err(e),
                     },
-                    TraversalValue::Vector(vector) => match storage.drop_vector(txn, &vector.id) {
+                    TraversalValue::Vector(vector) => match storage.drop_vector(txn, vector.id) {
                         Ok(_) => Ok(()),
                         Err(e) => Err(e),
                     },
                     TraversalValue::VectorNodeWithoutVectorData(vector) => {
-                        match storage.drop_vector(txn, &vector.id) {
+                        match storage.drop_vector(txn, vector.id) {
                             Ok(_) => Ok(()),
                             Err(e) => Err(e),
                         }

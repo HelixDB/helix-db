@@ -39,7 +39,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
         let n_from_id = std::iter::once({
-            match self.storage.get_node(self.txn, id, self.arena) {
+            use crate::helix_engine::storage_core::storage_methods::StorageMethods;
+
+            match self.storage.get_node(self.txn, *id, self.arena) {
                 Ok(node) => Ok(TraversalValue::Node(node)),
                 Err(e) => Err(e),
             }

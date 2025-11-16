@@ -51,7 +51,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 let edge_label_hash = hash_label(edge_label, None);
 
                 let prefix = HelixGraphStorage::out_edge_key(
-                    &match item {
+                    match item {
                         Ok(item) => item.id(),
                         Err(_) => return None,
                     },
@@ -72,7 +72,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                             Ok(data) => data,
                                             Err(e) => return Err(e),
                                         };
-                                    match self.storage.get_edge(self.txn, &edge_id, self.arena) {
+                                    match self.storage.get_edge(self.txn, edge_id, self.arena) {
                                         Ok(edge) => Ok(TraversalValue::Edge(edge)),
                                         Err(e) => Err(e),
                                     }

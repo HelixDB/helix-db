@@ -33,7 +33,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     > {
         let iter = self.inner.filter_map(move |item| {
             if let Ok(TraversalValue::Edge(item)) = item {
-                match self.storage.get_node(self.txn, &item.from_node, self.arena) {
+                match self.storage.get_node(self.txn, item.from_node, self.arena) {
                     Ok(node) => Some(Ok(TraversalValue::Node(node))),
                     Err(e) => Some(Err(e)),
                 }

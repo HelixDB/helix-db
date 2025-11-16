@@ -2,7 +2,9 @@
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use heed3::{Env, EnvOpenOptions, RoTxn};
+#[cfg(feature = "lmdb")]
+use heed3::RwTxn;
+use heed3::{Env, EnvOpenOptions, RoTxn, WithTls};
 use rand::Rng;
 use tempfile::TempDir;
 
@@ -85,14 +87,17 @@ fn index(env: &DB) -> VectorCore {
 }
 
 #[cfg(feature = "lmdb")]
-fn index(env: &DB) -> VectorCore {
-    VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap()
+fn index(env: &DB, txn: &mut RwTxn) -> VectorCore {
+    VectorCore::new(env, txn, HNSWConfig::new(None, None, None)).unwrap()
 }
 
 #[test]
 fn test_hnsw_insert_and_count() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
+    #[cfg(feature = "lmdb")]
+    let index = index(&env, &mut txn);
+    #[cfg(feature = "rocks")]
     let index = index(&env);
 
     let vector: Vec<f64> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
@@ -107,17 +112,24 @@ fn test_hnsw_insert_and_count() {
     txn.commit().unwrap();
     let txn = env.read_txn().unwrap();
 
+    #[cfg(feature = "rocks")]
     assert!(
         env.iterator_cf(&index.cf_vectors(), rocksdb::IteratorMode::Start)
             .count()
             >= 10
     );
+
+    #[cfg(feature = "lmdb")]
+    assert!(index.vectors_db.len(&txn).unwrap() >= 10);
 }
 
 #[test]
 fn test_hnsw_search_returns_results() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
+    #[cfg(feature = "lmdb")]
+    let index = index(&env, &mut txn);
+    #[cfg(feature = "rocks")]
     let index = index(&env);
 
     let mut rng = rand::rng();

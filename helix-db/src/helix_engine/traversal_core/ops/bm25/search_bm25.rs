@@ -63,7 +63,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
             let node = {
                 #[cfg(feature= "lmdb")]
-                {self.storage.nodes_db.get(self.txn, *id)}
+                {self.storage.nodes_db.get(self.txn, &id)}
 
                 #[cfg(feature= "rocks")]
                 {

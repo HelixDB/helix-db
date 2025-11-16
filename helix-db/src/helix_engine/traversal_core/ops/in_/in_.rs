@@ -58,7 +58,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             .filter_map(move |item| {
                 let edge_label_hash = hash_label(edge_label, None);
                 let prefix = HelixGraphStorage::in_edge_key(
-                    &match item {
+                    match item {
                         Ok(item) => item.id(),
                         Err(_) => return None,
                     },
@@ -129,7 +129,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             .filter_map(move |item| {
                 let edge_label_hash = hash_label(edge_label, None);
                 let prefix = HelixGraphStorage::in_edge_key(
-                    &match item {
+                    match item {
                         Ok(item) => item.id(),
                         Err(_) => return None,
                     },
@@ -145,8 +145,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                     return Some(Err(e));
                                 }
                             };
-                            if let Ok(node) = self.storage.get_node(self.txn, &item_id, self.arena)
-                            {
+                            if let Ok(node) = self.storage.get_node(self.txn, item_id, self.arena) {
                                 return Some(Ok(TraversalValue::Node(node)));
                             }
                         }

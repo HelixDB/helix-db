@@ -80,6 +80,8 @@ pub struct HelixGraphStorage {
     pub storage_config: StorageConfig,
 }
 
+#[cfg(feature = "lmdb")]
+pub type Txn<'db> = heed3::RoTxn<'db>;
 /// For LMDB
 #[cfg(feature = "lmdb")]
 impl HelixGraphStorage {
@@ -217,7 +219,7 @@ impl HelixGraphStorage {
     /// Believed to not introduce any overhead being inline and using a reference.
     #[must_use]
     #[inline(always)]
-    pub fn node_key(id: &u128) -> &u128 {
+    pub fn node_key(id: u128) -> u128 {
         id
     }
 
@@ -225,7 +227,7 @@ impl HelixGraphStorage {
     /// Believed to not introduce any overhead being inline and using a reference.
     #[must_use]
     #[inline(always)]
-    pub fn edge_key(id: &u128) -> &u128 {
+    pub fn edge_key(id: u128) -> u128 {
         id
     }
 
@@ -237,7 +239,7 @@ impl HelixGraphStorage {
     /// To save space, the key is only stored once,
     /// with the values being stored in a sorted sub-tree, with this key being the root.
     #[inline(always)]
-    pub fn out_edge_key(from_node_id: &u128, label: &[u8; 4]) -> [u8; 20] {
+    pub fn out_edge_key(from_node_id: u128, label: &[u8; 4]) -> [u8; 20] {
         let mut key = [0u8; 20];
         key[0..16].copy_from_slice(&from_node_id.to_be_bytes());
         key[16..20].copy_from_slice(label);
@@ -252,7 +254,7 @@ impl HelixGraphStorage {
     /// To save space, the key is only stored once,
     /// with the values being stored in a sorted sub-tree, with this key being the root.
     #[inline(always)]
-    pub fn in_edge_key(to_node_id: &u128, label: &[u8; 4]) -> [u8; 20] {
+    pub fn in_edge_key(to_node_id: u128, label: &[u8; 4]) -> [u8; 20] {
         let mut key = [0u8; 20];
         key[0..16].copy_from_slice(&to_node_id.to_be_bytes());
         key[16..20].copy_from_slice(label);
@@ -263,7 +265,7 @@ impl HelixGraphStorage {
     ///
     /// data = `edge-id(16)` | `node-id(16)`                 ← 32 B (DUPFIXED)
     #[inline(always)]
-    pub fn pack_edge_data(edge_id: &u128, node_id: &u128) -> [u8; 32] {
+    pub fn pack_edge_data(edge_id: u128, node_id: u128) -> [u8; 32] {
         let mut key = [0u8; 32];
         key[0..16].copy_from_slice(&edge_id.to_be_bytes());
         key[16..32].copy_from_slice(&node_id.to_be_bytes());
@@ -321,14 +323,14 @@ impl StorageMethods for HelixGraphStorage {
     fn get_node<'arena>(
         &self,
         txn: &RoTxn,
-        id: &u128,
+        id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<Node<'arena>, GraphError> {
-        let node = match self.nodes_db.get(txn, Self::node_key(id))? {
+        let node = match self.nodes_db.get(txn, &Self::node_key(id))? {
             Some(data) => data,
             None => return Err(GraphError::NodeNotFound),
         };
-        let node: Node = Node::from_bincode_bytes(*id, node, arena)?;
+        let node: Node = Node::from_bincode_bytes(id, node, arena)?;
         let node = self.version_info.upgrade_to_node_latest(node);
         Ok(node)
     }
@@ -337,18 +339,18 @@ impl StorageMethods for HelixGraphStorage {
     fn get_edge<'arena>(
         &self,
         txn: &RoTxn,
-        id: &u128,
+        id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<Edge<'arena>, GraphError> {
-        let edge = match self.edges_db.get(txn, Self::edge_key(id))? {
+        let edge = match self.edges_db.get(txn, &Self::edge_key(id))? {
             Some(data) => data,
             None => return Err(GraphError::EdgeNotFound),
         };
-        let edge: Edge = Edge::from_bincode_bytes(*id, edge, arena)?;
+        let edge: Edge = Edge::from_bincode_bytes(id, edge, arena)?;
         Ok(self.version_info.upgrade_to_edge_latest(edge))
     }
 
-    fn drop_node(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
+    fn drop_node(&self, txn: &mut RwTxn, id: u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
         // Get node to get its label
         //let node = self.get_node(txn, id)?;
@@ -393,7 +395,7 @@ impl StorageMethods for HelixGraphStorage {
         // println!("Deleting edges: {}", );
         // Delete all related data
         for edge in edges {
-            self.edges_db.delete(txn, Self::edge_key(&edge))?;
+            self.edges_db.delete(txn, &Self::edge_key(edge))?;
         }
         for label_bytes in out_edges.iter() {
             self.out_edges_db
@@ -407,15 +409,15 @@ impl StorageMethods for HelixGraphStorage {
         for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
             self.out_edges_db.delete_one_duplicate(
                 txn,
-                &Self::out_edge_key(other_node_id, label_bytes),
-                &Self::pack_edge_data(edge_id, id),
+                &Self::out_edge_key(*other_node_id, label_bytes),
+                &Self::pack_edge_data(*edge_id, id),
             )?;
         }
         for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
             self.in_edges_db.delete_one_duplicate(
                 txn,
-                &Self::in_edge_key(other_node_id, label_bytes),
-                &Self::pack_edge_data(edge_id, id),
+                &Self::in_edge_key(*other_node_id, label_bytes),
+                &Self::pack_edge_data(*edge_id, id),
             )?;
         }
 
@@ -440,39 +442,39 @@ impl StorageMethods for HelixGraphStorage {
         }
 
         // Delete node data and label
-        self.nodes_db.delete(txn, Self::node_key(id))?;
+        self.nodes_db.delete(txn, &Self::node_key(id))?;
 
         Ok(())
     }
 
-    fn drop_edge(&self, txn: &mut RwTxn, edge_id: &u128) -> Result<(), GraphError> {
+    fn drop_edge(&self, txn: &mut RwTxn, edge_id: u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
         // Get edge data first
-        let edge_data = match self.edges_db.get(txn, Self::edge_key(edge_id))? {
+        let edge_data = match self.edges_db.get(txn, &Self::edge_key(edge_id))? {
             Some(data) => data,
             None => return Err(GraphError::EdgeNotFound),
         };
-        let edge: Edge = Edge::from_bincode_bytes(*edge_id, edge_data, &arena)?;
+        let edge: Edge = Edge::from_bincode_bytes(edge_id, edge_data, &arena)?;
         let label_hash = hash_label(edge.label, None);
-        let out_edge_value = Self::pack_edge_data(edge_id, &edge.to_node);
-        let in_edge_value = Self::pack_edge_data(edge_id, &edge.from_node);
+        let out_edge_value = Self::pack_edge_data(edge_id, edge.to_node);
+        let in_edge_value = Self::pack_edge_data(edge_id, edge.from_node);
         // Delete all edge-related data
-        self.edges_db.delete(txn, Self::edge_key(edge_id))?;
+        self.edges_db.delete(txn, &Self::edge_key(edge_id))?;
         self.out_edges_db.delete_one_duplicate(
             txn,
-            &Self::out_edge_key(&edge.from_node, &label_hash),
+            &Self::out_edge_key(edge.from_node, &label_hash),
             &out_edge_value,
         )?;
         self.in_edges_db.delete_one_duplicate(
             txn,
-            &Self::in_edge_key(&edge.to_node, &label_hash),
+            &Self::in_edge_key(edge.to_node, &label_hash),
             &in_edge_value,
         )?;
 
         Ok(())
     }
 
-    fn drop_vector(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
+    fn drop_vector(&self, txn: &mut RwTxn, id: u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
         let mut edges = HashSet::new();
         let mut out_edges = HashSet::new();
@@ -515,7 +517,7 @@ impl StorageMethods for HelixGraphStorage {
         // println!("Deleting edges: {}", );
         // Delete all related data
         for edge in edges {
-            self.edges_db.delete(txn, Self::edge_key(&edge))?;
+            self.edges_db.delete(txn, &Self::edge_key(edge))?;
         }
         for label_bytes in out_edges.iter() {
             self.out_edges_db
@@ -529,20 +531,20 @@ impl StorageMethods for HelixGraphStorage {
         for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
             self.out_edges_db.delete_one_duplicate(
                 txn,
-                &Self::out_edge_key(other_node_id, label_bytes),
-                &Self::pack_edge_data(edge_id, id),
+                &Self::out_edge_key(*other_node_id, label_bytes),
+                &Self::pack_edge_data(*edge_id, id),
             )?;
         }
         for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
             self.in_edges_db.delete_one_duplicate(
                 txn,
-                &Self::in_edge_key(other_node_id, label_bytes),
-                &Self::pack_edge_data(edge_id, id),
+                &Self::in_edge_key(*other_node_id, label_bytes),
+                &Self::pack_edge_data(*edge_id, id),
             )?;
         }
 
         // Delete vector data
-        self.vectors.delete(txn, *id, &arena)?;
+        self.vectors.delete(txn, id, &arena)?;
 
         Ok(())
     }
@@ -946,7 +948,7 @@ impl HelixGraphStorage {
         buf
     }
 
-    pub fn drop_node<'db>(&self, txn: &mut Txn<'db>, id: &u128) -> Result<(), GraphError> {
+    pub fn drop_node<'db>(&self, txn: &mut Txn<'db>, id: u128) -> Result<(), GraphError> {
         use crate::helix_engine::utils::RocksUtils;
 
         let arena = bumpalo::Bump::new();
@@ -1053,7 +1055,7 @@ impl HelixGraphStorage {
             .map_err(GraphError::from)
     }
 
-    pub fn drop_edge<'db>(&self, txn: &mut Txn<'db>, edge_id: &u128) -> Result<(), GraphError> {
+    pub fn drop_edge<'db>(&self, txn: &mut Txn<'db>, edge_id: u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
         let edge = self.get_edge(txn, *edge_id, &arena)?;
         let label_hash = hash_label(edge.label, None);
@@ -1072,7 +1074,7 @@ impl HelixGraphStorage {
         Ok(())
     }
 
-    pub fn drop_vector<'db>(&self, txn: &mut Txn<'db>, id: &u128) -> Result<(), GraphError> {
+    pub fn drop_vector<'db>(&self, txn: &mut Txn<'db>, id: u128) -> Result<(), GraphError> {
         use crate::helix_engine::utils::RocksUtils;
 
         let arena = bumpalo::Bump::new();

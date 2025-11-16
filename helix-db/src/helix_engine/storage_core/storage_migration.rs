@@ -4,7 +4,7 @@ use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,
         types::GraphError,
-        vector_core::{vector::HVector, VectorCore},
+        vector_core::{ENTRY_POINT_KEY, VectorCore, vector::HVector},
     },
     protocol::value::Value,
     utils::properties::ImmutablePropertiesMap,
@@ -137,7 +137,7 @@ pub(crate) fn convert_all_vectors(
         let mut cursor = storage.vectors.vectors_db.range_mut(&mut txn, &bounds)?;
 
         while let Some((key, value)) = cursor.next().transpose()? {
-            if key == vector_core::ENTRY_POINT_KEY {
+            if key == ENTRY_POINT_KEY {
                 continue;
             }
 
@@ -325,7 +325,7 @@ fn verify_vectors_and_repair(storage: &HelixGraphStorage) -> Result<(), GraphErr
 
                 if level > 0 {
                     // Check if level 0 exists
-                    let level_0_key = VectorCore::vector_key(id);
+                    let level_0_key = VectorCore::vector_key(id, 0);
                     if storage
                         .vectors
                         .vectors_db
@@ -362,7 +362,7 @@ fn verify_vectors_and_repair(storage: &HelixGraphStorage) -> Result<(), GraphErr
 
             for &(id, source_level) in batch {
                 // Read vector data from source level
-                let source_key = VectorCore::vector_key(id);
+                let source_key = VectorCore::vector_key(id, source_level);
                 let vector_data: &[u8] = {
                     let key = storage
                         .vectors
@@ -378,7 +378,7 @@ fn verify_vectors_and_repair(storage: &HelixGraphStorage) -> Result<(), GraphErr
                 };
 
                 // Write to level 0
-                let level_0_key = VectorCore::vector_key(id);
+                let level_0_key = VectorCore::vector_key(id, 0);
                 storage
                     .vectors
                     .vectors_db
@@ -431,11 +431,11 @@ fn remove_orphaned_vector_edges(storage: &HelixGraphStorage) -> Result<(), Graph
         let sink_id = u128::from_be_bytes(key[24..40].try_into().unwrap());
 
         // Check if source vector exists at level 0
-        let source_key = VectorCore::vector_key(source_id);
+        let source_key = VectorCore::vector_key(source_id, level);
         let source_exists = storage.vectors.vectors_db.get(&txn, &source_key)?.is_some();
 
         // Check if sink vector exists at level 0
-        let sink_key = VectorCore::vector_key(sink_id);
+        let sink_key = VectorCore::vector_key(sink_id, 0);
         let sink_exists = storage.vectors.vectors_db.get(&txn, &sink_key)?.is_some();
 
         if !source_exists || !sink_exists {
@@ -451,11 +451,8 @@ fn remove_orphaned_vector_edges(storage: &HelixGraphStorage) -> Result<(), Graph
         let mut txn = storage.graph_env.write_txn()?;
 
         for (source_id, level, sink_id) in chunk {
-            let edge_key = vector_core::VectorCore::out_edges_key(
-                source_id.as_u128(),
-                level,
-                Some(sink_id.as_u128()),
-            );
+            let edge_key =
+                VectorCore::out_edges_key(source_id.as_u128(), level, Some(sink_id.as_u128()));
 
             storage
                 .vectors
