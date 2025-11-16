@@ -1,13 +1,13 @@
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{HelixGraphStorage, Txn, txn::ReadTransaction},
         traversal_core::{
             ops::util::{aggregate::AggregateAdapter, group_by::GroupByAdapter},
             traversal_value::TraversalValue,
         },
         types::GraphError,
     },
-    helix_gateway::mcp::tools::{execute_query_chain, EdgeType, FilterTraversal, Order, ToolArgs},
+    helix_gateway::mcp::tools::{EdgeType, FilterTraversal, Order, ToolArgs, execute_query_chain},
     protocol::{Format, Request, Response},
     utils::id::v6_uuid,
 };
@@ -169,36 +169,52 @@ fn execute_tool_step(
     connection_id: &str,
     tool: ToolArgs,
 ) -> Result<Response, GraphError> {
-    tracing::debug!("[EXECUTE_TOOL_STEP] Starting with connection_id: {}", connection_id);
+    tracing::debug!(
+        "[EXECUTE_TOOL_STEP] Starting with connection_id: {}",
+        connection_id
+    );
 
     // Clone necessary data while holding the lock
     let query_chain = {
         tracing::debug!("[EXECUTE_TOOL_STEP] Acquiring connection lock");
         let mut connections = input.mcp_connections.lock().unwrap();
 
-        tracing::debug!("[EXECUTE_TOOL_STEP] Available connections: {:?}",
-            connections.connections.keys().collect::<Vec<_>>());
+        tracing::debug!(
+            "[EXECUTE_TOOL_STEP] Available connections: {:?}",
+            connections.connections.keys().collect::<Vec<_>>()
+        );
 
         let connection = connections
             .get_connection_mut(connection_id)
             .ok_or_else(|| {
-                tracing::error!("[EXECUTE_TOOL_STEP] Connection not found: {}", connection_id);
+                tracing::error!(
+                    "[EXECUTE_TOOL_STEP] Connection not found: {}",
+                    connection_id
+                );
                 GraphError::StorageError(format!("Connection not found: {}", connection_id))
             })?;
 
-        tracing::debug!("[EXECUTE_TOOL_STEP] Adding query step, current chain length: {}",
-            connection.query_chain.len());
+        tracing::debug!(
+            "[EXECUTE_TOOL_STEP] Adding query step, current chain length: {}",
+            connection.query_chain.len()
+        );
         connection.add_query_step(tool);
         connection.query_chain.clone()
     };
 
-    tracing::debug!("[EXECUTE_TOOL_STEP] Executing query chain with {} steps", query_chain.len());
+    tracing::debug!(
+        "[EXECUTE_TOOL_STEP] Executing query chain with {} steps",
+        query_chain.len()
+    );
 
     // Execute long-running operation without holding the lock
     let arena = Bump::new();
     let storage = input.mcp_backend.db.as_ref();
     let txn = storage.graph_env.read_txn().map_err(|e| {
-        tracing::error!("[EXECUTE_TOOL_STEP] Failed to create read transaction: {:?}", e);
+        tracing::error!(
+            "[EXECUTE_TOOL_STEP] Failed to create read transaction: {:?}",
+            e
+        );
         e
     })?;
 
@@ -210,17 +226,20 @@ fn execute_tool_step(
     let mut iter = stream.into_inner_iter();
 
     let (first, consumed_one) = match iter.next() {
-            Some(value) => {
+        Some(value) => {
             let val = value.map_err(|e| {
                 tracing::error!("[EXECUTE_TOOL_STEP] Error getting first value: {:?}", e);
                 e
             })?;
             (val, true)
-            }
+        }
         None => (TraversalValue::Empty, false),
     };
 
-    tracing::debug!("[EXECUTE_TOOL_STEP] Got first result, consumed: {}", consumed_one);
+    tracing::debug!(
+        "[EXECUTE_TOOL_STEP] Got first result, consumed: {}",
+        consumed_one
+    );
 
     // Update connection state
     {
@@ -228,7 +247,10 @@ fn execute_tool_step(
         let connection = connections
             .get_connection_mut(connection_id)
             .ok_or_else(|| {
-                tracing::error!("[EXECUTE_TOOL_STEP] Connection not found when updating state: {}", connection_id);
+                tracing::error!(
+                    "[EXECUTE_TOOL_STEP] Connection not found when updating state: {}",
+                    connection_id
+                );
                 GraphError::StorageError(format!("Connection not found: {}", connection_id))
             })?;
         connection.current_position = if consumed_one { 1 } else { 0 };
@@ -283,8 +305,10 @@ pub fn next(input: &mut MCPToolInput) -> Result<Response, GraphError> {
     // Clone necessary data while holding the lock
     let (query_chain, current_position) = {
         let connections = input.mcp_connections.lock().unwrap();
-        tracing::debug!("[NEXT] Available connections: {:?}",
-            connections.connections.keys().collect::<Vec<_>>());
+        tracing::debug!(
+            "[NEXT] Available connections: {:?}",
+            connections.connections.keys().collect::<Vec<_>>()
+        );
 
         let connection = connections
             .get_connection(&data.connection_id)
@@ -295,7 +319,11 @@ pub fn next(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         (connection.query_chain.clone(), connection.current_position)
     };
 
-    tracing::debug!("[NEXT] Current position: {}, chain length: {}", current_position, query_chain.len());
+    tracing::debug!(
+        "[NEXT] Current position: {}, chain length: {}",
+        current_position,
+        query_chain.len()
+    );
 
     // Execute long-running operation without holding the lock
     let arena = Bump::new();
@@ -311,7 +339,11 @@ pub fn next(input: &mut MCPToolInput) -> Result<Response, GraphError> {
     })?;
 
     let next_value = match stream.nth(current_position).map_err(|e| {
-        tracing::error!("[NEXT] Error iterating to position {}: {:?}", current_position, e);
+        tracing::error!(
+            "[NEXT] Error iterating to position {}: {:?}",
+            current_position,
+            e
+        );
         e
     })? {
         Some(value) => {
@@ -320,11 +352,20 @@ pub fn next(input: &mut MCPToolInput) -> Result<Response, GraphError> {
             let connection = connections
                 .get_connection_mut(&data.connection_id)
                 .ok_or_else(|| {
-                    tracing::error!("[NEXT] Connection not found when updating position: {}", data.connection_id);
-                    GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+                    tracing::error!(
+                        "[NEXT] Connection not found when updating position: {}",
+                        data.connection_id
+                    );
+                    GraphError::StorageError(format!(
+                        "Connection not found: {}",
+                        data.connection_id
+                    ))
                 })?;
             connection.current_position += 1;
-            tracing::debug!("[NEXT] Updated position to: {}", connection.current_position);
+            tracing::debug!(
+                "[NEXT] Updated position to: {}",
+                connection.current_position
+            );
             value
         }
         None => {
@@ -361,7 +402,9 @@ pub fn collect(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection(&data.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+            })?;
         connection.query_chain.clone()
     };
 
@@ -381,9 +424,10 @@ pub fn collect(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let item = item?;
         if index >= start {
             if let Some(end) = end
-                && index >= end {
-                    break;
-                }
+                && index >= end
+            {
+                break;
+            }
             values.push(item);
         }
     }
@@ -393,7 +437,9 @@ pub fn collect(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let mut connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection_mut(&data.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+            })?;
 
         if data.drop.unwrap_or(true) {
             connection.clear_chain();
@@ -422,7 +468,9 @@ pub fn aggregate_by(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection(&data.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+            })?;
         connection.query_chain.clone()
     };
 
@@ -442,7 +490,9 @@ pub fn aggregate_by(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let mut connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection_mut(&data.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+            })?;
 
         if data.drop.unwrap_or(true) {
             connection.clear_chain();
@@ -464,7 +514,9 @@ pub fn group_by(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection(&data.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+            })?;
         connection.query_chain.clone()
     };
 
@@ -484,7 +536,9 @@ pub fn group_by(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         let mut connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection_mut(&data.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+            })?;
 
         if data.drop.unwrap_or(true) {
             connection.clear_chain();
@@ -509,7 +563,9 @@ pub fn reset(input: &mut MCPToolInput) -> Result<Response, GraphError> {
     let mut connections = input.mcp_connections.lock().unwrap();
     let connection = connections
         .get_connection_mut(&data.connection_id)
-        .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", data.connection_id)))?;
+        .ok_or_else(|| {
+            GraphError::StorageError(format!("Connection not found: {}", data.connection_id))
+        })?;
 
     connection.clear_chain();
     let connection_id = connection.connection_id.clone();
@@ -770,10 +826,7 @@ pub struct SearchKeywordInput {
 
 #[mcp_handler]
 pub fn search_keyword(input: &mut MCPToolInput) -> Result<Response, GraphError> {
-    use crate::helix_engine::traversal_core::ops::{
-        bm25::search_bm25::SearchBM25Adapter,
-        g::G,
-    };
+    use crate::helix_engine::traversal_core::ops::{bm25::search_bm25::SearchBM25Adapter, g::G};
 
     let req: SearchKeywordInput = match sonic_rs::from_slice(&input.request.body) {
         Ok(data) => data,
@@ -785,7 +838,9 @@ pub fn search_keyword(input: &mut MCPToolInput) -> Result<Response, GraphError> 
         let connections = input.mcp_connections.lock().unwrap();
         connections
             .get_connection(&req.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", req.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", req.connection_id))
+            })?;
     }
 
     // Execute long-running operation without holding the lock
@@ -796,7 +851,7 @@ pub fn search_keyword(input: &mut MCPToolInput) -> Result<Response, GraphError> 
     // Perform BM25 search using the existing index
     let results = G::new(storage, &txn, &arena)
         .search_bm25(&req.data.label, &req.data.query, req.data.limit)?
-        .collect::<Result<Vec<_>,_>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     let (first, consumed_one) = match results.first() {
         Some(value) => (value.clone(), true),
@@ -808,7 +863,9 @@ pub fn search_keyword(input: &mut MCPToolInput) -> Result<Response, GraphError> 
         let mut connections = input.mcp_connections.lock().unwrap();
         let connection = connections
             .get_connection_mut(&req.connection_id)
-            .ok_or_else(|| GraphError::StorageError(format!("Connection not found: {}", req.connection_id)))?;
+            .ok_or_else(|| {
+                GraphError::StorageError(format!("Connection not found: {}", req.connection_id))
+            })?;
 
         // Store remaining results for pagination
         connection.current_position = if consumed_one { 1 } else { 0 };
@@ -833,11 +890,8 @@ pub struct SearchVectorTextInput {
 
 #[mcp_handler]
 pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphError> {
-    use crate::helix_engine::traversal_core::ops::{
-        g::G,
-        vectors::search::SearchVAdapter,
-    };
-    use crate::helix_gateway::embedding_providers::{get_embedding_model, EmbeddingModel};
+    use crate::helix_engine::traversal_core::ops::{g::G, vectors::search::SearchVAdapter};
+    use crate::helix_gateway::embedding_providers::{EmbeddingModel, get_embedding_model};
 
     let req: SearchVectorTextInput = match sonic_rs::from_slice(&input.request.body) {
         Ok(data) => data,
@@ -847,20 +901,30 @@ pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphErr
         }
     };
 
-    tracing::debug!("[VECTOR_SEARCH] Starting search for connection: {}, query: {}, label: {}, k: {:?}",
-        req.connection_id, req.data.query, req.data.label, req.data.k);
+    tracing::debug!(
+        "[VECTOR_SEARCH] Starting search for connection: {}, query: {}, label: {}, k: {:?}",
+        req.connection_id,
+        req.data.query,
+        req.data.label,
+        req.data.k
+    );
 
     // Verify connection exists
     {
         tracing::debug!("[VECTOR_SEARCH] Verifying connection exists");
         let connections = input.mcp_connections.lock().unwrap();
-        tracing::debug!("[VECTOR_SEARCH] Available connections: {:?}",
-            connections.connections.keys().collect::<Vec<_>>());
+        tracing::debug!(
+            "[VECTOR_SEARCH] Available connections: {:?}",
+            connections.connections.keys().collect::<Vec<_>>()
+        );
 
         connections
             .get_connection(&req.connection_id)
             .ok_or_else(|| {
-                tracing::error!("[VECTOR_SEARCH] Connection not found: {}", req.connection_id);
+                tracing::error!(
+                    "[VECTOR_SEARCH] Connection not found: {}",
+                    req.connection_id
+                );
                 GraphError::StorageError(format!("Connection not found: {}", req.connection_id))
             })?;
     }
@@ -883,25 +947,30 @@ pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphErr
     })?;
 
     tracing::debug!("[VECTOR_SEARCH] Fetching embedding for query text");
-    let query_embedding = embedding_model.fetch_embedding(&req.data.query).map_err(|e| {
-        tracing::error!("[VECTOR_SEARCH] Failed to fetch embedding: {:?}", e);
-        e
-    })?;
+    let query_embedding = embedding_model
+        .fetch_embedding(&req.data.query)
+        .map_err(|e| {
+            tracing::error!("[VECTOR_SEARCH] Failed to fetch embedding: {:?}", e);
+            e
+        })?;
     let query_vec_arena = arena.alloc_slice_copy(&query_embedding);
 
     // Perform vector search
     let k_value = req.data.k.unwrap_or(10);
     let label_arena = arena.alloc_str(&req.data.label);
 
-    tracing::debug!("[VECTOR_SEARCH] Performing vector search with k={}", k_value);
+    tracing::debug!(
+        "[VECTOR_SEARCH] Performing vector search with k={}",
+        k_value
+    );
     let results = G::new(storage, &txn, &arena)
-        .search_v::<fn(&crate::helix_engine::vector_core::vector::HVector, &heed3::RoTxn) -> bool, _>(
+        .search_v::<fn(&crate::helix_engine::vector_core::vector::HVector, &Txn) -> bool, _>(
             query_vec_arena,
             k_value,
             label_arena,
-            None
+            None,
         )
-        .collect::<Result<Vec<_>,_>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     tracing::debug!("[VECTOR_SEARCH] Search returned {} results", results.len());
 
@@ -923,12 +992,18 @@ pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphErr
         let connection = connections
             .get_connection_mut(&req.connection_id)
             .ok_or_else(|| {
-                tracing::error!("[VECTOR_SEARCH] Connection not found when updating state: {}", req.connection_id);
+                tracing::error!(
+                    "[VECTOR_SEARCH] Connection not found when updating state: {}",
+                    req.connection_id
+                );
                 GraphError::StorageError(format!("Connection not found: {}", req.connection_id))
             })?;
 
         connection.current_position = if consumed_one { 1 } else { 0 };
-        tracing::debug!("[VECTOR_SEARCH] Updated position to: {}", connection.current_position);
+        tracing::debug!(
+            "[VECTOR_SEARCH] Updated position to: {}",
+            connection.current_position
+        );
     }
 
     tracing::debug!("[VECTOR_SEARCH] Successfully completed");

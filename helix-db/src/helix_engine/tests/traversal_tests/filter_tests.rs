@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::helix_engine::traversal_core::ops::source::add_e::AddEAdapter;
 use crate::helix_engine::{
-    storage_core::HelixGraphStorage,
+    storage_core::{HelixGraphStorage, txn::{ReadTransaction, WriteTransaction}},
     traversal_core::{
         ops::{g::G, source::add_n::AddNAdapter, util::filter_ref::FilterRefAdapter},
         traversal_value::TraversalValue,

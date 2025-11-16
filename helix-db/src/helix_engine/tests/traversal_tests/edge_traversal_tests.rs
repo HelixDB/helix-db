@@ -5,9 +5,9 @@ use tempfile::TempDir;
 
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{HelixGraphStorage, txn::{ReadTransaction, WriteTransaction}},
         tests::traversal_tests::test_utils::props_option,
-        traversal_core::{
+        traversal_core::{RTxn,
             ops::{
                 g::G,
                 in_::in_e::InEdgesAdapter,
@@ -29,7 +29,7 @@ use crate::{
 };
 use heed3::RoTxn;
 
-type Filter = fn(&HVector, &RoTxn) -> bool;
+type Filter = for<'a> fn(&HVector, &RTxn<'a>) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();

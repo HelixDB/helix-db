@@ -1,5 +1,7 @@
 use crate::helix_engine::{
-    storage_core::{HelixGraphStorage, storage_methods::DBMethods, version_info::VersionInfo, StorageConfig},
+    storage_core::{
+        HelixGraphStorage, StorageConfig, storage_methods::DBMethods, version_info::VersionInfo,
+    },
     traversal_core::config::Config,
 };
 use tempfile::TempDir;
@@ -23,7 +25,7 @@ fn setup_test_storage() -> (HelixGraphStorage, TempDir) {
 #[test]
 fn test_node_key() {
     let id = 12345u128;
-    let key = HelixGraphStorage::node_key(&id);
+    let key = HelixGraphStorage::node_key(id);
     assert_eq!(*key, id);
 }
 

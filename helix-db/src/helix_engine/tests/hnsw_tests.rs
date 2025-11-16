@@ -1,20 +1,28 @@
+#[cfg(feature = "rocks")]
+use std::sync::Arc;
+
 use bumpalo::Bump;
 use heed3::{Env, EnvOpenOptions, RoTxn};
 use rand::Rng;
 use tempfile::TempDir;
 
-use crate::helix_engine::vector_core::{
-    hnsw::HNSW,
-    vector::HVector,
-    vector_core::{HNSWConfig, VectorCore},
-};
+use crate::helix_engine::storage_core::txn::{ReadTransaction, WriteTransaction};
+use crate::helix_engine::traversal_core::RTxn;
+use crate::helix_engine::vector_core::{HNSW, HNSWConfig, VectorCore, vector::HVector};
 
-type Filter = fn(&HVector, &RoTxn) -> bool;
+type Filter = for<'a> fn(&HVector, &RTxn<'a>) -> bool;
 
-fn setup_env() -> (Env, TempDir) {
+#[cfg(feature = "lmdb")]
+type DB = Env;
+
+#[cfg(feature = "rocks")]
+type DB = Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>;
+
+fn setup_env() -> (DB, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path();
 
+    #[cfg(feature = "lmdb")]
     let env = unsafe {
         EnvOpenOptions::new()
             .map_size(512 * 1024 * 1024)
@@ -22,14 +30,70 @@ fn setup_env() -> (Env, TempDir) {
             .open(path)
             .unwrap()
     };
+
+    #[cfg(feature = "rocks")]
+    let env = {
+        use crate::helix_engine::storage_core::{HelixGraphStorage, default_helix_rocksdb_options};
+
+        let mut cf_descriptors = vec![
+            rocksdb::ColumnFamilyDescriptor::new("nodes", HelixGraphStorage::nodes_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new("edges", HelixGraphStorage::edges_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new(
+                "out_edges",
+                HelixGraphStorage::edges_index_cf_options(),
+            ),
+            rocksdb::ColumnFamilyDescriptor::new(
+                "in_edges",
+                HelixGraphStorage::edges_index_cf_options(),
+            ),
+            rocksdb::ColumnFamilyDescriptor::new("metadata", rocksdb::Options::default()),
+        ];
+
+        let vector_cf_descriptors = vec![
+            rocksdb::ColumnFamilyDescriptor::new("vectors", VectorCore::vector_cf_options()),
+            rocksdb::ColumnFamilyDescriptor::new(
+                "vector_data",
+                VectorCore::vector_properties_cf_options(),
+            ),
+            rocksdb::ColumnFamilyDescriptor::new(
+                "hnsw_edges",
+                VectorCore::vector_edges_cf_options(),
+            ),
+            rocksdb::ColumnFamilyDescriptor::new("ep", rocksdb::Options::default()),
+        ];
+        cf_descriptors.extend(vector_cf_descriptors);
+        let mut db_opts = default_helix_rocksdb_options();
+        let txn_db_opts = rocksdb::TransactionDBOptions::new();
+        let db = Arc::new(
+            rocksdb::TransactionDB::<rocksdb::MultiThreaded>::open_cf_descriptors(
+                &db_opts,
+                &txn_db_opts,
+                path,
+                cf_descriptors,
+            )
+            .unwrap(),
+        );
+        db
+    };
+
     (env, temp_dir)
+}
+
+#[cfg(feature = "rocks")]
+fn index(env: &DB) -> VectorCore {
+    VectorCore::new(Arc::clone(env), HNSWConfig::new(None, None, None)).unwrap()
+}
+
+#[cfg(feature = "lmdb")]
+fn index(env: &DB) -> VectorCore {
+    VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap()
 }
 
 #[test]
 fn test_hnsw_insert_and_count() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = index(&env);
 
     let vector: Vec<f64> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
     for _ in 0..10 {
@@ -49,7 +113,7 @@ fn test_hnsw_insert_and_count() {
 fn test_hnsw_search_returns_results() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = index(&env);
 
     let mut rng = rand::rng();
     for _ in 0..128 {

@@ -20,13 +20,15 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
 
+use crate::helix_engine::storage_core::txn::{ReadTransaction, WriteTransaction};
+use crate::helix_engine::traversal_core::RTxn;
 use crate::helix_engine::vector_core::{
     hnsw::HNSW,
     vector::HVector,
-    vector_core::{HNSWConfig, VectorCore},
+    HNSWConfig, VectorCore,
 };
 
-type Filter = fn(&HVector, &RoTxn) -> bool;
+type Filter = for<'a> fn(&HVector, &RTxn<'a>) -> bool;
 
 /// Setup test environment with larger map size for concurrent access
 ///

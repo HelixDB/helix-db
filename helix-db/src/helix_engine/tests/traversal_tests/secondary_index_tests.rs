@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use super::test_utils::props_option;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{HelixGraphStorage, txn::{ReadTransaction, WriteTransaction}},
         traversal_core::{
             ops::{
                 g::G,

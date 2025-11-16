@@ -717,27 +717,27 @@ impl HelixGraphStorage {
         Ok(storage)
     }
 
-    fn nodes_cf_options() -> rocksdb::Options {
+    pub fn nodes_cf_options() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16)); // u128 = 16 bytes
         opts
     }
 
-    fn edges_cf_options() -> rocksdb::Options {
+    pub fn edges_cf_options() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16)); // u128 = 16 bytes
         opts
     }
 
-    fn edges_index_cf_options() -> rocksdb::Options {
+    pub fn edges_index_cf_options() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         // For DUP_SORT replacement: use prefix for node_id+label (24 bytes)
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(24));
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(20));
         opts
     }
 
     // TODO CHANGE THIS
-    fn secondary_index_cf_options() -> rocksdb::Options {
+    pub fn secondary_index_cf_options() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         opts.set_merge_operator_associative("append", Self::merge_append);
         opts

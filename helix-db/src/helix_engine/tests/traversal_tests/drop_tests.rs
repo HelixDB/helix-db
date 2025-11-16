@@ -8,8 +8,8 @@ use tempfile::TempDir;
 use super::test_utils::props_option;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
-        traversal_core::{
+        storage_core::{HelixGraphStorage, txn::{ReadTransaction, WriteTransaction}},
+        traversal_core::{RTxn,
             ops::{
                 g::G,
                 in_::{in_::InAdapter, in_e::InEdgesAdapter},
@@ -30,7 +30,7 @@ use crate::{
     props,
 };
 
-type Filter = fn(&HVector, &RoTxn) -> bool;
+type Filter = for<'a> fn(&HVector, &RTxn<'a>) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
