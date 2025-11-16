@@ -167,14 +167,14 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
         let label_hash = hash_label(edge.label, None);
 
-        // For RocksDB, the key includes from_node, label, and to_node (36 bytes)
-        // The value is just the edge_id (16 bytes)
-        let out_edge_key = HelixGraphStorage::out_edge_key(from_node, &label_hash, to_node);
-        match self.txn.put_cf(
-            &self.storage.cf_out_edges(),
-            out_edge_key,
-            &edge.id.to_be_bytes(),
-        ) {
+        // For RocksDB, the key includes from_node, label, to_node, and edge_id (52 bytes)
+        // The value is empty
+        let out_edge_key =
+            HelixGraphStorage::out_edge_key(from_node, &label_hash, to_node, edge.id);
+        match self
+            .txn
+            .put_cf(&self.storage.cf_out_edges(), out_edge_key, &[])
+        {
             Ok(_) => {}
             Err(e) => {
                 println!(
@@ -184,12 +184,11 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             }
         }
 
-        let in_edge_key = HelixGraphStorage::in_edge_key(to_node, &label_hash, from_node);
-        match self.txn.put_cf(
-            &self.storage.cf_in_edges(),
-            in_edge_key,
-            &edge.id.to_be_bytes(),
-        ) {
+        let in_edge_key = HelixGraphStorage::in_edge_key(to_node, &label_hash, from_node, edge.id);
+        match self
+            .txn
+            .put_cf(&self.storage.cf_in_edges(), in_edge_key, &[])
+        {
             Ok(_) => {}
             Err(e) => {
                 println!(

@@ -350,31 +350,26 @@ where
                 let (_, value) = result.unwrap(); // TODO: handle error
                 let (edge_id, to_node) = HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
 
-                let edge = self
-                    .storage
-                    .get_edge(self.txn, &edge_id, self.arena)
-                    .unwrap(); // TODO: handle error
+                let edge = match self.storage.get_edge(self.txn, &edge_id, self.arena) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
 
-                // Extract weight from edge properties, default to 1.0 if not present
-                let weight = edge
-                    .properties
-                    .as_ref()
-                    .and_then(|props| props.get("weight"))
-                    .and_then(|w| match w {
-                        Value::F32(f) => Some(*f as f64),
-                        Value::F64(f) => Some(*f),
-                        Value::I8(i) => Some(*i as f64),
-                        Value::I16(i) => Some(*i as f64),
-                        Value::I32(i) => Some(*i as f64),
-                        Value::I64(i) => Some(*i as f64),
-                        Value::U8(i) => Some(*i as f64),
-                        Value::U16(i) => Some(*i as f64),
-                        Value::U32(i) => Some(*i as f64),
-                        Value::U64(i) => Some(*i as f64),
-                        Value::Boolean(i) => Some(*i as i8 as f64),
-                        _ => None,
-                    })
-                    .unwrap_or(1.0);
+                // Fetch nodes for full context in weight calculation
+                let src_node = match self.storage.get_node(self.txn, &current_id, self.arena) {
+                    Ok(n) => n,
+                    Err(e) => return Some(Err(e)),
+                };
+                let dst_node = match self.storage.get_node(self.txn, &to_node, self.arena) {
+                    Ok(n) => n,
+                    Err(e) => return Some(Err(e)),
+                };
+
+                // Call custom weight function with full context
+                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
+                    Ok(w) => w,
+                    Err(e) => return Some(Err(e)),
+                };
 
                 if weight < 0.0 {
                     return Some(Err(GraphError::TraversalError(
@@ -532,7 +527,7 @@ where
 // ============================================================================
 // RocksDB Implementation
 // ============================================================================
-
+use crate::helix_engine::utils::RocksUtils;
 #[cfg(feature = "rocks")]
 impl<
     'db: 'arena,
@@ -619,6 +614,8 @@ where
         while let Some(current_id) = queue.pop_front() {
             // For RocksDB, we need to create a prefix that's only 20 bytes (node_id + label)
             // since the full key is 36 bytes (node_id + label + to_node)
+
+            use crate::helix_engine::utils::RocksUtils;
             let out_prefix = self.edge_label.map_or_else(
                 || current_id.to_be_bytes().to_vec(),
                 |label| {
@@ -627,37 +624,24 @@ where
                 },
             );
 
-            let iter = self
+            let mut iter = self
                 .txn
-                .prefix_iterator_cf(&self.storage.cf_out_edges(), &out_prefix);
+                .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
 
-            for result in iter {
-                let (key, value) = match result {
-                    Ok((key, value)) => (key, value),
-                    Err(e) => return Some(Err(GraphError::from(e))),
-                };
+            while let Some(key) = iter.key() {
+                let (from_node_id, label, to_node_id, edge_id) =
+                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
+                if !visited.contains(&to_node_id) {
+                    visited.insert(to_node_id);
+                    parent.insert(to_node_id, (current_id, edge_id));
 
-                // For RocksDB: extract edge_id from value (16 bytes) and to_node from key[20..36]
-                let edge_id = match value.as_ref().try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => return Some(Err(GraphError::SliceLengthError)),
-                };
-
-                let to_node = match key[20..36].try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => return Some(Err(GraphError::SliceLengthError)),
-                };
-
-                if !visited.contains(&to_node) {
-                    visited.insert(to_node);
-                    parent.insert(to_node, (current_id, edge_id));
-
-                    if to_node == to {
+                    if to_node_id == to {
                         return Some(self.reconstruct_path(&parent, from, to, self.arena));
                     }
 
-                    queue.push_back(to_node);
+                    queue.push_back(to_node_id);
                 }
+                iter.next();
             }
         }
         Some(Err(GraphError::ShortestPathNotFound))
@@ -684,6 +668,7 @@ where
         }) = heap.pop()
         {
             // Already found a better path
+
             if let Some(&best_dist) = distances.get(&current_id)
                 && current_dist > best_dist
             {
@@ -704,52 +689,34 @@ where
                 },
             );
 
-            let iter = self
+            let mut iter = self
                 .txn
-                .prefix_iterator_cf(&self.storage.cf_out_edges(), &out_prefix);
+                .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
 
-            for result in iter {
-                let (key, value) = match result {
-                    Ok((key, value)) => (key, value),
-                    Err(e) => return Some(Err(GraphError::from(e))),
-                };
-
-                // For RocksDB: extract edge_id from value (16 bytes) and to_node from key[20..36]
-                let edge_id = match value.as_ref().try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => return Some(Err(GraphError::SliceLengthError)),
-                };
-
-                let to_node = match key[20..36].try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => return Some(Err(GraphError::SliceLengthError)),
-                };
+            while let Some(key) = iter.key() {
+                let (from_node_id, label, to_node_id, edge_id) =
+                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
 
                 let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
                     Ok(e) => e,
                     Err(e) => return Some(Err(e)),
                 };
 
-                // Extract weight from edge properties, default to 1.0 if not present
-                let weight = edge
-                    .properties
-                    .as_ref()
-                    .and_then(|props| props.get("weight"))
-                    .and_then(|w| match w {
-                        Value::F32(f) => Some(*f as f64),
-                        Value::F64(f) => Some(*f),
-                        Value::I8(i) => Some(*i as f64),
-                        Value::I16(i) => Some(*i as f64),
-                        Value::I32(i) => Some(*i as f64),
-                        Value::I64(i) => Some(*i as f64),
-                        Value::U8(i) => Some(*i as f64),
-                        Value::U16(i) => Some(*i as f64),
-                        Value::U32(i) => Some(*i as f64),
-                        Value::U64(i) => Some(*i as f64),
-                        Value::Boolean(i) => Some(*i as i8 as f64),
-                        _ => None,
-                    })
-                    .unwrap_or(1.0);
+                // Fetch nodes for full context in weight calculation
+                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
+                    Ok(n) => n,
+                    Err(e) => return Some(Err(e)),
+                };
+                let dst_node = match self.storage.get_node(self.txn, to_node_id, self.arena) {
+                    Ok(n) => n,
+                    Err(e) => return Some(Err(e)),
+                };
+
+                // Call custom weight function with full context
+                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
+                    Ok(w) => w,
+                    Err(e) => return Some(Err(e)),
+                };
 
                 if weight < 0.0 {
                     return Some(Err(GraphError::TraversalError(
@@ -761,17 +728,18 @@ where
                 let new_dist = current_dist + weight;
 
                 let should_update = distances
-                    .get(&to_node)
+                    .get(&to_node_id)
                     .is_none_or(|&existing_dist| new_dist < existing_dist);
 
                 if should_update {
-                    distances.insert(to_node, new_dist);
-                    parent.insert(to_node, (current_id, edge_id));
+                    distances.insert(to_node_id, new_dist);
+                    parent.insert(to_node_id, (current_id, edge_id));
                     heap.push(DijkstraState {
-                        node_id: to_node,
+                        node_id: to_node_id,
                         distance: new_dist,
                     });
                 }
+                iter.next();
             }
         }
         Some(Err(GraphError::ShortestPathNotFound))
@@ -839,27 +807,14 @@ where
                         .to_vec()
                 },
             );
-
-            let iter = self
+            println!("iterating");
+            let mut iter = self
                 .txn
-                .prefix_iterator_cf(&self.storage.cf_out_edges(), &out_prefix);
+                .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
 
-            for result in iter {
-                let (key, value) = match result {
-                    Ok((key, value)) => (key, value),
-                    Err(e) => return Some(Err(GraphError::from(e))),
-                };
-
-                // For RocksDB: extract edge_id from value (16 bytes) and to_node from key[20..36]
-                let edge_id = match value.as_ref().try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => return Some(Err(GraphError::SliceLengthError)),
-                };
-
-                let to_node = match key[20..36].try_into() {
-                    Ok(bytes) => u128::from_be_bytes(bytes),
-                    Err(_) => return Some(Err(GraphError::SliceLengthError)),
-                };
+            while let Some(key) = iter.key() {
+                let (from_node_id, label, to_node_id, edge_id) =
+                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
 
                 let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
                     Ok(e) => e,
@@ -871,7 +826,7 @@ where
                     Ok(n) => n,
                     Err(e) => return Some(Err(e)),
                 };
-                let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
+                let dst_node = match self.storage.get_node(self.txn, to_node_id, self.arena) {
                     Ok(n) => n,
                     Err(e) => return Some(Err(e)),
                 };
@@ -891,7 +846,7 @@ where
                 let tentative_g = current_g + weight;
 
                 let should_update = g_scores
-                    .get(&to_node)
+                    .get(&to_node_id)
                     .is_none_or(|&existing_g| tentative_g < existing_g);
 
                 if should_update {
@@ -903,14 +858,15 @@ where
 
                     let f = tentative_g + h;
 
-                    g_scores.insert(to_node, tentative_g);
-                    parent.insert(to_node, (current_id, edge_id));
+                    g_scores.insert(to_node_id, tentative_g);
+                    parent.insert(to_node_id, (current_id, edge_id));
                     heap.push(AStarState {
-                        node_id: to_node,
+                        node_id: to_node_id,
                         g_score: tentative_g,
                         f_score: f,
                     });
                 }
+                iter.next();
             }
         }
         Some(Err(GraphError::ShortestPathNotFound))

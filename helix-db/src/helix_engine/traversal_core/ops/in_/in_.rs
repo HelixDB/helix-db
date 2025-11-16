@@ -216,7 +216,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                     }
 
                     // Extract from_node from key: to_node(16) | label(4) | from_node(16)
-                    let (_, _, from_node) =
+                    let (_, _, from_node, _) =
                         match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
                             Ok(data) => data,
                             Err(e) => {
@@ -299,7 +299,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                     }
 
                     // Extract from_node from key: to_node(16) | label(4) | from_node(16)
-                    let (_, _, from_node) =
+                    let (_, _, from_node, _) =
                         match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
                             Ok(data) => data,
                             Err(e) => {

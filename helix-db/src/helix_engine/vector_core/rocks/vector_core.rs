@@ -139,7 +139,7 @@ fn hnsw_edges_merge(
             }
         }
     }
-    None
+    Some(new_edges)
 }
 
 impl VectorCore {
@@ -293,31 +293,30 @@ impl VectorCore {
         );
 
         let cf_edges = self.cf_edges();
-        let mut iter = txn.raw_prefix_iter(&cf_edges, &out_key);
+        let edges = txn.get_pinned_cf(&cf_edges, &out_key)?;
 
-        let prefix_len = out_key.len();
+        if let Some(value) = edges {
+            let edges = Self::decode_edges(&value);
+            for edge_entry in edges {
+                let neighbor_id = u128::from_be_bytes(edge_entry[..16].try_into().unwrap());
+                if neighbor_id == id {
+                    continue;
+                }
 
-        while let Some((key, value)) = iter.item() {
-            assert_eq!(key.len(), 17);
-            assert_eq!(value.len(), 17);
-            let neighbor_id = u128::from_be_bytes(key[..17].try_into().unwrap());
-            if neighbor_id == id {
-                continue;
+                let level = edge_entry[16];
+                let mut vector = self.get_raw_vector_data(txn, neighbor_id, label, arena)?;
+                vector.level = level as usize; // TODO modify vector to take level.
+                let passes_filters = match filter {
+                    Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
+                    None => true,
+                };
+
+                if passes_filters {
+                    neighbors.push(vector);
+                }
             }
-
-            let level = key[17];
-            let mut vector = self.get_raw_vector_data(txn, neighbor_id, label, arena)?;
-            vector.level = level as usize; // TODO modify vector to take level.
-            let passes_filters = match filter {
-                Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
-                None => true,
-            };
-
-            if passes_filters {
-                neighbors.push(vector);
-            }
-            iter.next();
         }
+
         neighbors.shrink_to_fit();
 
         Ok(neighbors)

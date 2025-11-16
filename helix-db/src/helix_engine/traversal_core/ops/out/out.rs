@@ -207,14 +207,14 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                 Some(iter.filter_map(move |result| {
                     match result {
-                        Ok((key, value)) => {
+                        Ok((key, _)) => {
                             // Manual prefix check for RocksDB
                             if !key.starts_with(&prefix) {
                                 return None;
                             }
 
                             // Unpack key to get to_node
-                            let (_, _, item_id) =
+                            let (_, _, item_id, _) =
                                 match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
                                     Ok(data) => data,
                                     Err(e) => {
@@ -290,7 +290,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                             }
 
                             // Unpack key to get to_node
-                            let (_, _, item_id) =
+                            let (_, _, item_id, _) =
                                 match HelixGraphStorage::unpack_adj_edge_key(key.as_ref()) {
                                     Ok(data) => data,
                                     Err(e) => {

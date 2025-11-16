@@ -150,16 +150,7 @@ impl<
     where
         K: Into<Value> + Serialize + Clone,
     {
-        let cf_name = self
-            .storage
-            .secondary_indices
-            .get(index)
-            .ok_or(GraphError::New(format!(
-                "Secondary Index {index} not found"
-            )))
-            .unwrap();
-
-        let cf = self.storage.get_secondary_index_cf_handle(cf_name).unwrap();
+        let cf = self.storage.get_secondary_index_cf_handle(index).unwrap();
         let search_key = bincode::serialize(&Value::from(key)).unwrap();
 
         let storage = self.storage;

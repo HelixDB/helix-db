@@ -695,7 +695,7 @@ fn test_astar_with_property_heuristic() {
     let txn = storage.graph_env.read_txn().unwrap();
 
     let heuristic = |node: &crate::utils::items::Node| property_heuristic(node, "h");
-
+    println!("testing");
     let path = G::new(&storage, &txn, &arena)
         .n_from_id(&start)
         .shortest_path_astar(
