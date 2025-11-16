@@ -1004,31 +1004,31 @@ impl HelixGraphStorage {
         for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
             txn.delete_cf(
                 &cf_out_edges,
-                &Self::out_edge_key(*id, label_bytes, *to_node_id, *edge_id),
+                &Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id),
             )?;
         }
         for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
             txn.delete_cf(
                 &cf_in_edges,
-                &Self::in_edge_key(*id, label_bytes, *from_node_id, *edge_id),
+                &Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id),
             )?;
         }
 
         for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
             txn.delete_cf(
                 &cf_out_edges,
-                &Self::out_edge_key(*other_node_id, label_bytes, *id, *edge_id),
+                &Self::out_edge_key(*other_node_id, label_bytes, id, *edge_id),
             )?;
         }
         for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
             txn.delete_cf(
                 &cf_in_edges,
-                &Self::in_edge_key(*other_node_id, label_bytes, *id, *edge_id),
+                &Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id),
             )?;
         }
 
         // delete secondary indices
-        let node = self.get_node(txn, *id, &arena)?;
+        let node = self.get_node(txn, id, &arena)?;
 
         for (index_name, cf_name) in &self.secondary_indices {
             let cf = self.graph_env.cf_handle(cf_name).unwrap();
@@ -1051,16 +1051,16 @@ impl HelixGraphStorage {
 
         // Delete node data
         let cf_nodes = self.cf_nodes();
-        txn.delete_cf(&cf_nodes, Self::node_key(*id))
+        txn.delete_cf(&cf_nodes, Self::node_key(id))
             .map_err(GraphError::from)
     }
 
     pub fn drop_edge<'db>(&self, txn: &mut Txn<'db>, edge_id: u128) -> Result<(), GraphError> {
         let arena = bumpalo::Bump::new();
-        let edge = self.get_edge(txn, *edge_id, &arena)?;
+        let edge = self.get_edge(txn, edge_id, &arena)?;
         let label_hash = hash_label(edge.label, None);
-        let out_edge_key = Self::out_edge_key(edge.from_node, &label_hash, edge.to_node, *edge_id);
-        let in_edge_key = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node, *edge_id);
+        let out_edge_key = Self::out_edge_key(edge.from_node, &label_hash, edge.to_node, edge_id);
+        let in_edge_key = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node, edge_id);
 
         // Get column family handles
         let cf_edges = self.cf_edges();
@@ -1068,7 +1068,7 @@ impl HelixGraphStorage {
         let cf_in_edges = self.cf_in_edges();
 
         // Delete all edge-related data
-        txn.delete_cf(&cf_edges, &Self::edge_key(*edge_id))?;
+        txn.delete_cf(&cf_edges, &Self::edge_key(edge_id))?;
         txn.delete_cf(&cf_out_edges, &out_edge_key)?;
         txn.delete_cf(&cf_in_edges, &in_edge_key)?;
         Ok(())
@@ -1130,31 +1130,31 @@ impl HelixGraphStorage {
         for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
             txn.delete_cf(
                 &cf_out_edges,
-                &Self::out_edge_key(*id, label_bytes, *to_node_id, *edge_id),
+                &Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id),
             )?;
         }
         for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
             txn.delete_cf(
                 &cf_in_edges,
-                &Self::in_edge_key(*id, label_bytes, *from_node_id, *edge_id),
+                &Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id),
             )?;
         }
 
         for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
             txn.delete_cf(
                 &cf_out_edges,
-                &Self::out_edge_key(*other_node_id, label_bytes, *id, *edge_id),
+                &Self::out_edge_key(*other_node_id, label_bytes, id, *edge_id),
             )?;
         }
         for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
             txn.delete_cf(
                 &cf_in_edges,
-                &Self::in_edge_key(*other_node_id, label_bytes, *id, *edge_id),
+                &Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id),
             )?;
         }
 
         // Delete vector data
-        self.vectors.delete(txn, *id, &arena)?;
+        self.vectors.delete(txn, id, &arena)?;
 
         Ok(())
     }
