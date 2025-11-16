@@ -214,6 +214,68 @@ pub fn print_confirm(message: &str) -> std::io::Result<bool> {
     Ok(response.to_lowercase() == "y" || response.to_lowercase() == "yes")
 }
 
+/// Spinner utilities for showing loading animations during async operations
+pub mod spinner {
+    use std::io::{self, Write};
+    use tokio::time::{interval, Duration};
+
+    const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    const SPINNER_INTERVAL_MS: u64 = 100;
+
+    /// Runs an async operation with a spinner animation
+    /// The spinner will automatically animate and clear when the operation completes
+    pub async fn with_spinner<F, T>(message: &str, operation: F) -> eyre::Result<T>
+    where
+        F: std::future::Future<Output = eyre::Result<T>>,
+    {
+        let message = message.to_string();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+
+        // Spawn the spinner animation task
+        let spinner_handle = tokio::spawn(async move {
+            let mut interval = interval(Duration::from_millis(SPINNER_INTERVAL_MS));
+            let mut frame = 0;
+            let mut stdout = io::stdout();
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let spinner_char = SPINNER_CHARS[frame % SPINNER_CHARS.len()];
+                        frame += 1;
+
+                        // Print spinner with message, using \r to overwrite the line
+                        print!("\r{} {}", spinner_char, message);
+                        let _ = stdout.flush();
+                    }
+                    result = &mut rx => {
+                        // Channel received signal, stop spinning
+                        match result {
+                            Ok(_) => break,
+                            Err(_) => break, // Channel closed
+                        }
+                    }
+                }
+            }
+
+            // Clear the line when done
+            print!("\r{}", " ".repeat(message.len() + 3));
+            print!("\r");
+            let _ = stdout.flush();
+        });
+
+        // Run the actual operation
+        let result = operation.await;
+
+        // Signal the spinner to stop
+        let _ = tx.send(());
+
+        // Wait for spinner to finish cleaning up
+        let _ = spinner_handle.await;
+
+        result
+    }
+}
+
 #[derive(Default)]
 #[allow(unused)]
 pub enum Template {

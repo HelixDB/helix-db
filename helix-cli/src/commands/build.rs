@@ -4,7 +4,7 @@ use crate::metrics_sender::MetricsSender;
 use crate::project::{ProjectContext, get_helix_repo_cache};
 use crate::utils::{
     copy_dir_recursive_excluding, diagnostic_source, helixc_utils::collect_hx_files, print_status,
-    print_success,
+    print_success, spinner,
 };
 use eyre::Result;
 use std::time::Instant;
@@ -46,13 +46,25 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
     print_status("BUILD", &format!("Building instance '{instance_name}'"));
 
     // Ensure Helix repo is cached
-    ensure_helix_repo_cached().await?;
+    spinner::with_spinner(
+        "Caching Helix repository...",
+        ensure_helix_repo_cached(),
+    )
+    .await?;
 
     // Prepare instance workspace
-    prepare_instance_workspace(&project, &instance_name).await?;
+    spinner::with_spinner(
+        &format!("Preparing workspace for '{instance_name}'..."),
+        prepare_instance_workspace(&project, &instance_name),
+    )
+    .await?;
 
     // Compile project queries into the workspace
-    let compile_result = compile_project(&project, &instance_name).await;
+    let compile_result = spinner::with_spinner(
+        "Compiling Helix queries...",
+        compile_project(&project, &instance_name),
+    )
+    .await;
 
     // Collect metrics data
     let compile_time = start_time.elapsed().as_secs() as u32;
@@ -82,13 +94,24 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
     compile_result?;
 
     // Generate Docker files
-    generate_docker_files(&project, &instance_name, instance_config.clone()).await?;
+    spinner::with_spinner(
+        "Generating Docker configuration...",
+        generate_docker_files(&project, &instance_name, instance_config.clone()),
+    )
+    .await?;
 
     // For local instances, build Docker image
     if instance_config.should_build_docker_image() {
         let docker = DockerManager::new(&project);
         DockerManager::check_docker_available()?;
-        docker.build_image(&instance_name, instance_config.docker_build_target())?;
+        spinner::with_spinner(
+            &format!("Building Docker image for '{instance_name}'..."),
+            async {
+                docker.build_image(&instance_name, instance_config.docker_build_target())?;
+                Ok::<(), eyre::Error>(())
+            },
+        )
+        .await?;
     }
 
     print_success(&format!("Instance '{instance_name}' built successfully"));

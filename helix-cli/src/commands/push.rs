@@ -6,7 +6,7 @@ use crate::config::{CloudConfig, InstanceInfo};
 use crate::docker::DockerManager;
 use crate::metrics_sender::MetricsSender;
 use crate::project::ProjectContext;
-use crate::utils::{print_status, print_success};
+use crate::utils::{print_status, print_success, spinner};
 use eyre::Result;
 use std::time::Instant;
 
@@ -97,11 +97,22 @@ async fn push_local_instance(
     DockerManager::check_docker_available()?;
 
     // Build the instance first (this ensures it's up to date) and get metrics data
-    let metrics_data =
-        crate::commands::build::run(instance_name.to_string(), metrics_sender).await?;
+    // Show spinner during build process
+    let metrics_data = spinner::with_spinner(
+        &format!("Building instance '{instance_name}'..."),
+        crate::commands::build::run(instance_name.to_string(), metrics_sender),
+    )
+    .await?;
 
     // Start the instance
-    docker.start_instance(instance_name)?;
+    spinner::with_spinner(
+        &format!("Starting instance '{instance_name}'..."),
+        async {
+            docker.start_instance(instance_name)?;
+            Ok::<(), eyre::Error>(())
+        },
+    )
+    .await?;
 
     // Get the instance configuration to show connection info
     let instance_config = project.config.get_instance(instance_name)?;
@@ -136,7 +147,11 @@ async fn push_cloud_instance(
 
     let metrics_data = if instance_config.should_build_docker_image() {
         // Build happens, get metrics data from build
-        crate::commands::build::run(instance_name.to_string(), metrics_sender).await?
+        spinner::with_spinner(
+            &format!("Building instance '{instance_name}'..."),
+            crate::commands::build::run(instance_name.to_string(), metrics_sender),
+        )
+        .await?
     } else {
         // No build, use lightweight parsing
         parse_queries_for_metrics(project)?
@@ -151,26 +166,47 @@ async fn push_cloud_instance(
     let config = project.config.cloud.get(instance_name).unwrap();
     match config {
         CloudConfig::FlyIo(config) => {
-            let fly = FlyManager::new(project, config.auth_type.clone()).await?;
-            let docker = DockerManager::new(project);
-            // Get the correct image name from docker compose project name
-            let image_name = docker.image_name(instance_name, config.build_mode);
+            spinner::with_spinner(
+                &format!("Deploying to Fly.io..."),
+                async {
+                    let fly = FlyManager::new(project, config.auth_type.clone()).await?;
+                    let docker = DockerManager::new(project);
+                    // Get the correct image name from docker compose project name
+                    let image_name = docker.image_name(instance_name, config.build_mode);
 
-            fly.deploy_image(&docker, config, instance_name, &image_name)
-                .await?;
+                    fly.deploy_image(&docker, config, instance_name, &image_name)
+                        .await?;
+                    Ok::<(), eyre::Error>(())
+                },
+            )
+            .await?;
         }
         CloudConfig::Ecr(config) => {
-            let ecr = EcrManager::new(project, config.auth_type.clone()).await?;
-            let docker = DockerManager::new(project);
-            // Get the correct image name from docker compose project name
-            let image_name = docker.image_name(instance_name, config.build_mode);
+            spinner::with_spinner(
+                &format!("Deploying to ECR..."),
+                async {
+                    let ecr = EcrManager::new(project, config.auth_type.clone()).await?;
+                    let docker = DockerManager::new(project);
+                    // Get the correct image name from docker compose project name
+                    let image_name = docker.image_name(instance_name, config.build_mode);
 
-            ecr.deploy_image(&docker, config, instance_name, &image_name)
-                .await?;
+                    ecr.deploy_image(&docker, config, instance_name, &image_name)
+                        .await?;
+                    Ok::<(), eyre::Error>(())
+                },
+            )
+            .await?;
         }
         CloudConfig::Helix(_config) => {
-            let helix = HelixManager::new(project);
-            helix.deploy(None, instance_name.to_string()).await?;
+            spinner::with_spinner(
+                &format!("Deploying to Helix Cloud..."),
+                async {
+                    let helix = HelixManager::new(project);
+                    helix.deploy(None, instance_name.to_string()).await?;
+                    Ok::<(), eyre::Error>(())
+                },
+            )
+            .await?;
         }
     }
 
