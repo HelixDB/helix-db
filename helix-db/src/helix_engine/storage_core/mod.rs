@@ -701,7 +701,10 @@ impl HelixGraphStorage {
             ),
         )?;
 
-        let bm25 = None;
+        let bm25 = config
+            .get_bm25()
+            .then(|| HBM25Config::new(Arc::clone(&db)))
+            .transpose()?;
 
         let storage_config = StorageConfig::new(
             config.schema,

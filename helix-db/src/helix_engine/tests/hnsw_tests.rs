@@ -106,7 +106,12 @@ fn test_hnsw_insert_and_count() {
 
     txn.commit().unwrap();
     let txn = env.read_txn().unwrap();
-    assert!(index.num_inserted_vectors(&txn).unwrap() >= 10);
+
+    assert!(
+        env.iterator_cf(&index.cf_vectors(), rocksdb::IteratorMode::Start)
+            .count()
+            >= 10
+    );
 }
 
 #[test]

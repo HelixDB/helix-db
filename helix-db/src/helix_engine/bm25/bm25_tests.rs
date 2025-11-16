@@ -79,7 +79,7 @@ mod tests {
         #[cfg(feature = "lmdb")]
         let config = HBM25Config::new(&env, &mut wtxn).unwrap();
         #[cfg(feature = "rocks")]
-        let config = HBM25Config::new(Arc::clone(&env), &mut wtxn).unwrap();
+        let config = HBM25Config::new(Arc::clone(&env)).unwrap();
 
         wtxn.commit().unwrap();
         (config, temp_dir)

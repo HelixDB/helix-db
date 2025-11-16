@@ -122,47 +122,37 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 let edge_label_hash = hash_label(edge_label, None);
                 match item {
                     Ok(item) => {
-                        let prefix = HelixGraphStorage::out_edge_key_prefix(item.id(), &edge_label_hash);
-                        let prefix_vec = prefix.to_vec();
+                        use crate::helix_engine::utils::RocksUtils;
 
-                        let edge_iter = self
+                        let prefix =
+                            HelixGraphStorage::out_edge_key_prefix(item.id(), &edge_label_hash);
+
+                        let mut iter = self
                             .txn
-                            .prefix_iterator_cf(&self.storage.cf_out_edges(), &prefix_vec)
-                            .filter_map(move |result| {
-                                match result {
-                                    Ok((key, value)) => {
-                                        // Manual prefix check for RocksDB
-                                        if !key.starts_with(&prefix_vec) {
-                                            return None;
-                                        }
+                            .raw_prefix_iter(&self.storage.cf_out_edges(), &prefix);
 
-                                        // Extract edge_id from value (16 bytes)
-                                        let edge_id = match value.as_ref().try_into() {
-                                            Ok(bytes) => u128::from_be_bytes(bytes),
-                                            Err(_) => {
-                                                println!("Error: value is not 16 bytes");
-                                                return Some(Err(GraphError::SliceLengthError));
-                                            }
-                                        };
+                        let edge_iter = std::iter::from_fn(move || {
+                            while let Some(key) = iter.key() {
+                                let (_, _, _, edge_id) =
+                                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
 
-                                        // Get the full edge object
-                                        match self.storage.get_edge(self.txn, edge_id, self.arena) {
-                                            Ok(edge) => Some(Ok(TraversalValue::Edge(edge))),
-                                            Err(e) => {
-                                                println!("Error getting edge {edge_id}: {e:?}");
-                                                None
-                                            }
-                                        }
+                                // Get the full edge object
+                                match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                                    Ok(edge) => {
+                                        iter.next();
+                                        return Some(Ok(TraversalValue::Edge(edge)));
                                     }
                                     Err(e) => {
-                                        println!("{} Error iterating out edges: {:?}", line!(), e);
-                                        None
+                                        iter.next();
+                                        println!("Error getting edge {edge_id}: {e:?}");
+                                        continue;
                                     }
                                 }
-                            })
-                            .collect::<Vec<_>>();
+                            }
+                            None
+                        });
 
-                        Some(edge_iter.into_iter())
+                        Some(edge_iter)
                     }
                     Err(e) => {
                         println!("{} Error getting out edges: {:?}", line!(), e);

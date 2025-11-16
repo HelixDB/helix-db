@@ -88,7 +88,6 @@ impl HBM25Config {
 
     pub fn new<'db>(
         graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
-        _wtxn: &mut WTxn<'db>,
     ) -> Result<HBM25Config, GraphError> {
         Ok(HBM25Config {
             graph_env,
@@ -151,7 +150,10 @@ impl BM25 for HBM25Config {
 
             let posting_bytes = bincode::serialize(&posting_entry)?;
 
-            txn.put_cf(&cf_inverted, term_bytes, &posting_bytes)?;
+            // Create composite key: term + doc_id
+            let mut key = term_bytes.to_vec();
+            key.extend_from_slice(&doc_id.to_be_bytes());
+            txn.put_cf(&cf_inverted, &key, &posting_bytes)?;
 
             let current_df = txn
                 .get_cf(&cf_term_freq, term_bytes)?
@@ -184,43 +186,39 @@ impl BM25 for HBM25Config {
 
     fn delete_doc(&self, txn: &mut WTxn, doc_id: u128) -> Result<(), GraphError> {
         let cf_inverted = self.cf_inverted_index();
-        let terms_to_update = {
-            let mut terms = Vec::new();
+
+        // Find all composite keys for this doc_id
+        let keys_to_delete = {
+            let mut keys = Vec::new();
             let mut iter = txn.iterator_cf(&cf_inverted, rocksdb::IteratorMode::Start);
 
-            while let Some((term_bytes, posting_bytes)) = iter.next().transpose()? {
+            while let Some((key_bytes, posting_bytes)) = iter.next().transpose()? {
                 let posting: PostingListEntry = bincode::deserialize(&posting_bytes)?;
                 if posting.doc_id == doc_id {
-                    terms.push(term_bytes.to_vec());
+                    keys.push(key_bytes.to_vec());
                 }
             }
-            terms
+            keys
         };
 
         let cf_term_freq = self.cf_term_frequencies();
-        // remove postings and update term frequencies
-        for term_bytes in terms_to_update {
-            // collect entries to keep
-            let entries_to_keep = {
-                let mut entries = Vec::new();
-                for result in txn.prefix_iterator_cf(&cf_inverted, &term_bytes) {
-                    let (_, posting_bytes) = result?;
-                    let posting: PostingListEntry = bincode::deserialize(&posting_bytes)?;
-                    if posting.doc_id != doc_id {
-                        entries.push(posting_bytes.to_vec());
-                    }
-                }
-                entries
-            };
 
-            // delete all entries for this term
-            txn.delete_cf(&cf_inverted, &term_bytes)?;
+        // Group keys by term to update term frequencies
+        let mut terms_updated = std::collections::HashSet::new();
 
-            // re-add the entries we want to keep
-            for entry_bytes in entries_to_keep {
-                txn.put_cf(&cf_inverted, &term_bytes, &entry_bytes)?;
+        for key in keys_to_delete {
+            // Extract term from composite key (term is everything except last 16 bytes for u128)
+            if key.len() > 16 {
+                let term_bytes = &key[..key.len() - 16];
+                terms_updated.insert(term_bytes.to_vec());
             }
 
+            // Delete the specific term-doc entry
+            txn.delete_cf(&cf_inverted, &key)?;
+        }
+
+        // Update term frequencies
+        for term_bytes in terms_updated {
             let current_df = txn
                 .get_cf(&cf_term_freq, &term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
@@ -327,7 +325,8 @@ impl BM25 for HBM25Config {
             // Get all documents containing this term
             for result in txn.prefix_iterator_cf(&cf_inverted, term_bytes) {
                 let (key, posting_bytes) = result?;
-                if key.as_ref() != term_bytes {
+                // Check if key still has our term as prefix
+                if !key.starts_with(term_bytes) {
                     break;
                 }
                 let posting: PostingListEntry = bincode::deserialize(&posting_bytes)?;
