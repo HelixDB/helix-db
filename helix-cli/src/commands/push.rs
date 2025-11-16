@@ -104,15 +104,8 @@ async fn push_local_instance(
     )
     .await?;
 
-    // Start the instance
-    spinner::with_spinner(
-        &format!("Starting instance '{instance_name}'..."),
-        async {
-            docker.start_instance(instance_name)?;
-            Ok::<(), eyre::Error>(())
-        },
-    )
-    .await?;
+    // Start the instance (has its own status messages, so no spinner needed)
+    docker.start_instance(instance_name)?;
 
     // Get the instance configuration to show connection info
     let instance_config = project.config.get_instance(instance_name)?;

@@ -100,18 +100,11 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
     )
     .await?;
 
-    // For local instances, build Docker image
+    // For local instances, build Docker image (has its own status messages, so no spinner needed)
     if instance_config.should_build_docker_image() {
         let docker = DockerManager::new(&project);
         DockerManager::check_docker_available()?;
-        spinner::with_spinner(
-            &format!("Building Docker image for '{instance_name}'..."),
-            async {
-                docker.build_image(&instance_name, instance_config.docker_build_target())?;
-                Ok::<(), eyre::Error>(())
-            },
-        )
-        .await?;
+        docker.build_image(&instance_name, instance_config.docker_build_target())?;
     }
 
     print_success(&format!("Instance '{instance_name}' built successfully"));
