@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use heed3::RoTxn;
 use tempfile::TempDir;
 
 use crate::{

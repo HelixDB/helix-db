@@ -20,7 +20,7 @@ use crate::{
 };
 
 use bumpalo::Bump;
-use heed3::RoTxn;
+
 use tempfile::TempDir;
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
@@ -34,7 +34,7 @@ fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     (temp_dir, Arc::new(storage))
 }
 #[cfg(feature = "lmdb")]
-type FnTy = fn(&HVector, &RoTxn) -> bool;
+type FnTy = fn(&HVector, &heed3::RoTxn) -> bool;
 #[cfg(feature = "rocks")]
 type FnTy = fn(&HVector, &rocksdb::Transaction<'_, rocksdb::TransactionDB>) -> bool;
 #[test]

@@ -36,8 +36,8 @@ bumpalo = { version = "3.19.0", features = ["collections", "boxed", "serde"] }
 bytemuck = "1.24.0"
 num_cpus = "1.17.0"
 
-heed3 = { version = "0.22.0"}
-rocksdb = { version = "0.24.0",  features = ["multi-threaded-cf"]  }
+heed3 = { version = "0.22.0", optional = true }
+rocksdb = { version = "0.24.0",  features = ["multi-threaded-cf"], optional = true }
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }
@@ -86,7 +86,7 @@ full = ["build", "compiler", "vectors"]
 bench = ["polars"]
 dev = ["debug-output", "server", "bench"]
 dev-instance = []
-lmdb = ["server"]
-rocks = ["server"]
+lmdb = ["server", "heed3"]
+rocks = ["server", "rocksdb"]
 default = ["rocks"]
 production = ["api-key"]

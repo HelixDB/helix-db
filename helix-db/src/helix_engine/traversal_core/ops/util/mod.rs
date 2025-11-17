@@ -3,7 +3,6 @@ pub mod count;
 pub mod dedup;
 pub mod drop;
 pub mod exist;
-pub mod filter_mut;
 pub mod filter_ref;
 pub mod group_by;
 pub mod map;

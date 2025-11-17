@@ -16,6 +16,7 @@ mod tests {
     };
 
     use bumpalo::Bump;
+    #[cfg(feature = "lmdb")]
     use heed3::{Env, EnvOpenOptions, RoTxn};
     use rand::Rng;
     use std::collections::HashMap;
@@ -340,7 +341,7 @@ mod tests {
 
         println!("results: {results:?}");
 
-        // documents 1 and 3 should score highest (contain both terms)
+        // documents 0 and 2 should score highest (contain both terms)
         assert!(results.len() >= 2);
 
         let doc_ids: Vec<u128> = results.iter().map(|(id, _)| *id).collect();

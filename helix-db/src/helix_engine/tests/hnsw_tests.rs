@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bumpalo::Bump;
 #[cfg(feature = "lmdb")]
 use heed3::RwTxn;
+#[cfg(feature = "lmdb")]
 use heed3::{Env, EnvOpenOptions, RoTxn, WithTls};
 use rand::Rng;
 use tempfile::TempDir;

@@ -1,6 +1,5 @@
 use crate::{helix_gateway::router::router::IoContFn, helixc::parser::errors::ParserError};
 use core::fmt;
-use heed3::Error as HeedError;
 use sonic_rs::Error as SonicError;
 use std::{net::AddrParseError, str::Utf8Error, string::FromUtf8Error};
 
@@ -30,8 +29,6 @@ pub enum GraphError {
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
     RerankerError(String),
-
- 
 }
 
 impl std::error::Error for GraphError {}
@@ -72,9 +69,9 @@ impl fmt::Display for GraphError {
         }
     }
 }
-
-impl From<HeedError> for GraphError {
-    fn from(error: HeedError) -> Self {
+#[cfg(feature = "lmdb")]
+impl From<heed3::Error> for GraphError {
+    fn from(error: heed3::Error) -> Self {
         GraphError::StorageError(error.to_string())
     }
 }
@@ -120,7 +117,7 @@ impl From<bincode::Error> for GraphError {
         GraphError::ConversionError(format!("bincode error: {error}"))
     }
 }
-
+#[cfg(feature = "rocks")]
 impl From<rocksdb::Error> for GraphError {
     fn from(error: rocksdb::Error) -> Self {
         GraphError::ConversionError(format!("rocksdb error: {error}"))
@@ -180,8 +177,9 @@ impl fmt::Display for VectorError {
     }
 }
 
-impl From<HeedError> for VectorError {
-    fn from(error: HeedError) -> Self {
+#[cfg(feature = "lmdb")]
+impl From<heed3::Error> for VectorError {
+    fn from(error: heed3::Error) -> Self {
         VectorError::VectorCoreError(format!("heed error: {error}"))
     }
 }
@@ -209,7 +207,7 @@ impl From<bincode::Error> for VectorError {
         VectorError::ConversionError(format!("bincode error: {error}"))
     }
 }
-
+#[cfg(feature = "rocks")]
 impl From<rocksdb::Error> for VectorError {
     fn from(error: rocksdb::Error) -> Self {
         VectorError::ConversionError(format!("rocksdb error: {error}"))

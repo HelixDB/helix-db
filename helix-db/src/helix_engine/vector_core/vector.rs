@@ -1,7 +1,7 @@
 use crate::{
     helix_engine::{
         types::VectorError,
-        vector_core::{vector_distance::DistanceCalc, vector_without_data::VectorWithoutData},
+        vector_core::{DistanceCalc, vector_without_data::VectorWithoutData},
     },
     protocol::{custom_serde::vector_serde::VectorDeSeed, value::Value},
     utils::{

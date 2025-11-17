@@ -1,5 +1,6 @@
 #[cfg(feature = "lmdb")]
 pub mod graph_visualization;
+#[cfg(feature = "lmdb")]
 pub mod metadata;
 pub mod storage_methods;
 #[cfg(feature = "lmdb")]

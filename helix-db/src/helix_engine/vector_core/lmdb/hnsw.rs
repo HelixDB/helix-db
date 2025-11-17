@@ -1,8 +1,6 @@
 use crate::helix_engine::vector_core::vector::HVector;
 use crate::{helix_engine::types::VectorError, utils::properties::ImmutablePropertiesMap};
 
-use heed3::{RoTxn, RwTxn};
-
 pub trait HNSW {
     /// Search for the k nearest neighbors of a query vector
     ///
@@ -17,7 +15,7 @@ pub trait HNSW {
     /// A vector of tuples containing the id and distance of the nearest neighbors
     fn search<'db, 'arena, 'txn, F>(
         &'db self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn heed3::RoTxn<'db>,
         query: &'arena [f64],
         k: usize,
         label: &'arena str,
@@ -42,14 +40,14 @@ pub trait HNSW {
     /// An HVector of the data inserted
     fn insert<'db, 'arena, 'txn, F>(
         &'db self,
-        txn: &'txn mut RwTxn<'db>,
+        txn: &'txn mut heed3::RwTxn<'db>,
         label: &'arena str,
         data: &'arena [f64],
         properties: Option<ImmutablePropertiesMap<'arena>>,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &heed3::RoTxn<'db>) -> bool,
         'db: 'arena,
         'arena: 'txn;
 
@@ -59,5 +57,10 @@ pub trait HNSW {
     ///
     /// * `txn` - The transaction to use
     /// * `id` - The id of the vector
-    fn delete(&self, txn: &mut RwTxn, id: u128, arena: &bumpalo::Bump) -> Result<(), VectorError>;
+    fn delete(
+        &self,
+        txn: &mut heed3::RwTxn,
+        id: u128,
+        arena: &bumpalo::Bump,
+    ) -> Result<(), VectorError>;
 }
