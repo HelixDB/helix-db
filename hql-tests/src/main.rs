@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
     }
 
     // Get backend argument if provided
-    let backend = matches.get_one::<String>("backend").map(|s| s.as_str());
+    let backend = matches.get_one::<String>("backend").map(|s| s.to_string());
 
     // Initialize GitHub configuration (optional - will print warning if not available)
     let github_config = match GitHubConfig::from_env() {
@@ -430,9 +430,16 @@ async fn main() -> Result<()> {
                 let tests_dir = tests_dir.clone();
                 let temp_repo = temp_repo.clone();
                 let github_config = github_config.clone();
-                let backend = backend;
+                let backend = backend.clone();
                 tokio::spawn(async move {
-                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config, backend).await
+                    process_test_directory(
+                        &test_name,
+                        &tests_dir,
+                        &temp_repo,
+                        &github_config,
+                        backend,
+                    )
+                    .await
                 })
             })
             .collect();
@@ -465,7 +472,9 @@ async fn main() -> Result<()> {
             );
         }
 
-        println!("[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully");
+        println!(
+            "[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully"
+        );
     } else {
         // Process all test directories in parallel (default behavior)
         println!(
@@ -480,9 +489,16 @@ async fn main() -> Result<()> {
                 let tests_dir = tests_dir.clone();
                 let temp_repo = temp_repo.clone();
                 let github_config = github_config.clone();
-                let backend = backend;
+                let backend = backend.clone();
                 tokio::spawn(async move {
-                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config, backend).await
+                    process_test_directory(
+                        &test_name,
+                        &tests_dir,
+                        &temp_repo,
+                        &github_config,
+                        backend,
+                    )
+                    .await
                 })
             })
             .collect();
@@ -529,7 +545,7 @@ async fn process_test_directory(
     tests_dir: &Path,
     temp_repo: &Path,
     github_config: &Option<GitHubConfig>,
-    backend: Option<&str>,
+    backend: Option<String>,
 ) -> Result<()> {
     let folder_path = tests_dir.join(test_name);
 
@@ -537,7 +553,6 @@ async fn process_test_directory(
         // Skip non-existent directories silently in parallel mode
         return Ok(());
     }
-
 
     // Find the query file - could be queries.hx or file*.hx
     let mut query_file_path = None;
@@ -656,8 +671,9 @@ async fn process_test_directory(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         // For helix compilation, we'll show the raw output since it's not cargo format
-        let error_message =
-            format!("[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}");
+        let error_message = format!(
+            "[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}"
+        );
 
         // Create GitHub issue if configuration is available
         if let Some(config) = github_config {
