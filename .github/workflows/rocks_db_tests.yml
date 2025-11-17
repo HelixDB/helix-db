@@ -1,4 +1,4 @@
-name: Core Database Tests
+name: RocksDB Core Database Tests
 
 on:
   pull_request:

@@ -219,6 +219,13 @@ async fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(String))
                 .required(false),
         )
+        .arg(
+            Arg::new("backend")
+                .long("backend")
+                .help("Backend to use (lmdb or rocks)")
+                .value_parser(["lmdb", "rocks"])
+                .required(false),
+        )
         .get_matches();
 
     let current_dir = env::current_dir().context("Failed to get current directory")?;
@@ -227,6 +234,9 @@ async fn main() -> Result<()> {
     if !tests_dir.exists() {
         bail!("Tests directory not found at: {}", tests_dir.display());
     }
+
+    // Get backend argument if provided
+    let backend = matches.get_one::<String>("backend").map(|s| s.as_str());
 
     // Initialize GitHub configuration (optional - will print warning if not available)
     let github_config = match GitHubConfig::from_env() {
@@ -365,7 +375,7 @@ async fn main() -> Result<()> {
             );
         }
 
-        process_test_directory(test_name, &tests_dir, &temp_repo, &github_config).await?;
+        process_test_directory(test_name, &tests_dir, &temp_repo, &github_config, backend).await?;
         println!("[SUCCESS] Successfully processed {test_name}");
     } else if let Some(batch_args) = matches.get_many::<u32>("batch") {
         // Process in batch mode
@@ -420,8 +430,9 @@ async fn main() -> Result<()> {
                 let tests_dir = tests_dir.clone();
                 let temp_repo = temp_repo.clone();
                 let github_config = github_config.clone();
+                let backend = backend;
                 tokio::spawn(async move {
-                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config).await
+                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config, backend).await
                 })
             })
             .collect();
@@ -469,8 +480,9 @@ async fn main() -> Result<()> {
                 let tests_dir = tests_dir.clone();
                 let temp_repo = temp_repo.clone();
                 let github_config = github_config.clone();
+                let backend = backend;
                 tokio::spawn(async move {
-                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config).await
+                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config, backend).await
                 })
             })
             .collect();
@@ -517,6 +529,7 @@ async fn process_test_directory(
     tests_dir: &Path,
     temp_repo: &Path,
     github_config: &Option<GitHubConfig>,
+    backend: Option<&str>,
 ) -> Result<()> {
     let folder_path = tests_dir.join(test_name);
 
@@ -684,8 +697,15 @@ async fn process_test_directory(
     // Run cargo check on the helix container path
     let helix_container_path = temp_dir.join("helix-db/helix-container");
     if helix_container_path.exists() {
-        let output = Command::new("cargo")
-            .arg("check")
+        let mut cmd = Command::new("cargo");
+        cmd.arg("check");
+
+        // Add --features flag if backend is specified
+        if let Some(backend) = backend {
+            cmd.arg("--features").arg(backend);
+        }
+
+        let output = cmd
             .current_dir(&helix_container_path)
             .output()
             .context("Failed to execute cargo check")?;
