@@ -24,7 +24,7 @@ dotenvy = "0.15.7"
 bumpalo = "3.19.0"
 
 [features]
-read = ["helix-db/lmdb"]
-write = ["helix-db/rocks"]
+lmdb = ["helix-db/lmdb"]
+rocks = ["helix-db/rocks"]
 prod = ["helix-db/production"]
 dev = ["helix-db/dev-instance"]
