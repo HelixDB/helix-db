@@ -8,11 +8,7 @@ The deployment is designed to run in a **minimal Debian-based container** and us
 
 ## Docker Image
 
-The container image runs the the `helix-container` binary which was compiled with the helix push tool previously.
-
-## Build and Push
-
-The Helm chart is located in the helm/ directory and provides a configurable Kubernetes deployment, service, and persistent volume claim.
+The container image runs the `helix-container` binary which was compiled with the helix push tool previously.
 
 ### Helm Chart Structure
 
@@ -38,7 +34,7 @@ helm install helixdb ./helm -n your-namespace --create-namespace
 If you are using a previously created PVC, make sure it has accessModes of type ReadWriteOncePod and includes the following annotations:
 
   * app.kubernetes.io/managed-by=Helm
-  *  meta.helm.sh/release-namespace=<namespace>
+  * meta.helm.sh/release-namespace=<namespace>
   * meta.helm.sh/release-name=helixdb 
 
 ##  Notes

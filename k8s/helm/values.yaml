@@ -3,8 +3,8 @@ namespace: helixdb
 
 image:
   # Image repository and tag
-  repository: "" 
-  tag: "" 
+  repository: "your-registry/helixdb"
+  tag: "2.1.2" 
   pullPolicy: IfNotPresent
 
 service:
@@ -17,17 +17,13 @@ pvc:
   # Optional storage class (default = cluster default)
   storageClassName: ""
   # Requested storage size
-  size: "" 
+  size: "10Gi"
 
+resources: {}    
 
-# ---------------------------------------------------------------------------
-# 🔹 Resources for the main Deployment container
-# ---------------------------------------------------------------------------
-resources:
-  requests:
-    cpu: ""
-    memory: ""
-  limits:
-    cpu: ""
-    memory: ""
-
+probes:
+  enabled: true
+  path: /introspect
+  port: 6969
+  initialDelaySeconds: 5
+  periodSeconds: 10      
