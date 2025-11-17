@@ -1,14 +1,12 @@
 use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,
+        storage_core::storage_methods::StorageMethods,
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::label_hash::hash_label,
 };
-
-#[cfg(feature = "lmdb")]
-use crate::helix_engine::storage_core::storage_methods::StorageMethods;
 
 pub trait OutAdapter<'db, 'arena, 'txn, 's>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -202,7 +200,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                 let iter = self
                     .txn
-                    .prefix_iterator_cf(&self.storage.cf_out_edges(), &prefix);
+                    .prefix_iterator_cf(&self.storage.cf_out_edges(), prefix);
 
                 Some(iter.filter_map(move |result| {
                     match result {
@@ -278,7 +276,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                 let iter = self
                     .txn
-                    .prefix_iterator_cf(&self.storage.cf_out_edges(), &prefix);
+                    .prefix_iterator_cf(&self.storage.cf_out_edges(), prefix);
 
                 Some(iter.filter_map(move |result| {
                     match result {

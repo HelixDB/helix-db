@@ -12,7 +12,7 @@ if [ "$1" = "dashboard" ]; then
      -A clippy::large-enum-variant \
      -A clippy::inherent-to-string \
      -A clippy::inherent_to_string_shadow_display
-fi 
+fi
 
 cargo clippy --workspace --locked --exclude hql-tests \
     -- -D warnings \
@@ -24,4 +24,3 @@ cargo clippy --workspace --locked --exclude hql-tests \
      -A clippy::large-enum-variant \
      -A clippy::inherent-to-string \
      -A clippy::inherent_to_string_shadow_display
-

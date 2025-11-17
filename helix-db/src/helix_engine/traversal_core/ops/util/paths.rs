@@ -1,6 +1,7 @@
 use crate::{
     helix_engine::{
-        storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::HelixGraphStorage,
+        storage_core::storage_methods::StorageMethods,
         traversal_core::{
             RTxn, traversal_iter::RoTraversalIterator, traversal_value::TraversalValue,
         },
@@ -175,704 +176,6 @@ impl PartialOrd for AStarState {
     }
 }
 
-// ============================================================================
-// LMDB Implementation
-// ============================================================================
-
-#[cfg(feature = "lmdb")]
-impl<
-    'db: 'arena,
-    'arena: 'txn,
-    'txn,
-    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
-> Iterator for ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
-{
-    type Item = Result<TraversalValue<'arena>, GraphError>;
-
-    /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(Ok(TraversalValue::Node(node))) => {
-                let (from, to) = match self.path_type {
-                    PathType::From(from) => (from, node.id),
-                    PathType::To(to) => (node.id, to),
-                };
-
-                match self.algorithm {
-                    PathAlgorithm::BFS => self.bfs_shortest_path(from, to),
-                    PathAlgorithm::Dijkstra => self.dijkstra_shortest_path(from, to),
-                    PathAlgorithm::AStar => self.astar_shortest_path(from, to),
-                }
-            }
-            Some(other) => Some(other),
-            None => None,
-        }
-    }
-}
-
-#[cfg(feature = "lmdb")]
-impl<'db, 'arena, 'txn, I, F, H> ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
-where
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
-{
-    fn reconstruct_path(
-        &self,
-        parent: &HashMap<u128, (u128, u128)>,
-        start_id: u128,
-        end_id: u128,
-        arena: &'arena bumpalo::Bump,
-    ) -> Result<TraversalValue<'arena>, GraphError> {
-        let mut nodes = Vec::with_capacity(parent.len());
-        let mut edges = Vec::with_capacity(parent.len().saturating_sub(1));
-
-        let mut current = end_id;
-
-        while current != start_id {
-            nodes.push(self.storage.get_node(self.txn, current, arena)?);
-
-            let (prev_node, edge) = &parent[&current];
-            edges.push(self.storage.get_edge(self.txn, *edge, arena)?);
-            current = *prev_node;
-        }
-
-        nodes.push(self.storage.get_node(self.txn, start_id, arena)?);
-
-        nodes.reverse();
-        edges.reverse();
-
-        Ok(TraversalValue::Path((nodes, edges)))
-    }
-
-    fn bfs_shortest_path(
-        &self,
-        from: u128,
-        to: u128,
-    ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
-        let mut queue = VecDeque::with_capacity(32);
-        let mut visited = HashSet::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
-        queue.push_back(from);
-        visited.insert(from);
-
-        // find shortest-path from one node to itself
-        if from == to {
-            return Some(self.reconstruct_path(&parent, from, to, self.arena));
-        }
-
-        while let Some(current_id) = queue.pop_front() {
-            let out_prefix = self.edge_label.map_or_else(
-                || current_id.to_be_bytes().to_vec(),
-                |label| {
-                    HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None)).to_vec()
-                },
-            );
-
-            let iter = self
-                .storage
-                .out_edges_db
-                .prefix_iter(self.txn, &out_prefix)
-                .unwrap();
-
-            for result in iter {
-                let value = match result {
-                    Ok((_, value)) => value,
-                    Err(e) => return Some(Err(GraphError::from(e))),
-                };
-                let (edge_id, to_node) = match HelixGraphStorage::unpack_adj_edge_data(value) {
-                    Ok((edge_id, to_node)) => (edge_id, to_node),
-                    Err(e) => return Some(Err(e)),
-                };
-
-                if !visited.contains(&to_node) {
-                    visited.insert(to_node);
-                    parent.insert(to_node, (current_id, edge_id));
-
-                    if to_node == to {
-                        return Some(self.reconstruct_path(&parent, from, to, self.arena));
-                    }
-
-                    queue.push_back(to_node);
-                }
-            }
-        }
-        Some(Err(GraphError::ShortestPathNotFound))
-    }
-
-    fn dijkstra_shortest_path(
-        &self,
-        from: u128,
-        to: u128,
-    ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
-        let mut heap = BinaryHeap::new();
-        let mut distances = HashMap::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
-
-        distances.insert(from, 0.0);
-        heap.push(DijkstraState {
-            node_id: from,
-            distance: 0.0,
-        });
-
-        while let Some(DijkstraState {
-            node_id: current_id,
-            distance: current_dist,
-        }) = heap.pop()
-        {
-            // Already found a better path
-            if let Some(&best_dist) = distances.get(&current_id)
-                && current_dist > best_dist
-            {
-                continue;
-            }
-
-            // Found the target
-            if current_id == to {
-                return Some(self.reconstruct_path(&parent, from, to, self.arena));
-            }
-
-            let out_prefix = self.edge_label.map_or_else(
-                || current_id.to_be_bytes().to_vec(),
-                |label| {
-                    HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None)).to_vec()
-                },
-            );
-
-            let iter = self
-                .storage
-                .out_edges_db
-                .prefix_iter(self.txn, &out_prefix)
-                .unwrap();
-
-            for result in iter {
-                let (_, value) = result.unwrap(); // TODO: handle error
-                let (edge_id, to_node) = HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
-
-                let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
-                    Ok(e) => e,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Call custom weight function with full context
-                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
-                    Ok(w) => w,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                if weight < 0.0 {
-                    return Some(Err(GraphError::TraversalError(
-                        "Negative edge weights are not supported for Dijkstra's algorithm"
-                            .to_string(),
-                    )));
-                }
-
-                let new_dist = current_dist + weight;
-
-                let should_update = distances
-                    .get(&to_node)
-                    .is_none_or(|&existing_dist| new_dist < existing_dist);
-
-                if should_update {
-                    distances.insert(to_node, new_dist);
-                    parent.insert(to_node, (current_id, edge_id));
-                    heap.push(DijkstraState {
-                        node_id: to_node,
-                        distance: new_dist,
-                    });
-                }
-            }
-        }
-        Some(Err(GraphError::ShortestPathNotFound))
-    }
-
-    fn astar_shortest_path(
-        &self,
-        from: u128,
-        to: u128,
-    ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
-        let heuristic_fn = match &self.heuristic_fn {
-            Some(h) => h,
-            None => {
-                return Some(Err(GraphError::TraversalError(
-                    "A* algorithm requires a heuristic function".to_string(),
-                )));
-            }
-        };
-
-        let mut heap = BinaryHeap::new();
-        let mut g_scores: HashMap<u128, f64> = HashMap::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
-
-        // Calculate initial heuristic for start node
-        let start_node = match self.storage.get_node(self.txn, from, self.arena) {
-            Ok(node) => node,
-            Err(e) => return Some(Err(e)),
-        };
-
-        let h_start = match heuristic_fn(&start_node) {
-            Ok(h) => h,
-            Err(e) => return Some(Err(e)),
-        };
-
-        g_scores.insert(from, 0.0);
-        heap.push(AStarState {
-            node_id: from,
-            g_score: 0.0,
-            f_score: h_start,
-        });
-
-        while let Some(AStarState {
-            node_id: current_id,
-            g_score: current_g,
-            ..
-        }) = heap.pop()
-        {
-            // Found the target
-            if current_id == to {
-                return Some(self.reconstruct_path(&parent, from, to, self.arena));
-            }
-
-            // Already found a better path
-            if let Some(&best_g) = g_scores.get(&current_id)
-                && current_g > best_g
-            {
-                continue;
-            }
-
-            let out_prefix = self.edge_label.map_or_else(
-                || current_id.to_be_bytes().to_vec(),
-                |label| {
-                    HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None)).to_vec()
-                },
-            );
-
-            let iter = self
-                .storage
-                .out_edges_db
-                .prefix_iter(self.txn, &out_prefix)
-                .unwrap();
-
-            for result in iter {
-                let (_, value) = result.unwrap(); // TODO: handle error
-                let (edge_id, to_node) = HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
-
-                let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
-                    Ok(e) => e,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Call custom weight function with full context
-                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
-                    Ok(w) => w,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                if weight < 0.0 {
-                    return Some(Err(GraphError::TraversalError(
-                        "Negative edge weights are not supported for A* algorithm".to_string(),
-                    )));
-                }
-
-                let tentative_g = current_g + weight;
-
-                let should_update = g_scores
-                    .get(&to_node)
-                    .is_none_or(|&existing_g| tentative_g < existing_g);
-
-                if should_update {
-                    // Calculate heuristic for neighbor
-                    let h = match heuristic_fn(&dst_node) {
-                        Ok(h) => h,
-                        Err(e) => return Some(Err(e)),
-                    };
-
-                    let f = tentative_g + h;
-
-                    g_scores.insert(to_node, tentative_g);
-                    parent.insert(to_node, (current_id, edge_id));
-                    heap.push(AStarState {
-                        node_id: to_node,
-                        g_score: tentative_g,
-                        f_score: f,
-                    });
-                }
-            }
-        }
-        Some(Err(GraphError::ShortestPathNotFound))
-    }
-}
-
-// ============================================================================
-// RocksDB Implementation
-// ============================================================================
-use crate::helix_engine::utils::RocksUtils;
-#[cfg(feature = "rocks")]
-impl<
-    'db: 'arena,
-    'arena: 'txn,
-    'txn,
-    I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
-> Iterator for ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
-{
-    type Item = Result<TraversalValue<'arena>, GraphError>;
-
-    /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(Ok(TraversalValue::Node(node))) => {
-                let (from, to) = match self.path_type {
-                    PathType::From(from) => (from, node.id),
-                    PathType::To(to) => (node.id, to),
-                };
-
-                match self.algorithm {
-                    PathAlgorithm::BFS => self.bfs_shortest_path(from, to),
-                    PathAlgorithm::Dijkstra => self.dijkstra_shortest_path(from, to),
-                    PathAlgorithm::AStar => self.astar_shortest_path(from, to),
-                }
-            }
-            Some(other) => Some(other),
-            None => None,
-        }
-    }
-}
-
-#[cfg(feature = "rocks")]
-impl<'db, 'arena, 'txn, I, F, H> ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
-where
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
-{
-    fn reconstruct_path(
-        &self,
-        parent: &HashMap<u128, (u128, u128)>,
-        start_id: u128,
-        end_id: u128,
-        arena: &'arena bumpalo::Bump,
-    ) -> Result<TraversalValue<'arena>, GraphError> {
-        let mut nodes = Vec::with_capacity(parent.len());
-        let mut edges = Vec::with_capacity(parent.len().saturating_sub(1));
-
-        let mut current = end_id;
-
-        while current != start_id {
-            nodes.push(self.storage.get_node(self.txn, current, arena)?);
-
-            let (prev_node, edge) = &parent[&current];
-            edges.push(self.storage.get_edge(self.txn, *edge, arena)?);
-            current = *prev_node;
-        }
-
-        nodes.push(self.storage.get_node(self.txn, start_id, arena)?);
-
-        nodes.reverse();
-        edges.reverse();
-
-        Ok(TraversalValue::Path((nodes, edges)))
-    }
-
-    fn bfs_shortest_path(
-        &self,
-        from: u128,
-        to: u128,
-    ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
-        let mut queue = VecDeque::with_capacity(32);
-        let mut visited = HashSet::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
-        queue.push_back(from);
-        visited.insert(from);
-
-        // find shortest-path from one node to itself
-        if from == to {
-            return Some(self.reconstruct_path(&parent, from, to, self.arena));
-        }
-
-        while let Some(current_id) = queue.pop_front() {
-            // For RocksDB, we need to create a prefix that's only 20 bytes (node_id + label)
-            // since the full key is 36 bytes (node_id + label + to_node)
-
-            use crate::helix_engine::utils::RocksUtils;
-            let out_prefix = self.edge_label.map_or_else(
-                || current_id.to_be_bytes().to_vec(),
-                |label| {
-                    HelixGraphStorage::out_edge_key_prefix(current_id, &hash_label(label, None))
-                        .to_vec()
-                },
-            );
-
-            let mut iter = self
-                .txn
-                .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
-
-            while let Some(key) = iter.key() {
-                let (from_node_id, label, to_node_id, edge_id) =
-                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
-                if !visited.contains(&to_node_id) {
-                    visited.insert(to_node_id);
-                    parent.insert(to_node_id, (current_id, edge_id));
-
-                    if to_node_id == to {
-                        return Some(self.reconstruct_path(&parent, from, to, self.arena));
-                    }
-
-                    queue.push_back(to_node_id);
-                }
-                iter.next();
-            }
-        }
-        Some(Err(GraphError::ShortestPathNotFound))
-    }
-
-    fn dijkstra_shortest_path(
-        &self,
-        from: u128,
-        to: u128,
-    ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
-        let mut heap = BinaryHeap::new();
-        let mut distances = HashMap::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
-
-        distances.insert(from, 0.0);
-        heap.push(DijkstraState {
-            node_id: from,
-            distance: 0.0,
-        });
-
-        while let Some(DijkstraState {
-            node_id: current_id,
-            distance: current_dist,
-        }) = heap.pop()
-        {
-            // Already found a better path
-
-            if let Some(&best_dist) = distances.get(&current_id)
-                && current_dist > best_dist
-            {
-                continue;
-            }
-
-            // Found the target
-            if current_id == to {
-                return Some(self.reconstruct_path(&parent, from, to, self.arena));
-            }
-
-            // For RocksDB, create a 20-byte prefix (node_id + label)
-            let out_prefix = self.edge_label.map_or_else(
-                || current_id.to_be_bytes().to_vec(),
-                |label| {
-                    HelixGraphStorage::out_edge_key_prefix(current_id, &hash_label(label, None))
-                        .to_vec()
-                },
-            );
-
-            let mut iter = self
-                .txn
-                .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
-
-            while let Some(key) = iter.key() {
-                let (from_node_id, label, to_node_id, edge_id) =
-                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
-
-                let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
-                    Ok(e) => e,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dst_node = match self.storage.get_node(self.txn, to_node_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Call custom weight function with full context
-                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
-                    Ok(w) => w,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                if weight < 0.0 {
-                    return Some(Err(GraphError::TraversalError(
-                        "Negative edge weights are not supported for Dijkstra's algorithm"
-                            .to_string(),
-                    )));
-                }
-
-                let new_dist = current_dist + weight;
-
-                let should_update = distances
-                    .get(&to_node_id)
-                    .is_none_or(|&existing_dist| new_dist < existing_dist);
-
-                if should_update {
-                    distances.insert(to_node_id, new_dist);
-                    parent.insert(to_node_id, (current_id, edge_id));
-                    heap.push(DijkstraState {
-                        node_id: to_node_id,
-                        distance: new_dist,
-                    });
-                }
-                iter.next();
-            }
-        }
-        Some(Err(GraphError::ShortestPathNotFound))
-    }
-
-    fn astar_shortest_path(
-        &self,
-        from: u128,
-        to: u128,
-    ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
-        let heuristic_fn = match &self.heuristic_fn {
-            Some(h) => h,
-            None => {
-                return Some(Err(GraphError::TraversalError(
-                    "A* algorithm requires a heuristic function".to_string(),
-                )));
-            }
-        };
-
-        let mut heap = BinaryHeap::new();
-        let mut g_scores: HashMap<u128, f64> = HashMap::with_capacity(64);
-        let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
-
-        // Calculate initial heuristic for start node
-        let start_node = match self.storage.get_node(self.txn, from, self.arena) {
-            Ok(node) => node,
-            Err(e) => return Some(Err(e)),
-        };
-
-        let h_start = match heuristic_fn(&start_node) {
-            Ok(h) => h,
-            Err(e) => return Some(Err(e)),
-        };
-
-        g_scores.insert(from, 0.0);
-        heap.push(AStarState {
-            node_id: from,
-            g_score: 0.0,
-            f_score: h_start,
-        });
-
-        while let Some(AStarState {
-            node_id: current_id,
-            g_score: current_g,
-            ..
-        }) = heap.pop()
-        {
-            // Found the target
-            if current_id == to {
-                return Some(self.reconstruct_path(&parent, from, to, self.arena));
-            }
-
-            // Already found a better path
-            if let Some(&best_g) = g_scores.get(&current_id)
-                && current_g > best_g
-            {
-                continue;
-            }
-
-            // For RocksDB, create a 20-byte prefix (node_id + label)
-            let out_prefix = self.edge_label.map_or_else(
-                || current_id.to_be_bytes().to_vec(),
-                |label| {
-                    HelixGraphStorage::out_edge_key_prefix(current_id, &hash_label(label, None))
-                        .to_vec()
-                },
-            );
-            println!("iterating");
-            let mut iter = self
-                .txn
-                .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
-
-            while let Some(key) = iter.key() {
-                let (from_node_id, label, to_node_id, edge_id) =
-                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
-
-                let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
-                    Ok(e) => e,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Fetch nodes for full context in weight calculation
-                let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dst_node = match self.storage.get_node(self.txn, to_node_id, self.arena) {
-                    Ok(n) => n,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                // Call custom weight function with full context
-                let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
-                    Ok(w) => w,
-                    Err(e) => return Some(Err(e)),
-                };
-
-                if weight < 0.0 {
-                    return Some(Err(GraphError::TraversalError(
-                        "Negative edge weights are not supported for A* algorithm".to_string(),
-                    )));
-                }
-
-                let tentative_g = current_g + weight;
-
-                let should_update = g_scores
-                    .get(&to_node_id)
-                    .is_none_or(|&existing_g| tentative_g < existing_g);
-
-                if should_update {
-                    // Calculate heuristic for neighbor
-                    let h = match heuristic_fn(&dst_node) {
-                        Ok(h) => h,
-                        Err(e) => return Some(Err(e)),
-                    };
-
-                    let f = tentative_g + h;
-
-                    g_scores.insert(to_node_id, tentative_g);
-                    parent.insert(to_node_id, (current_id, edge_id));
-                    heap.push(AStarState {
-                        node_id: to_node_id,
-                        g_score: tentative_g,
-                        f_score: f,
-                    });
-                }
-                iter.next();
-            }
-        }
-        Some(Err(GraphError::ShortestPathNotFound))
-    }
-}
-
 pub trait ShortestPathAdapter<'db, 'arena, 'txn, 's, I>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
@@ -1040,6 +343,715 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             },
             storage: self.storage,
             txn: self.txn,
+        }
+    }
+}
+
+// ============================================================================
+// LMDB Implementation
+// ============================================================================
+#[cfg(feature = "lmdb")]
+mod lmdb {
+    use super::*;
+
+    impl<
+        'db: 'arena,
+        'arena: 'txn,
+        'txn,
+        I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+        H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    > Iterator for ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
+    {
+        type Item = Result<TraversalValue<'arena>, GraphError>;
+
+        /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
+        fn next(&mut self) -> Option<Self::Item> {
+            match self.iter.next() {
+                Some(Ok(TraversalValue::Node(node))) => {
+                    let (from, to) = match self.path_type {
+                        PathType::From(from) => (from, node.id),
+                        PathType::To(to) => (node.id, to),
+                    };
+
+                    match self.algorithm {
+                        PathAlgorithm::BFS => self.bfs_shortest_path(from, to),
+                        PathAlgorithm::Dijkstra => self.dijkstra_shortest_path(from, to),
+                        PathAlgorithm::AStar => self.astar_shortest_path(from, to),
+                    }
+                }
+                Some(other) => Some(other),
+                None => None,
+            }
+        }
+    }
+
+    impl<'db, 'arena, 'txn, I, F, H> ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
+    where
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+        H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    {
+        fn reconstruct_path(
+            &self,
+            parent: &HashMap<u128, (u128, u128)>,
+            start_id: u128,
+            end_id: u128,
+            arena: &'arena bumpalo::Bump,
+        ) -> Result<TraversalValue<'arena>, GraphError> {
+            let mut nodes = Vec::with_capacity(parent.len());
+            let mut edges = Vec::with_capacity(parent.len().saturating_sub(1));
+
+            let mut current = end_id;
+
+            while current != start_id {
+                nodes.push(self.storage.get_node(self.txn, current, arena)?);
+
+                let (prev_node, edge) = &parent[&current];
+                edges.push(self.storage.get_edge(self.txn, *edge, arena)?);
+                current = *prev_node;
+            }
+
+            nodes.push(self.storage.get_node(self.txn, start_id, arena)?);
+
+            nodes.reverse();
+            edges.reverse();
+
+            Ok(TraversalValue::Path((nodes, edges)))
+        }
+
+        fn bfs_shortest_path(
+            &self,
+            from: u128,
+            to: u128,
+        ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
+            let mut queue = VecDeque::with_capacity(32);
+            let mut visited = HashSet::with_capacity(64);
+            let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
+            queue.push_back(from);
+            visited.insert(from);
+
+            // find shortest-path from one node to itself
+            if from == to {
+                return Some(self.reconstruct_path(&parent, from, to, self.arena));
+            }
+
+            while let Some(current_id) = queue.pop_front() {
+                let out_prefix = self.edge_label.map_or_else(
+                    || current_id.to_be_bytes().to_vec(),
+                    |label| {
+                        HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None))
+                            .to_vec()
+                    },
+                );
+
+                let iter = self
+                    .storage
+                    .out_edges_db
+                    .prefix_iter(self.txn, &out_prefix)
+                    .unwrap();
+
+                for result in iter {
+                    let value = match result {
+                        Ok((_, value)) => value,
+                        Err(e) => return Some(Err(GraphError::from(e))),
+                    };
+                    let (edge_id, to_node) = match HelixGraphStorage::unpack_adj_edge_data(value) {
+                        Ok((edge_id, to_node)) => (edge_id, to_node),
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    if !visited.contains(&to_node) {
+                        visited.insert(to_node);
+                        parent.insert(to_node, (current_id, edge_id));
+
+                        if to_node == to {
+                            return Some(self.reconstruct_path(&parent, from, to, self.arena));
+                        }
+
+                        queue.push_back(to_node);
+                    }
+                }
+            }
+            Some(Err(GraphError::ShortestPathNotFound))
+        }
+
+        fn dijkstra_shortest_path(
+            &self,
+            from: u128,
+            to: u128,
+        ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
+            let mut heap = BinaryHeap::new();
+            let mut distances = HashMap::with_capacity(64);
+            let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
+
+            distances.insert(from, 0.0);
+            heap.push(DijkstraState {
+                node_id: from,
+                distance: 0.0,
+            });
+
+            while let Some(DijkstraState {
+                node_id: current_id,
+                distance: current_dist,
+            }) = heap.pop()
+            {
+                // Already found a better path
+                if let Some(&best_dist) = distances.get(&current_id)
+                    && current_dist > best_dist
+                {
+                    continue;
+                }
+
+                // Found the target
+                if current_id == to {
+                    return Some(self.reconstruct_path(&parent, from, to, self.arena));
+                }
+
+                let out_prefix = self.edge_label.map_or_else(
+                    || current_id.to_be_bytes().to_vec(),
+                    |label| {
+                        HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None))
+                            .to_vec()
+                    },
+                );
+
+                let iter = self
+                    .storage
+                    .out_edges_db
+                    .prefix_iter(self.txn, &out_prefix)
+                    .unwrap();
+
+                for result in iter {
+                    let (_, value) = result.unwrap(); // TODO: handle error
+                    let (edge_id, to_node) =
+                        HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
+
+                    let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                        Ok(e) => e,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Fetch nodes for full context in weight calculation
+                    let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Call custom weight function with full context
+                    let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
+                        Ok(w) => w,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    if weight < 0.0 {
+                        return Some(Err(GraphError::TraversalError(
+                            "Negative edge weights are not supported for Dijkstra's algorithm"
+                                .to_string(),
+                        )));
+                    }
+
+                    let new_dist = current_dist + weight;
+
+                    let should_update = distances
+                        .get(&to_node)
+                        .is_none_or(|&existing_dist| new_dist < existing_dist);
+
+                    if should_update {
+                        distances.insert(to_node, new_dist);
+                        parent.insert(to_node, (current_id, edge_id));
+                        heap.push(DijkstraState {
+                            node_id: to_node,
+                            distance: new_dist,
+                        });
+                    }
+                }
+            }
+            Some(Err(GraphError::ShortestPathNotFound))
+        }
+
+        fn astar_shortest_path(
+            &self,
+            from: u128,
+            to: u128,
+        ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
+            let heuristic_fn = match &self.heuristic_fn {
+                Some(h) => h,
+                None => {
+                    return Some(Err(GraphError::TraversalError(
+                        "A* algorithm requires a heuristic function".to_string(),
+                    )));
+                }
+            };
+
+            let mut heap = BinaryHeap::new();
+            let mut g_scores: HashMap<u128, f64> = HashMap::with_capacity(64);
+            let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
+
+            // Calculate initial heuristic for start node
+            let start_node = match self.storage.get_node(self.txn, from, self.arena) {
+                Ok(node) => node,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let h_start = match heuristic_fn(&start_node) {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
+
+            g_scores.insert(from, 0.0);
+            heap.push(AStarState {
+                node_id: from,
+                g_score: 0.0,
+                f_score: h_start,
+            });
+
+            while let Some(AStarState {
+                node_id: current_id,
+                g_score: current_g,
+                ..
+            }) = heap.pop()
+            {
+                // Found the target
+                if current_id == to {
+                    return Some(self.reconstruct_path(&parent, from, to, self.arena));
+                }
+
+                // Already found a better path
+                if let Some(&best_g) = g_scores.get(&current_id)
+                    && current_g > best_g
+                {
+                    continue;
+                }
+
+                let out_prefix = self.edge_label.map_or_else(
+                    || current_id.to_be_bytes().to_vec(),
+                    |label| {
+                        HelixGraphStorage::out_edge_key(current_id, &hash_label(label, None))
+                            .to_vec()
+                    },
+                );
+
+                let iter = self
+                    .storage
+                    .out_edges_db
+                    .prefix_iter(self.txn, &out_prefix)
+                    .unwrap();
+
+                for result in iter {
+                    let (_, value) = result.unwrap(); // TODO: handle error
+                    let (edge_id, to_node) =
+                        HelixGraphStorage::unpack_adj_edge_data(value).unwrap(); // TODO: handle error
+
+                    let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                        Ok(e) => e,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Fetch nodes for full context in weight calculation
+                    let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let dst_node = match self.storage.get_node(self.txn, to_node, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Call custom weight function with full context
+                    let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
+                        Ok(w) => w,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    if weight < 0.0 {
+                        return Some(Err(GraphError::TraversalError(
+                            "Negative edge weights are not supported for A* algorithm".to_string(),
+                        )));
+                    }
+
+                    let tentative_g = current_g + weight;
+
+                    let should_update = g_scores
+                        .get(&to_node)
+                        .is_none_or(|&existing_g| tentative_g < existing_g);
+
+                    if should_update {
+                        // Calculate heuristic for neighbor
+                        let h = match heuristic_fn(&dst_node) {
+                            Ok(h) => h,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        let f = tentative_g + h;
+
+                        g_scores.insert(to_node, tentative_g);
+                        parent.insert(to_node, (current_id, edge_id));
+                        heap.push(AStarState {
+                            node_id: to_node,
+                            g_score: tentative_g,
+                            f_score: f,
+                        });
+                    }
+                }
+            }
+            Some(Err(GraphError::ShortestPathNotFound))
+        }
+    }
+}
+
+// ============================================================================
+// RocksDB Implementation
+// ============================================================================
+#[cfg(feature = "rocks")]
+mod rocks {
+    use super::*;
+    use crate::helix_engine::rocks_utils::RocksUtils;
+
+    impl<
+        'db: 'arena,
+        'arena: 'txn,
+        'txn,
+        I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+        H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    > Iterator for ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
+    {
+        type Item = Result<TraversalValue<'arena>, GraphError>;
+
+        /// Returns the next outgoing node by decoding the edge id and then getting the edge and node
+        fn next(&mut self) -> Option<Self::Item> {
+            match self.iter.next() {
+                Some(Ok(TraversalValue::Node(node))) => {
+                    let (from, to) = match self.path_type {
+                        PathType::From(from) => (from, node.id),
+                        PathType::To(to) => (node.id, to),
+                    };
+
+                    match self.algorithm {
+                        PathAlgorithm::BFS => self.bfs_shortest_path(from, to),
+                        PathAlgorithm::Dijkstra => self.dijkstra_shortest_path(from, to),
+                        PathAlgorithm::AStar => self.astar_shortest_path(from, to),
+                    }
+                }
+                Some(other) => Some(other),
+                None => None,
+            }
+        }
+    }
+
+    #[cfg(feature = "rocks")]
+    impl<'db, 'arena, 'txn, I, F, H> ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
+    where
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+        H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    {
+        fn reconstruct_path(
+            &self,
+            parent: &HashMap<u128, (u128, u128)>,
+            start_id: u128,
+            end_id: u128,
+            arena: &'arena bumpalo::Bump,
+        ) -> Result<TraversalValue<'arena>, GraphError> {
+            let mut nodes = Vec::with_capacity(parent.len());
+            let mut edges = Vec::with_capacity(parent.len().saturating_sub(1));
+
+            let mut current = end_id;
+
+            while current != start_id {
+                nodes.push(self.storage.get_node(self.txn, current, arena)?);
+
+                let (prev_node, edge) = &parent[&current];
+                edges.push(self.storage.get_edge(self.txn, *edge, arena)?);
+                current = *prev_node;
+            }
+
+            nodes.push(self.storage.get_node(self.txn, start_id, arena)?);
+
+            nodes.reverse();
+            edges.reverse();
+
+            Ok(TraversalValue::Path((nodes, edges)))
+        }
+
+        fn bfs_shortest_path(
+            &self,
+            from: u128,
+            to: u128,
+        ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
+            let mut queue = VecDeque::with_capacity(32);
+            let mut visited = HashSet::with_capacity(64);
+            let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
+            queue.push_back(from);
+            visited.insert(from);
+
+            // find shortest-path from one node to itself
+            if from == to {
+                return Some(self.reconstruct_path(&parent, from, to, self.arena));
+            }
+
+            while let Some(current_id) = queue.pop_front() {
+                // For RocksDB, we need to create a prefix that's only 20 bytes (node_id + label)
+                // since the full key is 36 bytes (node_id + label + to_node)
+
+                use crate::helix_engine::rocks_utils::RocksUtils;
+                let out_prefix = self.edge_label.map_or_else(
+                    || current_id.to_be_bytes().to_vec(),
+                    |label| {
+                        HelixGraphStorage::out_edge_key_prefix(current_id, &hash_label(label, None))
+                            .to_vec()
+                    },
+                );
+
+                let mut iter = self
+                    .txn
+                    .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
+
+                while let Some(key) = iter.key() {
+                    let (_, _, to_node_id, edge_id) =
+                        HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
+                    if !visited.contains(&to_node_id) {
+                        visited.insert(to_node_id);
+                        parent.insert(to_node_id, (current_id, edge_id));
+
+                        if to_node_id == to {
+                            return Some(self.reconstruct_path(&parent, from, to, self.arena));
+                        }
+
+                        queue.push_back(to_node_id);
+                    }
+                    iter.next();
+                }
+            }
+            Some(Err(GraphError::ShortestPathNotFound))
+        }
+
+        fn dijkstra_shortest_path(
+            &self,
+            from: u128,
+            to: u128,
+        ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
+            let mut heap = BinaryHeap::new();
+            let mut distances = HashMap::with_capacity(64);
+            let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
+
+            distances.insert(from, 0.0);
+            heap.push(DijkstraState {
+                node_id: from,
+                distance: 0.0,
+            });
+
+            while let Some(DijkstraState {
+                node_id: current_id,
+                distance: current_dist,
+            }) = heap.pop()
+            {
+                // Already found a better path
+
+                if let Some(&best_dist) = distances.get(&current_id)
+                    && current_dist > best_dist
+                {
+                    continue;
+                }
+
+                // Found the target
+                if current_id == to {
+                    return Some(self.reconstruct_path(&parent, from, to, self.arena));
+                }
+
+                // For RocksDB, create a 20-byte prefix (node_id + label)
+                let out_prefix = self.edge_label.map_or_else(
+                    || current_id.to_be_bytes().to_vec(),
+                    |label| {
+                        HelixGraphStorage::out_edge_key_prefix(current_id, &hash_label(label, None))
+                            .to_vec()
+                    },
+                );
+
+                let mut iter = self
+                    .txn
+                    .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
+
+                while let Some(key) = iter.key() {
+                    let (_, _, to_node_id, edge_id) =
+                        HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
+
+                    let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                        Ok(e) => e,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Fetch nodes for full context in weight calculation
+                    let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let dst_node = match self.storage.get_node(self.txn, to_node_id, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Call custom weight function with full context
+                    let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
+                        Ok(w) => w,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    if weight < 0.0 {
+                        return Some(Err(GraphError::TraversalError(
+                            "Negative edge weights are not supported for Dijkstra's algorithm"
+                                .to_string(),
+                        )));
+                    }
+
+                    let new_dist = current_dist + weight;
+
+                    let should_update = distances
+                        .get(&to_node_id)
+                        .is_none_or(|&existing_dist| new_dist < existing_dist);
+
+                    if should_update {
+                        distances.insert(to_node_id, new_dist);
+                        parent.insert(to_node_id, (current_id, edge_id));
+                        heap.push(DijkstraState {
+                            node_id: to_node_id,
+                            distance: new_dist,
+                        });
+                    }
+                    iter.next();
+                }
+            }
+            Some(Err(GraphError::ShortestPathNotFound))
+        }
+
+        fn astar_shortest_path(
+            &self,
+            from: u128,
+            to: u128,
+        ) -> Option<Result<TraversalValue<'arena>, GraphError>> {
+            let heuristic_fn = match &self.heuristic_fn {
+                Some(h) => h,
+                None => {
+                    return Some(Err(GraphError::TraversalError(
+                        "A* algorithm requires a heuristic function".to_string(),
+                    )));
+                }
+            };
+
+            let mut heap = BinaryHeap::new();
+            let mut g_scores: HashMap<u128, f64> = HashMap::with_capacity(64);
+            let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
+
+            // Calculate initial heuristic for start node
+            let start_node = match self.storage.get_node(self.txn, from, self.arena) {
+                Ok(node) => node,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let h_start = match heuristic_fn(&start_node) {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
+
+            g_scores.insert(from, 0.0);
+            heap.push(AStarState {
+                node_id: from,
+                g_score: 0.0,
+                f_score: h_start,
+            });
+
+            while let Some(AStarState {
+                node_id: current_id,
+                g_score: current_g,
+                ..
+            }) = heap.pop()
+            {
+                // Found the target
+                if current_id == to {
+                    return Some(self.reconstruct_path(&parent, from, to, self.arena));
+                }
+
+                // Already found a better path
+                if let Some(&best_g) = g_scores.get(&current_id)
+                    && current_g > best_g
+                {
+                    continue;
+                }
+
+                // For RocksDB, create a 20-byte prefix (node_id + label)
+                let out_prefix = self.edge_label.map_or_else(
+                    || current_id.to_be_bytes().to_vec(),
+                    |label| {
+                        HelixGraphStorage::out_edge_key_prefix(current_id, &hash_label(label, None))
+                            .to_vec()
+                    },
+                );
+                println!("iterating");
+                let mut iter = self
+                    .txn
+                    .raw_prefix_iter(&self.storage.cf_out_edges(), &out_prefix);
+
+                while let Some(key) = iter.key() {
+                    let (_, _, to_node_id, edge_id) =
+                        HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
+
+                    let edge = match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                        Ok(e) => e,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Fetch nodes for full context in weight calculation
+                    let src_node = match self.storage.get_node(self.txn, current_id, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let dst_node = match self.storage.get_node(self.txn, to_node_id, self.arena) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    // Call custom weight function with full context
+                    let weight = match (self.weight_fn)(&edge, &src_node, &dst_node) {
+                        Ok(w) => w,
+                        Err(e) => return Some(Err(e)),
+                    };
+
+                    if weight < 0.0 {
+                        return Some(Err(GraphError::TraversalError(
+                            "Negative edge weights are not supported for A* algorithm".to_string(),
+                        )));
+                    }
+
+                    let tentative_g = current_g + weight;
+
+                    let should_update = g_scores
+                        .get(&to_node_id)
+                        .is_none_or(|&existing_g| tentative_g < existing_g);
+
+                    if should_update {
+                        // Calculate heuristic for neighbor
+                        let h = match heuristic_fn(&dst_node) {
+                            Ok(h) => h,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        let f = tentative_g + h;
+
+                        g_scores.insert(to_node_id, tentative_g);
+                        parent.insert(to_node_id, (current_id, edge_id));
+                        heap.push(AStarState {
+                            node_id: to_node_id,
+                            g_score: tentative_g,
+                            f_score: f,
+                        });
+                    }
+                    iter.next();
+                }
+            }
+            Some(Err(GraphError::ShortestPathNotFound))
         }
     }
 }

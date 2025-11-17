@@ -173,7 +173,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             HelixGraphStorage::out_edge_key(from_node, &label_hash, to_node, edge.id);
         match self
             .txn
-            .put_cf(&self.storage.cf_out_edges(), out_edge_key, &[])
+            .put_cf(&self.storage.cf_out_edges(), out_edge_key, [])
         {
             Ok(_) => {}
             Err(e) => {
@@ -187,7 +187,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         let in_edge_key = HelixGraphStorage::in_edge_key(to_node, &label_hash, from_node, edge.id);
         match self
             .txn
-            .put_cf(&self.storage.cf_in_edges(), in_edge_key, &[])
+            .put_cf(&self.storage.cf_in_edges(), in_edge_key, [])
         {
             Ok(_) => {}
             Err(e) => {

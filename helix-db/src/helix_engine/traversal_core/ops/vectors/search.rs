@@ -1,5 +1,3 @@
-use heed3::RoTxn;
-
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},

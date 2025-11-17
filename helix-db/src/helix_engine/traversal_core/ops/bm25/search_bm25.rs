@@ -68,7 +68,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 #[cfg(feature= "rocks")]
                 {
                     let cf = self.storage.cf_nodes();
-                    self.txn.get_pinned_cf(&cf, &id.to_be_bytes())
+                    self.txn.get_pinned_cf(&cf, id.to_be_bytes())
                 }
             };
 

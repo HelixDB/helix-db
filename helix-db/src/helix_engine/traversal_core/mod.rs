@@ -3,9 +3,6 @@ pub mod ops;
 pub mod traversal_iter;
 pub mod traversal_value;
 
-#[cfg(feature = "lmdb")]
-use heed3::{AnyTls, WithTls};
-
 use crate::helix_engine::storage_core::{HelixGraphStorage, version_info::VersionInfo};
 use crate::helix_engine::traversal_core::config::Config;
 use crate::helix_engine::types::GraphError;

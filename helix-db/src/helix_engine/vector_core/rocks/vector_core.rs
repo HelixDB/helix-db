@@ -4,7 +4,6 @@ use crate::{
     helix_engine::{
         storage_core::Txn,
         types::VectorError,
-        utils::RocksUtils,
         vector_core::{
             rocks::{
                 hnsw::HNSW,
@@ -14,22 +13,12 @@ use crate::{
             vector_without_data::VectorWithoutData,
         },
     },
-    utils::{id::uuid_str, properties::ImmutablePropertiesMap},
-};
-use heed3::{
-    Database, Env, RoTxn, RwTxn,
-    byteorder::BE,
-    types::{Bytes, U128, Unit},
+    utils::properties::ImmutablePropertiesMap,
 };
 use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashSet, sync::Arc};
-use uuid::Uuid;
 
-const DB_VECTORS: &str = "vectors"; // for vector data (v:)
-const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
-const DB_HNSW_EDGES: &str = "hnsw_out_nodes"; // for hnsw out node data
-const VECTOR_PREFIX: &[u8] = b"v:";
 pub const ENTRY_POINT_KEY: &[u8] = b"entry_point";
 const EDGE_LENGTH: usize = 17;
 
@@ -104,7 +93,7 @@ fn remove(bytes: &mut Vec<u8>, target: [u8; 17]) {
     let step = target.len();
     let mut index = 0;
     while index < bytes.len() {
-        if &bytes[index..index + step] == target {
+        if bytes[index..index + step] == target {
             bytes.drain(index..index + step);
         }
         index += step;
@@ -115,7 +104,7 @@ fn insert(bytes: &mut Vec<u8>, target: [u8; 17]) {
     let step = target.len();
     let mut index = 0;
     while index < bytes.len() {
-        if &bytes[index..index + step] == target {
+        if bytes[index..index + step] == target {
             return;
         }
         index += step;
@@ -145,22 +134,22 @@ fn hnsw_edges_merge(
 impl VectorCore {
     // Helper methods to get column family handles on-demand
     #[inline(always)]
-    pub fn cf_vectors(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    pub fn cf_vectors(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.db.cf_handle("vectors").unwrap()
     }
 
     #[inline(always)]
-    pub fn cf_vector_properties(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    pub fn cf_vector_properties(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.db.cf_handle("vector_data").unwrap()
     }
 
     #[inline(always)]
-    pub fn cf_edges(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    pub fn cf_edges(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.db.cf_handle("hnsw_edges").unwrap()
     }
 
     #[inline(always)]
-    pub fn cf_ep(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    pub fn cf_ep(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.db.cf_handle("ep").unwrap()
     }
 
@@ -247,7 +236,7 @@ impl VectorCore {
     #[inline]
     fn set_entry_point<'db>(&self, txn: &Txn<'db>, entry: &HVector) -> Result<(), VectorError> {
         let cf = self.cf_ep();
-        txn.put_cf(&cf, ENTRY_POINT_KEY, &entry.id.to_be_bytes())
+        txn.put_cf(&cf, ENTRY_POINT_KEY, entry.id.to_be_bytes())
             .map_err(VectorError::from)?;
         Ok(())
     }
@@ -293,7 +282,7 @@ impl VectorCore {
         );
 
         let cf_edges = self.cf_edges();
-        let edges = txn.get_pinned_cf(&cf_edges, &out_key)?;
+        let edges = txn.get_pinned_cf(&cf_edges, out_key)?;
 
         if let Some(value) = edges {
             let edges = Self::decode_edges(&value);
@@ -397,22 +386,22 @@ impl VectorCore {
 
         for entry in removes {
             let operand = EdgeOp::encode(EdgeOp::Remove, &entry);
-            txn.merge_cf(&cf_edges, &key, &operand)?;
+            txn.merge_cf(&cf_edges, key, operand)?;
 
             let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
             let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
             let reciprocal_operand = EdgeOp::encode(EdgeOp::Remove, &reciprocal);
-            txn.merge_cf(&cf_edges, &neighbor_key, &reciprocal_operand)?;
+            txn.merge_cf(&cf_edges, neighbor_key, reciprocal_operand)?;
         }
 
         for entry in adds {
             let operand = EdgeOp::encode(EdgeOp::Add, &entry);
-            txn.merge_cf(&cf_edges, &key, &operand)?;
+            txn.merge_cf(&cf_edges, key, operand)?;
 
             let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
             let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
             let reciprocal_operand = EdgeOp::encode(EdgeOp::Add, &reciprocal);
-            txn.merge_cf(&cf_edges, &neighbor_key, &reciprocal_operand)?;
+            txn.merge_cf(&cf_edges, neighbor_key, reciprocal_operand)?;
         }
 
         Ok(())
@@ -543,7 +532,7 @@ impl VectorCore {
     }
 
     // Not possible to implement in RocksDB unless iterating over all keys
-    pub fn num_inserted_vectors<'db>(&self, txn: &Txn<'db>) -> Result<u64, VectorError> {
+    pub fn num_inserted_vectors<'db>(&self, _txn: &Txn<'db>) -> Result<u64, VectorError> {
         unimplemented!()
     }
 
@@ -556,7 +545,7 @@ impl VectorCore {
     ) -> Result<Option<VectorWithoutData<'arena>>, VectorError> {
         let cf = self.cf_vector_properties();
         let vector: Option<VectorWithoutData<'arena>> =
-            match txn.get_pinned_cf(&cf, &id.to_be_bytes())? {
+            match txn.get_pinned_cf(&cf, id.to_be_bytes())? {
                 Some(bytes) => Some(VectorWithoutData::from_bincode_bytes(arena, &bytes, id)?),
                 None => None,
             };
@@ -581,12 +570,12 @@ impl VectorCore {
         let cf_vectors = self.cf_vectors();
         let cf_props = self.cf_vector_properties();
         let vector_data_bytes =
-            txn.get_pinned_cf(&cf_vectors, &key)?
+            txn.get_pinned_cf(&cf_vectors, key)?
                 .ok_or(VectorError::VectorNotFound(
                     uuid::Uuid::from_u128(id).to_string(),
                 ))?;
 
-        let properties_bytes = txn.get_pinned_cf(&cf_props, &key)?;
+        let properties_bytes = txn.get_pinned_cf(&cf_props, key)?;
 
         let vector = HVector::from_bincode_bytes(
             arena,
@@ -610,7 +599,7 @@ impl VectorCore {
     ) -> Result<HVector<'arena>, VectorError> {
         let cf = self.cf_vectors();
         let vector_data_bytes =
-            txn.get_pinned_cf(&cf, &Self::vector_key(id))?
+            txn.get_pinned_cf(&cf, Self::vector_key(id))?
                 .ok_or(VectorError::VectorNotFound(
                     uuid::Uuid::from_u128(id).to_string(),
                 ))?;
@@ -785,9 +774,9 @@ impl HNSW for VectorCore {
                 properties.deleted = true;
                 txn.put_cf(
                     &self.cf_vector_properties(),
-                    &id.to_be_bytes(),
+                    id.to_be_bytes(),
                     &bincode::serialize(&properties)?,
-                );
+                )?;
                 debug_println!("vector deleted with id {}", &id);
                 Ok(())
             }

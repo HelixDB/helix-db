@@ -1,6 +1,8 @@
+#[cfg(feature = "rocks")]
+use crate::helix_engine::storage_core::txn::ReadTransaction;
 use crate::{
     helix_engine::{
-        storage_core::{HelixGraphStorage, Txn, txn::ReadTransaction},
+        storage_core::{HelixGraphStorage, Txn},
         traversal_core::{
             ops::util::{aggregate::AggregateAdapter, group_by::GroupByAdapter},
             traversal_value::TraversalValue,

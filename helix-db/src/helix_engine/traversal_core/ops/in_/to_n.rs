@@ -16,7 +16,6 @@ pub trait ToNAdapter<'db, 'arena, 'txn, I>:
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     >;
 }
-
 #[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     ToNAdapter<'db, 'arena, 'txn, I> for RoTraversalIterator<'db, 'arena, 'txn, I>

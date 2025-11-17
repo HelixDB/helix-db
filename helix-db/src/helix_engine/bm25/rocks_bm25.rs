@@ -14,10 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::task;
 
-const DB_BM25_INVERTED_INDEX: &str = "bm25_inverted_index"; // term -> list of (doc_id, tf)
-const DB_BM25_DOC_LENGTHS: &str = "bm25_doc_lengths"; // doc_id -> document length
-const DB_BM25_TERM_FREQUENCIES: &str = "bm25_term_frequencies"; // term -> document frequency
-const DB_BM25_METADATA: &str = "bm25_metadata"; // stores total docs, avgdl, etc.
 pub const METADATA_KEY: &[u8] = b"metadata";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -67,26 +63,26 @@ pub struct HBM25Config {
 impl HBM25Config {
     // Helper methods to get column family handles on-demand
     #[inline(always)]
-    fn cf_inverted_index(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    fn cf_inverted_index(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.graph_env.cf_handle("inverted_index").unwrap()
     }
 
     #[inline(always)]
-    fn cf_doc_lengths(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    fn cf_doc_lengths(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.graph_env.cf_handle("doc_lengths").unwrap()
     }
 
     #[inline(always)]
-    fn cf_term_frequencies(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    fn cf_term_frequencies(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.graph_env.cf_handle("term_frequencies").unwrap()
     }
 
     #[inline(always)]
-    fn cf_metadata(&self) -> Arc<rocksdb::BoundColumnFamily> {
+    fn cf_metadata(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
         self.graph_env.cf_handle("bm25_metadata").unwrap()
     }
 
-    pub fn new<'db>(
+    pub fn new(
         graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
     ) -> Result<HBM25Config, GraphError> {
         Ok(HBM25Config {
@@ -96,9 +92,9 @@ impl HBM25Config {
         })
     }
 
-    pub fn new_temp<'db>(
+    pub fn new_temp(
         graph_env: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
-        _wtxn: &mut WTxn<'db>,
+        _wtxn: &mut WTxn<'_>,
         _uuid: &str,
     ) -> Result<HBM25Config, GraphError> {
         Ok(HBM25Config {
@@ -133,8 +129,8 @@ impl BM25 for HBM25Config {
         let cf_doc_lengths = self.cf_doc_lengths();
         txn.put_cf(
             &cf_doc_lengths,
-            &doc_id.to_be_bytes(),
-            &doc_length.to_be_bytes(),
+            doc_id.to_be_bytes(),
+            doc_length.to_be_bytes(),
         )?;
 
         let cf_inverted = self.cf_inverted_index();
@@ -158,7 +154,7 @@ impl BM25 for HBM25Config {
             let current_df = txn
                 .get_cf(&cf_term_freq, term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
-            txn.put_cf(&cf_term_freq, term_bytes, &(current_df + 1).to_be_bytes())?;
+            txn.put_cf(&cf_term_freq, term_bytes, (current_df + 1).to_be_bytes())?;
         }
 
         let cf_metadata = self.cf_metadata();
@@ -223,16 +219,16 @@ impl BM25 for HBM25Config {
                 .get_cf(&cf_term_freq, &term_bytes)?
                 .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
             if current_df > 0 {
-                txn.put_cf(&cf_term_freq, &term_bytes, &(current_df - 1).to_be_bytes())?;
+                txn.put_cf(&cf_term_freq, &term_bytes, (current_df - 1).to_be_bytes())?;
             }
         }
 
         let cf_doc_lengths = self.cf_doc_lengths();
         let doc_length = txn
-            .get_cf(&cf_doc_lengths, &doc_id.to_be_bytes())?
+            .get_cf(&cf_doc_lengths, doc_id.to_be_bytes())?
             .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
 
-        txn.delete_cf(&cf_doc_lengths, &doc_id.to_be_bytes())?;
+        txn.delete_cf(&cf_doc_lengths, doc_id.to_be_bytes())?;
 
         let cf_metadata = self.cf_metadata();
         let metadata_data = txn.get_cf(&cf_metadata, METADATA_KEY)?;
@@ -333,7 +329,7 @@ impl BM25 for HBM25Config {
 
                 // Get document length
                 let doc_length = txn
-                    .get_cf(&cf_doc_lengths, &posting.doc_id.to_be_bytes())?
+                    .get_cf(&cf_doc_lengths, posting.doc_id.to_be_bytes())?
                     .map_or(0, |data| u32::from_be_bytes(data.try_into().unwrap()));
 
                 // Calculate BM25 score for this term in this document

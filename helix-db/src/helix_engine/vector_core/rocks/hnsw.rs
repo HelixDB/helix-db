@@ -1,8 +1,6 @@
 use crate::helix_engine::vector_core::vector::HVector;
 use crate::{helix_engine::types::VectorError, utils::properties::ImmutablePropertiesMap};
 
-use heed3::{RoTxn, RwTxn};
-
 pub trait HNSW {
     /// Search for the k nearest neighbors of a query vector
     ///

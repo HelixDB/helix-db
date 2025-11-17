@@ -1,5 +1,3 @@
-#![cfg(feature = "lmdb")]
-
 use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,

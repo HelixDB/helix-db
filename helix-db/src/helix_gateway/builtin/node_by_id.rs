@@ -1,18 +1,19 @@
 use std::sync::Arc;
 
+use crate::helix_engine::storage_core::storage_methods::StorageMethods;
+#[cfg(feature = "rocks")]
+use crate::helix_engine::storage_core::txn::ReadTransaction;
+use crate::helix_engine::types::GraphError;
+use crate::helix_gateway::gateway::AppState;
+use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
+use crate::protocol::{self, request::RequestType};
+use crate::utils::id::ID;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use sonic_rs::{JsonValueTrait, json};
 use tracing::info;
-
-use crate::helix_engine::storage_core::storage_methods::StorageMethods;
-use crate::helix_engine::types::GraphError;
-use crate::helix_gateway::gateway::AppState;
-use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
-use crate::protocol::{self, request::RequestType};
-use crate::utils::id::ID;
 
 // get node details by ID
 // curl "http://localhost:PORT/node-details?id=YOUR_NODE_ID"
@@ -54,7 +55,7 @@ pub async fn node_details_handler(
 
 pub fn node_details_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     let db = Arc::clone(&input.graph.storage);
-    let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
+    let txn = db.graph_env.read_txn()?;
     let arena = bumpalo::Bump::new();
 
     let node_id_str = if !input.request.body.is_empty() {
@@ -83,7 +84,7 @@ pub fn node_details_inner(input: HandlerInput) -> Result<protocol::Response, Gra
         },
     };
 
-    let result = match db.get_node(&txn, &node_id, &arena) {
+    let result = match db.get_node(&txn, node_id, &arena) {
         Ok(node) => {
             let id_str = ID::from(node_id).stringify();
 
@@ -128,25 +129,24 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use axum::body::Bytes;
+    #[cfg(feature = "rocks")]
+    use crate::helix_engine::storage_core::txn::WriteTransaction;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
             traversal_core::{
                 HelixGraphEngine, HelixGraphEngineOpts,
                 config::Config,
-                ops::{
-                    g::G,
-                    source::add_n::AddNAdapter,
-                },
+                ops::{g::G, source::add_n::AddNAdapter},
             },
         },
-        protocol::{request::Request, request::RequestType, Format, value::Value},
         helix_gateway::router::router::HandlerInput,
+        protocol::{Format, request::Request, request::RequestType, value::Value},
         utils::id::ID,
     };
+    use axum::body::Bytes;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -171,7 +171,9 @@ mod tests {
         let props = vec![("name", Value::String("Alice".to_string()))];
         let props_map = ImmutablePropertiesMap::new(
             props.len(),
-            props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -196,7 +198,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_details_inner(input);
@@ -227,7 +228,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_details_inner(input);
@@ -256,7 +256,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_details_inner(input);
@@ -279,7 +278,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_details_inner(input);
@@ -300,7 +298,9 @@ mod tests {
         ];
         let props_map = ImmutablePropertiesMap::new(
             props.len(),
-            props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -325,7 +325,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = node_details_inner(input);

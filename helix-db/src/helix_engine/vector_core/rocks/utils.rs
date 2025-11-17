@@ -4,11 +4,6 @@ use crate::helix_engine::{
     types::VectorError,
     vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
 };
-use heed3::{
-    Database, RoTxn,
-    byteorder::BE,
-    types::{Bytes, U128},
-};
 use rocksdb::BoundColumnFamily;
 use std::{cmp::Ordering, sync::Arc};
 
@@ -110,7 +105,7 @@ impl<'db, 'arena, 'txn, 'q> VectorFilter<'db, 'arena, 'txn, 'q>
         for _ in 0..k {
             // while pop check filters and pop until one passes
             while let Some(mut item) = self.pop() {
-                let properties = match txn.get_pinned_cf(&db, &item.id.to_be_bytes())? {
+                let properties = match txn.get_pinned_cf(&db, item.id.to_be_bytes())? {
                     Some(bytes) => {
                         // println!("decoding");
                         let res = Some(VectorWithoutData::from_bincode_bytes(

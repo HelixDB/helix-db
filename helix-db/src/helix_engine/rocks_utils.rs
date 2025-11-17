@@ -1,16 +1,16 @@
 pub(super) trait RocksUtils<'db> {
-    fn raw_prefix_iter<'a>(
+    fn raw_prefix_iter(
         &self,
         cf_handle: &impl rocksdb::AsColumnFamilyRef,
-        prefix: &'a [u8],
+        prefix: &[u8],
     ) -> rocksdb::DBRawIteratorWithThreadMode<'_, rocksdb::Transaction<'_, rocksdb::TransactionDB>>;
 }
 
 impl<'db> RocksUtils<'db> for rocksdb::Transaction<'db, rocksdb::TransactionDB> {
-    fn raw_prefix_iter<'a>(
+    fn raw_prefix_iter(
         &self,
         cf_handle: &impl rocksdb::AsColumnFamilyRef,
-        prefix: &'a [u8],
+        prefix: &[u8],
     ) -> rocksdb::DBRawIteratorWithThreadMode<'_, rocksdb::Transaction<'_, rocksdb::TransactionDB>>
     {
         let mut ro = rocksdb::ReadOptions::default();

@@ -1,14 +1,13 @@
 use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,
+        storage_core::storage_methods::StorageMethods,
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::label_hash::hash_label,
 };
 
-#[cfg(feature = "lmdb")]
-use crate::helix_engine::storage_core::storage_methods::StorageMethods;
 pub trait InEdgesAdapter<'db, 'arena, 'txn, 's, I>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
@@ -120,7 +119,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 let edge_label_hash = hash_label(edge_label, None);
                 match item {
                     Ok(item) => {
-                        use crate::helix_engine::utils::RocksUtils;
+                        use crate::helix_engine::rocks_utils::RocksUtils;
 
                         let prefix =
                             HelixGraphStorage::in_edge_key_prefix(item.id(), &edge_label_hash);

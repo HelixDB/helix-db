@@ -1,16 +1,16 @@
-#[cfg(feature = "lmdb")]
-use heed3::PutFlags;
-use itertools::Itertools;
-
+#[cfg(feature = "rocks")]
+use crate::helix_engine::storage_core::HelixGraphStorage;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     protocol::value::Value,
     utils::properties::ImmutablePropertiesMap,
 };
+#[cfg(feature = "lmdb")]
+use heed3::PutFlags;
+use itertools::Itertools;
 
 pub struct Update<I> {
     iter: I,
@@ -284,7 +284,8 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             None => {
                                 // Insert secondary indices
                                 for (k, v) in props.iter() {
-                                    let Some(cf_name) = self.storage.secondary_indices.get(*k) else {
+                                    let Some(cf_name) = self.storage.secondary_indices.get(*k)
+                                    else {
                                         continue;
                                     };
                                     let cf = self.storage.graph_env.cf_handle(cf_name).unwrap();
@@ -299,7 +300,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                     &v_serialized,
                                                     node.id,
                                                 );
-                                            if let Err(e) = self.txn.put_cf(&cf, composite_key, &[])
+                                            if let Err(e) = self.txn.put_cf(&cf, composite_key, [])
                                             {
                                                 results.push(Err(GraphError::from(e)));
                                             }
@@ -319,7 +320,8 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             }
                             Some(old) => {
                                 for (k, v) in props.iter() {
-                                    let Some(cf_name) = self.storage.secondary_indices.get(*k) else {
+                                    let Some(cf_name) = self.storage.secondary_indices.get(*k)
+                                    else {
                                         continue;
                                     };
                                     let cf = self.storage.graph_env.cf_handle(cf_name).unwrap();
@@ -361,7 +363,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                     &v_serialized,
                                                     node.id,
                                                 );
-                                            if let Err(e) = self.txn.put_cf(&cf, composite_key, &[])
+                                            if let Err(e) = self.txn.put_cf(&cf, composite_key, [])
                                             {
                                                 results.push(Err(GraphError::from(e)));
                                             }
@@ -405,7 +407,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             Ok(serialized_node) => {
                                 match self.txn.put_cf(
                                     &self.storage.cf_nodes(),
-                                    &HelixGraphStorage::node_key(node.id),
+                                    HelixGraphStorage::node_key(node.id),
                                     &serialized_node,
                                 ) {
                                     Ok(_) => results.push(Ok(TraversalValue::Node(node))),
@@ -463,7 +465,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             Ok(serialized_edge) => {
                                 match self.txn.put_cf(
                                     &self.storage.cf_edges(),
-                                    &HelixGraphStorage::edge_key(edge.id),
+                                    HelixGraphStorage::edge_key(edge.id),
                                     &serialized_edge,
                                 ) {
                                     Ok(_) => results.push(Ok(TraversalValue::Edge(edge))),

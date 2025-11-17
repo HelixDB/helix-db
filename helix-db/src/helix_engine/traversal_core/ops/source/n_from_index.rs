@@ -4,12 +4,13 @@ use crate::{
         types::GraphError,
     },
     protocol::value::Value,
-    utils::items::Node,
 };
 use serde::Serialize;
 
+#[cfg(feature = "rocks")]
+use crate::helix_engine::storage_core::storage_methods::StorageMethods;
 #[cfg(feature = "lmdb")]
-use crate::helix_engine::traversal_core::LMDB_STRING_HEADER_LENGTH;
+use crate::{helix_engine::traversal_core::LMDB_STRING_HEADER_LENGTH, utils::items::Node};
 
 pub trait NFromIndexAdapter<'db, 'arena, 'txn, 's, K: Into<Value> + Serialize>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -176,6 +177,7 @@ impl<
                         );
 
                         // Get the full node using get_node()
+                        // TODO FOR DIRECT LABEL CHECKING
                         match storage.get_node(txn, node_id, arena) {
                             Ok(node) => {
                                 // Filter by label using deserialized node

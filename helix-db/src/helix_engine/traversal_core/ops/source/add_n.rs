@@ -1,18 +1,16 @@
+#[cfg(feature = "lmdb")]
+use crate::helix_engine::bm25::lmdb_bm25::{BM25, BM25Flatten};
+#[cfg(feature = "rocks")]
+use crate::helix_engine::bm25::rocks_bm25::{BM25, BM25Flatten};
+#[cfg(feature = "rocks")]
+use crate::helix_engine::storage_core::HelixGraphStorage;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
     utils::{id::v6_uuid, items::Node, properties::ImmutablePropertiesMap},
 };
-
-#[cfg(feature = "lmdb")]
-use crate::helix_engine::bm25::lmdb_bm25::{BM25, BM25Flatten};
-
-#[cfg(feature = "rocks")]
-use crate::helix_engine::bm25::rocks_bm25::{BM25, BM25Flatten};
-
 #[cfg(feature = "lmdb")]
 use heed3::PutFlags;
 
@@ -159,7 +157,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             Ok(bytes) => {
                 if let Err(e) = self.txn.put_cf(
                     &self.storage.cf_nodes(),
-                    &HelixGraphStorage::node_key(node.id),
+                    HelixGraphStorage::node_key(node.id),
                     &bytes,
                 ) {
                     result = Err(GraphError::from(e));
@@ -187,7 +185,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                 node.id,
                             );
 
-                            if let Err(e) = self.txn.put_cf(&cf, composite_key, &[]) {
+                            if let Err(e) = self.txn.put_cf(&cf, composite_key, []) {
                                 println!(
                                     "{} Error adding node to secondary index: {:?}",
                                     line!(),

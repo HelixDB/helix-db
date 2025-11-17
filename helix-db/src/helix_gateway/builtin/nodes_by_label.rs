@@ -1,18 +1,19 @@
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::{Query, State};
-use axum::response::IntoResponse;
-use serde::Deserialize;
-use sonic_rs::{JsonValueTrait, json};
-use tracing::info;
-
+#[cfg(feature = "rocks")]
+use crate::helix_engine::storage_core::txn::ReadTransaction;
 use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
 use crate::protocol::{self, request::RequestType};
 use crate::utils::id::ID;
 use crate::utils::items::Node;
+use axum::body::Body;
+use axum::extract::{Query, State};
+use axum::response::IntoResponse;
+use serde::Deserialize;
+use sonic_rs::{JsonValueTrait, json};
+use tracing::info;
 
 // get all nodes with a specific label
 // curl "http://localhost:PORT/nodes-by-label?label=YOUR_LABEL&limit=100"
@@ -56,7 +57,7 @@ pub async fn nodes_by_label_handler(
 
 pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     let db = Arc::clone(&input.graph.storage);
-    let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
+    let txn = db.graph_env.read_txn()?;
     let arena = bumpalo::Bump::new();
 
     let (label, limit) = if !input.request.body.is_empty() {
@@ -83,37 +84,82 @@ pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, G
     let mut nodes_json = Vec::new();
     let mut count = 0;
 
-    for result in db.nodes_db.iter(&txn)? {
-        let (id, node_data) = result?;
-        match Node::from_bincode_bytes(id, node_data, &arena) {
-            Ok(node) => {
-                if node.label == label {
-                    let id_str = ID::from(id).stringify();
+    #[cfg(feature = "lmdb")]
+    {
+        // LMDB implementation
+        for result in db.nodes_db.iter(&txn)? {
+            let (id, node_data) = result?;
+            match Node::from_bincode_bytes(id, node_data, &arena) {
+                Ok(node) => {
+                    if node.label == label {
+                        let id_str = ID::from(id).stringify();
 
-                    let mut node_json = json!({
-                        "id": id_str.clone(),
-                        "label": node.label,
-                        "title": id_str
-                    });
+                        let mut node_json = json!({
+                            "id": id_str.clone(),
+                            "label": node.label,
+                            "title": id_str
+                        });
 
-                    // Add node properties
-                    if let Some(properties) = &node.properties {
-                        for (key, value) in properties.iter() {
-                            node_json[key] = sonic_rs::to_value(&value.inner_stringify())
-                                .unwrap_or_else(|_| sonic_rs::Value::from(""));
+                        // Add node properties
+                        if let Some(properties) = &node.properties {
+                            for (key, value) in properties.iter() {
+                                node_json[key] = sonic_rs::to_value(&value.inner_stringify())
+                                    .unwrap_or_else(|_| sonic_rs::Value::from(""));
+                            }
                         }
-                    }
 
-                    nodes_json.push(node_json);
-                    count += 1;
+                        nodes_json.push(node_json);
+                        count += 1;
 
-                    if let Some(limit_count) = limit
-                        && count >= limit_count {
+                        if let Some(limit_count) = limit
+                            && count >= limit_count
+                        {
                             break;
                         }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    #[cfg(feature = "rocks")]
+    {
+        // RocksDB implementation
+        let cf_nodes = db.cf_nodes();
+        let iter = txn.iterator_cf(&cf_nodes, rocksdb::IteratorMode::Start);
+
+        for (key, value) in iter.flatten() {
+            assert!(key.len() == 16);
+            let id = u128::from_be_bytes(key[..].try_into().unwrap());
+            if let Ok(node) = Node::from_bincode_bytes(id, &value, &arena)
+                && node.label == label
+            {
+                let id_str = ID::from(id).stringify();
+
+                let mut node_json = json!({
+                    "id": id_str.clone(),
+                    "label": node.label,
+                    "title": id_str
+                });
+
+                // Add node properties
+                if let Some(properties) = &node.properties {
+                    for (key, value) in properties.iter() {
+                        node_json[key] = sonic_rs::to_value(&value.inner_stringify())
+                            .unwrap_or_else(|_| sonic_rs::Value::from(""));
+                    }
+                }
+
+                nodes_json.push(node_json);
+                count += 1;
+
+                if let Some(limit_count) = limit
+                    && count >= limit_count
+                {
+                    break;
                 }
             }
-            Err(_) => continue,
         }
     }
 
@@ -137,24 +183,23 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use axum::body::Bytes;
+    #[cfg(feature = "rocks")]
+    use crate::helix_engine::storage_core::txn::WriteTransaction;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
             traversal_core::{
                 HelixGraphEngine, HelixGraphEngineOpts,
                 config::Config,
-                ops::{
-                    g::G,
-                    source::add_n::AddNAdapter,
-                },
+                ops::{g::G, source::add_n::AddNAdapter},
             },
         },
-        protocol::{request::Request, request::RequestType, Format, value::Value},
         helix_gateway::router::router::HandlerInput,
+        protocol::{Format, request::Request, request::RequestType, value::Value},
     };
+    use axum::body::Bytes;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -179,7 +224,9 @@ mod tests {
         let props1 = vec![("name", Value::String("Alice".to_string()))];
         let props_map1 = ImmutablePropertiesMap::new(
             props1.len(),
-            props1.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props1
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -190,7 +237,9 @@ mod tests {
         let props2 = vec![("name", Value::String("Bob".to_string()))];
         let props_map2 = ImmutablePropertiesMap::new(
             props2.len(),
-            props2.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props2
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -214,7 +263,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -238,7 +286,9 @@ mod tests {
             let props = vec![("index", Value::I64(i))];
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
 
@@ -263,7 +313,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -293,7 +342,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -320,7 +368,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);
@@ -357,7 +404,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_by_label_inner(input);

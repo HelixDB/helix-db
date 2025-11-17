@@ -1,4 +1,5 @@
 use crate::helix_engine::{
+    storage_core::storage_methods::StorageMethods,
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
 };
@@ -42,8 +43,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             arena: self.arena,
             txn: self.txn,
             inner: std::iter::once({
-                use crate::helix_engine::storage_core::storage_methods::StorageMethods;
-
                 match self.storage.get_edge(self.txn, *id, self.arena) {
                     Ok(edge) => Ok(TraversalValue::Edge(edge)),
                     Err(e) => Err(e),
