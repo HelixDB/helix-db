@@ -27,11 +27,13 @@ helm/
 
 ## Deploying to Kubernetes
 
+```bash
 helm install helixdb ./helm -n your-namespace --create-namespace
+```
 
 ## using an existing PVC
 
-If you are using a previously created PVC, make sure it has accessModes of type ReadWriteOncePod and includes the following annotations:
+If you are using a previously created PVC, make sure it has accessModes of type ReadWriteOncePod (supported on Kubernetes 1.22 and newer) and includes the following annotations:
 
   * app.kubernetes.io/managed-by=Helm
   * meta.helm.sh/release-namespace=<namespace>

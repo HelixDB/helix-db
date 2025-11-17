@@ -3,11 +3,12 @@ namespace: helixdb
 
 image:
   # Image repository and tag
-  repository: "your-registry/helixdb"
+  repository: "example.com/helixdb"
   tag: "2.1.2" 
   pullPolicy: IfNotPresent
 
 service:
+  type: ClusterIP
   # TCP port used by the application
   port: 6969
 

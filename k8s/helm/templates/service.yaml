@@ -4,6 +4,7 @@ metadata:
   name: helixdb-service
   namespace: {{ .Values.namespace }}
 spec:
+  type: {{ .Values.service.type }}
   selector:
     app: helixdb
   ports:

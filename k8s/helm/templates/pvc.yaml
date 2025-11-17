@@ -4,7 +4,8 @@ metadata:
   name: {{ .Values.pvc.name }}
   namespace: {{ .Values.namespace }}
 spec:
-  # Force ReadWriteOncePod mode
+  # ReadWriteOncePod requires Kubernetes >= 1.22.
+  # HelixDB needs exclusive volume access; do NOT change this mode.
   accessModes:
     - ReadWriteOncePod
   resources:
