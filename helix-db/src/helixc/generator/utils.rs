@@ -425,7 +425,6 @@ pub fn write_headers() -> String {
 
 
 use bumpalo::Bump;
-use heed3::RoTxn;
 use helix_macros::{handler, tool_call, mcp_handler, migration};
 use helix_db::{
     helix_engine::{
@@ -433,7 +432,9 @@ use helix_db::{
             RerankAdapter,
             fusion::{RRFReranker, MMRReranker, DistanceMethod},
         },
+        storage_core::txn::{ReadTransaction, WriteTransaction},
         traversal_core::{
+            RTxn,
             config::{Config, GraphConfig, VectorConfig},
             ops::{
                 bm25::search_bm25::SearchBM25Adapter,
