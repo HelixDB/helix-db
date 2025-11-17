@@ -717,6 +717,7 @@ async fn process_test_directory(
         cmd.arg("check");
 
         // Add --features flag if backend is specified
+        println!("Adding features: {backend:?}");
         if let Some(backend) = backend {
             cmd.arg("--features").arg(backend);
         }
