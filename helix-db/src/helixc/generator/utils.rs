@@ -455,7 +455,7 @@ use helix_db::{
                     v_from_type::VFromTypeAdapter
                 },
                 util::{
-                    dedup::DedupAdapter, drop::Drop, exist::Exist, filter_mut::FilterMut,
+                    dedup::DedupAdapter, drop::Drop, exist::Exist,
                     filter_ref::FilterRefAdapter, map::MapAdapter, paths::{PathAlgorithm, ShortestPathAdapter},
                     range::RangeAdapter, update::UpdateAdapter, order::OrderByAdapter,
                     aggregate::AggregateAdapter, group_by::GroupByAdapter, count::CountAdapter,
