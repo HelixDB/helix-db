@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [blacksmith-8vcpu-ubuntu-2404, windows-latest, macos-latest]
     env:
       HELIX_API_KEY: "12345678901234567890123456789012"
 
