@@ -715,8 +715,7 @@ async fn process_test_directory(
     if helix_container_path.exists() {
         let mut cmd = Command::new("cargo");
         cmd.arg("check");
-
-        cmd.arg("--lib");
+        cmd.arg("--release");
         cmd.arg("--no-default-features");
 
         // Add --features flag if backend is specified
