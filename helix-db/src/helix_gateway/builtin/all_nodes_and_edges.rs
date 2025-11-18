@@ -9,7 +9,6 @@ use tracing::info;
 
 #[cfg(feature = "lmdb")]
 use crate::helix_engine::storage_core::graph_visualization::GraphVisualization;
-
 use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::gateway::AppState;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};

@@ -716,6 +716,9 @@ async fn process_test_directory(
         let mut cmd = Command::new("cargo");
         cmd.arg("check");
 
+        cmd.arg("--lib");
+        cmd.arg("--no-default-features");
+
         // Add --features flag if backend is specified
         println!("Adding features: {backend:?}");
         if let Some(backend) = backend {
