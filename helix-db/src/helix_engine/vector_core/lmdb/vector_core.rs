@@ -4,8 +4,10 @@ use crate::{
     helix_engine::{
         types::VectorError,
         vector_core::{
-            hnsw::HNSW,
-            utils::{Candidate, HeapOps, VectorFilter},
+            lmdb::{
+                hnsw::HNSW,
+                utils::{Candidate, HeapOps, VectorFilter},
+            },
             vector::HVector,
             vector_without_data::VectorWithoutData,
         },

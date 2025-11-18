@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-helix-db = { path = "../helix-db" }
+helix-db = { path = "../helix-db", default-features = false }
 helix-macros = { path = "../helix-macros" }
 
 inventory = "0.3.16"
@@ -26,5 +26,5 @@ bumpalo = "3.19.0"
 [features]
 lmdb = ["helix-db/lmdb"]
 rocks = ["helix-db/rocks"]
-prod = ["helix-db/production"]
+prod = ["helix-db/production", "helix-db/rocks"]
 dev = ["helix-db/dev-instance"]

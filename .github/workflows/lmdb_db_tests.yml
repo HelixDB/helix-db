@@ -34,14 +34,14 @@ jobs:
       - name: Run tests
         run: |
           cd helix-db
-          cargo test --release --lib --features lmdb -- --skip concurrency_tests
+          cargo test --release --lib --no-default-features --features lmdb -- --skip concurrency_tests
 
       - name: Run dev instance tests
         run: |
           cd helix-db
-          cargo test --release --lib --features dev-instance --features lmdb -- --skip concurrency_tests
+          cargo test --release --lib --no-default-features --features dev-instance --features lmdb -- --skip concurrency_tests
 
       - name: Run production tests
         run: |
           cd helix-db
-          cargo test --release --lib --features production --features lmdb -- --skip concurrency_tests
+          cargo test --release --lib --no-default-features --features production --features lmdb -- --skip concurrency_tests

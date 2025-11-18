@@ -24,7 +24,7 @@ pub trait HNSW {
         arena: &'arena bumpalo::Bump,
     ) -> Result<bumpalo::collections::Vec<'arena, HVector<'arena>>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &heed3::RoTxn<'db>) -> bool,
         'db: 'arena,
         'arena: 'txn;
 
