@@ -4,7 +4,7 @@ use crate::metrics_sender::MetricsSender;
 use crate::project::{ProjectContext, get_helix_repo_cache};
 use crate::utils::{
     copy_dir_recursive_excluding, diagnostic_source, helixc_utils::collect_hx_files, print_status,
-    print_success, spinner,
+    print_success,
 };
 use eyre::Result;
 use std::time::Instant;

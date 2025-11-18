@@ -257,9 +257,8 @@ pub mod spinner {
                 }
             }
 
-            // Clear the line when done
-            print!("\r{}", " ".repeat(message.len() + 3));
-            print!("\r");
+            // Clear the line when done using ANSI escape code
+            print!("\r\x1b[2K");
             let _ = stdout.flush();
         });
 
