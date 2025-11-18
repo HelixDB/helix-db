@@ -40,6 +40,4 @@ path = "src/main.rs"
 [features]
 lmdb = ["helix-db/lmdb"]
 rocks = ["helix-db/rocks"]
-normal = ["helix-db/server", "lmdb"]
-ingestion = ["helix-db/full", "lmdb"]
-default = ["normal"]
+default = ["rocks"]
