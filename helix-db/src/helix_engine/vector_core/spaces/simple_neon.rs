@@ -1,5 +1,5 @@
 #[cfg(target_feature = "neon")]
-use crate::unaligned_vector::UnalignedVector;
+use crate::helix_engine::vector_core::unaligned_vector::UnalignedVector;
 use std::arch::aarch64::*;
 use std::ptr::read_unaligned;
 
@@ -117,6 +117,11 @@ unsafe fn unaligned_float32x4_t(ptr: *const f32) -> float32x4_t {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::helix_engine::vector_core::spaces::simple::{
+        dot_product_non_optimized, euclidean_distance_non_optimized,
+    };
+
     #[cfg(target_feature = "neon")]
     #[test]
     fn test_spaces_neon() {

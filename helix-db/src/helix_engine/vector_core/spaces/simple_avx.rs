@@ -120,12 +120,13 @@ pub(crate) unsafe fn dot_similarity_avx(
 
 #[cfg(test)]
 mod tests {
-    use crate::helix_engine::vector_core::spaces::simple::*;
+    use super::*;
+    use crate::helix_engine::vector_core::spaces::simple::{
+        dot_product_non_optimized, euclidean_distance_non_optimized,
+    };
 
     #[test]
     fn test_spaces_avx() {
-        use super::*;
-
         if is_x86_feature_detected!("avx") && is_x86_feature_detected!("fma") {
             let v1: Vec<f32> = vec![
                 10., 11., 12., 13., 14., 15., 16., 17., 18., 19., 20., 21., 22., 23., 24., 25.,
