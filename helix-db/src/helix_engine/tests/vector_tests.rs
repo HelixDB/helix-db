@@ -4,9 +4,10 @@ use crate::helix_engine::vector_core::{
 };
 use bumpalo::Bump;
 
-fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
-    let slice = arena.alloc_slice_copy(data);
-    HVector::from_slice("vector", 0, slice, arena)
+fn alloc_vector<'a>(arena: &'a Bump, data: &[f32]) -> HVector<'a> {
+    let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+    bump_vec.extend_from_slice(data);
+    HVector::from_vec("test_vector", bump_vec)
 }
 
 #[test]
