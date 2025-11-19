@@ -1,10 +1,6 @@
 use crate::{
     debug_println,
-    helix_engine::{
-        storage_core::HelixGraphStorage,
-        types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector},
-    },
+    helix_engine::{storage_core::HelixGraphStorage, types::GraphError},
     utils::properties::ImmutablePropertiesMap,
 };
 
@@ -437,15 +433,9 @@ impl HybridSearch for HelixGraphStorage {
                 let txn = graph_env_vector.read_txn()?;
                 let arena = Bump::new(); // MOVE
                 let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
-                let results = self.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
-                    &txn,
-                    query_slice,
-                    limit * 2,
-                    "vector",
-                    None,
-                    false,
-                    &arena,
-                )?;
+                let results =
+                    self.vectors
+                        .search(&txn, query_slice, limit * 2, "vector", false, &arena)?;
                 let scores = results
                     .into_iter()
                     .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))
