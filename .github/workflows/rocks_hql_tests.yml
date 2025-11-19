@@ -49,4 +49,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_OWNER: ${{ github.repository_owner }}
           GITHUB_REPO: ${{ github.event.repository.name }}
-        run: ./run.sh batch 6 ${{ matrix.batch }} rocks
+        run: ./run.sh batch 15 ${{ matrix.batch }} rocks
