@@ -45,6 +45,9 @@ pub mod unaligned_vector;
 pub mod version;
 pub mod writer;
 
+const DB_VECTORS: &str = "vectors"; // for vector data (v:)
+const DB_VECTOR_DATA: &str = "vector_data"; // for vector's properties
+
 pub type ItemId = u32;
 
 pub type LayerId = u8;
@@ -260,17 +263,28 @@ pub struct VectorCoreStats {
 // TODO: Properties filters
 // TODO: Support different distances for each database
 pub struct VectorCore {
-    /// One HNSW index per label
-    hsnw_index: HashMap<String, CoreDatabase<Cosine>>,
+    pub hsnw_index: CoreDatabase<Cosine>,
     pub stats: VectorCoreStats,
     pub vector_properties_db: Database<U128<BE>, Bytes>,
+    pub config: HNSWConfig,
 }
 
 impl VectorCore {
     pub fn new(env: &Env, txn: &mut RwTxn, config: HNSWConfig) -> VectorCoreResult<Self> {
-        todo!()
+        let vectors_db: CoreDatabase<Cosine> = env.create_database(txn, Some(DB_VECTORS))?;
+        let vector_properties_db = env
+            .database_options()
+            .types::<U128<BE>, Bytes>()
+            .name(DB_VECTOR_DATA)
+            .create(txn)?;
+
+        Ok(Self {
+            hsnw_index: vectors_db,
+            stats: VectorCoreStats { num_vectors: 0 },
+            vector_properties_db,
+            config,
+        })
     }
-    pub fn search_by_vector<'a>(&self, txn: &RoTxn, vector: &'a [f32]) {}
 
     pub fn search<'arena>(
         &self,
