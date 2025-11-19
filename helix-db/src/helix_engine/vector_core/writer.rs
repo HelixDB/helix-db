@@ -30,14 +30,18 @@ pub(crate) struct BuildOption {
     pub(crate) ef_construction: usize,
     pub(crate) alpha: f32,
     pub(crate) available_memory: Option<usize>,
+    pub(crate) m: usize,
+    pub(crate) m_max_0: usize,
 }
 
-impl Default for BuildOption {
+impl BuildOption {
     fn default() -> Self {
         Self {
             ef_construction: 100,
             alpha: 1.0,
             available_memory: None,
+            m: 16,
+            m_max_0: 32,
         }
     }
 }
@@ -49,18 +53,6 @@ impl<'a, D: Distance, R: Rng + SeedableRng> VectorBuilder<'a, D, R> {
     /// Typical values range from 50 to 500, with larger `ef_construction` producing higher
     /// quality hnsw graphs at the expense of longer builds. The default value used in hannoy is
     /// 100.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use hannoy::{Writer, distances::Euclidean};
-    /// # let (writer, wtxn): (Writer<Euclidean>, heed::RwTxn) = todo!();
-    /// use rand::rngs::StdRng;
-    /// use rand::SeedableRng;
-    ///
-    /// let mut rng = StdRng::seed_from_u64(4729);
-    /// writer.builder(&mut rng).ef_construction(100).build::<16,32>(&mut wtxn);
-    /// ```
     pub fn ef_construction(&mut self, ef_construction: usize) -> &mut Self {
         self.inner.ef_construction = ef_construction;
         self
@@ -71,19 +63,7 @@ impl<'a, D: Distance, R: Rng + SeedableRng> VectorBuilder<'a, D, R> {
     /// more similar to DiskANN. Increasing alpha increases indexing times as more neighbours are
     /// considered per linking step, but results in higher recall.
     ///
-    /// DiskANN authors suggest using alpha=1.1 or alpha=1.2. By default alpha=1.0 in hannoy.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use hannoy::{Writer, distances::Euclidean};
-    /// # let (writer, wtxn): (Writer<Euclidean>, heed::RwTxn) = todo!();
-    /// use rand::rngs::StdRng;
-    /// use rand::SeedableRng;
-    ///
-    /// let mut rng = StdRng::seed_from_u64(4729);
-    /// writer.builder(&mut rng).alpha(1.1).build::<16,32>(&mut wtxn);
-    /// ```
+    /// DiskANN authors suggest using alpha=1.1 or alpha=1.2. By default alpha=1.0.
     pub fn alpha(&mut self, alpha: f32) -> &mut Self {
         self.inner.alpha = alpha;
         self
@@ -94,30 +74,8 @@ impl<'a, D: Distance, R: Rng + SeedableRng> VectorBuilder<'a, D, R> {
     /// A general rule of thumb is to take `M0`= 2*`M`, with `M` >=3.  Some common choices for
     /// `M` include : 8, 12, 16, 32. Note that increasing `M` produces a denser graph at the cost
     /// of longer build times.
-    ///
-    /// This function is using rayon to spawn threads. It can be configured by using the
-    /// [`rayon::ThreadPoolBuilder`].
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use hannoy::{Writer, distances::Euclidean};
-    /// # let (writer, wtxn): (Writer<Euclidean>, heed::RwTxn) = todo!();
-    /// use rayon;
-    /// use rand::rngs::StdRng;
-    /// use rand::SeedableRng;
-    ///
-    /// // configure global threadpool if you want!
-    /// rayon::ThreadPoolBuilder::new().num_threads(4).build_global().unwrap();
-    ///
-    /// let mut rng = StdRng::seed_from_u64(4729);
-    /// writer.builder(&mut rng).build::<16,32>(&mut wtxn);
-    /// ```
-    pub fn build<const M: usize, const M0: usize>(
-        &mut self,
-        wtxn: &mut RwTxn,
-    ) -> VectorCoreResult<()> {
-        self.writer.build::<R, M, M0>(wtxn, self.rng, &self.inner)
+    pub fn build(&mut self, wtxn: &mut RwTxn) -> VectorCoreResult<()> {
+        self.writer.build::<R>(wtxn, self.rng, &self.inner)
     }
 }
 
@@ -258,12 +216,7 @@ impl<D: Distance> Writer<D> {
         }
     }
 
-    fn build<R, const M: usize, const M0: usize>(
-        &self,
-        wtxn: &mut RwTxn,
-        rng: &mut R,
-        options: &BuildOption,
-    ) -> VectorCoreResult<()>
+    fn build<R>(&self, wtxn: &mut RwTxn, rng: &mut R, options: &BuildOption) -> VectorCoreResult<()>
     where
         R: Rng + SeedableRng,
     {
@@ -292,7 +245,7 @@ impl<D: Distance> Writer<D> {
         // we should not keep a reference to the metadata since they're going to be moved by LMDB
         drop(metadata);
 
-        let mut hnsw = HnswBuilder::<D, M, M0>::new(options)
+        let mut hnsw = HnswBuilder::<D>::new(options)
             .with_entry_points(entry_points)
             .with_max_level(max_level);
 
