@@ -2,19 +2,21 @@ use crate::CloudDeploymentTypeCommand;
 use crate::commands::integrations::ecr::{EcrAuthType, EcrManager};
 use crate::commands::integrations::fly::{FlyAuthType, FlyManager, VmSize};
 use crate::commands::integrations::helix::HelixManager;
+use crate::commands::templates::{TemplateFetcher, TemplateProcessor, TemplateSource};
 use crate::config::{CloudConfig, HelixConfig};
 use crate::docker::DockerManager;
 use crate::errors::project_error;
 use crate::project::ProjectContext;
 use crate::utils::{print_instructions, print_status, print_success};
 use eyre::Result;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::Path;
 
 pub async fn run(
     path: Option<String>,
-    _template: String,
+    template: Option<String>,
     queries_path: String,
     deployment_type: Option<CloudDeploymentTypeCommand>,
 ) -> Result<()> {
@@ -47,6 +49,29 @@ pub async fn run(
     // Create project directory if it doesn't exist
     fs::create_dir_all(&project_dir)?;
 
+    // Process template if provided
+    if let Some(template_spec) = template {
+        process_template(&template_spec, &project_dir, project_name)?;
+
+        print_success(&format!(
+            "Helix project successfully initialized from template: `{template_spec}`",
+        ));
+
+        print_instructions(
+            "Next steps:",
+            &[
+                &format!(
+                    "1. Explore your project files in `{}`",
+                    project_dir.display()
+                ),
+                "2. Run `helix build dev` to compile your project",
+                "3. Run `helix push dev` to start your development instance",
+            ],
+        );
+
+        return Ok(());
+    }
+
     // Create default helix.toml with custom queries path
     let mut config = HelixConfig::default_config(project_name);
     config.project.queries = std::path::PathBuf::from(&queries_path);
@@ -55,7 +80,6 @@ pub async fn run(
     create_project_structure(&project_dir, &queries_path)?;
 
     // Initialize deployment type based on flags
-
     match deployment_type {
         Some(deployment) => {
             match deployment {
@@ -180,6 +204,29 @@ pub async fn run(
             "Run 'helix push dev' to start your development instance",
         ],
     );
+
+    Ok(())
+}
+
+fn process_template(
+    template_str: &str,
+    project_dir: &Path,
+    project_name: &str,
+) -> eyre::Result<()> {
+    // Parse template source
+    let template_source = TemplateSource::parse(template_str)?;
+
+    // Prepare template variables for rendering
+    let mut variables = HashMap::new();
+    variables.insert("project_name".to_string(), project_name.to_string());
+
+    // Fetch raw template from git (with caching)
+    print_status("TEMPLATE", &format!("Resolving template: {}", template_str));
+    let raw_template_path = TemplateFetcher::fetch(&template_source)?;
+
+    // Render and apply template to project directory.
+    print_status("TEMPLATE", "Rendering template...");
+    TemplateProcessor::render_to_dir(&raw_template_path, project_dir, &variables)?;
 
     Ok(())
 }
