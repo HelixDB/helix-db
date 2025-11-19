@@ -181,7 +181,7 @@ async fn main() -> Result<()> {
             cloud,
         } => commands::init::run(path, template, queries_path, cloud).await,
         Commands::Add { cloud } => commands::add::run(cloud).await,
-        Commands::Check { instance } => commands::check::run(instance).await,
+        Commands::Check { instance } => commands::check::run(instance, None).await,
         Commands::Compile { output, path } => commands::compile::run(output, path).await,
         Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
             .await

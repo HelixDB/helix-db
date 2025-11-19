@@ -4,10 +4,11 @@ use crate::utils::helixc_utils::{
 };
 use crate::utils::{print_status, print_success};
 use eyre::Result;
+use std::path::PathBuf;
 
-pub async fn run(instance: Option<String>) -> Result<()> {
+pub async fn run(instance: Option<String>, project_path: Option<PathBuf>) -> Result<()> {
     // Load project context
-    let project = ProjectContext::find_and_load(None)?;
+    let project = ProjectContext::find_and_load(project_path.as_deref())?;
 
     match instance {
         Some(instance_name) => check_instance(&project, &instance_name).await,
