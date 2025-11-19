@@ -23,7 +23,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct RRFReranker {
     /// The k parameter in the RRF formula (default: 60)
-    k: f64,
+    k: f32,
 }
 
 impl RRFReranker {
@@ -36,7 +36,7 @@ impl RRFReranker {
     ///
     /// # Arguments
     /// * `k` - The k parameter in the RRF formula. Higher values give less weight to ranking position.
-    pub fn with_k(k: f64) -> RerankerResult<Self> {
+    pub fn with_k(k: f32) -> RerankerResult<Self> {
         if k <= 0.0 {
             return Err(RerankerError::InvalidParameter(
                 "k must be positive".to_string(),
@@ -55,7 +55,7 @@ impl RRFReranker {
     /// A vector of items reranked by RRF scores
     pub fn fuse_lists<'arena, I>(
         lists: Vec<I>,
-        k: f64,
+        k: f32,
     ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
@@ -64,7 +64,7 @@ impl RRFReranker {
             return Err(RerankerError::EmptyInput);
         }
 
-        let mut rrf_scores: HashMap<u128, f64> = HashMap::new();
+        let mut rrf_scores: HashMap<u128, f32> = HashMap::new();
         let mut items_map: HashMap<u128, TraversalValue<'arena>> = HashMap::new();
 
         // Process each ranked list
@@ -79,7 +79,7 @@ impl RRFReranker {
 
                 // Calculate reciprocal rank: 1 / (k + rank)
                 // rank starts at 0, so actual rank is rank + 1
-                let rr_score = 1.0 / (k + (rank as f64) + 1.0);
+                let rr_score = 1.0 / (k + (rank as f32) + 1.0);
 
                 // Sum reciprocal ranks across all lists
                 *rrf_scores.entry(id).or_insert(0.0) += rr_score;
@@ -90,7 +90,7 @@ impl RRFReranker {
         }
 
         // Convert to scored items and sort by RRF score (descending)
-        let mut scored_items: Vec<(u128, f64)> = rrf_scores.into_iter().collect();
+        let mut scored_items: Vec<(u128, f32)> = rrf_scores.into_iter().collect();
         scored_items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Update scores and collect results
@@ -132,7 +132,7 @@ impl Reranker for RRFReranker {
 
         for (rank, mut item) in items_vec.into_iter().enumerate() {
             // Calculate RRF score for this item based on its rank
-            let rrf_score = 1.0 / (self.k + (rank as f64) + 1.0);
+            let rrf_score = 1.0 / (self.k + (rank as f32) + 1.0);
             update_score(&mut item, rrf_score)?;
             results.push(item);
         }
@@ -151,9 +151,10 @@ mod tests {
     use crate::{helix_engine::vector_core::HVector, utils::items::Node};
     use bumpalo::Bump;
 
-    fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
-        let slice = arena.alloc_slice_copy(data);
-        HVector::from_slice("test_vector", 0, slice, arena)
+    fn alloc_vector<'a>(arena: &'a Bump, data: &[f32]) -> HVector<'a> {
+        let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+        bump_vec.extend_from_slice(data);
+        HVector::from_vec("test_vector", bump_vec)
     }
 
     #[test]
@@ -164,7 +165,7 @@ mod tests {
         let vectors: Vec<TraversalValue> = (0..5)
             .map(|i| {
                 let mut v = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
-                v.distance = Some((i + 1) as f64);
+                v.distance = Some((i + 1) as f32);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })
@@ -177,7 +178,7 @@ mod tests {
         // Check that RRF scores are calculated correctly
         for (rank, item) in results.iter().enumerate() {
             if let TraversalValue::Vector(v) = item {
-                let expected_score = 1.0 / (60.0 + (rank as f64) + 1.0);
+                let expected_score = 1.0 / (60.0 + (rank as f32) + 1.0);
                 assert!((v.distance.unwrap() - expected_score).abs() < 1e-10);
             }
         }
@@ -589,7 +590,7 @@ mod tests {
 
         let vectors: Vec<TraversalValue> = (0..3)
             .map(|i| {
-                let mut v = alloc_vector(&arena, &[1.0 * i as f64, 2.0 * i as f64]);
+                let mut v = alloc_vector(&arena, &[1.0 * i as f32, 2.0 * i as f32]);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })

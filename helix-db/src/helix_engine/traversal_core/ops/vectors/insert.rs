@@ -12,7 +12,7 @@ pub trait InsertVAdapter<'db, 'arena, 'txn>:
 {
     fn insert_v(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         label: &'arena str,
         properties: Option<ImmutablePropertiesMap<'arena>>,
     ) -> RwTraversalIterator<
@@ -28,7 +28,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     fn insert_v(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         label: &'arena str,
         properties: Option<ImmutablePropertiesMap<'arena>>,
     ) -> RwTraversalIterator<
