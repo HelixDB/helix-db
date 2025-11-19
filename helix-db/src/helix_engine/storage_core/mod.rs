@@ -1,11 +1,8 @@
 pub mod graph_visualization;
 pub mod metadata;
 pub mod storage_methods;
-pub mod storage_migration;
 pub mod version_info;
 
-#[cfg(test)]
-mod storage_migration_tests;
 #[cfg(test)]
 mod storage_concurrent_tests;
 
@@ -18,10 +15,7 @@ use crate::{
         },
         traversal_core::config::Config,
         types::GraphError,
-        vector_core::{
-            hnsw::HNSW,
-            vector_core::{HNSWConfig, VectorCore},
-        },
+        vector_core::{HNSWConfig, VectorCore},
     },
     utils::{
         items::{Edge, Node},
@@ -179,7 +173,7 @@ impl HelixGraphStorage {
 
         wtxn.commit()?;
 
-        let mut storage = Self {
+        let storage = Self {
             graph_env,
             nodes_db,
             edges_db,
@@ -192,8 +186,6 @@ impl HelixGraphStorage {
             storage_config,
             version_info,
         };
-
-        storage_migration::migrate(&mut storage)?;
 
         Ok(storage)
     }

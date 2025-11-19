@@ -53,7 +53,7 @@ where
                         item.from_node,
                         self.arena,
                     ) {
-                        Ok(Some(vector)) => TraversalValue::VectorNodeWithoutVectorData(vector),
+                        Ok(Some(vector)) => TraversalValue::Vector(vector),
                         Ok(None) => {
                             return Some(Err(GraphError::from(VectorError::VectorNotFound(
                                 item.from_node.to_string(),

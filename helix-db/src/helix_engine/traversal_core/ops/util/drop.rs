@@ -42,12 +42,6 @@ where
                         Ok(_) => Ok(()),
                         Err(e) => Err(e),
                     },
-                    TraversalValue::VectorNodeWithoutVectorData(vector) => {
-                        match storage.drop_vector(txn, &vector.id) {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(e),
-                        }
-                    }
                     TraversalValue::Empty => Ok(()),
                     _ => Err(GraphError::ConversionError(format!(
                         "Incorrect Type: {item:?}"

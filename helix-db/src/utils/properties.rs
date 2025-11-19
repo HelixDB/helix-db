@@ -22,7 +22,7 @@ use crate::protocol::value::Value;
 ///     - All required space is allocated in the arena upfront
 ///     - Key lengths are stored packed for SIMD length check on get.
 ///     - Small n means O(n) is faster than O(1)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ImmutablePropertiesMap<'arena> {
     len: usize,
     key_lengths: *const usize,

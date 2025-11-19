@@ -1,18 +1,19 @@
-use crate::helix_engine::vector_core::vector_distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL};
-
-use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::vector_core::{
+    HVector,
+    distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL},
+};
 use bumpalo::Bump;
 
 fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
     let slice = arena.alloc_slice_copy(data);
-    HVector::from_slice("vector", 0, slice)
+    HVector::from_slice("vector", 0, slice, arena)
 }
 
 #[test]
 fn test_hvector_from_slice() {
     let arena = Bump::new();
     let vector = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
-    assert_eq!(vector.data, &[1.0, 2.0, 3.0]);
+    assert_eq!(vector.data_borrowed(), &[1.0, 2.0, 3.0]);
 }
 
 #[test]

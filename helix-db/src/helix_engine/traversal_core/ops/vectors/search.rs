@@ -3,7 +3,7 @@ use heed3::RoTxn;
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+    vector_core::HVector,
 };
 use std::iter::once;
 
@@ -53,7 +53,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             query,
             k.try_into().unwrap(),
             label,
-            filter,
             false,
             self.arena,
         );
@@ -61,6 +60,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         let iter = match vectors {
             Ok(vectors) => vectors
                 .into_iter()
+                // copying here!
                 .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
                 .collect::<Vec<_>>()
                 .into_iter(),

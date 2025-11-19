@@ -10,14 +10,12 @@
 //! - Sim2: similarity to already selected documents (diversity)
 //! - λ: trade-off parameter (typically 0.5-0.8)
 
-use crate::{
-    helix_engine::{
-        reranker::{
-            errors::{RerankerError, RerankerResult},
-            reranker::{extract_score, update_score, Reranker},
-        },
-        traversal_core::traversal_value::TraversalValue,
+use crate::helix_engine::{
+    reranker::{
+        errors::{RerankerError, RerankerResult},
+        reranker::{Reranker, extract_score, update_score},
     },
+    traversal_core::traversal_value::TraversalValue,
 };
 use std::collections::HashMap;
 
@@ -85,11 +83,16 @@ impl MMRReranker {
 
     /// Extract vector data from a TraversalValue.
     /// Note: This requires an arena to convert VectorPrecisionData to f64 slice
-    fn extract_vector_data<'a>(&self, item: &'a TraversalValue<'a>, _arena: &'a bumpalo::Bump) -> RerankerResult<&'a [f64]> {
+    fn extract_vector_data<'a>(
+        &self,
+        item: &'a TraversalValue<'a>,
+        arena: &'a bumpalo::Bump,
+    ) -> RerankerResult<Vec<f64>> {
         match item {
-            TraversalValue::Vector(v) => Ok(v.data),
+            TraversalValue::Vector(v) => Ok(v.data(arena).to_vec()),
             _ => Err(RerankerError::TextExtractionError(
-                "Cannot extract vector from this item type (only Vector supported for MMR)".to_string(),
+                "Cannot extract vector from this item type (only Vector supported for MMR)"
+                    .to_string(),
             )),
         }
     }
@@ -134,7 +137,10 @@ impl MMRReranker {
     }
 
     /// Perform MMR selection on the given items.
-    fn mmr_select<'arena>(&self, items: Vec<TraversalValue<'arena>>) -> RerankerResult<Vec<TraversalValue<'arena>>> {
+    fn mmr_select<'arena>(
+        &self,
+        items: Vec<TraversalValue<'arena>>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>> {
         // Create a temporary arena for vector conversions
         let arena = bumpalo::Bump::new();
         if items.is_empty() {
@@ -169,7 +175,7 @@ impl MMRReranker {
 
                 // Calculate relevance term
                 let relevance = if let Some(query) = &self.query_vector {
-                    self.calculate_similarity(item_vec, query)?
+                    self.calculate_similarity(&item_vec, query)?
                 } else {
                     *relevance_score // Use original score as relevance
                 };
@@ -183,7 +189,7 @@ impl MMRReranker {
                         cached
                     } else {
                         let sel_vec = self.extract_vector_data(selected_item, &arena)?;
-                        let sim = self.calculate_similarity(item_vec, sel_vec)?;
+                        let sim = self.calculate_similarity(&item_vec, &sel_vec)?;
                         similarity_cache.insert(cache_key, sim);
                         sim
                     };
@@ -211,7 +217,11 @@ impl MMRReranker {
 }
 
 impl Reranker for MMRReranker {
-    fn rerank<'arena, I>(&self, items: I, _query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        _query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -227,12 +237,12 @@ impl Reranker for MMRReranker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use bumpalo::Bump;
 
     fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
         let slice = arena.alloc_slice_copy(data);
-        HVector::from_slice("test_vector", 0, slice)
+        HVector::from_slice("test_vector", 0, slice, arena)
     }
 
     #[test]
@@ -339,9 +349,7 @@ mod tests {
     fn test_mmr_with_query_vector() {
         let arena = Bump::new();
         let query = vec![1.0, 0.0, 0.0];
-        let mmr = MMRReranker::new(0.7)
-            .unwrap()
-            .with_query_vector(query);
+        let mmr = MMRReranker::new(0.7).unwrap().with_query_vector(query);
 
         let vectors: Vec<TraversalValue> = vec![
             {
@@ -683,10 +691,10 @@ mod tests {
 
         // Verify vector data is preserved
         if let TraversalValue::Vector(v) = &results[0] {
-            assert_eq!(v.data, &[1.5, 2.5, 3.5]);
+            assert_eq!(v.data_borrowed(), &[1.5, 2.5, 3.5]);
         }
         if let TraversalValue::Vector(v) = &results[1] {
-            assert_eq!(v.data, &[4.5, 5.5, 6.5]);
+            assert_eq!(v.data_borrowed(), &[4.5, 5.5, 6.5]);
         }
     }
 
@@ -719,9 +727,7 @@ mod tests {
     fn test_mmr_with_query_vector_relevance() {
         let arena = Bump::new();
         let query = vec![1.0, 0.0];
-        let mmr = MMRReranker::new(0.9)
-            .unwrap()
-            .with_query_vector(query);
+        let mmr = MMRReranker::new(0.9).unwrap().with_query_vector(query);
 
         let vectors: Vec<TraversalValue> = vec![
             {

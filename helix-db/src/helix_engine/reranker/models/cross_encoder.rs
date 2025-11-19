@@ -88,7 +88,6 @@ impl CrossEncoderReranker {
             TraversalValue::Node(n) => n.properties,
             TraversalValue::Edge(e) => e.properties,
             TraversalValue::Vector(v) => v.properties,
-            TraversalValue::VectorNodeWithoutVectorData(v) => v.properties,
             TraversalValue::NodeWithScore { node, .. } => node.properties,
             _ => None,
         };
@@ -131,7 +130,11 @@ impl CrossEncoderReranker {
 }
 
 impl Reranker for CrossEncoderReranker {
-    fn rerank<'arena, I>(&self, items: I, query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -169,12 +172,12 @@ impl Reranker for CrossEncoderReranker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use bumpalo::Bump;
 
     fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
         let slice = arena.alloc_slice_copy(data);
-        HVector::from_slice("test_vector", 0, slice)
+        HVector::from_slice("test_vector", 0, slice, arena)
     }
 
     #[ignore]
@@ -213,7 +216,7 @@ mod tests {
         let result = reranker.extract_text(&item);
         assert!(result.is_err());
     }
-    
+
     #[ignore]
     #[test]
     fn test_rerank_without_query() {
@@ -221,7 +224,8 @@ mod tests {
         let config = CrossEncoderConfig::new("test-model");
         let reranker = CrossEncoderReranker::new(config);
 
-        let vectors: Vec<TraversalValue> = vec![TraversalValue::Vector(alloc_vector(&arena, &[1.0]))];
+        let vectors: Vec<TraversalValue> =
+            vec![TraversalValue::Vector(alloc_vector(&arena, &[1.0]))];
 
         let result = reranker.rerank(vectors.into_iter(), None);
         assert!(result.is_err());

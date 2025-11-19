@@ -5,7 +5,9 @@
 
 #![cfg(test)]
 
-use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::vector_core::HVector;
+use crate::helix_engine::vector_core::distance::Cosine;
+use crate::helix_engine::vector_core::node::Item;
 use crate::protocol::value::Value;
 use crate::utils::items::{Edge, Node};
 use crate::utils::properties::ImmutablePropertiesMap;
@@ -101,12 +103,7 @@ pub fn create_simple_node<'arena>(arena: &'arena Bump, id: u128, label: &str) ->
 }
 
 /// Creates an old-style Node for compatibility testing
-pub fn create_old_node(
-    id: u128,
-    label: &str,
-    version: u8,
-    props: Vec<(&str, Value)>,
-) -> OldNode {
+pub fn create_old_node(id: u128, label: &str, version: u8, props: Vec<(&str, Value)>) -> OldNode {
     if props.is_empty() {
         OldNode {
             id,
@@ -245,7 +242,7 @@ pub fn create_arena_vector<'arena>(
             deleted,
             level,
             distance: None,
-            data: data_ref,
+            data: Some(Item::<Cosine>::from(data_ref, arena)),
             properties: None,
         }
     } else {
@@ -263,7 +260,7 @@ pub fn create_arena_vector<'arena>(
             deleted,
             level,
             distance: None,
-            data: data_ref,
+            data: Some(Item::<Cosine>::from(data_ref, arena)),
             properties: Some(props_map),
         }
     }
@@ -334,7 +331,10 @@ pub fn all_value_types_props() -> Vec<(&'static str, Value)> {
         ("u16_val", Value::U16(65000)),
         ("u32_val", Value::U32(4000000)),
         ("u64_val", Value::U64(18000000000)),
-        ("u128_val", Value::U128(340282366920938463463374607431768211455)),
+        (
+            "u128_val",
+            Value::U128(340282366920938463463374607431768211455),
+        ),
         ("bool_val", Value::Boolean(true)),
         ("empty_val", Value::Empty),
     ]
@@ -345,17 +345,16 @@ pub fn nested_value_props() -> Vec<(&'static str, Value)> {
     vec![
         (
             "array_val",
-            Value::Array(vec![
-                Value::I32(1),
-                Value::I32(2),
-                Value::I32(3),
-            ]),
+            Value::Array(vec![Value::I32(1), Value::I32(2), Value::I32(3)]),
         ),
         (
             "object_val",
             Value::Object(
                 vec![
-                    ("nested_key".to_string(), Value::String("nested_value".to_string())),
+                    (
+                        "nested_key".to_string(),
+                        Value::String("nested_value".to_string()),
+                    ),
                     ("nested_num".to_string(), Value::I32(42)),
                 ]
                 .into_iter()
@@ -364,15 +363,14 @@ pub fn nested_value_props() -> Vec<(&'static str, Value)> {
         ),
         (
             "deeply_nested",
-            Value::Array(vec![
-                Value::Object(
-                    vec![
-                        ("inner".to_string(), Value::Array(vec![Value::I32(1), Value::I32(2)])),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-            ]),
+            Value::Array(vec![Value::Object(
+                vec![(
+                    "inner".to_string(),
+                    Value::Array(vec![Value::I32(1), Value::I32(2)]),
+                )]
+                .into_iter()
+                .collect(),
+            )]),
         ),
     ]
 }
@@ -398,11 +396,7 @@ pub fn assert_nodes_semantically_equal(node1: &Node, node2: &Node) {
     match (&node1.properties, &node2.properties) {
         (None, None) => {}
         (Some(props1), Some(props2)) => {
-            assert_eq!(
-                props1.len(),
-                props2.len(),
-                "Node property counts differ"
-            );
+            assert_eq!(props1.len(), props2.len(), "Node property counts differ");
             // Check each property exists and has the same value
             for (key1, val1) in props1.iter() {
                 if let Some(val2) = props2.get(key1) {
@@ -427,11 +421,7 @@ pub fn assert_edges_semantically_equal(edge1: &Edge, edge2: &Edge) {
     match (&edge1.properties, &edge2.properties) {
         (None, None) => {}
         (Some(props1), Some(props2)) => {
-            assert_eq!(
-                props1.len(),
-                props2.len(),
-                "Edge property counts differ"
-            );
+            assert_eq!(props1.len(), props2.len(), "Edge property counts differ");
             for (key1, val1) in props1.iter() {
                 if let Some(val2) = props2.get(key1) {
                     assert_eq!(val1, val2, "Property value differs for key: {}", key1);
@@ -450,10 +440,15 @@ pub fn assert_vectors_semantically_equal(vec1: &HVector, vec2: &HVector) {
     assert_eq!(vec1.label, vec2.label, "Vector labels differ");
     assert_eq!(vec1.version, vec2.version, "Vector versions differ");
     assert_eq!(vec1.deleted, vec2.deleted, "Vector deleted flags differ");
-    assert_eq!(vec1.data.len(), vec2.data.len(), "Vector dimensions differ");
+    assert_eq!(vec1.len(), vec2.len(), "Vector dimensions differ");
 
     // Compare vector data with floating point tolerance
-    for (i, (v1, v2)) in vec1.data.iter().zip(vec2.data.iter()).enumerate() {
+    for (i, (v1, v2)) in vec1
+        .data_borrowed()
+        .iter()
+        .zip(vec2.data_borrowed().iter())
+        .enumerate()
+    {
         assert!(
             (v1 - v2).abs() < 1e-10,
             "Vector data differs at index {}: {} vs {}",
@@ -466,11 +461,7 @@ pub fn assert_vectors_semantically_equal(vec1: &HVector, vec2: &HVector) {
     match (&vec1.properties, &vec2.properties) {
         (None, None) => {}
         (Some(props1), Some(props2)) => {
-            assert_eq!(
-                props1.len(),
-                props2.len(),
-                "Vector property counts differ"
-            );
+            assert_eq!(props1.len(), props2.len(), "Vector property counts differ");
             for (key1, val1) in props1.iter() {
                 if let Some(val2) = props2.get(key1) {
                     assert_eq!(val1, val2, "Property value differs for key: {}", key1);
@@ -502,7 +493,10 @@ pub fn print_byte_comparison(label: &str, bytes1: &[u8], bytes2: &[u8]) {
     let min_len = bytes1.len().min(bytes2.len());
     for (i, (b1, b2)) in bytes1.iter().zip(bytes2.iter()).take(min_len).enumerate() {
         if b1 != b2 {
-            println!("  Index {}: bytes1={:02x} ({}), bytes2={:02x} ({})", i, b1, b1, b2, b2);
+            println!(
+                "  Index {}: bytes1={:02x} ({}), bytes2={:02x} ({})",
+                i, b1, b1, b2, b2
+            );
         }
     }
 
@@ -561,7 +555,9 @@ pub fn random_utf8_string(len: usize) -> String {
 pub fn random_f64_vector(dimensions: usize) -> Vec<f64> {
     use rand::Rng;
     let mut rng = rand::rng();
-    (0..dimensions).map(|_| rng.random_range(-1.0..1.0)).collect()
+    (0..dimensions)
+        .map(|_| rng.random_range(-1.0..1.0))
+        .collect()
 }
 
 /// Generates a random Value for property testing

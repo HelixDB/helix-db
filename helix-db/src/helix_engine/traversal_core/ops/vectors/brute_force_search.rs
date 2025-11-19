@@ -1,7 +1,10 @@
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
-    vector_core::vector_distance::cosine_similarity,
+    vector_core::{
+        distance::{Cosine, Distance},
+        node::Item,
+    },
 };
 use itertools::Itertools;
 
@@ -40,12 +43,16 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
+        let arena = bumpalo::Bump::new();
         let iter = self
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.data, query).unwrap();
-                    v.set_distance(d);
+                    let d = Cosine::distance(
+                        v.data.as_ref().unwrap(),
+                        &Item::<Cosine>::from(query, &arena),
+                    );
+                    v.set_distance(d as f64);
                     Some(v)
                 }
                 _ => None,
@@ -56,10 +63,11 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 match self
                     .storage
                     .vectors
-                    .get_vector_properties(self.txn, *item.id(), self.arena)
+                    .get_vector_properties(self.txn, item.id, self.arena)
                 {
                     Ok(Some(vector_without_data)) => {
-                        item.expand_from_vector_without_data(vector_without_data);
+                        // todo!
+                        // item.expand_from_vector_without_data(vector_without_data);
                         Some(item)
                     }
 

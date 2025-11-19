@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod integration_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bincode::Options;
@@ -203,9 +203,7 @@ mod integration_tests {
         let arena = Bump::new();
 
         let edges: Vec<Edge> = (0..20)
-            .map(|i| {
-                create_simple_edge(&arena, i as u128, "LINK", i as u128, (i + 1) as u128)
-            })
+            .map(|i| create_simple_edge(&arena, i as u128, "LINK", i as u128, (i + 1) as u128))
             .collect();
 
         let serialized: Vec<Vec<u8>> = edges
@@ -251,12 +249,8 @@ mod integration_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let deserialized = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_bytes),
-            data_bytes,
-            id,
-        ).unwrap();
+        let deserialized =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
         assert_vectors_semantically_equal(&vector, &deserialized);
     }
@@ -277,12 +271,8 @@ mod integration_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let deserialized = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_bytes),
-            data_bytes,
-            id,
-        ).unwrap();
+        let deserialized =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
         assert_vectors_semantically_equal(&vector, &deserialized);
     }
@@ -314,23 +304,17 @@ mod integration_tests {
         let props_bytes1 = bincode::serialize(&vector).unwrap();
         let data_bytes1 = vector.vector_data_to_bytes().unwrap();
         let arena2 = Bump::new();
-        let vector2 = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_bytes1),
-            data_bytes1,
-            id,
-        ).unwrap();
+        let vector2 =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes1), data_bytes1, id, true)
+                .unwrap();
 
         // Second roundtrip
         let props_bytes2 = bincode::serialize(&vector2).unwrap();
         let data_bytes2 = vector2.vector_data_to_bytes().unwrap();
         let arena3 = Bump::new();
-        let vector3 = HVector::from_bincode_bytes(
-            &arena3,
-            Some(&props_bytes2),
-            data_bytes2,
-            id,
-        ).unwrap();
+        let vector3 =
+            HVector::from_bincode_bytes(&arena3, Some(&props_bytes2), data_bytes2, id, true)
+                .unwrap();
 
         assert_vectors_semantically_equal(&vector, &vector2);
         assert_vectors_semantically_equal(&vector2, &vector3);
@@ -367,6 +351,7 @@ mod integration_tests {
                 Some(props_bytes),
                 data_bytes,
                 i as u128,
+                true,
             );
             assert!(result.is_ok());
         }
@@ -428,6 +413,7 @@ mod integration_tests {
             Some(&vector_props_bytes),
             vector_data_bytes,
             3,
+            true,
         );
 
         assert!(node_restored.is_ok());
@@ -483,9 +469,7 @@ mod integration_tests {
         let restored: Vec<Node> = serialized
             .iter()
             .enumerate()
-            .map(|(i, bytes)| {
-                Node::from_bincode_bytes(i as u128, bytes, &shared_arena).unwrap()
-            })
+            .map(|(i, bytes)| Node::from_bincode_bytes(i as u128, bytes, &shared_arena).unwrap())
             .collect();
 
         assert_eq!(restored.len(), 100);
@@ -613,7 +597,11 @@ mod integration_tests {
         let bytes = bincode::serialize(&node).unwrap();
 
         // Should be relatively small (label + version + empty props indicator)
-        assert!(bytes.len() < 100, "Empty node should be small, got {} bytes", bytes.len());
+        assert!(
+            bytes.len() < 100,
+            "Empty node should be small, got {} bytes",
+            bytes.len()
+        );
     }
 
     #[test]
