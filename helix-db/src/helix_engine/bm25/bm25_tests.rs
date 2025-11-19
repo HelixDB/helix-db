@@ -7,14 +7,13 @@ mod tests {
             },
             storage_core::{HelixGraphStorage, version_info::VersionInfo},
             traversal_core::config::Config,
-            vector_core::{hnsw::HNSW, vector::HVector},
         },
         protocol::value::Value,
         utils::properties::ImmutablePropertiesMap,
     };
 
     use bumpalo::Bump;
-    use heed3::{Env, EnvOpenOptions, RoTxn};
+    use heed3::{Env, EnvOpenOptions};
     use rand::Rng;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -203,7 +202,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -271,7 +272,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1258,7 +1261,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1448,7 +1453,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1493,7 +1498,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1539,7 +1544,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();

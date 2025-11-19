@@ -9,7 +9,7 @@
 #[cfg(test)]
 mod property_based_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bumpalo::Bump;
@@ -36,7 +36,9 @@ mod property_based_tests {
             any::<i64>().prop_map(Value::I64),
             any::<u32>().prop_map(Value::U32),
             any::<u64>().prop_map(Value::U64),
-            any::<f64>().prop_filter("Not NaN", |f| !f.is_nan()).prop_map(Value::F64),
+            any::<f64>()
+                .prop_filter("Not NaN", |f| !f.is_nan())
+                .prop_map(Value::F64),
             any::<bool>().prop_map(Value::Boolean),
             arb_long_string().prop_map(Value::String),
             Just(Value::Empty),
@@ -288,14 +290,15 @@ mod property_based_tests {
                 Some(&props_bytes),
                 data_bytes,
                 id,
+                true,
             ).unwrap();
 
             prop_assert_eq!(deserialized.label, label.as_str());
             prop_assert_eq!(deserialized.id, id);
-            prop_assert_eq!(deserialized.data.len(), data.len());
+            prop_assert_eq!(deserialized.len(), data.len());
 
             // Check each data point (with floating point tolerance)
-            for (i, (&orig, &deser)) in data.iter().zip(deserialized.data.iter()).enumerate() {
+            for (i, (&orig, &deser)) in data.iter().zip(deserialized.data(&arena).iter()).enumerate() {
                 let diff = (orig - deser).abs();
                 prop_assert!(diff < 1e-10, "Data mismatch at index {}: {} vs {}", i, orig, deser);
             }
@@ -326,10 +329,11 @@ mod property_based_tests {
                 Some(&props_bytes),
                 data_bytes,
                 id,
+                true,
             ).unwrap();
 
             prop_assert_eq!(deserialized.deleted, deleted);
-            prop_assert_eq!(deserialized.data.len(), data.len());
+            prop_assert_eq!(deserialized.len(), data.len());
         }
 
         #[test]
@@ -387,6 +391,7 @@ mod property_based_tests {
                 Some(&props_bytes1),
                 data_bytes1,
                 id,
+                true,
             ).unwrap();
 
             // Second roundtrip
@@ -436,6 +441,7 @@ mod property_based_tests {
                 Some(&props_bytes),
                 data_bytes,
                 id,
+                true,
             ).unwrap();
             prop_assert_eq!(vector_restored.id, id);
         }
@@ -472,6 +478,7 @@ mod property_based_tests {
                 Some(&props_bytes),
                 data_bytes,
                 id,
+                true,
             ).unwrap();
             prop_assert_eq!(vector_restored.label, label.as_str());
         }

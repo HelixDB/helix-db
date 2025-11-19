@@ -47,9 +47,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                         item.to_node,
                         self.arena,
                     ) {
-                        Ok(Some(vector)) => {
-                            Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vector)))
-                        }
+                        Ok(Some(vector)) => Some(Ok(TraversalValue::Vector(vector))),
                         Ok(None) => None,
                         Err(e) => Some(Err(GraphError::from(e))),
                     }

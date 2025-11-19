@@ -3,11 +3,7 @@ use heed3::{Env, EnvOpenOptions, RoTxn};
 use rand::Rng;
 use tempfile::TempDir;
 
-use crate::helix_engine::vector_core::{
-    hnsw::HNSW,
-    vector::HVector,
-    vector_core::{HNSWConfig, VectorCore},
-};
+use crate::helix_engine::vector_core::{HNSWConfig, HVector, VectorCore};
 
 type Filter = fn(&HVector, &RoTxn) -> bool;
 
@@ -36,13 +32,12 @@ fn test_hnsw_insert_and_count() {
         let arena = Bump::new();
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", data, None, &arena)
             .unwrap();
     }
 
     txn.commit().unwrap();
-    let txn = env.read_txn().unwrap();
-    assert!(index.num_inserted_vectors(&txn).unwrap() >= 10);
+    assert!(index.num_inserted_vectors() >= 10);
 }
 
 #[test]
@@ -57,7 +52,7 @@ fn test_hnsw_search_returns_results() {
         let vector: Vec<f64> = (0..4).map(|_| rng.random_range(0.0..1.0)).collect();
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", data, None, &arena)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -66,7 +61,7 @@ fn test_hnsw_search_returns_results() {
     let txn = env.read_txn().unwrap();
     let query = [0.5, 0.5, 0.5, 0.5];
     let results = index
-        .search::<Filter>(&txn, &query, 5, "vector", None, false, &arena)
+        .search(&txn, &query, 5, "vector", false, &arena)
         .unwrap();
     assert!(!results.is_empty());
 }

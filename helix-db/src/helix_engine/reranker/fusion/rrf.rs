@@ -7,14 +7,12 @@
 //! Formula: RRF_score(d) = Σ 1/(k + rank_i(d))
 //! where k is typically 60 (default).
 
-use crate::{
-    helix_engine::{
-        reranker::{
-            errors::{RerankerError, RerankerResult},
-            reranker::{update_score, Reranker},
-        },
-        traversal_core::traversal_value::TraversalValue,
+use crate::helix_engine::{
+    reranker::{
+        errors::{RerankerError, RerankerResult},
+        reranker::{Reranker, update_score},
     },
+    traversal_core::traversal_value::TraversalValue,
 };
 use std::collections::HashMap;
 
@@ -55,7 +53,10 @@ impl RRFReranker {
     ///
     /// # Returns
     /// A vector of items reranked by RRF scores
-    pub fn fuse_lists<'arena, I>(lists: Vec<I>, k: f64) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    pub fn fuse_lists<'arena, I>(
+        lists: Vec<I>,
+        k: f64,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -112,7 +113,11 @@ impl Default for RRFReranker {
 }
 
 impl Reranker for RRFReranker {
-    fn rerank<'arena, I>(&self, items: I, _query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        _query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -143,15 +148,12 @@ impl Reranker for RRFReranker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        helix_engine::vector_core::vector::HVector,
-        utils::items::Node,
-    };
+    use crate::{helix_engine::vector_core::HVector, utils::items::Node};
     use bumpalo::Bump;
 
     fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
         let slice = arena.alloc_slice_copy(data);
-        HVector::from_slice("test_vector", 0, slice)
+        HVector::from_slice("test_vector", 0, slice, arena)
     }
 
     #[test]
@@ -242,11 +244,8 @@ mod tests {
             },
         ];
 
-        let results = RRFReranker::fuse_lists(
-            vec![list1.into_iter(), list2.into_iter()],
-            60.0,
-        )
-        .unwrap();
+        let results =
+            RRFReranker::fuse_lists(vec![list1.into_iter(), list2.into_iter()], 60.0).unwrap();
 
         // Items 1 and 2 appear in both lists, so should have higher scores
         assert_eq!(results.len(), 4);
@@ -280,7 +279,8 @@ mod tests {
 
     #[test]
     fn test_rrf_fuse_empty_lists() {
-        let result = RRFReranker::fuse_lists(Vec::<std::vec::IntoIter<TraversalValue>>::new(), 60.0);
+        let result =
+            RRFReranker::fuse_lists(Vec::<std::vec::IntoIter<TraversalValue>>::new(), 60.0);
         assert!(result.is_err());
     }
 
@@ -400,17 +400,15 @@ mod tests {
             },
         ];
 
-        let results = RRFReranker::fuse_lists(
-            vec![list1.into_iter(), list2.into_iter()],
-            60.0,
-        )
-        .unwrap();
+        let results =
+            RRFReranker::fuse_lists(vec![list1.into_iter(), list2.into_iter()], 60.0).unwrap();
 
         // All items should be present with equal RRF scores for same ranks
         assert_eq!(results.len(), 4);
 
         // Items at rank 0 in their respective lists should have same score
-        if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) = (&results[0], &results[1]) {
+        if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) = (&results[0], &results[1])
+        {
             let score1 = v1.distance.unwrap();
             let score2 = v2.distance.unwrap();
             assert!((score1 - score2).abs() < 1e-10);
@@ -542,11 +540,8 @@ mod tests {
             })
             .collect();
 
-        let results = RRFReranker::fuse_lists(
-            vec![list1.into_iter(), list2.into_iter()],
-            60.0,
-        )
-        .unwrap();
+        let results =
+            RRFReranker::fuse_lists(vec![list1.into_iter(), list2.into_iter()], 60.0).unwrap();
 
         // Items 5, 6, 7 appear in both lists, should rank higher
         assert_eq!(results.len(), 10);
@@ -573,7 +568,9 @@ mod tests {
 
         // Scores should be monotonically decreasing
         for i in 0..results.len() - 1 {
-            if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) = (&results[i], &results[i + 1]) {
+            if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) =
+                (&results[i], &results[i + 1])
+            {
                 assert!(v1.distance.unwrap() >= v2.distance.unwrap());
             }
         }
@@ -602,10 +599,10 @@ mod tests {
 
         // Verify vector data is preserved
         if let TraversalValue::Vector(v) = &results[0] {
-            assert_eq!(v.data, &[0.0, 0.0]);
+            assert_eq!(v.data_borrowed(), &[0.0, 0.0]);
         }
         if let TraversalValue::Vector(v) = &results[1] {
-            assert_eq!(v.data, &[1.0, 2.0]);
+            assert_eq!(v.data_borrowed(), &[1.0, 2.0]);
         }
     }
 }
