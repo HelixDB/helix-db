@@ -115,13 +115,12 @@ pub(crate) unsafe fn dot_similarity_sse(
 
 #[cfg(test)]
 mod tests {
-    use crate::helix_engine::vector_core::spaces::simple::{
-        dot_product_non_optimized, euclidean_distance_non_optimized,
-    };
-
     #[test]
     fn test_spaces_sse() {
         use super::*;
+        use crate::helix_engine::vector_core::spaces::simple::{
+            dot_product_non_optimized, euclidean_distance_non_optimized,
+        };
 
         if is_x86_feature_detected!("sse") {
             let v1: Vec<f32> = vec![
