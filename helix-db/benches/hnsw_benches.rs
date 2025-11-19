@@ -5,18 +5,15 @@ mod tests {
     use helix_db::{
         helix_engine::vector_core::{
             hnsw::HNSW,
-            vector::HVector,
+            unaligned_vector::HVector,
             vector_core::{HNSWConfig, VectorCore},
         },
         utils::tqdm::tqdm,
     };
     use polars::prelude::*;
-    use rand::{
-        prelude::SliceRandom,
-        Rng,
-    };
+    use rand::{Rng, prelude::SliceRandom};
     use std::{
-        collections::{HashSet, HashMap},
+        collections::{HashMap, HashSet},
         fs::{self, File},
         sync::{Arc, Mutex},
         thread,
@@ -88,26 +85,23 @@ mod tests {
                                         .map(|dist| (base_vec.id.clone(), dist))
                                         .ok()
                                 })
-                            .collect();
+                                .collect();
 
                             distances.sort_by(|a, b| {
                                 a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                             });
 
-                            let top_k_ids: Vec<u128> = distances
-                                .into_iter()
-                                .take(k)
-                                .map(|(id, _)| id)
-                                .collect();
+                            let top_k_ids: Vec<u128> =
+                                distances.into_iter().take(k).map(|(id, _)| id).collect();
 
                             (query_id, top_k_ids)
                         })
-                    .collect();
+                        .collect();
 
                     results.lock().unwrap().extend(local_results);
                 })
             })
-        .collect();
+            .collect();
 
         for handle in handles {
             handle.join().unwrap();
@@ -354,7 +348,9 @@ mod tests {
         let mut total_search_time = std::time::Duration::from_secs(0);
         for (qid, query) in query_vectors.iter() {
             let start_time = Instant::now();
-            let results = index.search::<Filter>(&txn, query, k, "vector", None, false).unwrap();
+            let results = index
+                .search::<Filter>(&txn, query, k, "vector", None, false)
+                .unwrap();
             let search_duration = start_time.elapsed();
             total_search_time += search_duration;
 
@@ -400,4 +396,3 @@ mod tests {
 }
 
 // TODO: memory benchmark (only the hnsw index ofc)
-

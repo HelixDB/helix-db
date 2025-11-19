@@ -10,7 +10,7 @@
 #[cfg(test)]
 mod compatibility_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bumpalo::Bump;
@@ -115,7 +115,10 @@ mod compatibility_tests {
 
         let props: Vec<(&str, Value)> = (0..50)
             .map(|i| {
-                (Box::leak(format!("key_{}", i).into_boxed_str()) as &str, Value::I32(i))
+                (
+                    Box::leak(format!("key_{}", i).into_boxed_str()) as &str,
+                    Value::I32(i),
+                )
             })
             .collect();
 
@@ -184,22 +187,23 @@ mod compatibility_tests {
     fn test_old_edge_with_nested_values() {
         let id = 77777u128;
 
-        let props = vec![
-            (
-                "metadata",
-                Value::Object(
-                    vec![
-                        ("created".to_string(), Value::I64(1234567890)),
-                        ("tags".to_string(), Value::Array(vec![
+        let props = vec![(
+            "metadata",
+            Value::Object(
+                vec![
+                    ("created".to_string(), Value::I64(1234567890)),
+                    (
+                        "tags".to_string(),
+                        Value::Array(vec![
                             Value::String("tag1".to_string()),
                             Value::String("tag2".to_string()),
-                        ])),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
+                        ]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
             ),
-        ];
+        )];
 
         let old_edge = create_old_edge(id, "NestedEdge", 0, 10, 20, props);
         let old_bytes = bincode::serialize(&old_edge).unwrap();
@@ -245,12 +249,8 @@ mod compatibility_tests {
         let data_bytes = create_vector_bytes(&data);
 
         let arena = Bump::new();
-        let new_vector = HVector::from_bincode_bytes(
-            &arena,
-            Some(&old_bytes),
-            &data_bytes,
-            id,
-        );
+        let new_vector =
+            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true);
 
         assert!(new_vector.is_ok(), "Should deserialize old vector format");
         let restored = new_vector.unwrap();
@@ -271,12 +271,8 @@ mod compatibility_tests {
         let data_bytes = create_vector_bytes(&[0.0]);
 
         let arena = Bump::new();
-        let new_vector = HVector::from_bincode_bytes(
-            &arena,
-            Some(&old_bytes),
-            &data_bytes,
-            id,
-        ).unwrap();
+        let new_vector =
+            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true).unwrap();
 
         assert_eq!(new_vector.deleted, true);
     }
@@ -296,12 +292,8 @@ mod compatibility_tests {
         let data_bytes = create_vector_bytes(&vec![0.0; 1536]);
 
         let arena = Bump::new();
-        let new_vector = HVector::from_bincode_bytes(
-            &arena,
-            Some(&old_bytes),
-            &data_bytes,
-            id,
-        ).unwrap();
+        let new_vector =
+            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true).unwrap();
 
         assert!(new_vector.properties.is_some());
         let props = new_vector.properties.unwrap();
@@ -371,18 +363,10 @@ mod compatibility_tests {
         let data_bytes = create_vector_bytes(&data);
 
         let arena2 = Bump::new();
-        let restored_v1 = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_v1),
-            &data_bytes,
-            id,
-        ).unwrap();
-        let restored_v2 = HVector::from_bincode_bytes(
-            &arena2,
-            Some(&props_v2),
-            &data_bytes,
-            id,
-        ).unwrap();
+        let restored_v1 =
+            HVector::from_bincode_bytes(&arena2, Some(&props_v1), &data_bytes, id, true).unwrap();
+        let restored_v2 =
+            HVector::from_bincode_bytes(&arena2, Some(&props_v2), &data_bytes, id, true).unwrap();
 
         assert_eq!(restored_v1.version, 1);
         assert_eq!(restored_v2.version, 2);

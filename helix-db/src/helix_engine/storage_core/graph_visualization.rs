@@ -3,8 +3,8 @@ use crate::{
     helix_engine::{storage_core::HelixGraphStorage, types::GraphError},
     utils::items::Node,
 };
-use heed3::{types::*, RoIter, RoTxn};
-use sonic_rs::{json, JsonValueMutTrait, Value as JsonValue};
+use heed3::{RoIter, RoTxn, types::*};
+use sonic_rs::{JsonValueMutTrait, Value as JsonValue, json};
 use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap},
@@ -40,9 +40,7 @@ impl GraphVisualization for HelixGraphStorage {
         }
 
         if self.nodes_db.is_empty(txn)? || self.edges_db.is_empty(txn)? {
-            return Err(GraphError::New(
-                "edges or nodes db is empty!".to_string(),
-            ));
+            return Err(GraphError::New("edges or nodes db is empty!".to_string()));
         }
 
         let top_nodes = self.get_nodes_by_cardinality(txn, k)?;
@@ -55,7 +53,7 @@ impl GraphVisualization for HelixGraphStorage {
         let result = json!({
             "num_nodes":   self.nodes_db.len(txn).unwrap_or(0),
             "num_edges":   self.edges_db.len(txn).unwrap_or(0),
-            "num_vectors": self.vectors.vectors_db.len(txn).unwrap_or(0),
+            "num_vectors": self.vectors.stats.num_vectors,
         });
         debug_println!("db stats json: {:?}", result);
 
@@ -133,11 +131,7 @@ impl HelixGraphStorage {
             BinaryHeap::with_capacity(node_count as usize);
 
         // out edges - iterate through nodes by getting each unique node ID from out_edges_db
-        let out_node_key_iter = out_db
-            .out_edges_db
-            .lazily_decode_data()
-            .iter(txn)
-            .unwrap();
+        let out_node_key_iter = out_db.out_edges_db.lazily_decode_data().iter(txn).unwrap();
         for data in out_node_key_iter {
             match data {
                 Ok((key, _)) => {
@@ -260,18 +254,17 @@ impl HelixGraphStorage {
                     if let Some(node_data) = self.nodes_db.get(txn, id)? {
                         let node = Node::from_bincode_bytes(*id, node_data, &arena)?;
                         if let Some(props) = node.properties
-                            && let Some(prop_value) = props.get(prop) {
-                                json_node
-                                    .as_object_mut()
-                                    .ok_or_else(|| {
-                                        GraphError::New("invalid JSON object".to_string())
-                                    })?
-                                    .insert(
-                                        "label",
-                                        sonic_rs::to_value(&prop_value.inner_stringify())
-                                            .unwrap_or_else(|_| sonic_rs::Value::from("")),
-                                    );
-                            }
+                            && let Some(prop_value) = props.get(prop)
+                        {
+                            json_node
+                                .as_object_mut()
+                                .ok_or_else(|| GraphError::New("invalid JSON object".to_string()))?
+                                .insert(
+                                    "label",
+                                    sonic_rs::to_value(&prop_value.inner_stringify())
+                                        .unwrap_or_else(|_| sonic_rs::Value::from("")),
+                                );
+                        }
                     }
                 }
 
