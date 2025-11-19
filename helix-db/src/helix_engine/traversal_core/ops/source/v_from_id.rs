@@ -66,7 +66,7 @@ where
                     if vec.deleted {
                         Err(GraphError::from(VectorError::VectorDeleted))
                     } else {
-                        Ok(TraversalValue::VectorNodeWithoutVectorData(vec))
+                        Ok(TraversalValue::Vector(vec))
                     }
                 }
                 Ok(None) => Err(GraphError::from(VectorError::VectorNotFound(
