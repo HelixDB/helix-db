@@ -4,6 +4,7 @@ use std::marker;
 use std::num::NonZeroUsize;
 
 use bumpalo::collections::CollectIn;
+use hashbrown::HashMap;
 use heed3::RoTxn;
 use heed3::types::Bytes;
 use heed3::types::DecodeIgnore;
@@ -57,6 +58,13 @@ impl<'arena> Searched<'arena> {
     /// Consumes `self` and returns vector of nearest neighbours
     pub fn into_nns(self) -> bumpalo::collections::Vec<'arena, (ItemId, f32)> {
         self.nns
+    }
+
+    pub fn into_global_id(&self, map: &HashMap<u32, u128>) -> Vec<(u128, f32)> {
+        self.nns
+            .iter()
+            .map(|(item_id, score)| (*map.get(item_id).unwrap(), *score))
+            .collect()
     }
 }
 
