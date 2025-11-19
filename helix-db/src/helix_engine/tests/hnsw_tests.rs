@@ -61,5 +61,5 @@ fn test_hnsw_search_returns_results() {
     let results = index
         .search(&txn, query.to_vec(), 5, "vector", false, &arena)
         .unwrap();
-    assert!(!results.is_empty());
+    assert!(!results.nns.is_empty());
 }

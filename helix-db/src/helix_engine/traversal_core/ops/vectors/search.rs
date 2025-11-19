@@ -5,7 +5,7 @@ use crate::helix_engine::{
     types::{GraphError, VectorError},
     vector_core::HVector,
 };
-use std::iter::once;
+use std::{iter::once, vec};
 
 pub trait SearchVAdapter<'db, 'arena, 'txn>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -58,12 +58,18 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         );
 
         let iter = match vectors {
-            Ok(vectors) => vectors
-                .into_iter()
-                // copying here!
-                .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
-                .collect::<Vec<_>>()
-                .into_iter(),
+            Ok(vectors) => {
+                let hvectors =
+                    self.storage
+                        .vectors
+                        .nns_to_hvectors(vectors.into_nns(), false, self.arena);
+
+                hvectors
+                    .into_iter()
+                    .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
             Err(VectorError::VectorNotFound(id)) => {
                 let error = GraphError::VectorError(format!("vector not found for id {id}"));
                 once(Err(error)).collect::<Vec<_>>().into_iter()

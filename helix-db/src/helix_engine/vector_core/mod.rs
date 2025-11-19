@@ -5,7 +5,7 @@ use std::{
     hash::Hash,
     sync::{
         RwLock,
-        atomic::{self, AtomicU16, AtomicU32},
+        atomic::{self, AtomicU16, AtomicU32, AtomicUsize},
     },
 };
 
@@ -27,7 +27,7 @@ use crate::{
             key::{Key, KeyCodec},
             node::{Item, NodeCodec},
             node_id::NodeMode,
-            reader::Reader,
+            reader::{Reader, Searched},
             unaligned_vector::UnalignedVector,
             writer::Writer,
         },
@@ -254,8 +254,7 @@ impl HNSWConfig {
 }
 
 pub struct VectorCoreStats {
-    // Do it an atomic?
-    pub num_vectors: usize,
+    pub num_vectors: AtomicUsize,
 }
 
 // TODO: Properties filters
@@ -271,7 +270,9 @@ pub struct VectorCore {
     /// Track the last index
     curr_index: AtomicU16,
 
-    pub id_map: RwLock<HashMap<u128, u32>>,
+    /// Maps global id (u128) to internal id (u32) and label
+    pub global_to_local_id: RwLock<HashMap<u128, (u32, String)>>,
+    pub local_to_global_id: RwLock<HashMap<u32, u128>>,
     curr_id: AtomicU32,
 }
 
@@ -286,13 +287,16 @@ impl VectorCore {
 
         Ok(Self {
             hsnw_index: vectors_db,
-            stats: VectorCoreStats { num_vectors: 0 },
+            stats: VectorCoreStats {
+                num_vectors: AtomicUsize::new(0),
+            },
             vector_properties_db,
             config,
             label_to_index: RwLock::new(HashMap::new()),
             curr_index: AtomicU16::new(0),
-            id_map: RwLock::new(HashMap::new()),
+            global_to_local_id: RwLock::new(HashMap::new()),
             curr_id: AtomicU32::new(0),
+            local_to_global_id: RwLock::new(HashMap::new()),
         })
     }
 
@@ -302,10 +306,20 @@ impl VectorCore {
         query: Vec<f32>,
         k: usize,
         label: &'arena str,
-        should_trickle: bool,
+        _should_trickle: bool,
         arena: &'arena bumpalo::Bump,
-    ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
-        todo!()
+    ) -> VectorCoreResult<Searched<'arena>> {
+        match self.label_to_index.read().unwrap().get(label) {
+            Some(&(index, dimension)) => {
+                if dimension != query.len() {
+                    return Err(VectorError::InvalidVectorLength);
+                }
+
+                let reader = Reader::open(txn, index, self.hsnw_index)?;
+                reader.nns(k).by_vector(txn, query.as_slice(), arena)
+            }
+            None => Ok(Searched::new(bumpalo::vec![in &arena])),
+        }
     }
 
     /// Get a writer based on label. If it doesn't exist build a new index
@@ -352,15 +366,53 @@ impl VectorCore {
         let hvector = HVector::from_vec(label, bump_vec);
 
         let idx = self.curr_id.fetch_add(1, atomic::Ordering::SeqCst);
-        self.id_map.write().unwrap().insert(hvector.id, idx);
+        self.global_to_local_id
+            .write()
+            .unwrap()
+            .insert(hvector.id, (idx, label.to_string()));
+        self.local_to_global_id
+            .write()
+            .unwrap()
+            .insert(idx, hvector.id);
+        self.stats
+            .num_vectors
+            .fetch_add(1, atomic::Ordering::SeqCst);
 
-        writer.add_item(txn, idx, data);
+        writer.add_item(txn, idx, data)?;
 
         Ok(hvector)
     }
 
-    pub fn delete(&self, txn: &RwTxn, id: u128, arena: &bumpalo::Bump) -> VectorCoreResult<()> {
-        Ok(())
+    pub fn delete(&self, txn: &mut RwTxn, id: u128) -> VectorCoreResult<()> {
+        match self.global_to_local_id.read().unwrap().get(&id) {
+            Some(&(idx, ref label)) => {
+                let &(index, dimension) = self
+                    .label_to_index
+                    .read()
+                    .unwrap()
+                    .get(label)
+                    .expect("if index exist label should also exist");
+                let writer = Writer::new(self.hsnw_index, index, dimension);
+                writer.del_item(txn, idx)?;
+                self.stats
+                    .num_vectors
+                    .fetch_add(1, atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            None => Err(VectorError::VectorNotFound(format!(
+                "vector {} doesn't exist",
+                id
+            ))),
+        }
+    }
+
+    pub fn nns_to_hvectors<'arena>(
+        &self,
+        nns: bumpalo::collections::Vec<'arena, (ItemId, f32)>,
+        with_data: bool,
+        arena: &bumpalo::Bump,
+    ) -> bumpalo::collections::Vec<'arena, HVector<'arena>> {
+        todo!()
     }
 
     pub fn get_full_vector<'arena>(
@@ -382,6 +434,6 @@ impl VectorCore {
     }
 
     pub fn num_inserted_vectors(&self) -> usize {
-        self.stats.num_vectors
+        self.stats.num_vectors.load(atomic::Ordering::SeqCst)
     }
 }

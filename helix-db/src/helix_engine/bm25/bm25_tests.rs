@@ -1438,7 +1438,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search() {
-        let (mut storage, _temp_dir) = setup_helix_storage();
+        let (storage, _temp_dir) = setup_helix_storage();
 
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let docs = vec![
@@ -1481,7 +1481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search_alpha_vectors() {
-        let (mut storage, _temp_dir) = setup_helix_storage();
+        let (storage, _temp_dir) = setup_helix_storage();
 
         // Insert some test documents first
         let mut wtxn = storage.graph_env.write_txn().unwrap();
@@ -1527,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search_alpha_bm25() {
-        let (mut storage, _temp_dir) = setup_helix_storage();
+        let (storage, _temp_dir) = setup_helix_storage();
 
         // Insert some test documents first
         let mut wtxn = storage.graph_env.write_txn().unwrap();
