@@ -82,7 +82,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             if label_in_lmdb == label_as_bytes {
                 match Node::<'arena>::from_bincode_bytes(id, value, self.arena) {
                     Ok(node) => {
-                        return Some(Ok(TraversalValue::NodeWithScore { node, score: score as f64 }));
+                        return Some(Ok(TraversalValue::NodeWithScore { node, score: score  }));
                     }
                     Err(e) => {
                         println!("{} Error decoding node: {:?}", line!(), e);

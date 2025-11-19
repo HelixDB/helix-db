@@ -35,18 +35,18 @@ pub struct MMRReranker {
     /// Lambda parameter: controls relevance vs diversity trade-off
     /// Higher values (closer to 1.0) favor relevance
     /// Lower values (closer to 0.0) favor diversity
-    lambda: f64,
+    lambda: f32,
 
     /// Distance metric for similarity calculation
     distance_method: DistanceMethod,
 
     /// Optional query vector for relevance calculation
-    query_vector: Option<Vec<f64>>,
+    query_vector: Option<Vec<f32>>,
 }
 
 impl MMRReranker {
     /// Create a new MMR reranker with default lambda=0.7 (favoring relevance).
-    pub fn new(lambda: f64) -> RerankerResult<Self> {
+    pub fn new(lambda: f32) -> RerankerResult<Self> {
         if !(0.0..=1.0).contains(&lambda) {
             return Err(RerankerError::InvalidParameter(
                 "lambda must be between 0.0 and 1.0".to_string(),
@@ -61,7 +61,7 @@ impl MMRReranker {
     }
 
     /// Create an MMR reranker with a custom distance metric.
-    pub fn with_distance(lambda: f64, distance_method: DistanceMethod) -> RerankerResult<Self> {
+    pub fn with_distance(lambda: f32, distance_method: DistanceMethod) -> RerankerResult<Self> {
         if !(0.0..=1.0).contains(&lambda) {
             return Err(RerankerError::InvalidParameter(
                 "lambda must be between 0.0 and 1.0".to_string(),
@@ -76,20 +76,23 @@ impl MMRReranker {
     }
 
     /// Set the query vector for relevance calculation.
-    pub fn with_query_vector(mut self, query: Vec<f64>) -> Self {
+    pub fn with_query_vector(mut self, query: Vec<f32>) -> Self {
         self.query_vector = Some(query);
         self
     }
 
     /// Extract vector data from a TraversalValue.
-    /// Note: This requires an arena to convert VectorPrecisionData to f64 slice
     fn extract_vector_data<'a>(
         &self,
         item: &'a TraversalValue<'a>,
         arena: &'a bumpalo::Bump,
-    ) -> RerankerResult<Vec<f64>> {
+    ) -> RerankerResult<bumpalo::collections::Vec<'a, f32>> {
         match item {
-            TraversalValue::Vector(v) => Ok(v.data(arena).to_vec()),
+            TraversalValue::Vector(v) => {
+                let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+                bump_vec.extend_from_slice(v.data_borrowed());
+                Ok(bump_vec)
+            }
             _ => Err(RerankerError::TextExtractionError(
                 "Cannot extract vector from this item type (only Vector supported for MMR)"
                     .to_string(),
@@ -98,7 +101,7 @@ impl MMRReranker {
     }
 
     /// Calculate similarity between two items.
-    fn calculate_similarity(&self, item1: &[f64], item2: &[f64]) -> RerankerResult<f64> {
+    fn calculate_similarity(&self, item1: &[f32], item2: &[f32]) -> RerankerResult<f32> {
         if item1.len() != item2.len() {
             return Err(RerankerError::InvalidParameter(
                 "Vector dimensions must match".to_string(),
@@ -108,9 +111,13 @@ impl MMRReranker {
         let distance = match self.distance_method {
             DistanceMethod::Cosine => {
                 // Calculate cosine similarity (1 - cosine distance)
-                let dot_product: f64 = item1.iter().zip(item2.iter()).map(|(a, b)| a * b).sum();
-                let norm1: f64 = item1.iter().map(|x| x * x).sum::<f64>().sqrt();
-                let norm2: f64 = item2.iter().map(|x| x * x).sum::<f64>().sqrt();
+                let dot_product = item1
+                    .iter()
+                    .zip(item2.iter())
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>();
+                let norm1 = item1.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let norm2 = item2.iter().map(|x| x * x).sum::<f32>().sqrt();
 
                 if norm1 == 0.0 || norm2 == 0.0 {
                     0.0
@@ -120,11 +127,11 @@ impl MMRReranker {
             }
             DistanceMethod::Euclidean => {
                 // Convert Euclidean distance to similarity (using negative exponential)
-                let dist_sq: f64 = item1
+                let dist_sq = item1
                     .iter()
                     .zip(item2.iter())
                     .map(|(a, b)| (a - b).powi(2))
-                    .sum();
+                    .sum::<f32>();
                 (-dist_sq.sqrt()).exp()
             }
             DistanceMethod::DotProduct => {
@@ -149,7 +156,7 @@ impl MMRReranker {
 
         let n = items.len();
         let mut selected: Vec<TraversalValue<'arena>> = Vec::with_capacity(n);
-        let mut remaining: Vec<(TraversalValue<'arena>, f64)> = Vec::with_capacity(n);
+        let mut remaining: Vec<(TraversalValue<'arena>, f32)> = Vec::with_capacity(n);
 
         // Extract original scores and prepare remaining items
         for item in items {
@@ -158,7 +165,7 @@ impl MMRReranker {
         }
 
         // Cache for similarity calculations
-        let mut similarity_cache: HashMap<(usize, usize), f64> = HashMap::new();
+        let mut similarity_cache: HashMap<(usize, usize), f32> = HashMap::new();
 
         // Select first item (highest original score)
         remaining.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -168,7 +175,7 @@ impl MMRReranker {
         // Iteratively select remaining items
         while !remaining.is_empty() {
             let mut best_idx = 0;
-            let mut best_mmr_score = f64::NEG_INFINITY;
+            let mut best_mmr_score = f32::NEG_INFINITY;
 
             for (idx, (item, relevance_score)) in remaining.iter().enumerate() {
                 let item_vec = self.extract_vector_data(item, &arena)?;
@@ -181,7 +188,7 @@ impl MMRReranker {
                 };
 
                 // Calculate diversity term (max similarity to selected items)
-                let mut max_similarity: f64 = 0.0;
+                let mut max_similarity: f32 = 0.0;
                 for (sel_idx, selected_item) in selected.iter().enumerate() {
                     // Check cache first
                     let cache_key = (idx, sel_idx);
@@ -240,9 +247,10 @@ mod tests {
     use crate::helix_engine::vector_core::HVector;
     use bumpalo::Bump;
 
-    fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
-        let slice = arena.alloc_slice_copy(data);
-        HVector::from_slice("test_vector", 0, slice, arena)
+    fn alloc_vector<'a>(arena: &'a Bump, data: &[f32]) -> HVector<'a> {
+        let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+        bump_vec.extend_from_slice(data);
+        HVector::from_vec("test_vector", bump_vec)
     }
 
     #[test]
@@ -648,9 +656,9 @@ mod tests {
         // Create 100 vectors
         let vectors: Vec<TraversalValue> = (0..100)
             .map(|i| {
-                let angle = (i as f64) * 0.1;
+                let angle = (i as f32) * 0.1;
                 let mut v = alloc_vector(&arena, &[angle.cos(), angle.sin()]);
-                v.distance = Some(1.0 - i as f64 / 100.0);
+                v.distance = Some(1.0 - i as f32 / 100.0);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })
@@ -705,8 +713,8 @@ mod tests {
 
         let vectors: Vec<TraversalValue> = (0..3)
             .map(|i| {
-                let mut v = alloc_vector(&arena, &[1.0 * i as f64, 0.0]);
-                v.distance = Some(1.0 - i as f64 * 0.1);
+                let mut v = alloc_vector(&arena, &[1.0 * i as f32, 0.0]);
+                v.distance = Some(1.0 - i as f32 * 0.1);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })
@@ -768,9 +776,9 @@ mod tests {
 
         let vectors: Vec<TraversalValue> = (0..5)
             .map(|i| {
-                let data: Vec<f64> = (0..100).map(|j| if j == i { 1.0 } else { 0.0 }).collect();
+                let data: Vec<f32> = (0..100).map(|j| if j == i { 1.0 } else { 0.0 }).collect();
                 let mut v = alloc_vector(&arena, &data);
-                v.distance = Some(1.0 - i as f64 * 0.1);
+                v.distance = Some(1.0 - i as f32 * 0.1);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })

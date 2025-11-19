@@ -13,7 +13,7 @@ pub trait BruteForceSearchVAdapter<'db, 'arena, 'txn>:
 {
     fn brute_force_search_v<K>(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         k: K,
     ) -> RoTraversalIterator<
         'db,
@@ -31,7 +31,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     fn brute_force_search_v<K>(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         k: K,
     ) -> RoTraversalIterator<
         'db,
@@ -48,11 +48,12 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = Cosine::distance(
-                        v.data.as_ref().unwrap(),
-                        &Item::<Cosine>::from(query, &arena),
-                    );
-                    v.set_distance(d as f64);
+                    let mut bump_vec = bumpalo::collections::Vec::new_in(&self.arena);
+                    bump_vec.extend_from_slice(v.data_borrowed());
+
+                    let d =
+                        Cosine::distance(v.data.as_ref().unwrap(), &Item::<Cosine>::new(bump_vec));
+                    v.set_distance(d);
                     Some(v)
                 }
                 _ => None,

@@ -131,15 +131,11 @@ mod tests {
     #[test]
     fn test_rerank_iterator() {
         let arena = bumpalo::Bump::new();
-        let data1 = arena.alloc_slice_copy(&[1.0]);
-        let data2 = arena.alloc_slice_copy(&[2.0]);
+        let data1 = bumpalo::vec![in &arena; 1.0];
+        let data2 = bumpalo::vec![in &arena; 2.0];
         let items = vec![
-            Ok(TraversalValue::Vector(HVector::from_slice(
-                "test", 0, data1, &arena,
-            ))),
-            Ok(TraversalValue::Vector(HVector::from_slice(
-                "test", 0, data2, &arena,
-            ))),
+            Ok(TraversalValue::Vector(HVector::from_vec("test", data1))),
+            Ok(TraversalValue::Vector(HVector::from_vec("test", data2))),
         ];
 
         let mut iter = RerankIterator {
