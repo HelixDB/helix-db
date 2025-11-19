@@ -401,8 +401,11 @@ async fn main() -> Result<()> {
 
         // Calculate which tests this batch should process
         let total_tests = test_dirs.len();
-        let tests_per_batch = total_tests / total_batches as usize;
+        println!("Total tests: {}", total_tests);
+        let tests_per_batch = (total_tests as f64 / total_batches as f64).ceil() as usize;
+        println!("Tests per batch: {}", tests_per_batch);
         let remainder = total_tests % total_batches as usize;
+        println!("Remainder tests: {}", remainder);
 
         // Calculate start and end for this batch
         let start_idx = (current_batch - 1) as usize * tests_per_batch;
