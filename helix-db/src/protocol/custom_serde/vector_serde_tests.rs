@@ -51,7 +51,7 @@ mod vector_serialization_tests {
         let data = vec![0.5, -0.5, 1.5, -1.5];
         let props = vec![("name", Value::String("test".to_string()))];
 
-        let vector = create_arena_vector(&arena, id, "labeled_vector", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "labeled_vector", 1, false, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -74,7 +74,7 @@ mod vector_serialization_tests {
             ("score", Value::F64(0.95)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "vector_label", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "vector_label", 1, false, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -93,7 +93,7 @@ mod vector_serialization_tests {
         let data = vec![0.0; 128]; // Standard embedding dimension
         let props = all_value_types_props();
 
-        let vector = create_arena_vector(&arena, id, "all_types", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "all_types", 1, false, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -112,7 +112,7 @@ mod vector_serialization_tests {
         let data = vec![1.0, 2.0, 3.0];
         let props = nested_value_props();
 
-        let vector = create_arena_vector(&arena, id, "nested", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "nested", 1, false, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -137,19 +137,19 @@ mod vector_serialization_tests {
     fn test_vector_data_to_bytes_128d() {
         let arena = Bump::new();
         let id = 111111u128;
-        let data: Vec<f64> = (0..128).map(|i| i as f64 * 0.1).collect();
+        let data: Vec<f32> = (0..128).map(|i| i as f32 * 0.1).collect();
 
         let vector = create_simple_vector(&arena, id, "vector_128", &data);
         let bytes = vector.vector_data_to_bytes().unwrap();
 
-        assert_eq!(bytes.len(), 128 * 8); // 128 dimensions * 8 bytes per f64
+        assert_eq!(bytes.len(), 128 * 8); // 128 dimensions * 8 bytes per f32
     }
 
     #[test]
     fn test_vector_data_to_bytes_384d() {
         let arena = Bump::new();
         let id = 222222u128;
-        let data: Vec<f64> = (0..384).map(|i| i as f64 * 0.01).collect();
+        let data: Vec<f32> = (0..384).map(|i| i as f32 * 0.01).collect();
 
         let vector = create_simple_vector(&arena, id, "vector_384", &data);
         let bytes = vector.vector_data_to_bytes().unwrap();
@@ -161,7 +161,7 @@ mod vector_serialization_tests {
     fn test_vector_data_to_bytes_1536d() {
         let arena = Bump::new();
         let id = 333333u128;
-        let data: Vec<f64> = (0..1536).map(|i| (i as f64).sin()).collect();
+        let data: Vec<f32> = (0..1536).map(|i| (i as f32).sin()).collect();
 
         let vector = create_simple_vector(&arena, id, "vector_1536", &data);
         let bytes = vector.vector_data_to_bytes().unwrap();
@@ -172,10 +172,10 @@ mod vector_serialization_tests {
     #[test]
     fn test_cast_raw_vector_data_128d() {
         let arena = Bump::new();
-        let original_data: Vec<f64> = (0..128).map(|i| i as f64).collect();
+        let original_data: Vec<f32> = (0..128).map(|i| i as f32).collect();
         let raw_bytes = create_vector_bytes(&original_data);
 
-        let casted_data = HVector::cast_raw_vector_data(&arena, &raw_bytes);
+        let casted_data = HVector::raw_vector_data_to_vec(&raw_bytes, &arena);
 
         assert_eq!(casted_data.len(), 128);
         for (i, &val) in casted_data.iter().enumerate() {
@@ -189,7 +189,7 @@ mod vector_serialization_tests {
         let original_data = vec![3.14159, 2.71828, 1.41421, 1.73205];
         let raw_bytes = create_vector_bytes(&original_data);
 
-        let casted_data = HVector::cast_raw_vector_data(&arena, &raw_bytes);
+        let casted_data = HVector::raw_vector_data_to_vec(&raw_bytes, &arena);
 
         assert_eq!(casted_data.len(), original_data.len());
         for (orig, casted) in original_data.iter().zip(casted_data.iter()) {
@@ -212,7 +212,6 @@ mod vector_serialization_tests {
         assert_eq!(vector.len(), 4);
         assert_eq!(vector.version, 1);
         assert_eq!(vector.deleted, false);
-        assert_eq!(vector.level, 0);
         assert!(vector.properties.is_none());
     }
 
@@ -251,7 +250,7 @@ mod vector_serialization_tests {
             ("dimension", Value::I32(4)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "embedding", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "embedding", 1, false, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -296,7 +295,7 @@ mod vector_serialization_tests {
         let id = 123456u128;
         let data = vec![1.0, 2.0];
 
-        let vector = create_arena_vector(&arena, id, "versioned", 5, false, 0, &data, vec![]);
+        let vector = create_arena_vector(&arena, id, "versioned", 5, false, &data, vec![]);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -314,7 +313,7 @@ mod vector_serialization_tests {
         let id = 654321u128;
         let data = vec![0.0, 1.0];
 
-        let vector = create_arena_vector(&arena, id, "deleted", 1, true, 0, &data, vec![]);
+        let vector = create_arena_vector(&arena, id, "deleted", 1, true, &data, vec![]);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -332,7 +331,7 @@ mod vector_serialization_tests {
         let id = 987654u128;
         let data = vec![1.0, 0.0];
 
-        let vector = create_arena_vector(&arena, id, "active", 1, false, 0, &data, vec![]);
+        let vector = create_arena_vector(&arena, id, "active", 1, false, &data, vec![]);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -438,7 +437,7 @@ mod vector_serialization_tests {
             })
             .collect();
 
-        let vector = create_arena_vector(&arena, id, "many_props", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "many_props", 1, false, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -477,7 +476,7 @@ mod vector_serialization_tests {
     fn test_vector_large_dimension_4096() {
         let arena = Bump::new();
         let id = 951753u128;
-        let data: Vec<f64> = (0..4096).map(|i| i as f64 * 0.001).collect();
+        let data: Vec<f32> = (0..4096).map(|i| i as f32 * 0.001).collect();
 
         let vector = create_simple_vector(&arena, id, "4096d", &data);
 
@@ -502,7 +501,7 @@ mod vector_serialization_tests {
         let data = vec![1.1, 2.2, 3.3];
         let props = vec![("test", Value::String("value".to_string()))];
 
-        let vector = create_arena_vector(&arena, id, "byte_test", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "byte_test", 1, false, &data, props);
 
         // First roundtrip
         let props_bytes1 = bincode::serialize(&vector).unwrap();

@@ -3,11 +3,9 @@
 
 //! Core Reranker trait and related types.
 
-use crate::{
-    helix_engine::{
-        reranker::errors::{RerankerError, RerankerResult},
-        traversal_core::traversal_value::TraversalValue,
-    },
+use crate::helix_engine::{
+    reranker::errors::{RerankerError, RerankerResult},
+    traversal_core::traversal_value::TraversalValue,
 };
 
 /// Represents a scored item for reranking.
@@ -41,7 +39,11 @@ pub trait Reranker: Send + Sync {
     ///
     /// # Returns
     /// A vector of reranked items with updated scores
-    fn rerank<'arena, I>(&self, items: I, query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>;
 
@@ -53,7 +55,7 @@ pub trait Reranker: Send + Sync {
 ///
 /// This handles the different types (Node, Edge, Vector) and extracts
 /// their associated score/distance value.
-pub fn extract_score(item: &TraversalValue) -> RerankerResult<f64> {
+pub fn extract_score(item: &TraversalValue) -> RerankerResult<f32> {
     match item {
         TraversalValue::Vector(v) => Ok(v.score()),
         TraversalValue::NodeWithScore { score, .. } => Ok(*score),
@@ -69,7 +71,7 @@ pub fn extract_score(item: &TraversalValue) -> RerankerResult<f64> {
 ///
 /// This modifies the distance/score field of the item to reflect
 /// the new reranked score.
-pub fn update_score(item: &mut TraversalValue, new_score: f64) -> RerankerResult<()> {
+pub fn update_score(item: &mut TraversalValue, new_score: f32) -> RerankerResult<()> {
     match item {
         TraversalValue::Vector(v) => {
             v.distance = Some(new_score);

@@ -47,8 +47,7 @@ impl BuildOption {
 }
 
 impl<'a, D: Distance, R: Rng + SeedableRng> VectorBuilder<'a, D, R> {
-    /// Controls the search range when inserting a new item into the graph. This value must be
-    /// greater than or equal to the `M` used in [`Self::build<M,M0>`]
+    /// Controls the search range when inserting a new item into the graph.
     ///
     /// Typical values range from 50 to 500, with larger `ef_construction` producing higher
     /// quality hnsw graphs at the expense of longer builds. The default value used in hannoy is

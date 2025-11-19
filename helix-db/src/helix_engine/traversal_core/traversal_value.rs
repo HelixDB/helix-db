@@ -25,7 +25,7 @@ pub enum TraversalValue<'arena> {
     Value(Value),
 
     /// Item With Score
-    NodeWithScore { node: Node<'arena>, score: f64 },
+    NodeWithScore { node: Node<'arena>, score: f32 },
     /// An empty traversal value
     Empty,
 }
@@ -67,14 +67,14 @@ impl<'arena> TraversalValue<'arena> {
         }
     }
 
-    pub fn data(&'arena self) -> &'arena [f64] {
+    pub fn data(&'arena self) -> &'arena [f32] {
         match self {
             TraversalValue::Vector(vector) => vector.data_borrowed(),
             _ => unimplemented!(),
         }
     }
 
-    pub fn score(&self) -> f64 {
+    pub fn score(&self) -> f32 {
         match self {
             TraversalValue::Vector(vector) => vector.score(),
             TraversalValue::NodeWithScore { score, .. } => *score,

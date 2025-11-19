@@ -266,7 +266,7 @@ mod integration_tests {
             ("dimensions", Value::I32(3)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "doc_vector", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "doc_vector", 1, false, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -328,7 +328,7 @@ mod integration_tests {
 
         let vectors: Vec<HVector> = (0..15)
             .map(|i| {
-                let data = vec![i as f64, (i + 1) as f64, (i + 2) as f64];
+                let data = vec![i as f32, (i + 1) as f32, (i + 2) as f32];
                 create_simple_vector(&arena, i as u128, &format!("vec_{}", i), &data)
             })
             .collect();

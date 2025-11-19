@@ -83,10 +83,6 @@ impl<D: Distance> Item<'_, D> {
         let header = D::new_header(&vector);
         Self { header, vector }
     }
-
-    pub fn from<'arena>(vec: &[f64], arena: &'arena bumpalo::Bump) -> Self {
-        Self::new(vec.into_iter().map(|x| *x as f32).collect_in(arena))
-    }
 }
 
 #[derive(Clone, Debug)]

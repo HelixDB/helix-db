@@ -25,14 +25,13 @@ fn setup_env() -> (Env, TempDir) {
 fn test_hnsw_insert_and_count() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let mut index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
-    let vector: Vec<f64> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
+    let vector: Vec<f32> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
     for _ in 0..10 {
         let arena = Bump::new();
-        let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", vector.as_slice(), None, &arena)
             .unwrap();
     }
 
@@ -44,15 +43,14 @@ fn test_hnsw_insert_and_count() {
 fn test_hnsw_search_returns_results() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let mut index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let mut rng = rand::rng();
     for _ in 0..128 {
         let arena = Bump::new();
-        let vector: Vec<f64> = (0..4).map(|_| rng.random_range(0.0..1.0)).collect();
-        let data = arena.alloc_slice_copy(&vector);
+        let vector: Vec<f32> = (0..4).map(|_| rng.random_range(0.0..1.0)).collect();
         let _ = index
-            .insert(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", vector.as_slice(), None, &arena)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -61,7 +59,7 @@ fn test_hnsw_search_returns_results() {
     let txn = env.read_txn().unwrap();
     let query = [0.5, 0.5, 0.5, 0.5];
     let results = index
-        .search(&txn, &query, 5, "vector", false, &arena)
+        .search(&txn, query.to_vec(), 5, "vector", false, &arena)
         .unwrap();
     assert!(!results.is_empty());
 }

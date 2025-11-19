@@ -12,7 +12,7 @@ pub trait SearchVAdapter<'db, 'arena, 'txn>:
 {
     fn search_v<F, K>(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         k: K,
         label: &'arena str,
         filter: Option<&'arena [F]>,
@@ -33,7 +33,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     fn search_v<F, K>(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         k: K,
         label: &'arena str,
         filter: Option<&'arena [F]>,
@@ -50,7 +50,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     {
         let vectors = self.storage.vectors.search(
             self.txn,
-            query,
+            query.to_vec(),
             k.try_into().unwrap(),
             label,
             false,

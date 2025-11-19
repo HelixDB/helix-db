@@ -228,7 +228,7 @@ mod error_handling_tests {
     fn test_vector_cast_empty_raw_data_panics() {
         let arena = Bump::new();
         let empty_data: &[u8] = &[];
-        HVector::cast_raw_vector_data(&arena, empty_data);
+        HVector::raw_vector_data_to_vec(empty_data, &arena);
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod error_handling_tests {
         let arena = Bump::new();
         let id = 666777u128;
         let props = vec![("key", Value::String("value".to_string()))];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, 0, &[1.0], props);
+        let vector = create_arena_vector(&arena, id, "test", 1, false, &[1.0], props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -265,7 +265,7 @@ mod error_handling_tests {
         let arena = Bump::new();
         // 7 bytes is not a multiple of 8 (size of f64)
         let misaligned: &[u8] = &[0, 1, 2, 3, 4, 5, 6];
-        HVector::cast_raw_vector_data(&arena, misaligned);
+        HVector::raw_vector_data_to_vec(&misaligned, &arena);
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod error_handling_tests {
         let arena = Bump::new();
         let id = 012012u128;
 
-        let vector = create_arena_vector(&arena, id, "test", 255, false, 0, &[1.0], vec![]);
+        let vector = create_arena_vector(&arena, id, "test", 255, false, &[1.0], vec![]);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -585,7 +585,7 @@ mod error_handling_tests {
         let id = 987654u128;
 
         // Vector with NaN, infinity, and other special values
-        let data = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+        let data = vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0];
         let vector = create_simple_vector(&arena, id, "special", &data);
 
         let props_bytes = bincode::serialize(&vector).unwrap();

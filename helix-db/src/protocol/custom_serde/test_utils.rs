@@ -227,12 +227,13 @@ pub fn create_arena_vector<'arena>(
     label: &str,
     version: u8,
     deleted: bool,
-    level: usize,
-    data: &[f64],
+    data: &[f32],
     props: Vec<(&str, Value)>,
 ) -> HVector<'arena> {
     let label_ref = arena.alloc_str(label);
-    let data_ref = arena.alloc_slice_copy(data);
+
+    let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+    bump_vec.extend_from_slice(data);
 
     if props.is_empty() {
         HVector {
@@ -240,9 +241,8 @@ pub fn create_arena_vector<'arena>(
             label: label_ref,
             version,
             deleted,
-            level,
             distance: None,
-            data: Some(Item::<Cosine>::from(data_ref, arena)),
+            data: Some(Item::<Cosine>::new(bump_vec)),
             properties: None,
         }
     } else {
@@ -258,9 +258,8 @@ pub fn create_arena_vector<'arena>(
             label: label_ref,
             version,
             deleted,
-            level,
             distance: None,
-            data: Some(Item::<Cosine>::from(data_ref, arena)),
+            data: Some(Item::<Cosine>::new(bump_vec)),
             properties: Some(props_map),
         }
     }
@@ -271,13 +270,13 @@ pub fn create_simple_vector<'arena>(
     arena: &'arena Bump,
     id: u128,
     label: &str,
-    data: &[f64],
+    data: &[f32],
 ) -> HVector<'arena> {
-    create_arena_vector(arena, id, label, 1, false, 0, data, vec![])
+    create_arena_vector(arena, id, label, 1, false, data, vec![])
 }
 
 /// Creates vector data as raw bytes
-pub fn create_vector_bytes(data: &[f64]) -> Vec<u8> {
+pub fn create_vector_bytes(data: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(data).to_vec()
 }
 

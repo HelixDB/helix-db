@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering};
+use std::{borrow::Cow, cmp::Ordering, hash::Hash};
 
 use bincode::Options;
 use byteorder::BE;
@@ -7,6 +7,7 @@ use heed3::{
     Database, Env, Error as LmdbError, RoTxn, RwTxn,
     types::{Bytes, U128},
 };
+use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -61,47 +62,33 @@ pub type CoreDatabase<D> = heed3::Database<KeyCodec, NodeCodec<D>>;
 #[derive(Debug, Serialize, Clone)]
 pub struct HVector<'arena> {
     pub id: u128,
-    pub distance: Option<f64>,
+    pub distance: Option<f32>,
     pub label: &'arena str,
     pub deleted: bool,
     pub version: u8,
-    pub level: usize,
     pub properties: Option<ImmutablePropertiesMap<'arena>>,
     pub data: Option<Item<'arena, Cosine>>,
 }
 
 impl<'arena> HVector<'arena> {
-    // FIXME: this allocates twice
-    pub fn data(&self, arena: &'arena bumpalo::Bump) -> &'arena [f64] {
-        let vec_f32 = self.data.as_ref().unwrap().vector.as_ref().to_vec(arena);
-
-        arena.alloc_slice_fill_iter(vec_f32.iter().map(|&x| x as f64))
+    pub fn data_borrowed(&self) -> &[f32] {
+        bytemuck::cast_slice(self.data.as_ref().unwrap().vector.as_bytes())
     }
 
-    pub fn data_borrowed(&self) -> &[f64] {
-        bytemuck::cast_slice(self.data.as_ref().unwrap().vector.as_ref().as_bytes())
-    }
-
-    pub fn from_slice(
-        label: &'arena str,
-        level: usize,
-        data: &'arena [f64],
-        arena: &'arena bumpalo::Bump,
-    ) -> Self {
+    pub fn from_vec(label: &'arena str, data: bumpalo::collections::Vec<'arena, f32>) -> Self {
         let id = v6_uuid();
         HVector {
             id,
             version: 1,
-            level,
             label,
-            data: Some(Item::<Cosine>::from(data, arena)),
+            data: Some(Item::<Cosine>::new(data)),
             distance: None,
             properties: None,
             deleted: false,
         }
     }
 
-    pub fn score(&self) -> f64 {
+    pub fn score(&self) -> f32 {
         self.distance.unwrap_or(2.0)
     }
 
@@ -163,11 +150,11 @@ impl<'arena> HVector<'arena> {
         todo!()
     }
 
-    pub fn set_distance(&mut self, distance: f64) {
+    pub fn set_distance(&mut self, distance: f32) {
         self.distance = Some(distance);
     }
 
-    pub fn get_distance(&self) -> f64 {
+    pub fn get_distance(&self) -> f32 {
         self.distance.unwrap()
     }
 
@@ -184,11 +171,13 @@ impl<'arena> HVector<'arena> {
         self.properties.as_ref().and_then(|value| value.get(key))
     }
 
-    pub fn cast_raw_vector_data<'txn>(
-        arena: &'arena bumpalo::Bump,
+    pub fn raw_vector_data_to_vec<'txn>(
         raw_vector_data: &'txn [u8],
-    ) -> &'txn [f64] {
-        todo!()
+        arena: &'arena bumpalo::Bump,
+    ) -> bumpalo::collections::Vec<'arena, f32> {
+        let mut bump_vec = bumpalo::collections::Vec::<'arena, f32>::new_in(arena);
+        bump_vec.extend_from_slice(bytemuck::cast_slice(raw_vector_data));
+        bump_vec
     }
 
     pub fn from_raw_vector_data<'txn>(
@@ -256,7 +245,7 @@ impl HNSWConfig {
 }
 
 pub struct VectorCoreStats {
-    // Do it atomical?
+    // Do it an atomic?
     pub num_vectors: usize,
 }
 
@@ -267,6 +256,19 @@ pub struct VectorCore {
     pub stats: VectorCoreStats,
     pub vector_properties_db: Database<U128<BE>, Bytes>,
     pub config: HNSWConfig,
+
+    /// Map labels to a different index
+    pub label_to_index: HashMap<String, u16>,
+    /// Track the last index
+    curr_index: u16,
+
+    pub id_map: HashMap<u128, u32>,
+    curr_id: u32,
+
+    /// The actual index is lazily build during the first access
+    // TODO: We should choose a better strategy to build the index
+    writer: Option<Writer<Cosine>>,
+    reader: Option<Reader<Cosine>>,
 }
 
 impl VectorCore {
@@ -283,29 +285,74 @@ impl VectorCore {
             stats: VectorCoreStats { num_vectors: 0 },
             vector_properties_db,
             config,
+            writer: None,
+            reader: None,
+            label_to_index: HashMap::new(),
+            curr_index: 0,
+            id_map: HashMap::new(),
+            curr_id: 0,
         })
     }
 
     pub fn search<'arena>(
         &self,
         txn: &RoTxn,
-        query: &'arena [f64],
+        query: Vec<f32>,
         k: usize,
         label: &'arena str,
         should_trickle: bool,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
+        if self.reader.is_none() {
+            return Ok(bumpalo::collections::Vec::new_in(&arena));
+        }
         todo!()
     }
 
+    fn get_or_create(&mut self, label: &str) -> u16 {
+        if let Some(&index) = self.label_to_index.get(label) {
+            index
+        } else {
+            self.curr_index += 1;
+            self.label_to_index
+                .insert(label.to_string(), self.curr_index);
+            self.curr_index
+        }
+    }
+
     pub fn insert<'arena>(
-        &self,
+        &mut self,
         txn: &mut RwTxn,
         label: &'arena str,
-        data: &'arena [f64],
+        data: &'arena [f32],
         properties: Option<ImmutablePropertiesMap<'arena>>,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
+        // index hasn't been built yet
+        if self.writer.is_none() {
+            let idx = self.get_or_create(label);
+            // assume the len of the first insertion as the
+            // index dimension
+            self.writer = Some(Writer::new(self.hsnw_index, idx, data.len()));
+            let mut rng = StdRng::from_os_rng();
+            let mut builder = self.writer.as_ref().unwrap().builder(&mut rng);
+            builder
+                .ef_construction(self.config.ef_construct)
+                .build(txn)?;
+        }
+
+        let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+        bump_vec.extend_from_slice(data);
+        let hvector = HVector::from_vec(label, bump_vec);
+
+        self.curr_id += 1;
+        self.id_map.insert(hvector.id, self.curr_id);
+
+        self.writer
+            .as_ref()
+            .unwrap()
+            .add_item(txn, self.curr_id, data);
+
         todo!()
     }
 
