@@ -29,11 +29,11 @@ use crate::helix_engine::vector_core::{VectorCoreResult, VectorError};
 
 pub(crate) type ScoredLink = (OrderedFloat, ItemId);
 
-pub struct NodeState<const M: usize> {
-    links: ArrayVec<[ScoredLink; M]>,
+pub struct NodeState {
+    links: Vec<ScoredLink>,
 }
 
-impl<const M: usize> Debug for NodeState<M> {
+impl Debug for NodeState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // from [crate::unaligned_vector]
         struct Number(f32);
@@ -53,19 +53,21 @@ impl<const M: usize> Debug for NodeState<M> {
     }
 }
 
-pub struct HnswBuilder<D, const M: usize, const M0: usize> {
+pub struct HnswBuilder<D> {
     assign_probas: Vec<f32>,
     ef_construction: usize,
     alpha: f32,
+    m: usize,
+    m_max_0: usize,
     pub max_level: usize,
     pub entry_points: Vec<ItemId>,
-    pub layers: Vec<HashMap<ItemId, NodeState<M0>>>,
+    pub layers: Vec<HashMap<ItemId, NodeState>>,
     distance: PhantomData<D>,
 }
 
-impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
+impl<D: Distance> HnswBuilder<D> {
     pub fn new(opts: &BuildOption) -> Self {
-        let assign_probas = Self::get_default_probas();
+        let assign_probas = Self::get_default_probas(opts.m);
         Self {
             assign_probas,
             ef_construction: opts.ef_construction,
@@ -74,6 +76,8 @@ impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
             entry_points: Vec::new(),
             layers: vec![],
             distance: PhantomData,
+            m: opts.m,
+            m_max_0: opts.m_max_0,
         }
     }
 
@@ -96,9 +100,9 @@ impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
         dist.sample(rng)
     }
 
-    fn get_default_probas() -> Vec<f32> {
-        let mut assign_probas = Vec::with_capacity(M);
-        let level_factor = 1.0 / (M as f32 + f32::EPSILON).ln();
+    fn get_default_probas(m: usize) -> Vec<f32> {
+        let mut assign_probas = Vec::with_capacity(m);
+        let level_factor = 1.0 / (m as f32 + f32::EPSILON).ln();
         let mut level = 0;
         loop {
             // P(L<x<L+1) = P(x<L+1) - P(x<L)
@@ -363,7 +367,7 @@ impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
             let _ = map_guard.insert(
                 id,
                 NodeState {
-                    links: ArrayVec::from_iter(pruned),
+                    links: Vec::from_iter(pruned),
                 },
             );
             Ok(())
@@ -379,12 +383,8 @@ impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
             let Some(map) = self.layers.get(level) else {
                 break;
             };
-            map.pin().get_or_insert(
-                item_id,
-                NodeState {
-                    links: array_vec![],
-                },
-            );
+            map.pin()
+                .get_or_insert(item_id, NodeState { links: vec![] });
         }
     }
 
@@ -501,26 +501,24 @@ impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
         let map_guard = map.pin();
 
         // 'pure' links update function
-        let _add_link = |node_state: &NodeState<M0>| {
-            let mut links = node_state.links;
-            let cap = if level == 0 { M0 } else { M };
+        let _add_link = |node_state: &NodeState| {
+            let mut links = node_state.links.clone();
+            let cap = if level == 0 { self.m_max_0 } else { self.m };
 
-            if links.len() < cap {
+            if node_state.links.len() < cap {
                 links.push(q);
                 return NodeState { links };
             }
 
             let new_links = self
-                .robust_prune(links.to_vec(), level, self.alpha, lmdb)
-                .map(ArrayVec::from_iter)
-                .unwrap_or_else(|_| node_state.links);
+                .robust_prune(links, level, self.alpha, lmdb)
+                .map(Vec::from_iter)
+                .unwrap_or_else(|_| node_state.links.clone());
 
             NodeState { links: new_links }
         };
 
-        map_guard.update_or_insert_with(p, _add_link, || NodeState {
-            links: array_vec!([ScoredLink; M0] => q),
-        });
+        map_guard.update_or_insert_with(p, _add_link, || NodeState { links: vec![q] });
 
         Ok(())
     }
@@ -535,7 +533,7 @@ impl<D: Distance, const M: usize, const M0: usize> HnswBuilder<D, M, M0> {
         alpha: f32,
         lmdb: &FrozenReader<'_, D>,
     ) -> VectorCoreResult<Vec<ScoredLink>> {
-        let cap = if level == 0 { M0 } else { M };
+        let cap = if level == 0 { self.m_max_0 } else { self.m };
         candidates.sort_by(|a, b| b.cmp(a));
         let mut selected: Vec<ScoredLink> = Vec::with_capacity(cap);
 
