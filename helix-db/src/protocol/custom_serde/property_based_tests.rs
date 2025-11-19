@@ -54,9 +54,9 @@ mod property_based_tests {
     }
 
     // Strategy for generating vector data
-    fn arb_vector_data() -> impl Strategy<Value = Vec<f64>> {
+    fn arb_vector_data() -> impl Strategy<Value = Vec<f32>> {
         prop::collection::vec(
-            any::<f64>().prop_filter("Not NaN", |f| !f.is_nan()),
+            any::<f32>().prop_filter("Not NaN", |f| !f.is_nan()),
             1..128, // 1 to 128 dimensions
         )
     }
@@ -298,8 +298,8 @@ mod property_based_tests {
             prop_assert_eq!(deserialized.len(), data.len());
 
             // Check each data point (with floating point tolerance)
-            for (i, (&orig, &deser)) in data.iter().zip(deserialized.data(&arena).iter()).enumerate() {
-                let diff = (orig - deser).abs();
+            for (i, (&orig, &deser)) in data.iter().zip(deserialized.data_borrowed().iter()).enumerate() {
+                let diff = (orig as f64 - deser as f64).abs();
                 prop_assert!(diff < 1e-10, "Data mismatch at index {}: {} vs {}", i, orig, deser);
             }
         }
@@ -318,7 +318,7 @@ mod property_based_tests {
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
 
-            let vector = create_arena_vector(&arena, id, &label, 1, deleted, 0, &data, props_refs);
+            let vector = create_arena_vector(&arena, id, &label, 1, deleted, &data, props_refs);
 
             let props_bytes = bincode::serialize(&vector).unwrap();
             let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -344,12 +344,12 @@ mod property_based_tests {
 
             // Convert to bytes and back
             let bytes = create_vector_bytes(&data);
-            let restored = HVector::cast_raw_vector_data(&arena, &bytes);
+            let restored = HVector::raw_vector_data_to_vec( &bytes,&arena);
 
             prop_assert_eq!(restored.len(), data.len());
 
             for (i, (&orig, &rest)) in data.iter().zip(restored.iter()).enumerate() {
-                let diff = (orig - rest).abs();
+                let diff = (orig as f64 - rest as f64).abs();
                 prop_assert!(diff < 1e-10, "Data mismatch at index {}: {} vs {}", i, orig, rest);
             }
         }

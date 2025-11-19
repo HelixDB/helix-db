@@ -399,7 +399,7 @@ pub trait HybridSearch {
     fn hybrid_search(
         self,
         query: &str,
-        query_vector: &[f64],
+        query_vector: &[f32],
         alpha: f32,
         limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<(u128, f32)>, GraphError>> + Send;
@@ -409,12 +409,11 @@ impl HybridSearch for HelixGraphStorage {
     async fn hybrid_search(
         self,
         query: &str,
-        query_vector: &[f64],
+        query_vector: &[f32],
         alpha: f32,
         limit: usize,
     ) -> Result<Vec<(u128, f32)>, GraphError> {
         let query_owned = query.to_string();
-        let query_vector_owned = query_vector.to_vec();
 
         let graph_env_bm25 = self.graph_env.clone();
         let graph_env_vector = self.graph_env.clone();
@@ -428,18 +427,23 @@ impl HybridSearch for HelixGraphStorage {
             }
         });
 
+        let query_vector_owned = query_vector.to_vec();
         let vector_handle =
-            task::spawn_blocking(move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
+            task::spawn_blocking(move || -> Result<Option<Vec<(u128, f32)>>, GraphError> {
                 let txn = graph_env_vector.read_txn()?;
                 let arena = Bump::new(); // MOVE
-                let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
-                let results =
-                    self.vectors
-                        .search(&txn, query_slice, limit * 2, "vector", false, &arena)?;
+                let results = self.vectors.search(
+                    &txn,
+                    query_vector_owned,
+                    limit * 2,
+                    "vector",
+                    false,
+                    &arena,
+                )?;
                 let scores = results
                     .into_iter()
                     .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))
-                    .collect::<Vec<(u128, f64)>>();
+                    .collect::<Vec<(u128, f32)>>();
                 Ok(Some(scores))
             });
 

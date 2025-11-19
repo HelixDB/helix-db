@@ -355,8 +355,8 @@ mod compatibility_tests {
         let data = vec![1.0, 2.0];
 
         // Different vector versions
-        let vec_v1 = create_arena_vector(&arena, id, "V1", 1, false, 0, &data, vec![]);
-        let vec_v2 = create_arena_vector(&arena, id, "V2", 2, false, 0, &data, vec![]);
+        let vec_v1 = create_arena_vector(&arena, id, "V1", 1, false, &data, vec![]);
+        let vec_v2 = create_arena_vector(&arena, id, "V2", 2, false, &data, vec![]);
 
         let props_v1 = bincode::serialize(&vec_v1).unwrap();
         let props_v2 = bincode::serialize(&vec_v2).unwrap();

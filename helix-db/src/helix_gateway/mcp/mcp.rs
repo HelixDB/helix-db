@@ -1012,9 +1012,9 @@ pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphErr
 
 #[derive(Debug, Deserialize)]
 pub struct SearchVectorData {
-    pub vector: Vec<f64>,
+    pub vector: Vec<f32>,
     pub k: usize,
-    pub min_score: Option<f64>,
+    pub min_score: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]

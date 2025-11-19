@@ -49,14 +49,14 @@ mod tests {
         (storage, temp_dir)
     }
 
-    fn generate_random_vectors(n: usize, d: usize) -> Vec<Vec<f64>> {
+    fn generate_random_vectors(n: usize, d: usize) -> Vec<Vec<f32>> {
         let mut rng = rand::rng();
         let mut vectors = Vec::with_capacity(n);
 
         for _ in 0..n {
             let mut vector = Vec::with_capacity(d);
             for _ in 0..d {
-                vector.push(rng.random::<f64>());
+                vector.push(rng.random::<f32>());
             }
             vectors.push(vector);
         }
@@ -1438,7 +1438,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search() {
-        let (storage, _temp_dir) = setup_helix_storage();
+        let (mut storage, _temp_dir) = setup_helix_storage();
 
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let docs = vec![
@@ -1457,10 +1457,9 @@ mod tests {
         let vectors = generate_random_vectors(800, 650);
         let mut arena = Bump::new();
         for vec in &vectors {
-            let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", vec.as_slice(), None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1482,7 +1481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search_alpha_vectors() {
-        let (storage, _temp_dir) = setup_helix_storage();
+        let (mut storage, _temp_dir) = setup_helix_storage();
 
         // Insert some test documents first
         let mut wtxn = storage.graph_env.write_txn().unwrap();
@@ -1528,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_search_alpha_bm25() {
-        let (storage, _temp_dir) = setup_helix_storage();
+        let (mut storage, _temp_dir) = setup_helix_storage();
 
         // Insert some test documents first
         let mut wtxn = storage.graph_env.write_txn().unwrap();

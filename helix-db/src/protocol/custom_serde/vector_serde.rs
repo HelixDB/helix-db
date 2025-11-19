@@ -94,16 +94,15 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
 
-                let data = HVector::cast_raw_vector_data(self.arena, self.raw_vector_data);
+                let data = HVector::raw_vector_data_to_vec(self.raw_vector_data, self.arena);
 
                 Ok(HVector {
                     id: self.id,
                     label,
                     deleted,
                     version,
-                    level: 0,
                     distance: None,
-                    data: Some(Item::<Cosine>::from(data, &self.arena)),
+                    data: Some(Item::<Cosine>::new(data)),
                     properties,
                 })
             }
@@ -169,7 +168,6 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
                     label,
                     version,
                     deleted,
-                    level: 0,
                     properties,
                     distance: None,
                     data: None,
