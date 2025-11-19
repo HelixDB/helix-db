@@ -1,4 +1,13 @@
-use std::{borrow::Cow, cmp::Ordering, hash::Hash};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    cmp::Ordering,
+    hash::Hash,
+    sync::{
+        RwLock,
+        atomic::{self, AtomicU16, AtomicU32},
+    },
+};
 
 use bincode::Options;
 use byteorder::BE;
@@ -257,18 +266,13 @@ pub struct VectorCore {
     pub vector_properties_db: Database<U128<BE>, Bytes>,
     pub config: HNSWConfig,
 
-    /// Map labels to a different index
-    pub label_to_index: HashMap<String, u16>,
+    /// Map labels to a different index and dimension
+    pub label_to_index: RwLock<HashMap<String, (u16, usize)>>,
     /// Track the last index
-    curr_index: u16,
+    curr_index: AtomicU16,
 
-    pub id_map: HashMap<u128, u32>,
-    curr_id: u32,
-
-    /// The actual index is lazily build during the first access
-    // TODO: We should choose a better strategy to build the index
-    writer: Option<Writer<Cosine>>,
-    reader: Option<Reader<Cosine>>,
+    pub id_map: RwLock<HashMap<u128, u32>>,
+    curr_id: AtomicU32,
 }
 
 impl VectorCore {
@@ -285,12 +289,10 @@ impl VectorCore {
             stats: VectorCoreStats { num_vectors: 0 },
             vector_properties_db,
             config,
-            writer: None,
-            reader: None,
-            label_to_index: HashMap::new(),
-            curr_index: 0,
-            id_map: HashMap::new(),
-            curr_id: 0,
+            label_to_index: RwLock::new(HashMap::new()),
+            curr_index: AtomicU16::new(0),
+            id_map: RwLock::new(HashMap::new()),
+            curr_id: AtomicU32::new(0),
         })
     }
 
@@ -303,25 +305,39 @@ impl VectorCore {
         should_trickle: bool,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
-        if self.reader.is_none() {
-            return Ok(bumpalo::collections::Vec::new_in(&arena));
-        }
         todo!()
     }
 
-    fn get_or_create(&mut self, label: &str) -> u16 {
-        if let Some(&index) = self.label_to_index.get(label) {
-            index
+    /// Get a writer based on label. If it doesn't exist build a new index
+    /// and return a writer to it
+    fn get_writer_or_create_index(
+        &self,
+        label: &str,
+        dimension: usize,
+        txn: &mut RwTxn,
+    ) -> VectorCoreResult<Writer<Cosine>> {
+        if let Some(&(idx, dimension)) = self.label_to_index.read().unwrap().get(label) {
+            Ok(Writer::new(self.hsnw_index, idx, dimension))
         } else {
-            self.curr_index += 1;
+            // Index do not exist, we should build it
+            let idx = self.curr_index.fetch_add(1, atomic::Ordering::SeqCst);
             self.label_to_index
-                .insert(label.to_string(), self.curr_index);
-            self.curr_index
+                .write()
+                .unwrap()
+                .insert(label.to_string(), (idx, dimension));
+            let writer = Writer::new(self.hsnw_index, idx, dimension);
+            let mut rng = StdRng::from_os_rng();
+            let mut builder = writer.builder(&mut rng);
+
+            builder
+                .ef_construction(self.config.ef_construct)
+                .build(txn)?;
+            Ok(writer)
         }
     }
 
     pub fn insert<'arena>(
-        &mut self,
+        &self,
         txn: &mut RwTxn,
         label: &'arena str,
         data: &'arena [f32],
@@ -329,31 +345,18 @@ impl VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
         // index hasn't been built yet
-        if self.writer.is_none() {
-            let idx = self.get_or_create(label);
-            // assume the len of the first insertion as the
-            // index dimension
-            self.writer = Some(Writer::new(self.hsnw_index, idx, data.len()));
-            let mut rng = StdRng::from_os_rng();
-            let mut builder = self.writer.as_ref().unwrap().builder(&mut rng);
-            builder
-                .ef_construction(self.config.ef_construct)
-                .build(txn)?;
-        }
+        let writer = self.get_writer_or_create_index(label, data.len(), txn)?;
 
         let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
         bump_vec.extend_from_slice(data);
         let hvector = HVector::from_vec(label, bump_vec);
 
-        self.curr_id += 1;
-        self.id_map.insert(hvector.id, self.curr_id);
+        let idx = self.curr_id.fetch_add(1, atomic::Ordering::SeqCst);
+        self.id_map.write().unwrap().insert(hvector.id, idx);
 
-        self.writer
-            .as_ref()
-            .unwrap()
-            .add_item(txn, self.curr_id, data);
+        writer.add_item(txn, idx, data);
 
-        todo!()
+        Ok(hvector)
     }
 
     pub fn delete(&self, txn: &RwTxn, id: u128, arena: &bumpalo::Bump) -> VectorCoreResult<()> {
