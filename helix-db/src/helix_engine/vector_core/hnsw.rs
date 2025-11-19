@@ -12,7 +12,6 @@ use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use roaring::RoaringBitmap;
-use tinyvec::{ArrayVec, array_vec};
 
 use crate::helix_engine::vector_core::node::{Item, Node};
 use crate::helix_engine::vector_core::{

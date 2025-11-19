@@ -1,7 +1,6 @@
 use core::fmt;
 use std::{borrow::Cow, ops::Deref};
 
-use bumpalo::collections::CollectIn;
 use bytemuck::{bytes_of, cast_slice, pod_read_unaligned};
 use byteorder::{ByteOrder, NativeEndian};
 use heed3::{BoxedError, BytesDecode, BytesEncode};
