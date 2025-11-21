@@ -734,12 +734,12 @@ impl<D: Distance> Reader<D> {
     }
 }
 
-pub fn get_item<'a, D: Distance>(
+pub fn get_item<'txn, D: Distance>(
     database: CoreDatabase<D>,
     index: u16,
-    rtxn: &'a RoTxn,
+    rtxn: &'txn RoTxn,
     item: ItemId,
-) -> VectorCoreResult<Option<Item<'a, D>>> {
+) -> VectorCoreResult<Option<Item<'txn, D>>> {
     match database.get(rtxn, &Key::item(index, item))? {
         Some(Node::Item(item)) => Ok(Some(item)),
         Some(Node::Links(_)) => Ok(None),
