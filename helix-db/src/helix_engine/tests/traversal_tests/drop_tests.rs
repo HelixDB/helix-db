@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use heed3::RoTxn;
 use rand::Rng;
 use tempfile::TempDir;
 
 use super::test_utils::props_option;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{
+            HelixGraphStorage,
+            txn::{ReadTransaction, WriteTransaction},
+        },
         traversal_core::{
+            RTxn,
             ops::{
                 g::G,
                 in_::{in_::InAdapter, in_e::InEdgesAdapter},
@@ -30,7 +33,7 @@ use crate::{
     props,
 };
 
-type Filter = fn(&HVector, &RoTxn) -> bool;
+type Filter = for<'a> fn(&HVector, &RTxn<'a>) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
@@ -170,7 +173,8 @@ fn test_drop_node() {
     let edges = G::new(&storage, &txn, &arena)
         .n_from_id(&node2_id)
         .in_e("knows")
-        .collect::<Result<Vec<_>, _>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     println!("edges: {:?}", edges);
     assert!(edges.is_empty());
 }
@@ -387,8 +391,11 @@ fn test_vector_deletion_in_existing_graph() {
             .unwrap(),
     );
 
+    println!("finishing node creation");
+
     let mut vector_ids = Vec::new();
     for _ in 0..10 {
+        println!("inserting");
         let id = match G::new_mut(&storage, &arena, &mut txn)
             .insert_v::<Filter>(&[1.0, 1.0, 1.0, 1.0], "vector", None)
             .collect_to_obj()
@@ -401,6 +408,8 @@ fn test_vector_deletion_in_existing_graph() {
         vector_ids.push(id);
     }
 
+    println!("finishing inserting");
+
     let target_vector_id = match G::new_mut(&storage, &arena, &mut txn)
         .insert_v::<Filter>(&[1.0, 1.0, 1.0, 1.0], "vector", None)
         .collect_to_obj()
@@ -411,6 +420,7 @@ fn test_vector_deletion_in_existing_graph() {
         other => panic!("unexpected value: {other:?}"),
     };
 
+    println!("finishing inserting target");
     for &other in &vector_ids {
         let random = vector_ids[rand::rng().random_range(0..vector_ids.len())];
         G::new_mut(&storage, &arena, &mut txn)
@@ -428,6 +438,7 @@ fn test_vector_deletion_in_existing_graph() {
     }
     txn.commit().unwrap();
 
+    println!("finishing inserting edges");
     let arena = Bump::new();
     let txn = storage.graph_env.read_txn().unwrap();
     let edges = G::new(&storage, &txn, &arena)
@@ -454,11 +465,12 @@ fn test_vector_deletion_in_existing_graph() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     drop(txn);
-
+    println!("finishing traversal");
     let mut txn = storage.graph_env.write_txn().unwrap();
     Drop::drop_traversal(to_result_iter(traversal), storage.as_ref(), &mut txn).unwrap();
     txn.commit().unwrap();
 
+    println!("finishing drop");
     let arena = Bump::new();
     let txn = storage.graph_env.read_txn().unwrap();
     let out_edges = G::new(&storage, &txn, &arena)

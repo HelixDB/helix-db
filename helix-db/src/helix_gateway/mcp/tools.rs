@@ -1,6 +1,6 @@
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{HelixGraphStorage, Txn},
         traversal_core::{
             ops::{
                 g::G,
@@ -17,7 +17,6 @@ use crate::{
     protocol::value::Value,
 };
 use bumpalo::Bump;
-use heed3::RoTxn;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -149,17 +148,13 @@ where
     'db: 'arena,
     'arena: 'txn,
 {
-    pub fn new(
-        storage: &'db HelixGraphStorage,
-        txn: &'txn RoTxn<'db>,
-        arena: &'arena Bump,
-    ) -> Self {
+    pub fn new(storage: &'db HelixGraphStorage, txn: &'txn Txn<'db>, arena: &'arena Bump) -> Self {
         Self::from_ro_iterator(G::new(storage, txn, arena))
     }
 
     pub fn from_iter(
         storage: &'db HelixGraphStorage,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         arena: &'arena Bump,
         items: impl Iterator<Item = TraversalValue<'arena>> + 'txn,
     ) -> Self {
@@ -235,7 +230,7 @@ where
 pub fn execute_query_chain<'db, 'arena, 'txn>(
     steps: &[ToolArgs],
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn Txn<'db>,
     arena: &'arena Bump,
 ) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
 where
@@ -249,7 +244,7 @@ where
 pub fn execute_query_chain_from_seed<'db, 'arena, 'txn>(
     steps: &[ToolArgs],
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn Txn<'db>,
     arena: &'arena Bump,
     seed: impl Iterator<Item = TraversalValue<'arena>> + 'txn,
 ) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
@@ -265,7 +260,7 @@ pub fn execute_query_chain_with_stream<'db, 'arena, 'txn>(
     initial: TraversalStream<'db, 'arena, 'txn>,
     steps: &[ToolArgs],
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn Txn<'db>,
     arena: &'arena Bump,
 ) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
 where
@@ -281,7 +276,7 @@ fn apply_step<'db, 'arena, 'txn>(
     stream: TraversalStream<'db, 'arena, 'txn>,
     step: &ToolArgs,
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn Txn<'db>,
     arena: &'arena Bump,
 ) -> Result<TraversalStream<'db, 'arena, 'txn>, GraphError>
 where
@@ -380,30 +375,44 @@ where
             // SearchVecText requires embedding model initialization
             // It should be called via the dedicated search_vec_text MCP handler
             // not through the generic query chain execution
-            Err(GraphError::New(
-                format!("SearchVecText (query: {}, label: {}, k: {}) is not supported in generic query chains. Use the search_vec_text endpoint directly.", query, label, k)
-            ))
+            Err(GraphError::New(format!(
+                "SearchVecText (query: {}, label: {}, k: {}) is not supported in generic query chains. Use the search_vec_text endpoint directly.",
+                query, label, k
+            )))
         }
-        ToolArgs::SearchVec { vector, k, min_score } => {
+        ToolArgs::SearchVec {
+            vector,
+            k,
+            min_score,
+        } => {
             use crate::helix_engine::traversal_core::ops::vectors::brute_force_search::BruteForceSearchVAdapter;
 
             let query_vec = arena.alloc_slice_copy(vector);
-            let mut results = stream.map(|iter| iter.range(0, *k*3).brute_force_search_v(query_vec, *k));
+            let mut results =
+                stream.map(|iter| iter.range(0, *k * 3).brute_force_search_v(query_vec, *k));
 
             // Apply min_score filter if specified
             if let Some(min_score_val) = min_score {
                 let min_score_copy = *min_score_val;
                 results = results.map(|iter| {
-                    let RoTraversalIterator { storage, arena, txn, inner } = iter;
-                    let filtered: DynIter<'arena, 'txn> = Box::new(
-                        inner.filter(move |item_res| {
-                            match item_res {
-                                Ok(TraversalValue::Vector(v)) => v.get_distance() > min_score_copy,
-                                _ => true, // Keep non-vector items
-                            }
-                        })
-                    );
-                    RoTraversalIterator { storage, arena, txn, inner: filtered }
+                    let RoTraversalIterator {
+                        storage,
+                        arena,
+                        txn,
+                        inner,
+                    } = iter;
+                    let filtered: DynIter<'arena, 'txn> = Box::new(inner.filter(move |item_res| {
+                        match item_res {
+                            Ok(TraversalValue::Vector(v)) => v.get_distance() > min_score_copy,
+                            _ => true, // Keep non-vector items
+                        }
+                    }));
+                    RoTraversalIterator {
+                        storage,
+                        arena,
+                        txn,
+                        inner: filtered,
+                    }
                 });
             }
 
@@ -454,7 +463,7 @@ fn matches_filter<'db, 'arena, 'txn>(
     item: &TraversalValue<'arena>,
     filter: &FilterTraversal,
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn Txn<'db>,
     arena: &'arena Bump,
 ) -> Result<bool, GraphError>
 where
@@ -498,7 +507,7 @@ fn evaluate_sub_traversal<'db, 'arena, 'txn>(
     item: &TraversalValue<'arena>,
     step: &ToolArgs,
     storage: &'db HelixGraphStorage,
-    txn: &'txn RoTxn<'db>,
+    txn: &'txn Txn<'db>,
     arena: &'arena Bump,
 ) -> Result<bool, GraphError>
 where

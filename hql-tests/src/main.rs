@@ -219,6 +219,13 @@ async fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(String))
                 .required(false),
         )
+        .arg(
+            Arg::new("backend")
+                .long("backend")
+                .help("Backend to use (lmdb or rocks)")
+                .value_parser(["lmdb", "rocks"])
+                .required(false),
+        )
         .get_matches();
 
     let current_dir = env::current_dir().context("Failed to get current directory")?;
@@ -227,6 +234,9 @@ async fn main() -> Result<()> {
     if !tests_dir.exists() {
         bail!("Tests directory not found at: {}", tests_dir.display());
     }
+
+    // Get backend argument if provided
+    let backend = matches.get_one::<String>("backend").map(|s| s.to_string());
 
     // Initialize GitHub configuration (optional - will print warning if not available)
     let github_config = match GitHubConfig::from_env() {
@@ -365,7 +375,7 @@ async fn main() -> Result<()> {
             );
         }
 
-        process_test_directory(test_name, &tests_dir, &temp_repo, &github_config).await?;
+        process_test_directory(test_name, &tests_dir, &temp_repo, &github_config, backend).await?;
         println!("[SUCCESS] Successfully processed {test_name}");
     } else if let Some(batch_args) = matches.get_many::<u32>("batch") {
         // Process in batch mode
@@ -391,8 +401,11 @@ async fn main() -> Result<()> {
 
         // Calculate which tests this batch should process
         let total_tests = test_dirs.len();
-        let tests_per_batch = total_tests / total_batches as usize;
+        println!("Total tests: {}", total_tests);
+        let tests_per_batch = (total_tests as f64 / total_batches as f64).ceil() as usize;
+        println!("Tests per batch: {}", tests_per_batch);
         let remainder = total_tests % total_batches as usize;
+        println!("Remainder tests: {}", remainder);
 
         // Calculate start and end for this batch
         let start_idx = (current_batch - 1) as usize * tests_per_batch;
@@ -420,8 +433,16 @@ async fn main() -> Result<()> {
                 let tests_dir = tests_dir.clone();
                 let temp_repo = temp_repo.clone();
                 let github_config = github_config.clone();
+                let backend = backend.clone();
                 tokio::spawn(async move {
-                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config).await
+                    process_test_directory(
+                        &test_name,
+                        &tests_dir,
+                        &temp_repo,
+                        &github_config,
+                        backend,
+                    )
+                    .await
                 })
             })
             .collect();
@@ -454,7 +475,9 @@ async fn main() -> Result<()> {
             );
         }
 
-        println!("[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully");
+        println!(
+            "[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully"
+        );
     } else {
         // Process all test directories in parallel (default behavior)
         println!(
@@ -469,8 +492,16 @@ async fn main() -> Result<()> {
                 let tests_dir = tests_dir.clone();
                 let temp_repo = temp_repo.clone();
                 let github_config = github_config.clone();
+                let backend = backend.clone();
                 tokio::spawn(async move {
-                    process_test_directory(&test_name, &tests_dir, &temp_repo, &github_config).await
+                    process_test_directory(
+                        &test_name,
+                        &tests_dir,
+                        &temp_repo,
+                        &github_config,
+                        backend,
+                    )
+                    .await
                 })
             })
             .collect();
@@ -517,6 +548,7 @@ async fn process_test_directory(
     tests_dir: &Path,
     temp_repo: &Path,
     github_config: &Option<GitHubConfig>,
+    backend: Option<String>,
 ) -> Result<()> {
     let folder_path = tests_dir.join(test_name);
 
@@ -524,7 +556,6 @@ async fn process_test_directory(
         // Skip non-existent directories silently in parallel mode
         return Ok(());
     }
-
 
     // Find the query file - could be queries.hx or file*.hx
     let mut query_file_path = None;
@@ -643,8 +674,9 @@ async fn process_test_directory(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         // For helix compilation, we'll show the raw output since it's not cargo format
-        let error_message =
-            format!("[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}");
+        let error_message = format!(
+            "[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}"
+        );
 
         // Create GitHub issue if configuration is available
         if let Some(config) = github_config {
@@ -684,8 +716,18 @@ async fn process_test_directory(
     // Run cargo check on the helix container path
     let helix_container_path = temp_dir.join("helix-db/helix-container");
     if helix_container_path.exists() {
-        let output = Command::new("cargo")
-            .arg("check")
+        let mut cmd = Command::new("cargo");
+        cmd.arg("check");
+        cmd.arg("--release");
+        cmd.arg("--no-default-features");
+
+        // Add --features flag if backend is specified
+        println!("Adding features: {backend:?}");
+        if let Some(backend) = backend {
+            cmd.arg("--features").arg(backend);
+        }
+
+        let output = cmd
             .current_dir(&helix_container_path)
             .output()
             .context("Failed to execute cargo check")?;

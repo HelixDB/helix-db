@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use bumpalo::Bump;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{HelixGraphStorage, txn::{ReadTransaction, WriteTransaction}},
         traversal_core::{
             ops::{
                 g::G,

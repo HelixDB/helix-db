@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{HelixGraphStorage, txn::{ReadTransaction, WriteTransaction}},
         traversal_core::{
             ops::{
                 g::G,

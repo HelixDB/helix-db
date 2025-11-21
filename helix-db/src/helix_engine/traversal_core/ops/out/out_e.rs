@@ -1,6 +1,7 @@
 use crate::{
     helix_engine::{
-        storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
+        storage_core::HelixGraphStorage,
+        storage_core::storage_methods::StorageMethods,
         traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
     },
@@ -27,6 +28,7 @@ pub trait OutEdgesAdapter<'db, 'arena, 'txn, 's>:
     >;
 }
 
+#[cfg(feature = "lmdb")]
 impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     OutEdgesAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
@@ -47,7 +49,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 let edge_label_hash = hash_label(edge_label, None);
 
                 let prefix = HelixGraphStorage::out_edge_key(
-                    &match item {
+                    match item {
                         Ok(item) => item.id(),
                         Err(_) => return None,
                     },
@@ -68,7 +70,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                             Ok(data) => data,
                                             Err(e) => return Err(e),
                                         };
-                                    match self.storage.get_edge(self.txn, &edge_id, self.arena) {
+                                    match self.storage.get_edge(self.txn, edge_id, self.arena) {
                                         Ok(edge) => Ok(TraversalValue::Edge(edge)),
                                         Err(e) => Err(e),
                                     }
@@ -83,6 +85,75 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                     Err(e) => {
                         println!("Error getting in edges: {e:?}");
                         // return Err(e);
+                        None
+                    }
+                }
+            })
+            .flatten();
+        RoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: iter,
+        }
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    OutEdgesAdapter<'db, 'arena, 'txn, 's> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    #[inline]
+    fn out_e(
+        self,
+        edge_label: &'s str,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        // iterate through the iterator and create a new iterator on the out edges
+        let iter = self
+            .inner
+            .filter_map(move |item| {
+                let edge_label_hash = hash_label(edge_label, None);
+                match item {
+                    Ok(item) => {
+                        use crate::helix_engine::rocks_utils::RocksUtils;
+
+                        let prefix =
+                            HelixGraphStorage::out_edge_key_prefix(item.id(), &edge_label_hash);
+
+                        let mut iter = self
+                            .txn
+                            .raw_prefix_iter(&self.storage.cf_out_edges(), &prefix);
+
+                        let edge_iter = std::iter::from_fn(move || {
+                            while let Some(key) = iter.key() {
+                                let (_, _, _, edge_id) =
+                                    HelixGraphStorage::unpack_adj_edge_key(key).unwrap();
+
+                                // Get the full edge object
+                                match self.storage.get_edge(self.txn, edge_id, self.arena) {
+                                    Ok(edge) => {
+                                        iter.next();
+                                        return Some(Ok(TraversalValue::Edge(edge)));
+                                    }
+                                    Err(e) => {
+                                        iter.next();
+                                        println!("Error getting edge {edge_id}: {e:?}");
+                                        continue;
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        Some(edge_iter)
+                    }
+                    Err(e) => {
+                        println!("{} Error getting out edges: {:?}", line!(), e);
                         None
                     }
                 }

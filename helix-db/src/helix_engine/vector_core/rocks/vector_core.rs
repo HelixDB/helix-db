@@ -2,30 +2,25 @@ use super::binary_heap::BinaryHeap;
 use crate::{
     debug_println,
     helix_engine::{
+        storage_core::Txn,
         types::VectorError,
         vector_core::{
-            hnsw::HNSW,
-            utils::{Candidate, HeapOps, VectorFilter},
+            rocks::{
+                hnsw::HNSW,
+                utils::{Candidate, HeapOps, VectorFilter},
+            },
             vector::HVector,
             vector_without_data::VectorWithoutData,
         },
     },
-    utils::{id::uuid_str, properties::ImmutablePropertiesMap},
-};
-use heed3::{
-    Database, Env, RoTxn, RwTxn,
-    byteorder::BE,
-    types::{Bytes, U128, Unit},
+    utils::properties::ImmutablePropertiesMap,
 };
 use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{cmp::Ordering, collections::HashSet, sync::Arc};
 
-const DB_VECTORS: &str = "vectors"; // for vector data (v:)
-const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
-const DB_HNSW_EDGES: &str = "hnsw_out_nodes"; // for hnsw out node data
-const VECTOR_PREFIX: &[u8] = b"v:";
 pub const ENTRY_POINT_KEY: &[u8] = b"entry_point";
+const EDGE_LENGTH: usize = 17;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HNSWConfig {
@@ -62,70 +57,168 @@ impl HNSWConfig {
 }
 
 pub struct VectorCore {
-    pub vectors_db: Database<Bytes, Bytes>,
-    pub vector_properties_db: Database<U128<BE>, Bytes>,
-    pub edges_db: Database<Bytes, Unit>,
+    pub db: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
     pub config: HNSWConfig,
 }
 
-impl VectorCore {
-    pub fn new(env: &Env, txn: &mut RwTxn, config: HNSWConfig) -> Result<Self, VectorError> {
-        let vectors_db = env.create_database(txn, Some(DB_VECTORS))?;
-        let vector_properties_db = env
-            .database_options()
-            .types::<U128<BE>, Bytes>()
-            .name(DB_VECTOR_DATA)
-            .create(txn)?;
-        let edges_db = env.create_database(txn, Some(DB_HNSW_EDGES))?;
+#[repr(u8)]
+enum EdgeOp {
+    Add,
+    Remove,
+}
 
-        Ok(Self {
-            vectors_db,
-            vector_properties_db,
-            edges_db,
-            config,
-        })
+impl EdgeOp {
+    fn encode(kind: EdgeOp, bytes: &[u8]) -> [u8; 18] {
+        let mut buf = [0u8; 18];
+        buf[0] = kind as u8;
+        buf[1..18].copy_from_slice(bytes);
+        buf
+    }
+
+    fn decode(bytes: &[u8]) -> Option<(Self, [u8; 17])> {
+        if bytes.len() != 18 {
+            return None;
+        }
+        let kind = match bytes[0] {
+            0 => Self::Add,
+            1 => Self::Remove,
+            _ => return None,
+        };
+        Some((kind, bytes[1..18].try_into().unwrap()))
+    }
+}
+
+// TODO: use something similar to immutable map with SIMD keys. Is fine for now
+fn remove(bytes: &mut Vec<u8>, target: [u8; 17]) {
+    let step = target.len();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..index + step] == target {
+            bytes.drain(index..index + step);
+        }
+        index += step;
+    }
+}
+
+fn insert(bytes: &mut Vec<u8>, target: [u8; 17]) {
+    let step = target.len();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..index + step] == target {
+            return;
+        }
+        index += step;
+    }
+    bytes.extend_from_slice(&target);
+}
+
+fn hnsw_edges_merge(
+    _key: &[u8],
+    existing: Option<&[u8]>,
+    operands: &rocksdb::MergeOperands,
+) -> Option<Vec<u8>> {
+    let mut new_edges = Vec::with_capacity(existing.map(|e| (e.len() / 17) * 2).unwrap_or(0));
+    new_edges.clear();
+    new_edges.extend_from_slice(existing.unwrap_or(&[]));
+    for op in operands {
+        if let Some((kind, bytes)) = EdgeOp::decode(op) {
+            match kind {
+                EdgeOp::Add => insert(&mut new_edges, bytes),
+                EdgeOp::Remove => remove(&mut new_edges, bytes),
+            }
+        }
+    }
+    Some(new_edges)
+}
+
+impl VectorCore {
+    // Helper methods to get column family handles on-demand
+    #[inline(always)]
+    pub fn cf_vectors(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
+        self.db.cf_handle("vectors").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_vector_properties(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
+        self.db.cf_handle("vector_data").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_edges(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
+        self.db.cf_handle("hnsw_edges").unwrap()
+    }
+
+    #[inline(always)]
+    pub fn cf_ep(&self) -> Arc<rocksdb::BoundColumnFamily<'_>> {
+        self.db.cf_handle("ep").unwrap()
+    }
+
+    pub fn new(
+        db: Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>>,
+        config: HNSWConfig,
+    ) -> Result<Self, VectorError> {
+        Ok(Self { db, config })
+    }
+
+    /// VECTOR KEY STRUCTURE
+    ///
+    /// [u128 uuid] -> [<f64/f32/f16/binary>; dimension]
+    pub(crate) fn vector_cf_options() -> rocksdb::Options {
+        let mut options = rocksdb::Options::default();
+        options.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
+        options
+    }
+
+    /// VECTOR PROPERTY KEY STRUCTURE
+    ///
+    /// [u128 uuid] -> [<f64/f32/f16/binary>; dimension]
+    pub(crate) fn vector_properties_cf_options() -> rocksdb::Options {
+        let mut options = rocksdb::Options::default();
+        options.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
+        options
+    }
+
+    /// VECTOR EDGE KEY STRUCTURE
+    ///
+    /// [u128 uuid : level u8] -> [u128 uuid, level u8]
+    pub(crate) fn vector_edges_cf_options() -> rocksdb::Options {
+        let mut options = rocksdb::Options::default();
+        options.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(17));
+        options.set_merge_operator_associative("hnsw_edges", hnsw_edges_merge);
+        options
     }
 
     /// Vector key: [v, id, ]
     #[inline(always)]
-    pub fn vector_key(id: u128, level: usize) -> Vec<u8> {
-        [VECTOR_PREFIX, &id.to_be_bytes(), &level.to_be_bytes()].concat()
+    pub fn vector_key(id: u128) -> [u8; 16] {
+        id.to_be_bytes()
     }
 
+    /// edges key: [u128 uuid : level u8] -> [level u8, u128 uuid]
     #[inline(always)]
-    pub fn out_edges_key(source_id: u128, level: usize, sink_id: Option<u128>) -> Vec<u8> {
-        match sink_id {
-            Some(sink_id) => [
-                source_id.to_be_bytes().as_slice(),
-                level.to_be_bytes().as_slice(),
-                sink_id.to_be_bytes().as_slice(),
-            ]
-            .concat()
-            .to_vec(),
-            None => [
-                source_id.to_be_bytes().as_slice(),
-                level.to_be_bytes().as_slice(),
-            ]
-            .concat()
-            .to_vec(),
-        }
+    pub fn edges_key(source_id: u128, level: u8) -> [u8; 17] {
+        let mut key = [0u8; 17];
+        key[..16].copy_from_slice(&source_id.to_be_bytes());
+        key[16] = level;
+        key
     }
 
     #[inline]
-    fn get_new_level(&self) -> usize {
+    fn get_new_level(&self) -> u8 {
         let mut rng = rand::rng();
         let r: f64 = rng.random::<f64>();
-        (-r.ln() * self.config.m_l).floor() as usize
+        (-r.ln() * self.config.m_l).floor() as u8
     }
 
     #[inline]
-    fn get_entry_point<'db: 'arena, 'arena: 'txn, 'txn>(
+    fn get_entry_point<'db, 'arena: 'txn, 'txn>(
         &self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         label: &'arena str,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY)?;
+        let cf = self.cf_ep();
+        let ep_id = txn.get_pinned_cf(&cf, ENTRY_POINT_KEY)?;
         if let Some(ep_id) = ep_id {
             let mut arr = [0u8; 16];
             let len = std::cmp::min(ep_id.len(), 16);
@@ -141,138 +234,192 @@ impl VectorCore {
     }
 
     #[inline]
-    fn set_entry_point(&self, txn: &mut RwTxn, entry: &HVector) -> Result<(), VectorError> {
-        self.vectors_db
-            .put(txn, ENTRY_POINT_KEY, &entry.id.to_be_bytes())
+    fn set_entry_point<'db>(&self, txn: &Txn<'db>, entry: &HVector) -> Result<(), VectorError> {
+        let cf = self.cf_ep();
+        txn.put_cf(&cf, ENTRY_POINT_KEY, entry.id.to_be_bytes())
             .map_err(VectorError::from)?;
         Ok(())
     }
 
     #[inline(always)]
-    pub fn put_vector<'arena>(
+    pub fn put_vector<'db, 'arena>(
         &self,
-        txn: &mut RwTxn,
+        txn: &Txn<'db>,
         vector: &HVector<'arena>,
     ) -> Result<(), VectorError> {
-        self.vectors_db
-            .put(
-                txn,
-                &Self::vector_key(vector.id, vector.level),
-                vector.vector_data_to_bytes()?,
-            )
-            .map_err(VectorError::from)?;
-        self.vector_properties_db
-            .put(txn, &vector.id, &bincode::serialize(&vector)?)?;
+        let cf_vectors = self.cf_vectors();
+        let cf_props = self.cf_vector_properties();
+        txn.put_cf(
+            &cf_vectors,
+            vector.id.to_be_bytes(),
+            vector.vector_data_to_bytes()?,
+        )?;
+        txn.put_cf(
+            &cf_props,
+            vector.id.to_be_bytes(),
+            &bincode::serialize(&vector)?,
+        )?;
         Ok(())
     }
 
     #[inline(always)]
-    fn get_neighbors<'db: 'arena, 'arena: 'txn, 'txn, F>(
+    fn get_neighbors<'db, 'arena: 'txn, 'txn, F>(
         &self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         label: &'arena str,
         id: u128,
-        level: usize,
+        level: u8,
         filter: Option<&[F]>,
         arena: &'arena bumpalo::Bump,
     ) -> Result<bumpalo::collections::Vec<'arena, HVector<'arena>>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &Txn<'db>) -> bool,
     {
-        let out_key = Self::out_edges_key(id, level, None);
+        let out_key = Self::edges_key(id, level);
         let mut neighbors = bumpalo::collections::Vec::with_capacity_in(
             self.config.m_max_0.min(self.config.min_neighbors),
             arena,
         );
 
-        let iter = self
-            .edges_db
-            .lazily_decode_data()
-            .prefix_iter(txn, &out_key)?;
+        let cf_edges = self.cf_edges();
+        let edges = txn.get_pinned_cf(&cf_edges, out_key)?;
 
-        let prefix_len = out_key.len();
+        if let Some(value) = edges {
+            let edges = Self::decode_edges(&value);
+            for edge_entry in edges {
+                let neighbor_id = u128::from_be_bytes(edge_entry[..16].try_into().unwrap());
+                if neighbor_id == id {
+                    continue;
+                }
 
-        for result in iter {
-            let (key, _) = result?;
+                let level = edge_entry[16];
+                let mut vector = self.get_raw_vector_data(txn, neighbor_id, label, arena)?;
+                vector.level = level as usize; // TODO modify vector to take level.
+                let passes_filters = match filter {
+                    Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
+                    None => true,
+                };
 
-            let mut arr = [0u8; 16];
-            arr[..16].copy_from_slice(&key[prefix_len..(prefix_len + 16)]);
-            let neighbor_id = u128::from_be_bytes(arr);
-
-            if neighbor_id == id {
-                continue;
-            }
-            let vector = self.get_raw_vector_data(txn, neighbor_id, label, arena)?;
-
-            let passes_filters = match filter {
-                Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
-                None => true,
-            };
-
-            if passes_filters {
-                neighbors.push(vector);
+                if passes_filters {
+                    neighbors.push(vector);
+                }
             }
         }
+
         neighbors.shrink_to_fit();
 
         Ok(neighbors)
     }
 
+    #[inline]
+    fn edge_entry(id: u128, level: u8) -> [u8; EDGE_LENGTH] {
+        let mut buf = [0u8; EDGE_LENGTH];
+        buf[..16].copy_from_slice(&id.to_be_bytes());
+        buf[16] = level;
+        buf
+    }
+
+    fn decode_edges(bytes: &[u8]) -> Vec<[u8; EDGE_LENGTH]> {
+        bytes
+            .chunks_exact(EDGE_LENGTH)
+            .map(|chunk| {
+                let mut entry = [0u8; EDGE_LENGTH];
+                entry.copy_from_slice(chunk);
+                entry
+            })
+            .collect()
+    }
     #[inline(always)]
-    fn set_neighbours<'db: 'arena, 'arena: 'txn, 'txn, 's>(
-        &'db self,
-        txn: &'txn mut RwTxn<'db>,
+    fn set_neighbours<'db, 'arena: 'txn, 'txn>(
+        &self,
+        txn: &'txn Txn<'db>,
         id: u128,
         neighbors: &BinaryHeap<'arena, HVector<'arena>>,
-        level: usize,
+        level: u8,
     ) -> Result<(), VectorError> {
-        let prefix = Self::out_edges_key(id, level, None);
+        let key = Self::edges_key(id, level);
+        let mut desired = Vec::with_capacity(neighbors.len());
 
-        let mut keys_to_delete: HashSet<Vec<u8>> = self
-            .edges_db
-            .prefix_iter(txn, prefix.as_ref())?
-            .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
-            .collect();
+        // get desired neighbors
+        for neighbor in neighbors.iter() {
+            if neighbor.id == id {
+                continue;
+            }
+            // Store the neighbor id + whichever level you want to persist.
+            desired.push(Self::edge_entry(neighbor.id, neighbor.level as u8));
+        }
+        desired.sort_unstable();
+        desired.dedup();
 
-        neighbors
-            .iter()
-            .try_for_each(|neighbor| -> Result<(), VectorError> {
-                let neighbor_id = neighbor.id;
-                if neighbor_id == id {
-                    return Ok(());
+        let cf_edges = self.cf_edges();
+
+        // then determine the changes needed
+        let mut existing = txn
+            .get_pinned_cf(&cf_edges, key)?
+            .map(|buf| Self::decode_edges(buf.as_ref()))
+            .unwrap_or_default();
+        existing.sort_unstable();
+
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < existing.len() && j < desired.len() {
+            match existing[i].cmp(&desired[j]) {
+                Ordering::Less => {
+                    removes.push(existing[i]);
+                    i += 1;
                 }
+                Ordering::Greater => {
+                    adds.push(desired[j]);
+                    j += 1;
+                }
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        removes.extend_from_slice(&existing[i..]);
+        adds.extend_from_slice(&desired[j..]);
 
-                let out_key = Self::out_edges_key(id, level, Some(neighbor_id));
-                keys_to_delete.remove(&out_key);
-                self.edges_db.put(txn, &out_key, &())?;
+        let reciprocal = Self::edge_entry(id, level);
 
-                let in_key = Self::out_edges_key(neighbor_id, level, Some(id));
-                keys_to_delete.remove(&in_key);
-                self.edges_db.put(txn, &in_key, &())?;
+        for entry in removes {
+            let operand = EdgeOp::encode(EdgeOp::Remove, &entry);
+            txn.merge_cf(&cf_edges, key, operand)?;
 
-                Ok(())
-            })?;
+            let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
+            let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
+            let reciprocal_operand = EdgeOp::encode(EdgeOp::Remove, &reciprocal);
+            txn.merge_cf(&cf_edges, neighbor_key, reciprocal_operand)?;
+        }
 
-        for key in keys_to_delete {
-            self.edges_db.delete(txn, &key)?;
+        for entry in adds {
+            let operand = EdgeOp::encode(EdgeOp::Add, &entry);
+            txn.merge_cf(&cf_edges, key, operand)?;
+
+            let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
+            let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
+            let reciprocal_operand = EdgeOp::encode(EdgeOp::Add, &reciprocal);
+            txn.merge_cf(&cf_edges, neighbor_key, reciprocal_operand)?;
         }
 
         Ok(())
     }
 
-    fn select_neighbors<'db: 'arena, 'arena: 'txn, 'txn, 's, F>(
-        &'db self,
-        txn: &'txn RoTxn<'db>,
+    fn select_neighbors<'db, 'arena: 'txn, 'txn, 's, F>(
+        &self,
+        txn: &'txn Txn<'db>,
         label: &'arena str,
         query: &'s HVector<'arena>,
         mut cands: BinaryHeap<'arena, HVector<'arena>>,
-        level: usize,
+        level: u8,
         should_extend: bool,
         filter: Option<&[F]>,
         arena: &'arena bumpalo::Bump,
     ) -> Result<BinaryHeap<'arena, HVector<'arena>>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &Txn<'db>) -> bool,
     {
         let m = self.config.m;
 
@@ -313,19 +460,19 @@ impl VectorCore {
         Ok(result.take_inord(m))
     }
 
-    fn search_level<'db: 'arena, 'arena: 'txn, 'txn, 'q, F>(
+    fn search_level<'db, 'arena: 'txn, 'txn, 'q, F>(
         &self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         label: &'arena str,
         query: &'q HVector<'arena>,
         entry_point: &'q mut HVector<'arena>,
         ef: usize,
-        level: usize,
+        level: u8,
         filter: Option<&[F]>,
         arena: &'arena bumpalo::Bump,
     ) -> Result<BinaryHeap<'arena, HVector<'arena>>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &Txn<'db>) -> bool,
     {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut candidates: BinaryHeap<'arena, Candidate> =
@@ -384,20 +531,22 @@ impl VectorCore {
         Ok(results)
     }
 
-    pub fn num_inserted_vectors(&self, txn: &RoTxn) -> Result<u64, VectorError> {
-        Ok(self.vectors_db.len(txn)?)
+    // Not possible to implement in RocksDB unless iterating over all keys
+    pub fn num_inserted_vectors<'db>(&self, _txn: &Txn<'db>) -> Result<u64, VectorError> {
+        unimplemented!()
     }
 
     #[inline]
-    pub fn get_vector_properties<'db: 'arena, 'arena: 'txn, 'txn>(
+    pub fn get_vector_properties<'db, 'arena: 'txn, 'txn>(
         &self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<Option<VectorWithoutData<'arena>>, VectorError> {
+        let cf = self.cf_vector_properties();
         let vector: Option<VectorWithoutData<'arena>> =
-            match self.vector_properties_db.get(txn, &id)? {
-                Some(bytes) => Some(VectorWithoutData::from_bincode_bytes(arena, bytes, id)?),
+            match txn.get_pinned_cf(&cf, id.to_be_bytes())? {
+                Some(bytes) => Some(VectorWithoutData::from_bincode_bytes(arena, &bytes, id)?),
                 None => None,
             };
 
@@ -411,20 +560,29 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    pub fn get_full_vector<'arena>(
+    pub fn get_full_vector<'db, 'arena>(
         &self,
-        txn: &RoTxn,
+        txn: &Txn<'db>,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let vector_data_bytes = self
-            .vectors_db
-            .get(txn, &Self::vector_key(id, 0))?
-            .ok_or(VectorError::VectorNotFound(uuid_str(id, arena).to_string()))?;
+        let key = Self::vector_key(id);
+        let cf_vectors = self.cf_vectors();
+        let cf_props = self.cf_vector_properties();
+        let vector_data_bytes =
+            txn.get_pinned_cf(&cf_vectors, key)?
+                .ok_or(VectorError::VectorNotFound(
+                    uuid::Uuid::from_u128(id).to_string(),
+                ))?;
 
-        let properties_bytes = self.vector_properties_db.get(txn, &id)?;
+        let properties_bytes = txn.get_pinned_cf(&cf_props, key)?;
 
-        let vector = HVector::from_bincode_bytes(arena, properties_bytes, vector_data_bytes, id)?;
+        let vector = HVector::from_bincode_bytes(
+            arena,
+            properties_bytes.as_deref(),
+            &vector_data_bytes,
+            id,
+        )?;
         if vector.deleted {
             return Err(VectorError::VectorDeleted);
         }
@@ -432,71 +590,28 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    pub fn get_raw_vector_data<'db: 'arena, 'arena: 'txn, 'txn>(
+    pub fn get_raw_vector_data<'db, 'arena: 'txn, 'txn>(
         &self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         id: u128,
         label: &'arena str,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError> {
-        let vector_data_bytes = self
-            .vectors_db
-            .get(txn, &Self::vector_key(id, 0))?
-            .ok_or(VectorError::VectorNotFound(uuid_str(id, arena).to_string()))?;
-        HVector::from_raw_vector_data(arena, vector_data_bytes, label, id)
-    }
+        let cf = self.cf_vectors();
+        let vector_data_bytes =
+            txn.get_pinned_cf(&cf, Self::vector_key(id))?
+                .ok_or(VectorError::VectorNotFound(
+                    uuid::Uuid::from_u128(id).to_string(),
+                ))?;
 
-    /// Get all vectors from the database, optionally filtered by level
-    pub fn get_all_vectors<'db: 'arena, 'arena: 'txn, 'txn>(
-        &self,
-        txn: &'txn RoTxn<'db>,
-        level: Option<usize>,
-        arena: &'arena bumpalo::Bump,
-    ) -> Result<bumpalo::collections::Vec<'arena, HVector<'arena>>, VectorError> {
-        let mut vectors = bumpalo::collections::Vec::new_in(arena);
-
-        // Iterate over all vectors in the database
-        let prefix_iter = self.vectors_db.prefix_iter(txn, VECTOR_PREFIX)?;
-
-        for result in prefix_iter {
-            let (key, _) = result?;
-
-            // Extract id from the key: v: (2 bytes) + id (16 bytes) + level (8 bytes)
-            if key.len() < VECTOR_PREFIX.len() + 16 {
-                continue; // Skip malformed keys
-            }
-
-            let mut id_bytes = [0u8; 16];
-            id_bytes.copy_from_slice(&key[VECTOR_PREFIX.len()..VECTOR_PREFIX.len() + 16]);
-            let id = u128::from_be_bytes(id_bytes);
-
-            // Get the full vector using the existing method
-            match self.get_full_vector(txn, id, arena) {
-                Ok(vector) => {
-                    // Filter by level if specified
-                    if let Some(lvl) = level {
-                        if vector.level == lvl {
-                            vectors.push(vector);
-                        }
-                    } else {
-                        vectors.push(vector);
-                    }
-                }
-                Err(_) => {
-                    // Skip vectors that can't be loaded (e.g., deleted)
-                    continue;
-                }
-            }
-        }
-
-        Ok(vectors)
+        HVector::from_raw_vector_data(arena, &vector_data_bytes, label, id)
     }
 }
 
 impl HNSW for VectorCore {
     fn search<'db, 'arena, 'txn, F>(
         &self,
-        txn: &'txn RoTxn<'db>,
+        txn: &'txn Txn<'db>,
         query: &'arena [f64],
         k: usize,
         label: &'arena str,
@@ -505,7 +620,7 @@ impl HNSW for VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> Result<bumpalo::collections::Vec<'arena, HVector<'arena>>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &Txn<'db>) -> bool,
         'db: 'arena,
         'arena: 'txn,
     {
@@ -515,7 +630,7 @@ impl HNSW for VectorCore {
         let mut entry_point = self.get_entry_point(txn, label, arena)?;
 
         let ef = self.config.ef;
-        let curr_level = entry_point.level;
+        let curr_level = entry_point.level as u8;
         // println!("curr_level: {curr_level}");
         for level in (1..=curr_level).rev() {
             let mut nearest = self.search_level(
@@ -555,7 +670,7 @@ impl HNSW for VectorCore {
             filter,
             label,
             txn,
-            self.vector_properties_db,
+            Arc::clone(&self.cf_vector_properties()),
             arena,
         )?;
 
@@ -564,15 +679,15 @@ impl HNSW for VectorCore {
     }
 
     fn insert<'db, 'arena, 'txn, F>(
-        &'db self,
-        txn: &'txn mut RwTxn<'db>,
+        &self,
+        txn: &'txn Txn<'db>,
         label: &'arena str,
         data: &'arena [f64],
         properties: Option<ImmutablePropertiesMap<'arena>>,
         arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError>
     where
-        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        F: Fn(&HVector<'arena>, &Txn<'db>) -> bool,
         'db: 'arena,
         'arena: 'txn,
     {
@@ -582,7 +697,7 @@ impl HNSW for VectorCore {
         query.properties = properties;
         self.put_vector(txn, &query)?;
 
-        query.level = new_level;
+        query.level = new_level as usize; // TODO: change vector to take level as u8
 
         let entry_point = match self.get_entry_point(txn, label, arena) {
             Ok(ep) => ep,
@@ -595,7 +710,7 @@ impl HNSW for VectorCore {
             }
         };
 
-        let l = entry_point.level;
+        let l = entry_point.level as u8; // TODO Change
         let mut curr_ep = entry_point;
         for level in (new_level + 1..=l).rev() {
             let mut nearest =
@@ -644,17 +759,24 @@ impl HNSW for VectorCore {
         Ok(query)
     }
 
-    fn delete(&self, txn: &mut RwTxn, id: u128, arena: &bumpalo::Bump) -> Result<(), VectorError> {
+    fn delete<'db>(
+        &self,
+        txn: &Txn<'db>,
+        id: u128,
+        arena: &bumpalo::Bump,
+    ) -> Result<(), VectorError> {
         match self.get_vector_properties(txn, id, arena)? {
             Some(mut properties) => {
                 debug_println!("properties: {properties:?}");
                 if properties.deleted {
                     return Err(VectorError::VectorAlreadyDeleted(id.to_string()));
                 }
-
                 properties.deleted = true;
-                self.vector_properties_db
-                    .put(txn, &id, &bincode::serialize(&properties)?)?;
+                txn.put_cf(
+                    &self.cf_vector_properties(),
+                    id.to_be_bytes(),
+                    &bincode::serialize(&properties)?,
+                )?;
                 debug_println!("vector deleted with id {}", &id);
                 Ok(())
             }

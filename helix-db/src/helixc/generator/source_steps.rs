@@ -141,7 +141,7 @@ impl Display for AddV {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "insert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})",
+            "insert_v::<fn(&HVector, &RTxn) -> bool>({}, {}, {})",
             self.vec,
             self.label,
             write_properties(&self.properties)
@@ -291,19 +291,19 @@ impl Display for SearchVector {
         match &self.pre_filter {
             Some(pre_filter) => write!(
                 f,
-                "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, Some(&[{}]))",
+                "search_v::<fn(&HVector, &RTxn) -> bool, _>({}, {}, {}, Some(&[{}]))",
                 self.vec,
                 self.k,
                 self.label,
                 pre_filter
                     .iter()
-                    .map(|f| format!("|v: &HVector, txn: &RoTxn| {f}"))
+                    .map(|f| format!("|v: &HVector, txn: &RTxn| {f}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
             None => write!(
                 f,
-                "search_v::<fn(&HVector, &RoTxn) -> bool, _>({}, {}, {}, None)",
+                "search_v::<fn(&HVector, &RTxn) -> bool, _>({}, {}, {}, None)",
                 self.vec, self.k, self.label,
             ),
         }

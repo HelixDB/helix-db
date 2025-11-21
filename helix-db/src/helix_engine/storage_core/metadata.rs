@@ -1,3 +1,4 @@
+#[cfg(feature = "lmdb")]
 use heed3::{Database, RoTxn, RwTxn, WithTls, types::Bytes};
 
 use crate::helix_engine::types::GraphError;
