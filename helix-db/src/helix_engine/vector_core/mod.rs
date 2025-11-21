@@ -3,6 +3,7 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     hash::Hash,
+    io::Read,
     sync::{
         RwLock,
         atomic::{self, AtomicU16, AtomicU32, AtomicUsize},
@@ -27,7 +28,7 @@ use crate::{
             key::{Key, KeyCodec},
             node::{Item, NodeCodec},
             node_id::NodeMode,
-            reader::{Reader, Searched},
+            reader::{Reader, Searched, get_item},
             unaligned_vector::UnalignedVector,
             writer::Writer,
         },
@@ -72,6 +73,7 @@ pub type CoreDatabase<D> = heed3::Database<KeyCodec, NodeCodec<D>>;
 pub struct HVector<'arena> {
     pub id: u128,
     pub distance: Option<f32>,
+    // TODO: String Interning
     pub label: &'arena str,
     pub deleted: bool,
     pub version: u8,
@@ -88,8 +90,8 @@ impl<'arena> HVector<'arena> {
         let id = v6_uuid();
         HVector {
             id,
-            version: 1,
             label,
+            version: 1,
             data: Some(Item::<Cosine>::new(data)),
             distance: None,
             properties: None,
@@ -406,13 +408,62 @@ impl VectorCore {
         }
     }
 
-    pub fn nns_to_hvectors<'arena>(
+    pub fn nns_to_hvectors<'arena, 'txn>(
         &self,
+        txn: &'txn RoTxn,
         nns: bumpalo::collections::Vec<'arena, (ItemId, f32)>,
         with_data: bool,
-        arena: &bumpalo::Bump,
-    ) -> bumpalo::collections::Vec<'arena, HVector<'arena>> {
-        todo!()
+        arena: &'arena bumpalo::Bump,
+    ) -> bumpalo::collections::Vec<'arena, HVector<'arena>>
+    where
+        'txn: 'arena,
+    {
+        let mut results = bumpalo::collections::Vec::<'arena, HVector<'arena>>::with_capacity_in(
+            nns.len(),
+            arena,
+        );
+
+        let local_to_global_id = self.local_to_global_id.read().unwrap();
+        let label_to_index = self.label_to_index.read().unwrap();
+        let global_to_local_id = self.global_to_local_id.read().unwrap();
+
+        let (item_id, _) = nns.first().unwrap();
+        let global_id = local_to_global_id.get(item_id).unwrap();
+        let (_, label) = global_to_local_id.get(global_id).unwrap();
+        let (index, _) = label_to_index.get(label).unwrap();
+        let label = arena.alloc_str(&label);
+
+        if with_data {
+            for (item_id, distance) in nns.into_iter() {
+                let global_id = local_to_global_id.get(&item_id).unwrap();
+
+                results.push(HVector {
+                    id: *global_id,
+                    distance: Some(distance),
+                    label,
+                    deleted: false,
+                    version: 0,
+                    properties: None,
+                    data: get_item(self.hsnw_index, *index, txn, item_id).unwrap(),
+                });
+            }
+        } else {
+            for (item_id, distance) in nns.into_iter() {
+                let global_id = local_to_global_id.get(&item_id).unwrap();
+
+                results.push(HVector {
+                    id: *global_id,
+                    distance: Some(distance),
+                    label,
+                    deleted: false,
+                    version: 0,
+                    properties: None,
+                    data: None,
+                });
+            }
+        }
+
+        results
     }
 
     pub fn get_full_vector<'arena>(

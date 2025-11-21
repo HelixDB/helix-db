@@ -176,7 +176,6 @@ fn test_drop_vector_removes_edges() {
         .search_v::<Filter, _>(&[0.5, 0.5, 0.5], 10, "vector", None)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    drop(txn);
 
     let mut txn = storage.graph_env.write_txn().unwrap();
     Drop::drop_traversal(
