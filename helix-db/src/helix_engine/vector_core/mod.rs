@@ -470,9 +470,26 @@ impl VectorCore {
         &self,
         txn: &RoTxn,
         id: u128,
-        arena: &bumpalo::Bump,
+        arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
-        todo!()
+        let label_to_index = self.label_to_index.read().unwrap();
+        let global_to_local_id = self.global_to_local_id.read().unwrap();
+
+        let (item_id, label) = global_to_local_id.get(&id).unwrap();
+        let (index, _) = label_to_index.get(label).unwrap();
+        let label = arena.alloc_str(&label);
+
+        let item = get_item(self.hsnw_index, *index, txn, *item_id)?.map(|i| i.clone_in(arena));
+
+        Ok(HVector {
+            id: id,
+            distance: None,
+            label,
+            deleted: false,
+            version: 0,
+            properties: None,
+            data: item.clone(),
+        })
     }
 
     pub fn get_vector_properties<'arena>(
