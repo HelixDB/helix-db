@@ -13,13 +13,16 @@ export const ExprKindStruct = (fields: Record<string, ExprKind>) => ({
 });
 
 export type ExprKind =
-  | typeof ExprKindString
-  | typeof ExprKindI64
-  | typeof ExprKindF64
-  | typeof ExprKindBoolean
-  | typeof ExprKindVector
-  | { kind: "List"; item: ExprKind }
-  | { kind: "Struct"; fields: Record<string, ExprKind> };
+  & MaybeNamed
+  & (
+    | typeof ExprKindString
+    | typeof ExprKindI64
+    | typeof ExprKindF64
+    | typeof ExprKindBoolean
+    | typeof ExprKindVector
+    | { kind: "List"; item: ExprKind }
+    | { kind: "Struct"; fields: Record<string, ExprKind> }
+  );
 
 export type Expr = {
   kind: ExprKind;
@@ -37,21 +40,24 @@ export type Statement =
 
 export type Block = Statement[];
 
-export type Query = {
-  name: string;
+export type Named = { name: string };
+export type MaybeNamed = Partial<Named>;
+
+export type QueryName = string;
+export type Query = Named & {
   arguments: ExprKind[];
   returns: ExprKind;
   body: Block;
 };
 
-export type NodeName = `node_${number}`;
-export type Node = {
+export type NodeName = string;
+export type Node = Named & {
   id: typeof ExprKindI64;
   [_: string]: ExprKind;
 };
 
-export type EdgeName = `edge_${number}`;
-export type Edge = {
+export type EdgeName = string;
+export type Edge = Named & {
   id: typeof ExprKindI64;
   from: NodeName;
   to: NodeName;
@@ -61,8 +67,8 @@ export const GlobalVectorspaceName = `vectorspace_global` as const;
 export type GlobalVectorspaceName = typeof GlobalVectorspaceName;
 export type GlobalVectorspace = symbol;
 
-export type VectorspaceName = `vectorspace_${number}`;
-export type Vectorspace = {
+export type VectorspaceName = string;
+export type Vectorspace = Named & {
   dimensions: number;
   hnsw: any; // TODO
 };
@@ -73,7 +79,7 @@ export type Schema = {
 
   edges: Record<EdgeName, Edge>;
 
-  vectorspaces:
-    & Record<GlobalVectorspaceName, GlobalVectorspace>
-    & Record<VectorspaceName, Vectorspace>;
+  vectorspaces: Record<GlobalVectorspaceName | VectorspaceName, Vectorspace>;
+
+  queries: Record<QueryName, Query>;
 };

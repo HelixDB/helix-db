@@ -2,25 +2,28 @@ import hx from "helix";
 
 const schema = hx.schema();
 
-const Chapter = schema.defineNode({
+const Chapter = schema.defineNode("Chapter", {
   index: I64,
 });
 
 schema.index(Chapter.index, { unique: true });
 
-const SubChapter = schema.defineNode({
+const SubChapter = schema.defineNode("SubChapter", {
   title: hx.String,
   content: hx.String,
 
   embedding: SubChapterEmbedding,
 });
 
-const SubChapterEmbedding = schema.defineVector({
+const SubChapterEmbedding = schema.defineVector("SubChapterEmbedding", {
   dimensions: 1536,
   hnsw: hx.cosine,
 });
 
-const Contains = schema.defineEdge({ from: Chapter, to: SubChapter });
+const Contains = schema.defineEdge("Contains", {
+  from: Chapter,
+  to: SubChapter,
+});
 
 const ArgChapter = hx.Struct({
   id: hx.I64,
@@ -33,8 +36,7 @@ const ArgSubChapter = hx.Struct({
   chunk: hx.Vector,
 });
 
-const loadDocsRag = schema.query({
-  name: "loaddocs_rag",
+const loadDocsRag = schema.query("loaddocs_rag", {
   arguments: [hx.List(ArgChapter)],
   returns: hx.String,
 }, (db, [chapters]) => {
@@ -55,16 +57,14 @@ const loadDocsRag = schema.query({
   return "Success";
 });
 
-const edgeNode = schema.query({
-  name: "edge_node",
+const edgeNode = schema.query("edge_node", {
   arguments: [],
   returns: hx.Iterator(Contains),
 }, (db, []) => {
   return db.nodes[Chapter].outgoingEdges[Contains];
 });
 
-const edgeNodeId = schema.query({
-  name: "edge_node_id",
+const edgeNodeId = schema.query("edge_node_id", {
   arguments: [hx.Id(Chapter)],
   returns: hx.Iterator(Contains),
 }, (db, [id]) => {
