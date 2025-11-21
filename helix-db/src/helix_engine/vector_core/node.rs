@@ -76,6 +76,19 @@ impl<D: Distance> Item<'_, D> {
         }
     }
 
+    /// Clones the item into the provided arena, returning a new Item
+    /// with a lifetime tied to the arena.
+    pub fn clone_in<'bump>(&self, arena: &'bump bumpalo::Bump) -> Item<'bump, D> {
+        // TODO: This does two allocations, we should do only one!
+        let vec_data = self.vector.to_vec(arena);
+        let vector = UnalignedVector::from_vec(vec_data);
+
+        Item {
+            header: self.header,
+            vector,
+        }
+    }
+
     /// Builds a new item from a `Vec<f32>`.
     pub fn new(vec: bumpalo::collections::Vec<f32>) -> Self {
         let vector = UnalignedVector::from_vec(vec);
