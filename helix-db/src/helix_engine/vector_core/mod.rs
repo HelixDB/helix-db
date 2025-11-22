@@ -31,7 +31,10 @@ use crate::{
         custom_serde::vector_serde::{VectoWithoutDataDeSeed, VectorDeSeed},
         value::Value,
     },
-    utils::{id::v6_uuid, properties::ImmutablePropertiesMap},
+    utils::{
+        id::{uuid_str_from_buf, v6_uuid},
+        properties::ImmutablePropertiesMap,
+    },
 };
 
 pub mod distance;
@@ -63,7 +66,7 @@ pub type LmdbResult<T, E = LmdbError> = std::result::Result<T, E>;
 
 pub type CoreDatabase<D> = heed3::Database<KeyCodec, NodeCodec<D>>;
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct HVector<'arena> {
     pub id: u128,
     pub distance: Option<f32>,
@@ -75,6 +78,42 @@ pub struct HVector<'arena> {
     pub version: u8,
     pub properties: Option<ImmutablePropertiesMap<'arena>>,
     pub data: Option<Item<'arena, Cosine>>,
+}
+
+impl<'arena> serde::Serialize for HVector<'arena> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        // Check if this is a human-readable format (like JSON)
+        if serializer.is_human_readable() {
+            // Include id for JSON serialization
+            let mut buffer = [0u8; 36];
+            let mut state = serializer.serialize_map(Some(
+                5 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            ))?;
+            state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
+            state.serialize_entry("label", &self.label)?;
+            state.serialize_entry("version", &self.version)?;
+            state.serialize_entry("deleted", &self.deleted)?;
+            if let Some(properties) = &self.properties {
+                for (key, value) in properties.iter() {
+                    state.serialize_entry(key, value)?;
+                }
+            }
+            state.end()
+        } else {
+            // Skip id, level, distance, and data for bincode serialization
+            let mut state = serializer.serialize_struct("HVector", 4)?;
+            state.serialize_field("label", &self.label)?;
+            state.serialize_field("version", &self.version)?;
+            state.serialize_field("deleted", &self.deleted)?;
+            state.serialize_field("properties", &self.properties)?;
+            state.end()
+        }
+    }
 }
 
 impl<'arena> HVector<'arena> {
@@ -101,10 +140,16 @@ impl<'arena> HVector<'arena> {
     }
 
     /// Converts HVector's data to a vec of bytes by accessing the data field directly
-    /// and converting each f64 to a byte slice
+    /// and converting each f32 to a byte slice
     #[inline(always)]
     pub fn vector_data_to_bytes(&self) -> VectorCoreResult<&[u8]> {
-        Ok(self.data.as_ref().unwrap().vector.as_ref().as_bytes())
+        Ok(self
+            .data
+            .as_ref()
+            .ok_or(VectorError::HasNoData)?
+            .vector
+            .as_ref()
+            .as_bytes())
     }
 
     /// Deserializes bytes into an vector using a custom deserializer that allocates into the provided arena
@@ -112,7 +157,6 @@ impl<'arena> HVector<'arena> {
     /// Both the properties bytes (if present) and the raw vector data are combined to generate the final vector struct
     ///
     /// NOTE: in this method, fixint encoding is used
-    #[inline]
     pub fn from_bincode_bytes<'txn>(
         arena: &'arena bumpalo::Bump,
         properties: Option<&'txn [u8]>,
