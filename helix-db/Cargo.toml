@@ -85,3 +85,7 @@ dev = ["debug-output", "server", "bench"]
 dev-instance = []
 default = ["server"]
 production = ["api-key","server"]
+
+[[test]]
+name = "capacity_optimization_benches"
+path = "benches/capacity_optimization_benches.rs"

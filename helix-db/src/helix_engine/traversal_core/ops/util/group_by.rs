@@ -18,11 +18,14 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     fn group_by(self, properties: &[String], should_count: bool) -> Result<GroupBy, GraphError> {
         let mut groups: HashMap<String, GroupByItem> = HashMap::new();
 
+        let properties_len = properties.len();
+
         for item in self.inner {
             let item = item?;
 
-            let mut kvs = Vec::new();
-            let mut key_parts = Vec::new();
+            // TODO HANDLE COUNT
+            let mut kvs = Vec::with_capacity(properties_len);
+            let mut key_parts = Vec::with_capacity(properties_len);
 
             for property in properties {
                 match item.get_property(property) {

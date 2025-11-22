@@ -203,7 +203,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -213,7 +215,8 @@ mod tests {
 
         // search for "fox"
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "fox", 10).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "fox", 10, &arena).unwrap();
 
         println!("results: {results:?}");
 
@@ -271,7 +274,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -280,7 +285,8 @@ mod tests {
         wtxn.commit().unwrap();
 
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "machine learning", 10).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "machine learning", 10, &arena).unwrap();
 
         println!("results: {results:?}");
 
@@ -1258,7 +1264,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1268,7 +1276,8 @@ mod tests {
         wtxn.commit().unwrap();
 
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "science", 10).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "science", 10, &arena).unwrap();
 
         println!("results: {results:?}");
 
@@ -1328,7 +1337,8 @@ mod tests {
 
         // search should find the updated content
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "updated", 10).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "updated", 10, &arena).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, doc_id);
     }
@@ -1365,7 +1375,8 @@ mod tests {
 
         // search should not find the deleted document
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "two", 10).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "two", 10, &arena).unwrap();
         assert_eq!(results.len(), 0);
     }
 
@@ -1382,7 +1393,8 @@ mod tests {
         wtxn.commit().unwrap();
 
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "test", 5).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "test", 5, &arena).unwrap();
 
         // should respect the limit
         assert_eq!(results.len(), 5);
@@ -1403,7 +1415,8 @@ mod tests {
         wtxn.commit().unwrap();
 
         let rtxn = bm25.graph_env.read_txn().unwrap();
-        let results = bm25.search(&rtxn, "nonexistent", 10).unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "nonexistent", 10, &arena).unwrap();
 
         assert_eq!(results.len(), 0);
     }
