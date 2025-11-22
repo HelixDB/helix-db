@@ -345,9 +345,11 @@ fn validate_property_access<'a>(
                             );
 
                             // Check if this nested traversal ends with a Closure step
-                            let own_closure_param = tr.steps.last()
-                                .and_then(|step| match &step.step {
-                                    crate::helixc::parser::types::StepType::Closure(cl) => Some(cl.identifier.clone()),
+                            let own_closure_param =
+                                tr.steps.last().and_then(|step| match &step.step {
+                                    crate::helixc::parser::types::StepType::Closure(cl) => {
+                                        Some(cl.identifier.clone())
+                                    }
                                     _ => None,
                                 });
 
@@ -386,9 +388,11 @@ fn validate_property_access<'a>(
                                 );
 
                                 // Check if this nested traversal ends with a Closure step
-                                let own_closure_param = tr.steps.last()
-                                    .and_then(|step| match &step.step {
-                                        crate::helixc::parser::types::StepType::Closure(cl) => Some(cl.identifier.clone()),
+                                let own_closure_param =
+                                    tr.steps.last().and_then(|step| match &step.step {
+                                        crate::helixc::parser::types::StepType::Closure(cl) => {
+                                            Some(cl.identifier.clone())
+                                        }
                                         _ => None,
                                     });
 

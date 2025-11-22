@@ -152,7 +152,7 @@ impl HelixParser {
 
 #[cfg(test)]
 mod tests {
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // AddNode Tests

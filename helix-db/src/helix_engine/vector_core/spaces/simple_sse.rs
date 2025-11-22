@@ -17,101 +17,105 @@ unsafe fn hsum128_ps_sse(x: __m128) -> f32 {
 pub(crate) unsafe fn euclid_similarity_sse(
     v1: &UnalignedVector<f32>,
     v2: &UnalignedVector<f32>,
-) -> f32 { unsafe {
-    // It is safe to load unaligned floats from a pointer.
-    // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadu_ps&ig_expand=4131>
+) -> f32 {
+    unsafe {
+        // It is safe to load unaligned floats from a pointer.
+        // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadu_ps&ig_expand=4131>
 
-    let n = v1.len();
-    let m = n - (n % 16);
-    let mut ptr1 = v1.as_ptr() as *const f32;
-    let mut ptr2 = v2.as_ptr() as *const f32;
-    let mut sum128_1: __m128 = _mm_setzero_ps();
-    let mut sum128_2: __m128 = _mm_setzero_ps();
-    let mut sum128_3: __m128 = _mm_setzero_ps();
-    let mut sum128_4: __m128 = _mm_setzero_ps();
-    let mut i: usize = 0;
-    while i < m {
-        let sub128_1 = _mm_sub_ps(_mm_loadu_ps(ptr1), _mm_loadu_ps(ptr2));
-        sum128_1 = _mm_add_ps(_mm_mul_ps(sub128_1, sub128_1), sum128_1);
+        let n = v1.len();
+        let m = n - (n % 16);
+        let mut ptr1 = v1.as_ptr() as *const f32;
+        let mut ptr2 = v2.as_ptr() as *const f32;
+        let mut sum128_1: __m128 = _mm_setzero_ps();
+        let mut sum128_2: __m128 = _mm_setzero_ps();
+        let mut sum128_3: __m128 = _mm_setzero_ps();
+        let mut sum128_4: __m128 = _mm_setzero_ps();
+        let mut i: usize = 0;
+        while i < m {
+            let sub128_1 = _mm_sub_ps(_mm_loadu_ps(ptr1), _mm_loadu_ps(ptr2));
+            sum128_1 = _mm_add_ps(_mm_mul_ps(sub128_1, sub128_1), sum128_1);
 
-        let sub128_2 = _mm_sub_ps(_mm_loadu_ps(ptr1.add(4)), _mm_loadu_ps(ptr2.add(4)));
-        sum128_2 = _mm_add_ps(_mm_mul_ps(sub128_2, sub128_2), sum128_2);
+            let sub128_2 = _mm_sub_ps(_mm_loadu_ps(ptr1.add(4)), _mm_loadu_ps(ptr2.add(4)));
+            sum128_2 = _mm_add_ps(_mm_mul_ps(sub128_2, sub128_2), sum128_2);
 
-        let sub128_3 = _mm_sub_ps(_mm_loadu_ps(ptr1.add(8)), _mm_loadu_ps(ptr2.add(8)));
-        sum128_3 = _mm_add_ps(_mm_mul_ps(sub128_3, sub128_3), sum128_3);
+            let sub128_3 = _mm_sub_ps(_mm_loadu_ps(ptr1.add(8)), _mm_loadu_ps(ptr2.add(8)));
+            sum128_3 = _mm_add_ps(_mm_mul_ps(sub128_3, sub128_3), sum128_3);
 
-        let sub128_4 = _mm_sub_ps(_mm_loadu_ps(ptr1.add(12)), _mm_loadu_ps(ptr2.add(12)));
-        sum128_4 = _mm_add_ps(_mm_mul_ps(sub128_4, sub128_4), sum128_4);
+            let sub128_4 = _mm_sub_ps(_mm_loadu_ps(ptr1.add(12)), _mm_loadu_ps(ptr2.add(12)));
+            sum128_4 = _mm_add_ps(_mm_mul_ps(sub128_4, sub128_4), sum128_4);
 
-        ptr1 = ptr1.add(16);
-        ptr2 = ptr2.add(16);
-        i += 16;
+            ptr1 = ptr1.add(16);
+            ptr2 = ptr2.add(16);
+            i += 16;
+        }
+
+        let mut result = hsum128_ps_sse(sum128_1)
+            + hsum128_ps_sse(sum128_2)
+            + hsum128_ps_sse(sum128_3)
+            + hsum128_ps_sse(sum128_4);
+        for i in 0..n - m {
+            let a = read_unaligned(ptr1.add(i));
+            let b = read_unaligned(ptr2.add(i));
+            result += (a - b).powi(2);
+        }
+        result
     }
-
-    let mut result = hsum128_ps_sse(sum128_1)
-        + hsum128_ps_sse(sum128_2)
-        + hsum128_ps_sse(sum128_3)
-        + hsum128_ps_sse(sum128_4);
-    for i in 0..n - m {
-        let a = read_unaligned(ptr1.add(i));
-        let b = read_unaligned(ptr2.add(i));
-        result += (a - b).powi(2);
-    }
-    result
-}}
+}
 
 #[target_feature(enable = "sse")]
 pub(crate) unsafe fn dot_similarity_sse(
     v1: &UnalignedVector<f32>,
     v2: &UnalignedVector<f32>,
-) -> f32 { unsafe {
-    // It is safe to load unaligned floats from a pointer.
-    // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadu_ps&ig_expand=4131>
+) -> f32 {
+    unsafe {
+        // It is safe to load unaligned floats from a pointer.
+        // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadu_ps&ig_expand=4131>
 
-    let n = v1.len();
-    let m = n - (n % 16);
-    let mut ptr1 = v1.as_ptr() as *const f32;
-    let mut ptr2 = v2.as_ptr() as *const f32;
-    let mut sum128_1: __m128 = _mm_setzero_ps();
-    let mut sum128_2: __m128 = _mm_setzero_ps();
-    let mut sum128_3: __m128 = _mm_setzero_ps();
-    let mut sum128_4: __m128 = _mm_setzero_ps();
+        let n = v1.len();
+        let m = n - (n % 16);
+        let mut ptr1 = v1.as_ptr() as *const f32;
+        let mut ptr2 = v2.as_ptr() as *const f32;
+        let mut sum128_1: __m128 = _mm_setzero_ps();
+        let mut sum128_2: __m128 = _mm_setzero_ps();
+        let mut sum128_3: __m128 = _mm_setzero_ps();
+        let mut sum128_4: __m128 = _mm_setzero_ps();
 
-    let mut i: usize = 0;
-    while i < m {
-        sum128_1 = _mm_add_ps(_mm_mul_ps(_mm_loadu_ps(ptr1), _mm_loadu_ps(ptr2)), sum128_1);
+        let mut i: usize = 0;
+        while i < m {
+            sum128_1 = _mm_add_ps(_mm_mul_ps(_mm_loadu_ps(ptr1), _mm_loadu_ps(ptr2)), sum128_1);
 
-        sum128_2 = _mm_add_ps(
-            _mm_mul_ps(_mm_loadu_ps(ptr1.add(4)), _mm_loadu_ps(ptr2.add(4))),
-            sum128_2,
-        );
+            sum128_2 = _mm_add_ps(
+                _mm_mul_ps(_mm_loadu_ps(ptr1.add(4)), _mm_loadu_ps(ptr2.add(4))),
+                sum128_2,
+            );
 
-        sum128_3 = _mm_add_ps(
-            _mm_mul_ps(_mm_loadu_ps(ptr1.add(8)), _mm_loadu_ps(ptr2.add(8))),
-            sum128_3,
-        );
+            sum128_3 = _mm_add_ps(
+                _mm_mul_ps(_mm_loadu_ps(ptr1.add(8)), _mm_loadu_ps(ptr2.add(8))),
+                sum128_3,
+            );
 
-        sum128_4 = _mm_add_ps(
-            _mm_mul_ps(_mm_loadu_ps(ptr1.add(12)), _mm_loadu_ps(ptr2.add(12))),
-            sum128_4,
-        );
+            sum128_4 = _mm_add_ps(
+                _mm_mul_ps(_mm_loadu_ps(ptr1.add(12)), _mm_loadu_ps(ptr2.add(12))),
+                sum128_4,
+            );
 
-        ptr1 = ptr1.add(16);
-        ptr2 = ptr2.add(16);
-        i += 16;
+            ptr1 = ptr1.add(16);
+            ptr2 = ptr2.add(16);
+            i += 16;
+        }
+
+        let mut result = hsum128_ps_sse(sum128_1)
+            + hsum128_ps_sse(sum128_2)
+            + hsum128_ps_sse(sum128_3)
+            + hsum128_ps_sse(sum128_4);
+        for i in 0..n - m {
+            let a = read_unaligned(ptr1.add(i));
+            let b = read_unaligned(ptr2.add(i));
+            result += a * b;
+        }
+        result
     }
-
-    let mut result = hsum128_ps_sse(sum128_1)
-        + hsum128_ps_sse(sum128_2)
-        + hsum128_ps_sse(sum128_3)
-        + hsum128_ps_sse(sum128_4);
-    for i in 0..n - m {
-        let a = read_unaligned(ptr1.add(i));
-        let b = read_unaligned(ptr2.add(i));
-        result += a * b;
-    }
-    result
-}}
+}
 
 #[cfg(test)]
 mod tests {

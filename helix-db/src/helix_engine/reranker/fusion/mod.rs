@@ -9,4 +9,4 @@ pub mod score_normalizer;
 
 pub use mmr::{DistanceMethod, MMRReranker};
 pub use rrf::RRFReranker;
-pub use score_normalizer::{normalize_scores, NormalizationMethod};
+pub use score_normalizer::{NormalizationMethod, normalize_scores};

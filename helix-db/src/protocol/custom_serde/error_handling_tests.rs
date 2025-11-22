@@ -468,7 +468,7 @@ mod error_handling_tests {
     #[test]
     fn test_vector_extreme_version_value() {
         let arena = Bump::new();
-        let id = 012012u128;
+        let id = 12012u128;
 
         let vector = create_arena_vector(&arena, id, "test", 255, false, &[1.0], vec![]);
         let props_bytes = bincode::serialize(&vector).unwrap();

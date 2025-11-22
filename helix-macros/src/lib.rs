@@ -5,7 +5,10 @@ extern crate syn;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream}, parse_macro_input, Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem
+    Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token,
+    TraitItem,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
 };
 
 struct HandlerArgs {
@@ -118,7 +121,6 @@ pub fn get_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     expanded.into()
 }
-
 
 #[proc_macro_attribute]
 pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -391,20 +393,17 @@ pub fn traversable_derive(input: TokenStream) -> TokenStream {
 
     // Verify that the struct has an 'id' field
     let has_id_field = match &input.data {
-        Data::Struct(data) => {
-            data.fields.iter().any(|field| {
-                field.ident.as_ref().map(|i| i == "id").unwrap_or(false)
-            })
-        }
+        Data::Struct(data) => data
+            .fields
+            .iter()
+            .any(|field| field.ident.as_ref().map(|i| i == "id").unwrap_or(false)),
         _ => false,
     };
 
     if !has_id_field {
-        return TokenStream::from(
-            quote! {
-                compile_error!("Traversable can only be derived for structs with an 'id: &'a str' field");
-            }
-        );
+        return TokenStream::from(quote! {
+            compile_error!("Traversable can only be derived for structs with an 'id: &'a str' field");
+        });
     }
 
     // Extract lifetime parameter if present

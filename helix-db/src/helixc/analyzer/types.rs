@@ -229,10 +229,10 @@ impl From<DefaultValue> for GeneratedValue {
 /// Metadata for GROUPBY and AGGREGATE_BY operations
 #[derive(Debug, Clone)]
 pub struct AggregateInfo {
-    pub source_type: Box<Type>,   // Original type being aggregated (Node, Edge, Vector)
-    pub properties: Vec<String>,  // Properties being grouped by
-    pub is_count: bool,           // true for COUNT mode
-    pub is_group_by: bool,        // true for GROUP_BY, false for AGGREGATE_BY
+    pub source_type: Box<Type>, // Original type being aggregated (Node, Edge, Vector)
+    pub properties: Vec<String>, // Properties being grouped by
+    pub is_count: bool,         // true for COUNT mode
+    pub is_group_by: bool,      // true for GROUP_BY, false for AGGREGATE_BY
 }
 
 #[derive(Debug, Clone)]
@@ -408,7 +408,11 @@ impl From<&FieldType> for Type {
             String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128
             | Uuid | Date => Type::Scalar(ft.clone()),
             Array(inner_ft) => Type::Array(Box::new(Type::from(*inner_ft.clone()))),
-            Object(obj) => Type::Object(obj.iter().map(|(k, v)| (k.clone(), Type::from(v))).collect()),
+            Object(obj) => Type::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), Type::from(v)))
+                    .collect(),
+            ),
             Identifier(id) => Type::Scalar(FieldType::Identifier(id.clone())),
         }
     }

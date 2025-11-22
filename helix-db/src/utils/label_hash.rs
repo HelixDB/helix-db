@@ -31,7 +31,10 @@ mod tests {
         let hash_person = hash_label("person", None);
         let hash_company = hash_label("company", None);
 
-        assert_ne!(hash_person, hash_company, "Different labels should produce different hashes");
+        assert_ne!(
+            hash_person, hash_company,
+            "Different labels should produce different hashes"
+        );
     }
 
     #[test]
@@ -42,22 +45,24 @@ mod tests {
         let hash_seed_42 = hash_label(label, Some(42));
 
         // Same label with no seed vs seed 0 should be same
-        assert_eq!(hash_no_seed, hash_seed_0, "No seed should be equivalent to seed 0");
+        assert_eq!(
+            hash_no_seed, hash_seed_0,
+            "No seed should be equivalent to seed 0"
+        );
 
         // Different seed should produce different hash
-        assert_ne!(hash_no_seed, hash_seed_42, "Different seeds should produce different hashes");
+        assert_ne!(
+            hash_no_seed, hash_seed_42,
+            "Different seeds should produce different hashes"
+        );
     }
 
     #[test]
     fn test_hash_label_collision_rate() {
         // Test collision rate with 10,000 labels
-        let labels: Vec<String> = (0..10_000)
-            .map(|i| format!("label_{}", i))
-            .collect();
+        let labels: Vec<String> = (0..10_000).map(|i| format!("label_{}", i)).collect();
 
-        let hashes: HashSet<[u8; 4]> = labels.iter()
-            .map(|l| hash_label(l, None))
-            .collect();
+        let hashes: HashSet<[u8; 4]> = labels.iter().map(|l| hash_label(l, None)).collect();
 
         let collision_rate = 1.0 - (hashes.len() as f64 / labels.len() as f64);
 
@@ -86,16 +91,14 @@ mod tests {
         // Test with UTF-8 characters
         let labels = vec![
             "person",
-            "人",           // Chinese character
-            "🚀",          // Emoji
-            "Ñoño",        // Spanish with tildes
-            "Привет",      // Russian
-            "مرحبا",       // Arabic
+            "人",     // Chinese character
+            "🚀",     // Emoji
+            "Ñoño",   // Spanish with tildes
+            "Привет", // Russian
+            "مرحبا",  // Arabic
         ];
 
-        let hashes: Vec<[u8; 4]> = labels.iter()
-            .map(|l| hash_label(l, None))
-            .collect();
+        let hashes: Vec<[u8; 4]> = labels.iter().map(|l| hash_label(l, None)).collect();
 
         // All should be different
         let unique_hashes: HashSet<_> = hashes.iter().collect();
@@ -149,15 +152,9 @@ mod tests {
     #[test]
     fn test_hash_label_similar_strings() {
         // Test labels that differ by only one character
-        let labels = ["person",
-            "persons",
-            "person1",
-            "person_",
-            "Person"];
+        let labels = ["person", "persons", "person1", "person_", "Person"];
 
-        let hashes: Vec<[u8; 4]> = labels.iter()
-            .map(|l| hash_label(l, None))
-            .collect();
+        let hashes: Vec<[u8; 4]> = labels.iter().map(|l| hash_label(l, None)).collect();
 
         // All should be different
         let unique_hashes: HashSet<_> = hashes.iter().collect();
@@ -177,7 +174,10 @@ mod tests {
 
         // Should be big-endian bytes (we can convert back)
         let value = u32::from_be_bytes(hash);
-        assert!(value > 0, "Hash value should be non-zero for non-empty string");
+        assert!(
+            value > 0,
+            "Hash value should be non-zero for non-empty string"
+        );
     }
 
     #[test]
@@ -216,9 +216,7 @@ mod tests {
             "created_by",
         ];
 
-        let hashes: HashSet<[u8; 4]> = common_labels.iter()
-            .map(|l| hash_label(l, None))
-            .collect();
+        let hashes: HashSet<[u8; 4]> = common_labels.iter().map(|l| hash_label(l, None)).collect();
 
         // All common labels should hash uniquely
         assert_eq!(

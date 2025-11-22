@@ -50,25 +50,29 @@ fn test_delete_node_with_secondary_index() {
             props_option(&arena, props! { "name" => "John" }),
             Some(&["name"]),
         )
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     let node_id = node.id();
 
     G::new_mut_from_iter(&storage, &mut txn, std::iter::once(node), &arena)
         .update(&[("name", Value::from("Jane"))])
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     txn.commit().unwrap();
 
     let arena = Bump::new();
     let txn = storage.graph_env.read_txn().unwrap();
     let jane_nodes = G::new(&storage, &txn, &arena)
         .n_from_index("person", "name", &"Jane".to_string())
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(jane_nodes.len(), 1);
     assert_eq!(jane_nodes[0].id(), node_id);
 
     let john_nodes = G::new(&storage, &txn, &arena)
         .n_from_index("person", "name", &"John".to_string())
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert!(john_nodes.is_empty());
     drop(txn);
 
@@ -76,7 +80,8 @@ fn test_delete_node_with_secondary_index() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     drop(txn);
 
     let mut txn = storage.graph_env.write_txn().unwrap();
@@ -87,7 +92,8 @@ fn test_delete_node_with_secondary_index() {
     let txn = storage.graph_env.read_txn().unwrap();
     let node = G::new(&storage, &txn, &arena)
         .n_from_index("person", "name", &"Jane".to_string())
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert!(node.is_empty());
 }
 
@@ -103,21 +109,24 @@ fn test_update_of_secondary_indices() {
             props_option(&arena, props! { "name" => "John" }),
             Some(&["name"]),
         )
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     txn.commit().unwrap();
 
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
     G::new_mut_from_iter(&storage, &mut txn, std::iter::once(node), &arena)
         .update(&[("name", Value::from("Jane"))])
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     txn.commit().unwrap();
 
     let arena = Bump::new();
     let txn = storage.graph_env.read_txn().unwrap();
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_index("person", "name", &"Jane".to_string())
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(nodes.len(), 1);
     if let TraversalValue::Node(node) = &nodes[0] {
         match node.properties.as_ref().unwrap().get("name").unwrap() {
@@ -130,6 +139,7 @@ fn test_update_of_secondary_indices() {
 
     let john_nodes = G::new(&storage, &txn, &arena)
         .n_from_index("person", "name", &"John".to_string())
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert!(john_nodes.is_empty());
 }

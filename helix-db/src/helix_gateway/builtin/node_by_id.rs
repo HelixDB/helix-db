@@ -289,8 +289,10 @@ mod tests {
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
-        let props = [("name", Value::String("Alice".to_string())),
-            ("age", Value::I64(30))];
+        let props = [
+            ("name", Value::String("Alice".to_string())),
+            ("age", Value::I64(30)),
+        ];
         let props_map = ImmutablePropertiesMap::new(
             props.len(),
             props

@@ -34,12 +34,12 @@ pub trait StorageMethods {
     fn drop_node(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError>;
 
     /// Removes the following from the storage engine:
-    /// - The given edge 
+    /// - The given edge
     /// - All incoming and outgoing mappings for that edge
     fn drop_edge(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError>;
 
     /// Sets the `deleted` field of a vector to true
-    /// 
-    /// NOTE: The vector is not ACTUALLY deleted and is still present in the db. 
+    ///
+    /// NOTE: The vector is not ACTUALLY deleted and is still present in the db.
     fn drop_vector(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError>;
 }

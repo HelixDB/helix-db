@@ -93,7 +93,10 @@ fn find_project_root(start: &Path) -> Result<PathBuf> {
             let error = crate::errors::config_error("found v1 project configuration")
                 .with_file_path(v1_config_path.display().to_string())
                 .with_context("This project uses the old v1 configuration format")
-                .with_hint(format!("Run 'helix migrate --path \"{}\"' to migrate this project to v2 format", current.display()));
+                .with_hint(format!(
+                    "Run 'helix migrate --path \"{}\"' to migrate this project to v2 format",
+                    current.display()
+                ));
             return Err(eyre!("{}", error.render()));
         }
 
@@ -105,7 +108,10 @@ fn find_project_root(start: &Path) -> Result<PathBuf> {
 
     let error = crate::errors::config_error("project configuration not found")
         .with_file_path(start.display().to_string())
-        .with_context(format!("searched from {} up to filesystem root", start.display()));
+        .with_context(format!(
+            "searched from {} up to filesystem root",
+            start.display()
+        ));
     Err(eyre!("{}", error.render()))
 }
 

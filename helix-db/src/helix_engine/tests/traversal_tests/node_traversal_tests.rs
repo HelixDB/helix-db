@@ -13,7 +13,7 @@ use crate::{
                     add_e::AddEAdapter, add_n::AddNAdapter, e_from_type::EFromTypeAdapter,
                     n_from_id::NFromIdAdapter, n_from_type::NFromTypeAdapter,
                 },
-                util::{filter_ref::FilterRefAdapter, drop::Drop},
+                util::{drop::Drop, filter_ref::FilterRefAdapter},
             },
             traversal_value::TraversalValue,
         },
@@ -88,23 +88,28 @@ fn test_out() {
     // Create graph: (person1)-[knows]->(person2)-[knows]->(person3)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person1 = person1.first().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person2 = person2.first().unwrap();
     let person3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person2.id(), person3.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
@@ -130,22 +135,26 @@ fn test_in() {
     // Create graph: (person1)-[knows]->(person2)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person1 = person1.first().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person2 = person2.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&person2.id())
         .in_node("knows")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     txn.commit().unwrap();
     // Check that current step is at person1
@@ -167,26 +176,32 @@ fn test_complex_traversal() {
 
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person1 = person1.first().unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person2 = person2.first().unwrap();
     let person3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("likes", None, person2.id(), person3.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("follows", None, person3.id(), person1.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = storage.graph_env.read_txn().unwrap();
@@ -194,7 +209,8 @@ fn test_complex_traversal() {
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&person1.id())
         .out_node("knows")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Check that current step is at person2
     assert_eq!(nodes.len(), 1);
@@ -205,7 +221,8 @@ fn test_complex_traversal() {
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
         .out_node("likes")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Check that current step is at person3
     assert_eq!(nodes.len(), 1);
@@ -216,7 +233,8 @@ fn test_complex_traversal() {
     let nodes = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
         .out_node("follows")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Check that current step is at person1
     assert_eq!(nodes.len(), 1);
@@ -232,14 +250,16 @@ fn test_n_from_id() {
     // Create a test node
     let person = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     let node_id = person.id();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let count = G::new(&storage, &txn, &arena)
         .n_from_id(&node_id)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     assert_eq!(count.len(), 1);
 }
@@ -253,20 +273,24 @@ fn test_n_from_id_with_traversal() {
     // Create test graph: (person1)-[knows]->(person2)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), true)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
     let count = G::new(&storage, &txn, &arena)
         .n_from_id(&person1.id())
         .out_node("knows")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Check that traversal reaches person2
     assert_eq!(count.len(), 1);
@@ -281,7 +305,8 @@ fn test_n_from_id_nonexistent() {
     let txn = storage.graph_env.read_txn().unwrap();
     G::new(&storage, &txn, &arena)
         .n_from_id(&100)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 }
 
 #[test]
@@ -293,23 +318,29 @@ fn test_n_from_id_chain_operations() {
     // Create test graph: (person1)-[knows]->(person2)-[likes]->(person3)
     let person1 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     let person2 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     let _ = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     let person3 = G::new_mut(&storage, &arena, &mut txn)
         .add_n("person", None, None)
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("knows", None, person1.id(), person2.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge("likes", None, person2.id(), person3.id(), false)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     txn.commit().unwrap();
     let txn = storage.graph_env.read_txn().unwrap();
@@ -317,7 +348,8 @@ fn test_n_from_id_chain_operations() {
         .n_from_id(&person1.id())
         .out_node("knows")
         .out_node("likes")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Check that the chain of traversals reaches person3
     assert_eq!(nodes.len(), 1);
@@ -336,7 +368,8 @@ fn test_with_id_type() {
             props_option(&arena, props! { "name" => "test" }),
             None,
         )
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
     txn.commit().unwrap();
     #[derive(Serialize, Deserialize, Debug)]
     struct Input {
@@ -355,7 +388,8 @@ fn test_with_id_type() {
     let txn = storage.graph_env.read_txn().unwrap();
     let traversal = G::new(&storage, &txn, &arena)
         .n_from_id(&input.id)
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     assert_eq!(traversal.len(), 1);
     assert_eq!(traversal[0].id(), input.id.inner());
@@ -374,7 +408,8 @@ fn test_double_add_and_double_fetch() {
             props_option(&arena, props! { "entity_name" => "person1" }),
             None,
         )
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
 
     let original_node2 = G::new_mut(db, &arena, &mut txn)
         .add_n(
@@ -382,7 +417,8 @@ fn test_double_add_and_double_fetch() {
             props_option(&arena, props! { "entity_name" => "person2" }),
             None,
         )
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
 
     txn.commit().unwrap();
 
@@ -398,7 +434,8 @@ fn test_double_add_and_double_fetch() {
                 Ok(false)
             }
         })
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     let node2 = G::new(db, &txn, &arena)
         .n_from_type("person")
@@ -411,7 +448,8 @@ fn test_double_add_and_double_fetch() {
                 Ok(false)
             }
         })
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     assert_eq!(node1.len(), 1);
     assert_eq!(node1[0].id(), original_node1.id());
@@ -426,14 +464,16 @@ fn test_double_add_and_double_fetch() {
             node2.first().unwrap().id(),
             false,
         )
-        .collect_to_obj().unwrap();
+        .collect_to_obj()
+        .unwrap();
 
     txn.commit().unwrap();
 
     let txn = db.graph_env.read_txn().unwrap();
     let e = G::new(db, &txn, &arena)
         .e_from_type("knows")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(e.len(), 1);
     assert_eq!(e[0].id(), e.first().unwrap().id());
     if let TraversalValue::Edge(e) = &e[0] {

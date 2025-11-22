@@ -1,9 +1,5 @@
 use crate::helixc::{
-    analyzer::{
-        error_codes::ErrorCode,
-        fix::Fix,
-        pretty,
-    },
+    analyzer::{error_codes::ErrorCode, fix::Fix, pretty},
     parser::location::Loc,
 };
 

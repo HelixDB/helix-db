@@ -5,7 +5,10 @@ use crate::{
         types::GraphError,
     },
     protocol::value::Value,
-    utils::{items::{Edge, Node}, label_hash::hash_label},
+    utils::{
+        items::{Edge, Node},
+        label_hash::hash_label,
+    },
 };
 use heed3::RoTxn;
 use std::{
@@ -85,8 +88,14 @@ pub enum PathAlgorithm {
     AStar,
 }
 
-pub struct ShortestPathIterator<'db, 'arena, 'txn, I, F, H = fn(&Node<'arena>) -> Result<f64, GraphError>>
-where
+pub struct ShortestPathIterator<
+    'db,
+    'arena,
+    'txn,
+    I,
+    F,
+    H = fn(&Node<'arena>) -> Result<f64, GraphError>,
+> where
     'db: 'arena,
     'arena: 'txn,
     F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
@@ -391,7 +400,7 @@ where
             None => {
                 return Some(Err(GraphError::TraversalError(
                     "A* algorithm requires a heuristic function".to_string(),
-                )))
+                )));
             }
         };
 
@@ -590,7 +599,13 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
         >,
     > {
-        self.shortest_path_with_algorithm(edge_label, from, to, PathAlgorithm::BFS, default_weight_fn)
+        self.shortest_path_with_algorithm(
+            edge_label,
+            from,
+            to,
+            PathAlgorithm::BFS,
+            default_weight_fn,
+        )
     }
 
     #[inline]
