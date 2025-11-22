@@ -1327,6 +1327,7 @@ dependencies = [
  "futures-util",
  "helix-db",
  "helix-metrics",
+ "helix-sim",
  "iota",
  "regex",
  "reqwest",
@@ -1431,6 +1432,14 @@ dependencies = [
  "sonic-rs",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "helix-sim"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
 ]
 
 [[package]]

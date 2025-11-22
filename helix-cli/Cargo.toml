@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 helix-metrics = { path = "../metrics" }
 helix-db = { path = "../helix-db" }
+helix-sim = { path = "../helix-sim" }
 clap = { version = "4.5.47", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.47.1", features = ["full"] }

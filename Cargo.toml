@@ -4,6 +4,7 @@ members = [
     "helix-container",
     "helix-macros",
     "helix-cli",
+    "helix-sim",
     "hql-tests",
     "metrics",
 ]

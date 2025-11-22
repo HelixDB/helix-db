@@ -1,11 +1,12 @@
 use chrono::{Local, NaiveDate};
 use dirs::home_dir;
-use eyre::{eyre, OptionExt, Result};
+use eyre::{OptionExt, Result, eyre};
 use flume::{Receiver, Sender, unbounded};
 use helix_metrics::events::{
     CompileEvent, DeployCloudEvent, DeployLocalEvent, EventData, EventType, RawEvent,
     RedeployLocalEvent, TestEvent,
 };
+use helix_sim::TokioRuntime;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -71,6 +72,7 @@ impl MetricsConfig {
 pub struct MetricsSender {
     tx: Sender<MetricsMessage>,
     handle: JoinHandle<()>,
+    _runtime: TokioRuntime,
 }
 
 #[derive(Debug)]
@@ -88,7 +90,11 @@ impl MetricsSender {
             }
         });
 
-        Ok(Self { tx, handle })
+        Ok(Self {
+            tx,
+            handle,
+            _runtime: TokioRuntime,
+        })
     }
 
     pub fn send_event(&self, event: RawEvent<EventData>) {
