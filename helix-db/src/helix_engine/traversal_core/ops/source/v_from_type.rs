@@ -1,8 +1,5 @@
 use crate::helix_engine::{
-    traversal_core::{
-        traversal_iter::RoTraversalIterator,
-        traversal_value::TraversalValue,
-    },
+    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
 };
 
@@ -31,27 +28,31 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     fn v_from_type(
         self,
         label: &'arena str,
-        _get_vector_data: bool,
+        get_vector_data: bool,
     ) -> RoTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
-        let _label_bytes = label.as_bytes();
-        let iter = self
-            .storage
-            .vectors
-            .vector_properties_db
-            .iter(self.txn)
-            .unwrap()
-            .filter_map(move |_item| todo!());
+        let mut inner = Vec::new();
+        match self.storage.vectors.get_all_vectors_by_label(
+            self.txn,
+            label,
+            get_vector_data,
+            self.arena,
+        ) {
+            Ok(vec) => vec
+                .into_iter()
+                .for_each(|v| inner.push(Ok(TraversalValue::Vector(v)))),
+            Err(err) => inner.push(Err(GraphError::from(err))),
+        }
 
         RoTraversalIterator {
             storage: self.storage,
             arena: self.arena,
             txn: self.txn,
-            inner: iter,
+            inner: inner.into_iter(),
         }
     }
 }

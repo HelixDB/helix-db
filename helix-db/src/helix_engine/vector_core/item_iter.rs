@@ -1,17 +1,17 @@
 use heed3::RoTxn;
 
 use crate::helix_engine::vector_core::{
-    CoreDatabase, ItemId, LmdbResult,
+    CoreDatabase, LmdbResult,
     distance::Distance,
     key::{KeyCodec, Prefix, PrefixCodec},
     node::{Item, Node, NodeCodec},
+    node_id::NodeId,
 };
 
 // used by the reader
 pub struct ItemIter<'t, D: Distance> {
     pub inner: heed3::RoPrefix<'t, KeyCodec, NodeCodec<D>>,
     dimensions: usize,
-    arena: &'t bumpalo::Bump,
 }
 
 impl<'t, D: Distance> ItemIter<'t, D> {
@@ -20,7 +20,6 @@ impl<'t, D: Distance> ItemIter<'t, D> {
         index: u16,
         dimensions: usize,
         rtxn: &'t RoTxn,
-        arena: &'t bumpalo::Bump,
     ) -> heed3::Result<Self> {
         Ok(ItemIter {
             inner: database
@@ -28,24 +27,33 @@ impl<'t, D: Distance> ItemIter<'t, D> {
                 .prefix_iter(rtxn, &Prefix::item(index))?
                 .remap_key_type::<KeyCodec>(),
             dimensions,
-            arena,
         })
+    }
+
+    pub fn next_id(&mut self) -> Option<LmdbResult<NodeId>> {
+        match self.inner.next() {
+            Some(Ok((key, node))) => match node {
+                Node::Item(_) => Some(Ok(key.node)),
+                Node::Links(_) => unreachable!("Node must not be a link"),
+            },
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        }
     }
 }
 
 impl<'t, D: Distance> Iterator for ItemIter<'t, D> {
-    type Item = LmdbResult<(ItemId, bumpalo::collections::Vec<'t, f32>)>;
+    type Item = LmdbResult<(NodeId, Item<'t, D>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner.next() {
             Some(Ok((key, node))) => match node {
-                Node::Item(Item { header: _, vector }) => {
-                    let mut vector = vector.to_vec(self.arena);
-                    if vector.len() != self.dimensions {
+                Node::Item(mut item) => {
+                    if item.vector.len() != self.dimensions {
                         // quantized codecs pad to 8-bytes so we truncate to recover len
-                        vector.truncate(self.dimensions);
+                        item.vector.to_mut().truncate(self.dimensions);
                     }
-                    Some(Ok((key.node.item, vector)))
+                    Some(Ok((key.node, item)))
                 }
                 Node::Links(_) => unreachable!("Node must not be a link"),
             },

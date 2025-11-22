@@ -136,17 +136,12 @@ impl<D: Distance> Writer<D> {
     }
 
     /// Returns an iterator over the items vector.
-    pub fn iter<'t>(
-        &self,
-        rtxn: &'t RoTxn,
-        arena: &'t bumpalo::Bump,
-    ) -> VectorCoreResult<ItemIter<'t, D>> {
+    pub fn iter<'t>(&self, rtxn: &'t RoTxn) -> VectorCoreResult<ItemIter<'t, D>> {
         Ok(ItemIter::new(
             self.database,
             self.index,
             self.dimensions,
             rtxn,
-            arena,
         )?)
     }
 
