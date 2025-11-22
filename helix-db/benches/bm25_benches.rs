@@ -51,7 +51,7 @@ mod tests {
 
         let mut rng = rand::rng();
         let mut docs = vec![];
-        let relevant_count = 4000 as usize;
+        let relevant_count = 4000_usize;
         let total_docs = 1_000_000;
 
         for i in tqdm::new(
@@ -126,7 +126,7 @@ mod tests {
             let id = v6_uuid();
             let doc_lower = doc.to_lowercase();
 
-            let _ = bm25.insert_doc(&mut wtxn, id, &doc_lower).unwrap();
+            bm25.insert_doc(&mut wtxn, id, &doc_lower).unwrap();
 
             for term in &query_terms {
                 if doc_lower.contains(term) {
@@ -139,7 +139,7 @@ mod tests {
 
         for query_term in query_terms {
             let rtxn = bm25.graph_env.read_txn().unwrap();
-            let term_count = query_term_counts.get(query_term).unwrap().clone();
+            let term_count = *query_term_counts.get(query_term).unwrap();
 
             let results = bm25.search(&rtxn, query_term, limit).unwrap();
 
@@ -148,7 +148,7 @@ mod tests {
             debug_println!("term count: {}, results len: {}", term_count, results.len());
 
             assert!(
-                precision >= 0.9 && precision <= 1.0,
+                (0.9..=1.0).contains(&precision),
                 "precision {} below 0.9 or above 1.0",
                 precision
             );

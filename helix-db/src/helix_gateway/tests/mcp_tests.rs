@@ -340,7 +340,7 @@ mod mcp_tests {
 
         let response = out_step(&mut input).unwrap();
         let body = String::from_utf8(response.body.clone()).unwrap();
-        assert!(body.contains(&uuid_str(person2.id(), &arena)));
+        assert!(body.contains(uuid_str(person2.id(), &arena)));
     }
 
     #[test]
@@ -906,7 +906,7 @@ mod mcp_tests {
                 .unwrap();
 
         let results = stream.collect().unwrap();
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
     }
 
     #[test]
@@ -1141,7 +1141,7 @@ mod mcp_tests {
                 .unwrap();
 
         let results = stream.collect().unwrap();
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
     }
 
     #[test]

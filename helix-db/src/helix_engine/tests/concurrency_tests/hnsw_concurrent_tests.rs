@@ -161,7 +161,7 @@ fn test_concurrent_searches_during_inserts() {
     // Initialize with some initial vectors
     {
         let mut txn = env.write_txn().unwrap();
-        let mut index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+        let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
         let arena = Bump::new();
         for _ in 0..50 {
@@ -246,7 +246,7 @@ fn test_concurrent_searches_during_inserts() {
                 let vector = random_vector(128);
                 let data = arena.alloc_slice_copy(&vector);
 
-                let mut index = open_vector_core(&env, &mut wtxn).unwrap();
+                let index = open_vector_core(&env, &mut wtxn).unwrap();
                 index
                     .insert(&mut wtxn, "search_test", data, None, &arena)
                     .expect("Insert should succeed");
@@ -318,7 +318,7 @@ fn test_concurrent_inserts_multiple_labels() {
 
                 for i in 0..vectors_per_label {
                     let mut wtxn = env.write_txn().unwrap();
-                    let mut index = open_vector_core(&env, &mut wtxn).unwrap();
+                    let index = open_vector_core(&env, &mut wtxn).unwrap();
                     let arena = Bump::new();
 
                     let vector = random_vector(64);
@@ -403,7 +403,7 @@ fn test_entry_point_consistency() {
 
                 for _ in 0..vectors_per_thread {
                     let mut wtxn = env.write_txn().unwrap();
-                    let mut index = open_vector_core(&env, &mut wtxn).unwrap();
+                    let index = open_vector_core(&env, &mut wtxn).unwrap();
                     let arena = Bump::new();
 
                     let vector = random_vector(32);
@@ -444,7 +444,7 @@ fn test_entry_point_consistency() {
     );
 
     // Verify results have valid properties
-    for &(id, distance) in results.into_nns().iter() {
+    for &(_id, _distance) in results.into_nns().iter() {
         // assert!(result.id > 0, "Result ID should be valid");
         // assert!(!result.deleted, "Results should not be deleted");
         // assert!(
@@ -484,7 +484,7 @@ fn test_graph_connectivity_after_concurrent_inserts() {
 
                 for _ in 0..vectors_per_thread {
                     let mut wtxn = env.write_txn().unwrap();
-                    let mut index = open_vector_core(&env, &mut wtxn).unwrap();
+                    let index = open_vector_core(&env, &mut wtxn).unwrap();
                     let arena = Bump::new();
 
                     let vector = random_vector(64);

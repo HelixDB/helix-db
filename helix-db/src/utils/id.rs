@@ -274,7 +274,7 @@ mod tests {
         let id = ID::from(value);
 
         // Test Deref trait
-        let deref_value: &u128 = &*id;
+        let deref_value: &u128 = &id;
         assert_eq!(*deref_value, value);
     }
 
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_id_ordering() {
-        let mut ids = vec![ID::from(300u128), ID::from(100u128), ID::from(200u128)];
+        let mut ids = [ID::from(300u128), ID::from(100u128), ID::from(200u128)];
 
         ids.sort();
 

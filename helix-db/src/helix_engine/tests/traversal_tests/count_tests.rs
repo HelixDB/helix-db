@@ -180,16 +180,16 @@ fn test_count_filter_ref() {
         .filter_ref(|val, txn| {
             if let Ok(val) = val {
                 let val_id = val.id();
-                Ok(G::new(&storage, &txn, &arena)
+                Ok(G::new(&storage, txn, &arena)
                     .n_from_id(&val_id)
                     .out_node("Country_to_City")
                     .count_to_val()
                     .map_value_or(false, |v| {
                         println!(
                             "v: {v:?}, res: {:?}",
-                            *v > 10.clone()
+                            *v > 10
                         );
-                        *v > 10.clone()
+                        *v > 10
                     })?)
             } else {
                 Ok(false)

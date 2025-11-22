@@ -131,6 +131,10 @@ impl<'a> ItemIds<'a> {
         self.bytes.len() / size_of::<ItemId>()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = ItemId> + 'a {
         self.bytes
             .chunks_exact(size_of::<ItemId>())

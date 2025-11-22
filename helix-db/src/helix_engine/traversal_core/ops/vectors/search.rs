@@ -5,7 +5,7 @@ use crate::helix_engine::{
     types::{GraphError, VectorError},
     vector_core::HVector,
 };
-use std::{iter::once, vec};
+use std::iter::once;
 
 pub trait SearchVAdapter<'db, 'arena, 'txn>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -37,7 +37,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         query: &'arena [f32],
         k: K,
         label: &'arena str,
-        filter: Option<&'arena [F]>,
+        _filter: Option<&'arena [F]>,
     ) -> RoTraversalIterator<
         'db,
         'arena,

@@ -40,7 +40,7 @@ impl<'t, D: Distance> Iterator for ItemIter<'t, D> {
         match self.inner.next() {
             Some(Ok((key, node))) => match node {
                 Node::Item(Item { header: _, vector }) => {
-                    let mut vector = vector.to_vec(&self.arena);
+                    let mut vector = vector.to_vec(self.arena);
                     if vector.len() != self.dimensions {
                         // quantized codecs pad to 8-bytes so we truncate to recover len
                         vector.truncate(self.dimensions);
@@ -49,7 +49,7 @@ impl<'t, D: Distance> Iterator for ItemIter<'t, D> {
                 }
                 Node::Links(_) => unreachable!("Node must not be a link"),
             },
-            Some(Err(e)) => Some(Err(e.into())),
+            Some(Err(e)) => Some(Err(e)),
             None => None,
         }
     }

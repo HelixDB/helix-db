@@ -386,7 +386,7 @@ mod node_serialization_tests {
 
         // Check that both have the same keys and values (regardless of order)
         for (key, old_value) in old_props.iter() {
-            let new_value = new_props.get(key).expect(&format!("Missing key: {}", key));
+            let new_value = new_props.get(key).unwrap_or_else(|| panic!("Missing key: {}", key));
             // For nested objects, we need to compare recursively since HashMap order may differ
             assert!(values_equal(old_value, new_value), "Value mismatch for key {}: {:?} != {:?}", key, old_value, new_value);
         }
@@ -413,7 +413,7 @@ mod node_serialization_tests {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
             }
             (Value::Object(a), Value::Object(b)) => {
-                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| values_equal(v, bv)))
+                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
             }
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Id(a), Value::Id(b)) => a == b,
@@ -602,14 +602,12 @@ mod node_serialization_tests {
     fn test_node_serialization_utf8_labels() {
         let arena = Bump::new();
 
-        let utf8_labels = vec![
-            "Hello",
+        let utf8_labels = ["Hello",
             "世界",
             "🚀🌟",
             "Привет",
             "مرحبا",
-            "Ñoño",
-        ];
+            "Ñoño"];
 
         for (idx, label) in utf8_labels.iter().enumerate() {
             let id = idx as u128;
@@ -843,7 +841,7 @@ mod edge_serialization_tests {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
             }
             (Value::Object(a), Value::Object(b)) => {
-                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| values_equal(v, bv)))
+                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
             }
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Id(a), Value::Id(b)) => a == b,
@@ -938,7 +936,7 @@ mod edge_serialization_tests {
 
         // Check semantic equality (order may differ)
         for (key, old_value) in old_props.iter() {
-            let new_value = new_props.get(key).expect(&format!("Missing key: {}", key));
+            let new_value = new_props.get(key).unwrap_or_else(|| panic!("Missing key: {}", key));
             assert!(values_equal(old_value, new_value), "Value mismatch for key {}", key);
         }
     }
@@ -1045,7 +1043,7 @@ mod edge_serialization_tests {
 
         // Compare nested values
         for (key, old_value) in old_props.iter() {
-            let new_value = new_props.get(key).expect(&format!("Missing key: {}", key));
+            let new_value = new_props.get(key).unwrap_or_else(|| panic!("Missing key: {}", key));
             assert!(values_equal(old_value, new_value), "Value mismatch for key {}: {:?} != {:?}", key, old_value, new_value);
         }
     }

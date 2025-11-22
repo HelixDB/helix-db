@@ -52,12 +52,7 @@ tracing = "0.1.41"
 core_affinity = "0.8.3"
 async-trait = "0.1.88"
 thiserror = "2.0.12"
-polars = { version = "0.46.0", features = [
-    "parquet",
-    "lazy",
-    "json",
-], optional = true }
-sha2 = "0.10"
+polars = { version = "0.46.0", features = ["parquet", "lazy", "json"], optional = true }
 subtle = "2.6.1"
 sha_256 = "=0.1.1"
 byteorder = "1.5.0"

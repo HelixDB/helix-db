@@ -368,7 +368,7 @@ fn test_double_add_and_double_fetch() {
     let arena = Bump::new();
     let mut txn = db.graph_env.write_txn().unwrap();
 
-    let original_node1 = G::new_mut(&db, &arena, &mut txn)
+    let original_node1 = G::new_mut(db, &arena, &mut txn)
         .add_n(
             "person",
             props_option(&arena, props! { "entity_name" => "person1" }),
@@ -376,7 +376,7 @@ fn test_double_add_and_double_fetch() {
         )
         .collect_to_obj().unwrap();
 
-    let original_node2 = G::new_mut(&db, &arena, &mut txn)
+    let original_node2 = G::new_mut(db, &arena, &mut txn)
         .add_n(
             "person",
             props_option(&arena, props! { "entity_name" => "person2" }),
@@ -387,26 +387,26 @@ fn test_double_add_and_double_fetch() {
     txn.commit().unwrap();
 
     let mut txn = db.graph_env.write_txn().unwrap();
-    let node1 = G::new(&db, &txn, &arena)
+    let node1 = G::new(db, &txn, &arena)
         .n_from_type("person")
         .filter_ref(|val, _| {
             if let Ok(val) = val {
                 Ok(val
                     .get_property("entity_name")
-                    .map_or(false, |v| *v == "person1"))
+                    .is_some_and(|v| *v == "person1"))
             } else {
                 Ok(false)
             }
         })
         .collect::<Result<Vec<_>,_>>().unwrap();
 
-    let node2 = G::new(&db, &txn, &arena)
+    let node2 = G::new(db, &txn, &arena)
         .n_from_type("person")
         .filter_ref(|val, _| {
             if let Ok(val) = val {
                 Ok(val
                     .get_property("entity_name")
-                    .map_or(false, |v| *v == "person2"))
+                    .is_some_and(|v| *v == "person2"))
             } else {
                 Ok(false)
             }
@@ -418,7 +418,7 @@ fn test_double_add_and_double_fetch() {
     assert_eq!(node2.len(), 1);
     assert_eq!(node2[0].id(), original_node2.id());
 
-    let _e = G::new_mut(&db, &arena, &mut txn)
+    let _e = G::new_mut(db, &arena, &mut txn)
         .add_edge(
             "knows",
             None,
@@ -431,7 +431,7 @@ fn test_double_add_and_double_fetch() {
     txn.commit().unwrap();
 
     let txn = db.graph_env.read_txn().unwrap();
-    let e = G::new(&db, &txn, &arena)
+    let e = G::new(db, &txn, &arena)
         .e_from_type("knows")
         .collect::<Result<Vec<_>,_>>().unwrap();
     assert_eq!(e.len(), 1);

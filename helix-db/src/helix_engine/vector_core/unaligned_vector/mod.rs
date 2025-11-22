@@ -95,7 +95,7 @@ impl<Codec: VectorCodec> UnalignedVector<Codec> {
         &self,
         arena: &'arena bumpalo::Bump,
     ) -> bumpalo::collections::Vec<'arena, f32> {
-        Codec::to_vec(self, &arena)
+        Codec::to_vec(self, arena)
     }
 
     /// Returns the len of the vector in terms of elements.

@@ -244,6 +244,7 @@ pub fn create_arena_vector<'arena>(
             distance: None,
             data: Some(Item::<Cosine>::new(bump_vec)),
             properties: None,
+            level: None,
         }
     } else {
         let len = props.len();
@@ -261,6 +262,7 @@ pub fn create_arena_vector<'arena>(
             distance: None,
             data: Some(Item::<Cosine>::new(bump_vec)),
             properties: Some(props_map),
+            level: None,
         }
     }
 }

@@ -26,12 +26,12 @@ pub struct VectorBuilder<'a, D: Distance, R: Rng + SeedableRng> {
     inner: BuildOption,
 }
 
-pub(crate) struct BuildOption {
-    pub(crate) ef_construction: usize,
-    pub(crate) alpha: f32,
-    pub(crate) available_memory: Option<usize>,
-    pub(crate) m: usize,
-    pub(crate) m_max_0: usize,
+pub struct BuildOption {
+    pub ef_construction: usize,
+    pub alpha: f32,
+    pub available_memory: Option<usize>,
+    pub m: usize,
+    pub m_max_0: usize,
 }
 
 impl BuildOption {
@@ -299,12 +299,11 @@ impl<D: Distance> Writer<D> {
     // Fetches the item's ids, not the links.
     fn item_indices(&self, wtxn: &mut RwTxn) -> VectorCoreResult<RoaringBitmap> {
         let mut indices = RoaringBitmap::new();
-        for (_, result) in self
+        for result in self
             .database
             .remap_types::<PrefixCodec, DecodeIgnore>()
             .prefix_iter(wtxn, &Prefix::item(self.index))?
             .remap_key_type::<KeyCodec>()
-            .enumerate()
         {
             let (i, _) = result?;
             indices.insert(i.node.unwrap_item());
@@ -363,6 +362,7 @@ impl<'a, D: Distance> FrozenReader<'a, D> {
 }
 
 /// Clears all the links. Starts from the last node and stops at the first item.
+#[allow(dead_code)]
 fn clear_links<D: Distance>(
     wtxn: &mut RwTxn,
     database: CoreDatabase<D>,

@@ -46,7 +46,7 @@ impl VectorCodec for f32 {
         arena: &'arena bumpalo::Bump,
     ) -> bumpalo::collections::Vec<'arena, f32> {
         let iter = vec.iter();
-        let mut ret = bumpalo::collections::Vec::with_capacity_in(iter.len(), &arena);
+        let mut ret = bumpalo::collections::Vec::with_capacity_in(iter.len(), arena);
         ret.extend(iter);
         ret
     }

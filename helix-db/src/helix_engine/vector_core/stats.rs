@@ -11,7 +11,7 @@ use crate::helix_engine::vector_core::node::{Links, Node};
 
 // TODO: ignore the phantom
 #[derive(Debug)]
-pub(crate) struct BuildStats<D> {
+pub struct BuildStats<D> {
     /// a counter to see how many times `HnswBuilder.add_link` is invoked
     pub n_links_added: AtomicUsize,
     /// a counter tracking how many times we hit lmdb
@@ -24,6 +24,12 @@ pub(crate) struct BuildStats<D> {
     pub link_misses: AtomicUsize,
 
     _phantom: PhantomData<D>,
+}
+
+impl<D: Distance> Default for BuildStats<D> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<D: Distance> BuildStats<D> {

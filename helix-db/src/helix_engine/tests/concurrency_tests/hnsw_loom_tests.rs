@@ -137,7 +137,7 @@ fn loom_neighbor_count_race() {
         // This test demonstrates the lost update problem
         // In real code, this should use fetch_add
         assert!(
-            final_count >= 1 && final_count <= 2,
+            (1..=2).contains(&final_count),
             "Expected 1 or 2, got {}",
             final_count
         );
@@ -176,7 +176,7 @@ fn loom_max_level_update_race() {
         // Should end up with max level of 3
         let final_max = max_level.load(Ordering::SeqCst);
         assert!(
-            final_max >= 2 && final_max <= 3,
+            (2..=3).contains(&final_max),
             "Expected 2 or 3, got {}",
             final_max
         );

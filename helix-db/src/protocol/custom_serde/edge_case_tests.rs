@@ -616,7 +616,7 @@ mod edge_case_tests {
         let arena = Bump::new();
         let id = 404404u128;
 
-        let large_array = Value::Array((0..1000).map(|i| Value::I32(i)).collect());
+        let large_array = Value::Array((0..1000).map(Value::I32).collect());
 
         let props = vec![("big_array", large_array)];
         let node = create_arena_node(&arena, id, "test", 0, props);

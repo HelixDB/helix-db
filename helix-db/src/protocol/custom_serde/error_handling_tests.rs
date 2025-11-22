@@ -265,7 +265,7 @@ mod error_handling_tests {
         let arena = Bump::new();
         // 7 bytes is not a multiple of 8 (size of f64)
         let misaligned: &[u8] = &[0, 1, 2, 3, 4, 5, 6];
-        HVector::raw_vector_data_to_vec(&misaligned, &arena);
+        HVector::raw_vector_data_to_vec(misaligned, &arena);
     }
 
     #[test]

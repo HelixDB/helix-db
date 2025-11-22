@@ -459,7 +459,7 @@ impl HybridSearch for HelixGraphStorage {
         // correct_score = alpha * bm25_score + (1.0 - alpha) * vector_score
         if let Some(vector_results) = vector_results? {
             for (doc_id, score) in vector_results {
-                let similarity = (1.0 / (1.0 + score)) as f32;
+                let similarity = 1.0 / (1.0 + score) ;
                 combined_scores
                     .entry(doc_id)
                     .and_modify(|existing_score| *existing_score += (1.0 - alpha) * similarity)

@@ -654,7 +654,7 @@ fn test_concurrent_graph_topology_consistency() {
     // Verify all edges point to valid nodes
     for result in storage.edges_db.iter(&rtxn).unwrap() {
         let (edge_id, edge_bytes) = result.unwrap();
-        let edge = crate::utils::items::Edge::from_bincode_bytes(edge_id, &edge_bytes, &arena).unwrap();
+        let edge = crate::utils::items::Edge::from_bincode_bytes(edge_id, edge_bytes, &arena).unwrap();
 
         // Verify source exists
         assert!(
