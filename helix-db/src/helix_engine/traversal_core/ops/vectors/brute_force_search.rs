@@ -1,7 +1,10 @@
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
-    vector_core::vector_distance::cosine_similarity,
+    vector_core::{
+        distance::{Cosine, Distance},
+        node::Item,
+    },
 };
 use itertools::Itertools;
 
@@ -10,7 +13,7 @@ pub trait BruteForceSearchVAdapter<'db, 'arena, 'txn>:
 {
     fn brute_force_search_v<K>(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         k: K,
     ) -> RoTraversalIterator<
         'db,
@@ -28,7 +31,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     fn brute_force_search_v<K>(
         self,
-        query: &'arena [f64],
+        _query: &'arena [f32],
         k: K,
     ) -> RoTraversalIterator<
         'db,
@@ -40,11 +43,15 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
+        let _arena = bumpalo::Bump::new();
         let iter = self
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.data, query).unwrap();
+                    let d = Cosine::distance(
+                        v.data.as_ref().unwrap(),
+                        &Item::<Cosine>::from_slice(v.data_borrowed()),
+                    );
                     v.set_distance(d);
                     Some(v)
                 }
@@ -52,14 +59,15 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             })
             .sorted_by(|v1, v2| v1.partial_cmp(v2).unwrap())
             .take(k.try_into().unwrap())
-            .filter_map(move |mut item| {
+            .filter_map(move |item| {
                 match self
                     .storage
                     .vectors
-                    .get_vector_properties(self.txn, *item.id(), self.arena)
+                    .get_vector_properties(self.txn, item.id, self.arena)
                 {
-                    Ok(Some(vector_without_data)) => {
-                        item.expand_from_vector_without_data(vector_without_data);
+                    Ok(Some(_vector_without_data)) => {
+                        // todo!
+                        // item.expand_from_vector_without_data(vector_without_data);
                         Some(item)
                     }
 

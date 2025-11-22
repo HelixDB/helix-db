@@ -3,7 +3,7 @@ use heed3::RoTxn;
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::{GraphError, VectorError},
-    vector_core::{hnsw::HNSW, vector::HVector},
+    vector_core::HVector,
 };
 use std::iter::once;
 
@@ -12,28 +12,7 @@ pub trait SearchVAdapter<'db, 'arena, 'txn>:
 {
     fn search_v<F, K>(
         self,
-        query: &'arena [f64],
-        k: K,
-        label: &'arena str,
-        filter: Option<&'arena [F]>,
-    ) -> RoTraversalIterator<
-        'db,
-        'arena,
-        'txn,
-        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    >
-    where
-        F: Fn(&HVector, &RoTxn) -> bool,
-        K: TryInto<usize>,
-        K::Error: std::fmt::Debug;
-}
-
-impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
-    SearchVAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
-{
-    fn search_v<F, K>(
-        self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         k: K,
         label: &'arena str,
         filter: Option<&'arena [F]>,
@@ -47,23 +26,54 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         F: Fn(&HVector, &RoTxn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
+        'txn: 'arena;
+}
+
+impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
+    SearchVAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
+{
+    fn search_v<F, K>(
+        self,
+        query: &'arena [f32],
+        k: K,
+        label: &'arena str,
+        _filter: Option<&'arena [F]>,
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+        K: TryInto<usize>,
+        K::Error: std::fmt::Debug,
+        'txn: 'arena,
     {
         let vectors = self.storage.vectors.search(
             self.txn,
-            query,
+            query.to_vec(),
             k.try_into().unwrap(),
             label,
-            filter,
             false,
             self.arena,
         );
 
         let iter = match vectors {
-            Ok(vectors) => vectors
-                .into_iter()
-                .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
-                .collect::<Vec<_>>()
-                .into_iter(),
+            Ok(vectors) => {
+                let hvectors = self.storage.vectors.nns_to_hvectors(
+                    self.txn,
+                    vectors.into_nns(),
+                    false,
+                    self.arena,
+                );
+
+                hvectors
+                    .into_iter()
+                    .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
             Err(VectorError::VectorNotFound(id)) => {
                 let error = GraphError::VectorError(format!("vector not found for id {id}"));
                 once(Err(error)).collect::<Vec<_>>().into_iter()

@@ -203,7 +203,9 @@ async fn main() -> Result<()> {
             port,
             dry_run,
             no_backup,
-        } => commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await,
+        } => {
+            commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await
+        }
     };
 
     // Shutdown metrics sender

@@ -12,7 +12,6 @@
 //!     .collect_to::<Vec<_>>()
 //! ```
 
-
 use crate::helix_engine::{
     reranker::reranker::Reranker,
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
@@ -25,7 +24,9 @@ pub struct RerankIterator<'arena, I: Iterator<Item = Result<TraversalValue<'aren
     iter: I,
 }
 
-impl<'arena, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>> Iterator for RerankIterator<'arena, I> {
+impl<'arena, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>> Iterator
+    for RerankIterator<'arena, I>
+{
     type Item = Result<TraversalValue<'arena>, GraphError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -34,7 +35,8 @@ impl<'arena, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>> Ite
 }
 
 /// Trait that adds reranking capability to traversal iterators.
-pub trait RerankAdapter<'arena, 'db, 'txn>: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
+pub trait RerankAdapter<'arena, 'db, 'txn>:
+    Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 where
     'db: 'arena,
     'arena: 'txn,
@@ -61,7 +63,12 @@ where
         self,
         reranker: R,
         query: Option<&str>,
-    ) -> RoTraversalIterator<'db, 'arena, 'txn, impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>;
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
 }
 
 impl<'db, 'arena, 'txn, I> RerankAdapter<'arena, 'db, 'txn>
@@ -75,7 +82,12 @@ where
         self,
         reranker: R,
         query: Option<&str>,
-    ) -> RoTraversalIterator<'db, 'arena, 'txn, impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>> {
+    ) -> RoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
         // Collect all items from the iterator
         let items = self.inner.filter_map(|item| item.ok());
 
@@ -106,7 +118,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helix_engine::{reranker::fusion::RRFReranker, vector_core::vector::HVector};
+    use crate::helix_engine::{reranker::fusion::RRFReranker, vector_core::HVector};
 
     #[test]
     fn test_rerank_adapter_trait() {
@@ -119,11 +131,11 @@ mod tests {
     #[test]
     fn test_rerank_iterator() {
         let arena = bumpalo::Bump::new();
-        let data1 = arena.alloc_slice_copy(&[1.0]);
-        let data2 = arena.alloc_slice_copy(&[2.0]);
+        let data1 = bumpalo::vec![in &arena; 1.0];
+        let data2 = bumpalo::vec![in &arena; 2.0];
         let items = vec![
-            Ok(TraversalValue::Vector(HVector::from_slice("test", 0, data1))),
-            Ok(TraversalValue::Vector(HVector::from_slice("test", 0, data2))),
+            Ok(TraversalValue::Vector(HVector::from_vec("test", data1))),
+            Ok(TraversalValue::Vector(HVector::from_vec("test", data2))),
         ];
 
         let mut iter = RerankIterator {

@@ -88,7 +88,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                 .vectors
                                 .get_vector_properties(self.txn, item_id, self.arena)
                             {
-                                return Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vec)));
+                                return Some(Ok(TraversalValue::Vector(vec)));
                             }
                             None
                         } else {

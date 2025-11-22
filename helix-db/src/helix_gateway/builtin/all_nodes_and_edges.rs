@@ -98,7 +98,7 @@ pub fn nodes_edges_inner(input: HandlerInput) -> Result<protocol::Response, Grap
 
     let vectors_result = db
         .vectors
-        .get_all_vectors(&txn, None, &arena)
+        .get_all_vectors(&txn, true, &arena)
         .map(|vecs| {
             let vectors_json: Vec<sonic_rs::Value> = vecs
                 .iter()
@@ -108,7 +108,7 @@ pub fn nodes_edges_inner(input: HandlerInput) -> Result<protocol::Response, Grap
                         "level": v.level,
                         "distance": v.distance,
                         "data": v.data,
-                        "dimension": v.data.len()
+                        "dimension": v.data.as_ref().unwrap().vector.len()
                     })
                 })
                 .collect();
@@ -149,10 +149,11 @@ fn get_all_nodes_edges_json(
             let node = Node::from_bincode_bytes(id, value, arena)?;
             json_node["label"] = json!(node.label);
             if let Some(props) = node.properties
-                && let Some(prop_value) = props.get(prop) {
-                    json_node["label"] = sonic_rs::to_value(&prop_value.inner_stringify())
-                        .unwrap_or_else(|_| sonic_rs::Value::from(""));
-                }
+                && let Some(prop_value) = props.get(prop)
+            {
+                json_node["label"] = sonic_rs::to_value(&prop_value.inner_stringify())
+                    .unwrap_or_else(|_| sonic_rs::Value::from(""));
+            }
         }
         nodes.push(json_node);
     }
@@ -190,9 +191,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use axum::body::Bytes;
     use crate::{
         helix_engine::{
             storage_core::version_info::VersionInfo,
@@ -201,16 +199,15 @@ mod tests {
                 config::Config,
                 ops::{
                     g::G,
-                    source::{
-                        add_e::AddEAdapter,
-                        add_n::AddNAdapter,
-                    },
+                    source::{add_e::AddEAdapter, add_n::AddNAdapter},
                 },
             },
         },
-        protocol::{request::Request, request::RequestType, Format},
-        helixc::generator::traversal_steps::EdgeType,
+        protocol::{Format, request::Request, request::RequestType},
     };
+    use axum::body::Bytes;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -239,7 +236,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_edges_inner(input);
@@ -263,10 +259,12 @@ mod tests {
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
-        let props1 = vec![("name", Value::String("Alice".to_string()))];
+        let props1 = [("name", Value::String("Alice".to_string()))];
         let props_map1 = ImmutablePropertiesMap::new(
             props1.len(),
-            props1.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props1
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -274,10 +272,12 @@ mod tests {
             .add_n(arena.alloc_str("person"), Some(props_map1), None)
             .collect_to_obj()?;
 
-        let props2 = vec![("name", Value::String("Bob".to_string()))];
+        let props2 = [("name", Value::String("Bob".to_string()))];
         let props_map2 = ImmutablePropertiesMap::new(
             props2.len(),
-            props2.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props2
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -286,7 +286,13 @@ mod tests {
             .collect_to_obj()?;
 
         let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
-            .add_edge(arena.alloc_str("knows"), None, node1.id(), node2.id(), false)
+            .add_edge(
+                arena.alloc_str("knows"),
+                None,
+                node1.id(),
+                node2.id(),
+                false,
+            )
             .collect_to_obj()?;
 
         txn.commit().unwrap();
@@ -303,7 +309,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_edges_inner(input);
@@ -327,10 +332,12 @@ mod tests {
 
         let mut nodes = Vec::new();
         for i in 0..10 {
-            let props = vec![("index", Value::I64(i))];
+            let props = [("index", Value::I64(i))];
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
 
@@ -343,7 +350,13 @@ mod tests {
         // Add some edges to satisfy the nodes_edges_to_json method
         for i in 0..5 {
             let _edge = G::new_mut(&engine.storage, &arena, &mut txn)
-                .add_edge(arena.alloc_str("connects"), None, nodes[i].id(), nodes[i+1].id(), false)
+                .add_edge(
+                    arena.alloc_str("connects"),
+                    None,
+                    nodes[i].id(),
+                    nodes[i + 1].id(),
+                    false,
+                )
                 .collect_to_obj()?;
         }
 
@@ -362,7 +375,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-
         };
 
         let result = nodes_edges_inner(input);
@@ -382,10 +394,12 @@ mod tests {
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
-        let props = vec![("name", Value::String("Test".to_string()))];
+        let props = [("name", Value::String("Test".to_string()))];
         let props_map = ImmutablePropertiesMap::new(
             props.len(),
-            props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 
@@ -408,7 +422,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_edges_inner(input);
@@ -431,7 +444,6 @@ mod tests {
         let input = HandlerInput {
             graph: Arc::new(engine),
             request,
-            
         };
 
         let result = nodes_edges_inner(input);
