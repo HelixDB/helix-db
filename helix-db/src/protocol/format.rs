@@ -201,7 +201,8 @@ mod tests {
     fn test_format_deserialize_invalid_json() {
         let invalid_json = b"not valid json {";
 
-        let result: Result<MaybeOwned<TestData>, GraphError> = Format::Json.deserialize(invalid_json);
+        let result: Result<MaybeOwned<TestData>, GraphError> =
+            Format::Json.deserialize(invalid_json);
         assert!(result.is_err());
 
         if let Err(GraphError::DecodeError(msg)) = result {

@@ -336,9 +336,10 @@ fn test_gateway_opts_default_workers_per_core() {
 
 #[cfg(feature = "api-key")]
 mod api_key_tests {
+
     use crate::helix_gateway::key_verification::verify_key;
-    use crate::protocol::request::Request;
-    use crate::protocol::{Format, HelixError};
+    use crate::protocol::Format;
+    use crate::protocol::{HelixError, request::Request};
     use axum::body::Bytes;
 
     #[test]
