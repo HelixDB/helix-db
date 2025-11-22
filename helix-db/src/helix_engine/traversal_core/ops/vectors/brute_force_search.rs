@@ -48,11 +48,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let mut bump_vec = bumpalo::collections::Vec::new_in(self.arena);
-                    bump_vec.extend_from_slice(v.data_borrowed());
-
-                    let d =
-                        Cosine::distance(v.data.as_ref().unwrap(), &Item::<Cosine>::new(bump_vec));
+                    let d = Cosine::distance(
+                        v.data.as_ref().unwrap(),
+                        &Item::<Cosine>::from_slice(v.data_borrowed()),
+                    );
                     v.set_distance(d);
                     Some(v)
                 }
