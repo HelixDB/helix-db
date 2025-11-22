@@ -53,7 +53,7 @@ impl GraphVisualization for HelixGraphStorage {
         let result = json!({
             "num_nodes":   self.nodes_db.len(txn).unwrap_or(0),
             "num_edges":   self.edges_db.len(txn).unwrap_or(0),
-            "num_vectors": self.vectors.stats.num_vectors,
+            "num_vectors": self.vectors.num_inserted_vectors(),
         });
         debug_println!("db stats json: {:?}", result);
 
