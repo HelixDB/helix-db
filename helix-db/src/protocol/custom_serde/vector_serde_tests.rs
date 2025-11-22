@@ -205,7 +205,7 @@ mod vector_serialization_tests {
         let data = vec![1.0, 2.0, 3.0, 4.0];
         let raw_bytes = create_vector_bytes(&data);
 
-        let vector = HVector::from_raw_vector_data(&arena, &raw_bytes, label, id).unwrap();
+        let vector = HVector::from_raw_vector_data(id, label, &raw_bytes).unwrap();
 
         assert_eq!(vector.id, id);
         assert_eq!(vector.label, label);

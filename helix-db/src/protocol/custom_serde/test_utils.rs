@@ -242,7 +242,7 @@ pub fn create_arena_vector<'arena>(
             version,
             deleted,
             distance: None,
-            data: Some(Item::<Cosine>::new(bump_vec)),
+            data: Some(Item::<Cosine>::from_vec(bump_vec)),
             properties: None,
             level: None,
         }
@@ -260,7 +260,7 @@ pub fn create_arena_vector<'arena>(
             version,
             deleted,
             distance: None,
-            data: Some(Item::<Cosine>::new(bump_vec)),
+            data: Some(Item::<Cosine>::from_vec(bump_vec)),
             properties: Some(props_map),
             level: None,
         }
