@@ -36,7 +36,7 @@ impl HelixParser {
                     Rule::float => value_pair
                         .as_str()
                         .parse()
-                        .map(|f| ValueType::new(Value::F64(f), value_pair.loc()))
+                        .map(|f| ValueType::new(Value::F32(f), value_pair.loc()))
                         .map_err(|_| ParserError::from("Invalid float value")),
                     Rule::boolean => Ok(ValueType::new(
                         Value::Boolean(value_pair.as_str() == "true"),
@@ -101,7 +101,7 @@ impl HelixParser {
             },
             Rule::float => FieldValue {
                 loc: value_pair.loc(),
-                value: FieldValueType::Literal(Value::F64(
+                value: FieldValueType::Literal(Value::F32(
                     value_pair
                         .as_str()
                         .parse()
@@ -193,7 +193,7 @@ impl HelixParser {
             },
             Rule::float => FieldValue {
                 loc: value_pair.loc(),
-                value: FieldValueType::Literal(Value::F64(
+                value: FieldValueType::Literal(Value::F32(
                     value_pair
                         .as_str()
                         .parse()
