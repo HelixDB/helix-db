@@ -106,8 +106,8 @@ impl<D: Distance> Writer<D> {
     }
 
     /// Returns `true` if the index is empty.
-    pub fn is_empty(&self, rtxn: &RoTxn, arena: &bumpalo::Bump) -> VectorCoreResult<bool> {
-        self.iter(rtxn, arena).map(|mut iter| iter.next().is_none())
+    pub fn is_empty(&self, rtxn: &RoTxn) -> VectorCoreResult<bool> {
+        self.iter(rtxn).map(|mut iter| iter.next().is_none())
     }
 
     /// Returns `true` if the index needs to be built before being able to read in it.

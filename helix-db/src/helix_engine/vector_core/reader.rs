@@ -223,9 +223,10 @@ impl<'a> Visitor<'a> {
                 if res.len() < self.ef || dist < f_max {
                     search_queue.push((Reverse(OrderedFloat(dist)), point));
                     if let Some(c) = self.candidates
-                        && !c.contains(point) {
-                            continue;
-                        }
+                        && !c.contains(point)
+                    {
+                        continue;
+                    }
                     if res.len() == self.ef {
                         let _ = res.push_pop_max((OrderedFloat(dist), point));
                     } else {
@@ -488,8 +489,8 @@ impl<D: Distance> Reader<D> {
     }
 
     /// Returns `true` if the index is empty.
-    pub fn is_empty(&self, rtxn: &RoTxn, arena: &bumpalo::Bump) -> VectorCoreResult<bool> {
-        self.iter(rtxn, arena).map(|mut iter| iter.next().is_none())
+    pub fn is_empty(&self, rtxn: &RoTxn) -> VectorCoreResult<bool> {
+        self.iter(rtxn).map(|mut iter| iter.next().is_none())
     }
 
     /// Returns `true` if the database contains the given item.
@@ -502,12 +503,8 @@ impl<D: Distance> Reader<D> {
     }
 
     /// Returns an iterator over the items vector.
-    pub fn iter<'t>(
-        &self,
-        rtxn: &'t RoTxn,
-        arena: &'t bumpalo::Bump,
-    ) -> VectorCoreResult<ItemIter<'t, D>> {
-        ItemIter::new(self.database, self.index, self.dimensions, rtxn, arena).map_err(Into::into)
+    pub fn iter<'t>(&self, rtxn: &'t RoTxn) -> VectorCoreResult<ItemIter<'t, D>> {
+        ItemIter::new(self.database, self.index, self.dimensions, rtxn).map_err(Into::into)
     }
 
     /// Return a [`QueryBuilder`] that lets you configure and execute a search request.
