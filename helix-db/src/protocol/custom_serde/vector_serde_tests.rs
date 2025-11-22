@@ -142,7 +142,7 @@ mod vector_serialization_tests {
         let vector = create_simple_vector(&arena, id, "vector_128", &data);
         let bytes = vector.vector_data_to_bytes().unwrap();
 
-        assert_eq!(bytes.len(), 128 * 8); // 128 dimensions * 8 bytes per f32
+        assert_eq!(bytes.len(), 128 * 4); // 128 dimensions * 4 bytes per f32
     }
 
     #[test]
@@ -154,7 +154,7 @@ mod vector_serialization_tests {
         let vector = create_simple_vector(&arena, id, "vector_384", &data);
         let bytes = vector.vector_data_to_bytes().unwrap();
 
-        assert_eq!(bytes.len(), 384 * 8);
+        assert_eq!(bytes.len(), 384 * 4);
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod vector_serialization_tests {
         let vector = create_simple_vector(&arena, id, "vector_1536", &data);
         let bytes = vector.vector_data_to_bytes().unwrap();
 
-        assert_eq!(bytes.len(), 1536 * 8);
+        assert_eq!(bytes.len(), 1536 * 4);
     }
 
     #[test]
