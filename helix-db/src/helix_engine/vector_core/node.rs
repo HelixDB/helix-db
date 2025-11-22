@@ -66,7 +66,7 @@ impl<D: Distance> Clone for Item<'_, D> {
     }
 }
 
-impl<D: Distance> Item<'_, D> {
+impl<'a, D: Distance> Item<'a, D> {
     /// Converts the item into an owned version of itself by cloning
     /// the internal vector. Doing so will make it mutable.
     pub fn into_owned(self) -> Item<'static, D> {
@@ -89,8 +89,25 @@ impl<D: Distance> Item<'_, D> {
         }
     }
 
+    /// Builds a new borrowed item from a `&[u8]` slice.
+    /// This function do not allocates
+    pub fn from_raw_slice(slice: &'a [u8]) -> Self {
+        let vector = UnalignedVector::from_slice(bytemuck::cast_slice(slice));
+        let header = D::new_header(&vector);
+        Self { header, vector }
+    }
+
+    /// Builds a new borrowed item from a `&[f32]` slice.
+    /// This function do not allocates
+    pub fn from_slice(slice: &'a [f32]) -> Self {
+        let vector = UnalignedVector::from_slice(slice);
+        let header = D::new_header(&vector);
+        Self { header, vector }
+    }
+
     /// Builds a new item from a `Vec<f32>`.
-    pub fn new(vec: bumpalo::collections::Vec<f32>) -> Self {
+    /// This function allocates
+    pub fn from_vec(vec: bumpalo::collections::Vec<f32>) -> Self {
         let vector = UnalignedVector::from_vec(vec);
         let header = D::new_header(&vector);
         Self { header, vector }

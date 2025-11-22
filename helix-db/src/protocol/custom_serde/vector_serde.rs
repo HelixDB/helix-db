@@ -102,7 +102,7 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
                     deleted,
                     version,
                     distance: None,
-                    data: Some(Item::<Cosine>::new(data)),
+                    data: Some(Item::<Cosine>::from_vec(data)),
                     properties,
                     level: None,
                 })
