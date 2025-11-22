@@ -31,7 +31,7 @@ pub struct MathFunctionCallGen {
 
 #[derive(Debug, Clone)]
 pub struct NumericLiteral {
-    pub value: f64,
+    pub value: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -54,10 +54,10 @@ impl Display for MathExpr {
 impl Display for NumericLiteral {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Handle special formatting for cleaner output
-        if self.value.fract() == 0.0 && self.value.abs() < i64::MAX as f64 {
-            write!(f, "{}_f64", self.value as i64)
+        if self.value.fract() == 0.0 && self.value.abs() < i64::MAX as f32 {
+            write!(f, "{}_f32", self.value as i64)
         } else {
-            write!(f, "{}_f64", self.value)
+            write!(f, "{}_f32", self.value)
         }
     }
 }
@@ -66,16 +66,32 @@ impl Display for PropertyAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.context {
             PropertyContext::Edge => {
-                write!(f, "(edge.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(edge.get_property({}).ok_or(GraphError::Default)?.as_f32())",
+                    self.property
+                )
             }
             PropertyContext::SourceNode => {
-                write!(f, "(src_node.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(src_node.get_property({}).ok_or(GraphError::Default)?.as_f32())",
+                    self.property
+                )
             }
             PropertyContext::TargetNode => {
-                write!(f, "(dst_node.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(dst_node.get_property({}).ok_or(GraphError::Default)?.as_f32())",
+                    self.property
+                )
             }
             PropertyContext::Current => {
-                write!(f, "(v.get_property({}).ok_or(GraphError::Default)?.as_f64())", self.property)
+                write!(
+                    f,
+                    "(v.get_property({}).ok_or(GraphError::Default)?.as_f32())",
+                    self.property
+                )
             }
         }
     }
@@ -223,8 +239,8 @@ impl Display for MathFunctionCallGen {
             }
 
             // Constants (nullary)
-            MathFunction::Pi => write!(f, "std::f64::consts::PI"),
-            MathFunction::E => write!(f, "std::f64::consts::E"),
+            MathFunction::Pi => write!(f, "std::f32::consts::PI"),
+            MathFunction::E => write!(f, "std::f32::consts::E"),
 
             // Aggregates (special handling needed)
             MathFunction::Min
@@ -270,7 +286,7 @@ pub fn generate_math_expr(
             }))
         }
         ExpressionType::IntegerLiteral(i) => Ok(MathExpr::NumericLiteral(NumericLiteral {
-            value: *i as f64,
+            value: *i as f32,
         })),
         ExpressionType::FloatLiteral(f) => {
             Ok(MathExpr::NumericLiteral(NumericLiteral { value: *f }))
@@ -307,22 +323,35 @@ fn parse_property_access_from_traversal(
     } else if traversal.steps.len() == 2 {
         // Check if first step is FromN or ToN
         match &traversal.steps[0].step {
-            StepType::Node(graph_step) => {
-                match &graph_step.step {
-                    GraphStepType::FromN => (PropertyContext::SourceNode, 1),
-                    GraphStepType::ToN => (PropertyContext::TargetNode, 1),
-                    _ => return Err(format!("Unexpected node step type in property access: {:?}", graph_step.step)),
+            StepType::Node(graph_step) => match &graph_step.step {
+                GraphStepType::FromN => (PropertyContext::SourceNode, 1),
+                GraphStepType::ToN => (PropertyContext::TargetNode, 1),
+                _ => {
+                    return Err(format!(
+                        "Unexpected node step type in property access: {:?}",
+                        graph_step.step
+                    ));
                 }
+            },
+            _ => {
+                return Err(format!(
+                    "Expected FromN or ToN step, got: {:?}",
+                    traversal.steps[0].step
+                ));
             }
-            _ => return Err(format!("Expected FromN or ToN step, got: {:?}", traversal.steps[0].step)),
         }
     } else {
-        return Err(format!("Invalid traversal length for property access: {}", traversal.steps.len()));
+        return Err(format!(
+            "Invalid traversal length for property access: {}",
+            traversal.steps.len()
+        ));
     };
 
     // Extract property name from the Object step
     if let StepType::Object(obj) = &traversal.steps[property_step_idx].step
-        && obj.fields.len() == 1 && !obj.should_spread {
+        && obj.fields.len() == 1
+        && !obj.should_spread
+    {
         let property_name = obj.fields[0].key.clone();
 
         // Override context if specified by ExpressionContext
@@ -347,13 +376,13 @@ mod tests {
     #[test]
     fn test_numeric_literal_integer() {
         let lit = NumericLiteral { value: 5.0 };
-        assert_eq!(lit.to_string(), "5_f64");
+        assert_eq!(lit.to_string(), "5_f32");
     }
 
     #[test]
     fn test_numeric_literal_float() {
         let lit = NumericLiteral { value: 3.14 };
-        assert_eq!(lit.to_string(), "3.14_f64");
+        assert_eq!(lit.to_string(), "3.14_f32");
     }
 
     #[test]
@@ -365,7 +394,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 3.0 }),
             ],
         };
-        assert_eq!(add.to_string(), "(5_f64 + 3_f64)");
+        assert_eq!(add.to_string(), "(5_f32 + 3_f32)");
     }
 
     #[test]
@@ -377,7 +406,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 30.0 }),
             ],
         };
-        assert_eq!(pow.to_string(), "(0.95_f64).powf(30_f64)");
+        assert_eq!(pow.to_string(), "(0.95_f32).powf(30_f32)");
     }
 
     #[test]
@@ -395,7 +424,7 @@ mod tests {
                 }),
             ],
         };
-        assert_eq!(nested.to_string(), "(0.95_f64).powf((10_f64 / 30_f64))");
+        assert_eq!(nested.to_string(), "(0.95_f32).powf((10_f32 / 30_f32))");
     }
 
     #[test]
@@ -404,7 +433,7 @@ mod tests {
             function: MathFunction::Sqrt,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 16.0 })],
         };
-        assert_eq!(sqrt.to_string(), "(16_f64).sqrt()");
+        assert_eq!(sqrt.to_string(), "(16_f32).sqrt()");
     }
 
     #[test]
@@ -413,7 +442,7 @@ mod tests {
             function: MathFunction::Sin,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.57 })],
         };
-        assert_eq!(sin.to_string(), "(1.57_f64).sin()");
+        assert_eq!(sin.to_string(), "(1.57_f32).sin()");
     }
 
     #[test]
@@ -422,13 +451,13 @@ mod tests {
             function: MathFunction::Pi,
             args: vec![],
         };
-        assert_eq!(pi.to_string(), "std::f64::consts::PI");
+        assert_eq!(pi.to_string(), "std::f32::consts::PI");
 
         let e = MathFunctionCallGen {
             function: MathFunction::E,
             args: vec![],
         };
-        assert_eq!(e.to_string(), "std::f64::consts::E");
+        assert_eq!(e.to_string(), "std::f32::consts::E");
     }
 
     #[test]
@@ -440,7 +469,7 @@ mod tests {
         };
         assert_eq!(
             edge_prop.to_string(),
-            "(edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64())"
+            "(edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f32())"
         );
 
         // Test SourceNode context
@@ -450,7 +479,7 @@ mod tests {
         };
         assert_eq!(
             src_prop.to_string(),
-            "(src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f64())"
+            "(src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f32())"
         );
 
         // Test TargetNode context
@@ -460,14 +489,14 @@ mod tests {
         };
         assert_eq!(
             dst_prop.to_string(),
-            "(dst_node.get_property(\"popularity\").ok_or(GraphError::Default)?.as_f64())"
+            "(dst_node.get_property(\"popularity\").ok_or(GraphError::Default)?.as_f32())"
         );
     }
 
     #[test]
     fn test_complex_weight_expression() {
         // Test: MUL(_::{distance}, POW(0.95, DIV(_::{days}, 30)))
-        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f64()) * (0.95_f64).powf(((edge.get_property("days").ok_or(GraphError::Default)?.as_f64()) / 30_f64)))
+        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f32()) * (0.95_f32).powf(((edge.get_property("days").ok_or(GraphError::Default)?.as_f32()) / 30_f32)))
         let expr = MathFunctionCallGen {
             function: MathFunction::Mul,
             args: vec![
@@ -496,14 +525,14 @@ mod tests {
 
         assert_eq!(
             expr.to_string(),
-            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64()) * (0.95_f64).powf(((edge.get_property(\"days\").ok_or(GraphError::Default)?.as_f64()) / 30_f64)))"
+            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f32()) * (0.95_f32).powf(((edge.get_property(\"days\").ok_or(GraphError::Default)?.as_f32()) / 30_f32)))"
         );
     }
 
     #[test]
     fn test_multi_context_expression() {
         // Test: MUL(_::{distance}, _::From::{traffic_factor})
-        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f64()) * (src_node.get_property("traffic_factor").ok_or(GraphError::Default)?.as_f64()))
+        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f32()) * (src_node.get_property("traffic_factor").ok_or(GraphError::Default)?.as_f32()))
         let expr = MathFunctionCallGen {
             function: MathFunction::Mul,
             args: vec![
@@ -520,7 +549,7 @@ mod tests {
 
         assert_eq!(
             expr.to_string(),
-            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64()) * (src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f64()))"
+            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f32()) * (src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f32()))"
         );
     }
 }
