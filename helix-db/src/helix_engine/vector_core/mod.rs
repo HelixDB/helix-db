@@ -14,7 +14,7 @@ use heed3::{
     types::{Bytes, U128},
 };
 use rand::{SeedableRng, rngs::StdRng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
     helix_engine::{
@@ -127,7 +127,7 @@ impl<'arena> HVector<'arena> {
             id,
             label,
             version: 1,
-            data: Some(Item::<Cosine>::new(data)),
+            data: Some(Item::<Cosine>::from_vec(data)),
             distance: None,
             properties: None,
             deleted: false,
@@ -233,12 +233,23 @@ impl<'arena> HVector<'arena> {
     }
 
     pub fn from_raw_vector_data<'txn>(
-        _arena: &'arena bumpalo::Bump,
-        _raw_vector_data: &'txn [u8],
-        _label: &'arena str,
-        _id: u128,
-    ) -> Result<Self, VectorError> {
-        todo!()
+        id: u128,
+        label: &'arena str,
+        raw_vector_data: &'txn [u8],
+    ) -> VectorCoreResult<HVector<'txn>>
+    where
+        'arena: 'txn,
+    {
+        Ok(HVector {
+            id,
+            label,
+            data: Some(Item::<Cosine>::from_raw_slice(raw_vector_data)),
+            properties: None,
+            distance: None,
+            deleted: false,
+            level: Some(0),
+            version: 1,
+        })
     }
 }
 
