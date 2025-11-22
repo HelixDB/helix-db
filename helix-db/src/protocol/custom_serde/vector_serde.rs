@@ -104,6 +104,7 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
                     distance: None,
                     data: Some(Item::<Cosine>::new(data)),
                     properties,
+                    level: None,
                 })
             }
         }
@@ -170,6 +171,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
                     deleted,
                     properties,
                     distance: None,
+                    level: None,
                     data: None,
                 })
             }

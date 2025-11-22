@@ -17,7 +17,7 @@ unsafe fn hsum128_ps_sse(x: __m128) -> f32 {
 pub(crate) unsafe fn euclid_similarity_sse(
     v1: &UnalignedVector<f32>,
     v2: &UnalignedVector<f32>,
-) -> f32 {
+) -> f32 { unsafe {
     // It is safe to load unaligned floats from a pointer.
     // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadu_ps&ig_expand=4131>
 
@@ -58,13 +58,13 @@ pub(crate) unsafe fn euclid_similarity_sse(
         result += (a - b).powi(2);
     }
     result
-}
+}}
 
 #[target_feature(enable = "sse")]
 pub(crate) unsafe fn dot_similarity_sse(
     v1: &UnalignedVector<f32>,
     v2: &UnalignedVector<f32>,
-) -> f32 {
+) -> f32 { unsafe {
     // It is safe to load unaligned floats from a pointer.
     // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadu_ps&ig_expand=4131>
 
@@ -111,7 +111,7 @@ pub(crate) unsafe fn dot_similarity_sse(
         result += a * b;
     }
     result
-}
+}}
 
 #[cfg(test)]
 mod tests {

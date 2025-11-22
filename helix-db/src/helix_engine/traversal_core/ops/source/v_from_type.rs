@@ -1,9 +1,9 @@
 use crate::helix_engine::{
     traversal_core::{
-        LMDB_STRING_HEADER_LENGTH, traversal_iter::RoTraversalIterator,
+        traversal_iter::RoTraversalIterator,
         traversal_value::TraversalValue,
     },
-    types::{GraphError, VectorError},
+    types::GraphError,
 };
 
 pub trait VFromTypeAdapter<'db, 'arena, 'txn>:
@@ -31,21 +31,21 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     fn v_from_type(
         self,
         label: &'arena str,
-        get_vector_data: bool,
+        _get_vector_data: bool,
     ) -> RoTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
-        let label_bytes = label.as_bytes();
+        let _label_bytes = label.as_bytes();
         let iter = self
             .storage
             .vectors
             .vector_properties_db
             .iter(self.txn)
             .unwrap()
-            .filter_map(move |item| todo!());
+            .filter_map(move |_item| todo!());
 
         RoTraversalIterator {
             storage: self.storage,

@@ -1,9 +1,5 @@
 use std::{
-    borrow::Cow,
-    cell::RefCell,
     cmp::Ordering,
-    hash::Hash,
-    io::Read,
     sync::{
         RwLock,
         atomic::{self, AtomicU16, AtomicU32, AtomicUsize},
@@ -24,12 +20,10 @@ use crate::{
     helix_engine::{
         types::VectorError,
         vector_core::{
-            distance::{Cosine, Distance, DistanceValue},
-            key::{Key, KeyCodec},
+            distance::Cosine,
+            key::KeyCodec,
             node::{Item, NodeCodec},
-            node_id::NodeMode,
             reader::{Reader, Searched, get_item},
-            unaligned_vector::UnalignedVector,
             writer::Writer,
         },
     },
@@ -76,6 +70,7 @@ pub struct HVector<'arena> {
     // TODO: String Interning
     pub label: &'arena str,
     pub deleted: bool,
+    pub level: Option<usize>,
     pub version: u8,
     pub properties: Option<ImmutablePropertiesMap<'arena>>,
     pub data: Option<Item<'arena, Cosine>>,
@@ -96,6 +91,7 @@ impl<'arena> HVector<'arena> {
             distance: None,
             properties: None,
             deleted: false,
+            level: None,
         }
     }
 
@@ -157,7 +153,7 @@ impl<'arena> HVector<'arena> {
         bincode::serialize(self)
     }
 
-    pub fn distance_to(&self, rhs: &HVector<'arena>) -> VectorCoreResult<f64> {
+    pub fn distance_to(&self, _rhs: &HVector<'arena>) -> VectorCoreResult<f64> {
         todo!()
     }
 
@@ -192,10 +188,10 @@ impl<'arena> HVector<'arena> {
     }
 
     pub fn from_raw_vector_data<'txn>(
-        arena: &'arena bumpalo::Bump,
-        raw_vector_data: &'txn [u8],
-        label: &'arena str,
-        id: u128,
+        _arena: &'arena bumpalo::Bump,
+        _raw_vector_data: &'txn [u8],
+        _label: &'arena str,
+        _id: u128,
     ) -> Result<Self, VectorError> {
         todo!()
     }
@@ -357,7 +353,7 @@ impl VectorCore {
         txn: &mut RwTxn,
         label: &'arena str,
         data: &'arena [f32],
-        properties: Option<ImmutablePropertiesMap<'arena>>,
+        _properties: Option<ImmutablePropertiesMap<'arena>>,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
         // index hasn't been built yet
@@ -431,7 +427,7 @@ impl VectorCore {
         let global_id = local_to_global_id.get(item_id).unwrap();
         let (_, label) = global_to_local_id.get(global_id).unwrap();
         let (index, _) = label_to_index.get(label).unwrap();
-        let label = arena.alloc_str(&label);
+        let label = arena.alloc_str(label);
 
         if with_data {
             for (item_id, distance) in nns.into_iter() {
@@ -442,6 +438,7 @@ impl VectorCore {
                     distance: Some(distance),
                     label,
                     deleted: false,
+                    level: None,
                     version: 0,
                     properties: None,
                     data: get_item(self.hsnw_index, *index, txn, item_id).unwrap(),
@@ -458,6 +455,7 @@ impl VectorCore {
                     deleted: false,
                     version: 0,
                     properties: None,
+                    level: None,
                     data: None,
                 });
             }
@@ -477,16 +475,17 @@ impl VectorCore {
 
         let (item_id, label) = global_to_local_id.get(&id).unwrap();
         let (index, _) = label_to_index.get(label).unwrap();
-        let label = arena.alloc_str(&label);
+        let label = arena.alloc_str(label);
 
         let item = get_item(self.hsnw_index, *index, txn, *item_id)?.map(|i| i.clone_in(arena));
 
         Ok(HVector {
-            id: id,
+            id,
             distance: None,
             label,
             deleted: false,
             version: 0,
+            level: None,
             properties: None,
             data: item.clone(),
         })
@@ -494,14 +493,23 @@ impl VectorCore {
 
     pub fn get_vector_properties<'arena>(
         &self,
-        txn: &RoTxn,
-        id: u128,
-        arena: &bumpalo::Bump,
+        _txn: &RoTxn,
+        _id: u128,
+        _arena: &bumpalo::Bump,
     ) -> VectorCoreResult<Option<HVector<'arena>>> {
         todo!()
     }
 
     pub fn num_inserted_vectors(&self) -> usize {
         self.stats.num_vectors.load(atomic::Ordering::SeqCst)
+    }
+
+    pub fn get_all_vectors<'arena>(
+        &self,
+        _txn: &RoTxn,
+        _level: Option<usize>,
+        _arena: &bumpalo::Bump,
+    ) -> VectorCoreResult<bumpalo::collections::Vec<'_, HVector<'arena>>> {
+        todo!()
     }
 }
