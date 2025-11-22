@@ -9,11 +9,11 @@ QUERY testString(value: String) =>
 QUERY testI8(value: I8) =>
     node <- N<TestNode>({i8_field: value})
     RETURN node
-    
+
 QUERY testI32(value: I32) =>
     node <- N<TestNode>({i32_field: value})
     RETURN node
-    
+
 QUERY testI64(value: I64) =>
     node <- N<TestNode>({i64_field: value})
     RETURN node
@@ -22,11 +22,11 @@ QUERY testI64(value: I64) =>
 QUERY testU8(value: U8) =>
     node <- N<TestNode>({u8_field: value})
     RETURN node
-    
+
 QUERY testU32(value: U32) =>
     node <- N<TestNode>({u32_field: value})
     RETURN node
-    
+
 QUERY testU64(value: U64) =>
     node <- N<TestNode>({u64_field: value})
     RETURN node
@@ -35,7 +35,7 @@ QUERY testU64(value: U64) =>
 QUERY testF32(value: F32) =>
     node <- N<TestNode>({f32_field: value})
     RETURN node
-    
+
 QUERY testF64(value: F64) =>
     node <- N<TestNode>({f64_field: value})
     RETURN node

@@ -10,7 +10,7 @@ QUERY GetCompany(company_number: String) =>
 QUERY CreateCompany(company_name: String, company_number: String, total_docs: I32) =>
     company <- AddN<Company>({
         company_name: company_name,
-        company_number: company_number, 
+        company_number: company_number,
         total_docs: total_docs,
         ingested_docs: 0
     })
@@ -30,7 +30,7 @@ QUERY DeleteCompany(company_number: String) =>
 
 // ------------------------------ EDGE OPERATIONS --------------------------
 
-QUERY GetDocumentEdges(company_number: String) => 
+QUERY GetDocumentEdges(company_number: String) =>
     c <- N<Company>({company_number: company_number})
     edges <- c::OutE<DocumentEdge>
     RETURN edges
@@ -39,9 +39,9 @@ QUERY GetDocumentEdges(company_number: String) =>
 // ─── filing / embedding helpers ───────────────────────────────
 
 QUERY AddEmbeddingsToCompany(
-    company_number: String, 
+    company_number: String,
     embeddings_data: [{
-        vector: [F64],
+        vector: [F32],
         text: String,
         chunk_id: String,
         page_number: I32,
@@ -85,19 +85,19 @@ QUERY GetAllCompanyEmbeddings(company_number: String) =>
     embeddings <- c::Out<DocumentEdge>
     RETURN embeddings
 
-QUERY CompanyEmbeddingSearch(company_number: String, query: [F64], k: I32) =>
+QUERY CompanyEmbeddingSearch(company_number: String, query: [F32], k: I32) =>
     c <- N<Company>({company_number: company_number})::OutE<DocumentEdge>::ToV
     embedding_search <- c::SearchV<DocumentEmbedding>(query, k)
     RETURN embedding_search
 
 // ---------------------- FOR TESTING ---------------------------------
 //  tmp function for testing helix
-QUERY AddVector(vector: [F64], text: String, chunk_id: String, page_number: I32, reference: String) =>
+QUERY AddVector(vector: [F32], text: String, chunk_id: String, page_number: I32, reference: String) =>
     embedding <- AddV<DocumentEmbedding>(vector, {text: text, chunk_id: chunk_id, page_number: page_number, reference: reference})
     RETURN embedding
 
 //  tmp function for testing helix
-QUERY SearchVector(query: [F64], k: I32) =>
+QUERY SearchVector(query: [F32], k: I32) =>
     embedding_search <- SearchV<DocumentEmbedding>(query, k)
     RETURN embedding_search
 
