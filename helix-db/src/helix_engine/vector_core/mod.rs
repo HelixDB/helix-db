@@ -67,7 +67,8 @@ pub type CoreDatabase<D> = heed3::Database<KeyCodec, NodeCodec<D>>;
 pub struct HVector<'arena> {
     pub id: u128,
     pub distance: Option<f32>,
-    // TODO: String Interning
+    // TODO: String Interning. We do a lot of unnecessary string allocations
+    // for the same set of labels.
     pub label: &'arena str,
     pub deleted: bool,
     pub level: Option<usize>,
@@ -219,12 +220,18 @@ impl Ord for HVector<'_> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HNSWConfig {
-    pub m: usize,             // max num of bi-directional links per element
-    pub m_max_0: usize,       // max num of links for lower layers
-    pub ef_construct: usize,  // size of the dynamic candidate list for construction
-    pub m_l: f64,             // level generation factor
-    pub ef: usize,            // search param, num of cands to search
-    pub min_neighbors: usize, // for get_neighbors, always 512
+    /// max num of bi-directional links per element
+    pub m: usize,
+    /// max num of links for lower layers
+    pub m_max_0: usize,
+    /// size of the dynamic candidate list for construction
+    pub ef_construct: usize,
+    /// level generation factor
+    pub m_l: f64,
+    /// search param, num of cands to search
+    pub ef: usize,
+    /// for get_neighbors, always 512
+    pub min_neighbors: usize,
 }
 
 impl HNSWConfig {
@@ -358,6 +365,11 @@ impl VectorCore {
     ) -> VectorCoreResult<HVector<'arena>> {
         // index hasn't been built yet
         let writer = self.get_writer_or_create_index(label, data.len(), txn)?;
+
+        let idx = self.curr_id.fetch_add(1, atomic::Ordering::SeqCst);
+        writer.add_item(txn, idx, data).inspect_err(|_| {
+            self.curr_id.fetch_sub(1, atomic::Ordering::SeqCst);
+        })?;
 
         let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
         bump_vec.extend_from_slice(data);
@@ -494,22 +506,127 @@ impl VectorCore {
     pub fn get_vector_properties<'arena>(
         &self,
         _txn: &RoTxn,
-        _id: u128,
-        _arena: &bumpalo::Bump,
+        id: u128,
+        arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<Option<HVector<'arena>>> {
-        todo!()
+        let global_to_local_id = self.global_to_local_id.read().unwrap();
+        let (_, label) = global_to_local_id.get(&id).unwrap();
+
+        // todo: actually take properties
+        Ok(Some(HVector {
+            id,
+            distance: None,
+            label: arena.alloc_str(label.as_str()),
+            deleted: false,
+            version: 0,
+            level: None,
+            properties: None,
+            data: None,
+        }))
     }
 
     pub fn num_inserted_vectors(&self) -> usize {
         self.stats.num_vectors.load(atomic::Ordering::SeqCst)
     }
 
+    pub fn get_all_vectors_by_label<'arena>(
+        &self,
+        txn: &RoTxn,
+        label: &'arena str,
+        get_vector_data: bool,
+        arena: &'arena bumpalo::Bump,
+    ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
+        let mut result = bumpalo::collections::Vec::new_in(arena);
+        let label_to_reader = self.label_to_reader.read().unwrap();
+        let local_to_global_id = self.local_to_global_id.read().unwrap();
+
+        let reader = label_to_reader
+            .get(label)
+            .ok_or_else(|| VectorError::VectorCoreError("Label not found".to_string()))?;
+
+        let mut iter = reader.iter(txn)?;
+
+        if get_vector_data {
+            while let Some((key, item)) = iter.next().transpose()? {
+                let &id = local_to_global_id.get(&key.item).unwrap();
+                result.push(HVector {
+                    id,
+                    label,
+                    distance: None,
+                    deleted: false,
+                    level: Some(key.layer as usize),
+                    version: 0,
+                    properties: None,
+                    data: Some(item.clone_in(arena)),
+                });
+            }
+        } else {
+            while let Some(key) = iter.next_id().transpose()? {
+                let &id = local_to_global_id.get(&key.item).unwrap();
+                result.push(HVector {
+                    id,
+                    label,
+                    distance: None,
+                    deleted: false,
+                    level: Some(key.layer as usize),
+                    version: 0,
+                    properties: None,
+                    data: None,
+                });
+            }
+        }
+
+        Ok(result)
+    }
+
     pub fn get_all_vectors<'arena>(
         &self,
-        _txn: &RoTxn,
-        _level: Option<usize>,
-        _arena: &bumpalo::Bump,
+        txn: &RoTxn,
+        get_vector_data: bool,
+        arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'_, HVector<'arena>>> {
-        todo!()
+        let label_to_reader = self.label_to_reader.read().unwrap();
+        let local_to_global_id = self.local_to_global_id.read().unwrap();
+        let mut result = bumpalo::collections::Vec::new_in(arena);
+
+        for (label, _) in label_to_reader.iter() {
+            let reader = label_to_reader
+                .get(label)
+                .ok_or_else(|| VectorError::VectorCoreError("Label not found".to_string()))?;
+
+            let mut iter = reader.iter(txn)?;
+
+            if get_vector_data {
+                while let Some((key, item)) = iter.next().transpose()? {
+                    let &id = local_to_global_id.get(&key.item).unwrap();
+                    result.push(HVector {
+                        id,
+                        label: arena.alloc_str(label),
+                        distance: None,
+                        deleted: false,
+                        level: Some(key.layer as usize),
+                        version: 0,
+                        properties: None,
+                        data: Some(item.clone_in(arena)),
+                    });
+                }
+            } else {
+                while let Some(key) = iter.next_id().transpose()? {
+                    let &id = local_to_global_id.get(&key.item).unwrap();
+                    result.push(HVector {
+                        id,
+                        label: arena.alloc_str(label),
+                        distance: None,
+                        deleted: false,
+                        level: Some(key.layer as usize),
+                        version: 0,
+                        properties: None,
+                        data: None,
+                    });
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
