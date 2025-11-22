@@ -13,9 +13,9 @@ mod cosine;
 
 pub type DistanceValue = f32;
 
-pub const MAX_DISTANCE: f64 = 2.0;
-pub const ORTHOGONAL: f64 = 1.0;
-pub const MIN_DISTANCE: f64 = 0.0;
+pub const MAX_DISTANCE: f32 = 2.0;
+pub const ORTHOGONAL: f32 = 1.0;
+pub const MIN_DISTANCE: f32 = 0.0;
 
 pub trait Distance: Send + Sync + Sized + Clone + fmt::Debug + 'static {
     /// A header structure with informations related to the

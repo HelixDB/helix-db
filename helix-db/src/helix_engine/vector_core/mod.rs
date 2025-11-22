@@ -20,7 +20,7 @@ use crate::{
     helix_engine::{
         types::VectorError,
         vector_core::{
-            distance::Cosine,
+            distance::{Cosine, Distance},
             key::KeyCodec,
             node::{Item, NodeCodec},
             reader::{Reader, Searched, get_item},
@@ -198,8 +198,11 @@ impl<'arena> HVector<'arena> {
         bincode::serialize(self)
     }
 
-    pub fn distance_to(&self, _rhs: &HVector<'arena>) -> VectorCoreResult<f64> {
-        todo!()
+    pub fn distance_to(&self, rhs: &HVector<'arena>) -> VectorCoreResult<f32> {
+        match (self.data.as_ref(), rhs.data.as_ref()) {
+            (None, _) | (_, None) => Err(VectorError::HasNoData),
+            (Some(a), Some(b)) => Ok(Cosine::distance(a, b)),
+        }
     }
 
     pub fn set_distance(&mut self, distance: f32) {
