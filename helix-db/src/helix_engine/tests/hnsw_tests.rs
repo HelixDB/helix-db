@@ -25,7 +25,7 @@ fn setup_env() -> (Env, TempDir) {
 fn test_hnsw_insert_and_count() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
-    let mut index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let vector: Vec<f32> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
     for _ in 0..10 {
@@ -43,7 +43,7 @@ fn test_hnsw_insert_and_count() {
 fn test_hnsw_search_returns_results() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
-    let mut index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let mut rng = rand::rng();
     for _ in 0..128 {

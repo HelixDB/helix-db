@@ -258,7 +258,7 @@ mod compatibility_tests {
         assert_eq!(restored.id, id);
         assert_eq!(restored.label, "LegacyVector");
         assert_eq!(restored.version, 1);
-        assert_eq!(restored.deleted, false);
+        assert!(!restored.deleted);
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod compatibility_tests {
         let new_vector =
             HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true).unwrap();
 
-        assert_eq!(new_vector.deleted, true);
+        assert!(new_vector.deleted);
     }
 
     #[test]
