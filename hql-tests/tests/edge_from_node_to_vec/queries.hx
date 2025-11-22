@@ -14,7 +14,7 @@ E::EmbeddingOf {
     }
 }
 
-QUERY add(vec: [F64]) => 
+QUERY add(vec: [F32]) =>
     user <- AddN<User>({
         name: "John Doe"
     })
@@ -24,11 +24,10 @@ QUERY add(vec: [F64]) =>
     AddE<EmbeddingOf>({category: "test"})::From(user)::To(embedding)
     RETURN user
 
-QUERY to_v(query: [F64], k: I32, data: String) => 
+QUERY to_v(query: [F32], k: I32, data: String) =>
     user <- N<User>({name: "John Doe"})
     edges <- user::OutE<EmbeddingOf>
     filtered <- edges::WHERE(_::{category}::EQ(data))
     vectors <- filtered::ToV
     searched <- vectors::SearchV<Embedding>(query, k)
     RETURN user, edges, filtered, vectors, searched
-

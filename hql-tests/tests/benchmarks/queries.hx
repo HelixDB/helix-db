@@ -33,8 +33,8 @@ QUERY InsertUser(country: U8) =>
 
 // Query 2: Insert an Item vector node
 // Creates a new Item record with embedding and category
-// The embedding parameter is explicit as an array of F64 values
-QUERY InsertItem(embedding: [F64], category: U16) =>
+// The embedding parameter is explicit as an array of F32 values
+QUERY InsertItem(embedding: [F32], category: U16) =>
     item <- AddV<Item>(embedding, {
         category: category
     })
@@ -87,10 +87,10 @@ QUERY OneHopFilter(user_id: ID, category: U16) =>
     items <- N<User>(user_id)::Out<Interacted>::WHERE(_::{category}::EQ(category))
     RETURN items::{id, category}
 
-QUERY Vector(vector: [F64], top_k: I64) =>
+QUERY Vector(vector: [F32], top_k: I64) =>
     items <- SearchV<Item>(vector, top_k)
     RETURN items::{id, score, category}
 
-QUERY VectorHopFilter(vector: [F64], top_k: I64, country: U8) =>
+QUERY VectorHopFilter(vector: [F32], top_k: I64, country: U8) =>
     items <- SearchV<Item>(vector, top_k)::WHERE(EXISTS(_::In<Interacted>::WHERE(_::{country}::EQ(country))))
     RETURN items::{id, category}

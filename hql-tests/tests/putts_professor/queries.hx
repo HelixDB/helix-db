@@ -45,7 +45,7 @@ QUERY link_professor_to_lab(professor_id: ID, lab_id: ID) =>
     lab <- N<Lab>(lab_id)
     edge <- AddE<HasLab>::From(professor)::To(lab)
     RETURN edge
-    
+
 // Link Professor to Research Area
 QUERY link_professor_to_research_area(professor_id: ID, research_area_id: ID) =>
     professor <- N<Professor>(professor_id)
@@ -54,7 +54,7 @@ QUERY link_professor_to_research_area(professor_id: ID, research_area_id: ID) =>
     RETURN edge
 
 // Search Similar Professors based on Research Area + Description Embedding
-QUERY search_similar_professors_by_research_area_and_description(query_vector: [F64], k: I64) =>
+QUERY search_similar_professors_by_research_area_and_description(query_vector: [F32], k: I64) =>
     vecs <- SearchV<ResearchAreaAndDescriptionEmbedding>(query_vector, k)
     professors <- vecs::In<HasResearchAreaAndDescriptionEmbedding>
     RETURN professors
@@ -64,14 +64,14 @@ QUERY get_professor_research_areas_with_descriptions(professor_id: ID) =>
     research_areas <- N<Professor>(professor_id)::Out<HasResearchAreaAndDescriptionEmbedding>::{areas_and_descriptions: areas_and_descriptions}
     RETURN research_areas
 
-QUERY create_research_area_embedding(professor_id: ID, areas_and_descriptions: String, vector: [F64]) =>
+QUERY create_research_area_embedding(professor_id: ID, areas_and_descriptions: String, vector: [F32]) =>
     professor <- N<Professor>(professor_id)
     research_area <- AddV<ResearchAreaAndDescriptionEmbedding>(vector, { areas_and_descriptions: areas_and_descriptions })
     edge <- AddE<HasResearchAreaAndDescriptionEmbedding>::From(professor)::To(research_area)
     RETURN research_area
 
 
-// GET Queries // 
+// GET Queries //
 
 QUERY get_professors_by_university_name(university_name: String) =>
     professors <- N<Professor>::Out<HasUniversity>::WHERE(_::{name}::EQ(university_name))
@@ -80,7 +80,7 @@ QUERY get_professors_by_university_name(university_name: String) =>
 QUERY get_professor_by_research_area_name(research_area_name: String) =>
     professors <- N<Professor>::Out<HasResearchArea>::WHERE(_::{research_area}::EQ(research_area_name))
     RETURN professors
-    
+
 QUERY get_professors_by_department_name(department_name: String) =>
     professors <- N<Professor>::Out<HasDepartment>::WHERE(_::{name}::EQ(department_name))
     RETURN professors

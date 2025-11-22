@@ -13,7 +13,7 @@ E::EdgeUser {
 }
 
 
-QUERY user(vec: [F64]) =>
+QUERY user(vec: [F32]) =>
     vecs <- SearchV<UserVec>(vec, 10)
     // pre_filter <- SearchV<File7Vec>(vec, 10)::PREFILTER(_::{content}::EQ("hello"))
     RETURN "hello"

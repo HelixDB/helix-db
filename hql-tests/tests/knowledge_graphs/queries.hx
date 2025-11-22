@@ -138,7 +138,7 @@ QUERY insert_event_Cluster1 (
     uuid: String,
     chunk_uuid: String,
     statement: String,
-    embedding: [F64],
+    embedding: [F32],
     triplets: [String],
     statement_type: String,
     temporal_type: String,
@@ -189,7 +189,7 @@ QUERY update_event_Cluster1 (
     uuid: String,
     chunk_uuid: String,
     statement: String,
-    embedding: [F64],
+    embedding: [F32],
     triplets: [String],
     statement_type: String,
     temporal_type: String,
@@ -414,7 +414,7 @@ QUERY remove_entity_Cluster1 (
 // #########################################################
 
 QUERY vector_search_events_Cluster1 (
-    query_embedding: [F64],
+    query_embedding: [F32],
     k: I32
 ) =>
     matching_embeddings <- SearchV<EventEmbedding_Cluster1>(query_embedding, k)
@@ -440,7 +440,7 @@ QUERY get_stories_mentioning_entity_as_subject_Cluster1 (
     stories <- chunks::In<Story_to_Chunk_Cluster1>
     RETURN stories, chunks, events, triplets
 
-// Find stories that mention a specific entity (as object)  
+// Find stories that mention a specific entity (as object)
 QUERY get_stories_mentioning_entity_as_object_Cluster1 (
     entity_uuid: String
 ) =>
@@ -613,7 +613,7 @@ QUERY get_sub_comments_by_parent_uuid_Cluster2 (
 // Story Embedding operations
 QUERY add_story_embedding_Cluster2 (
     story_uuid: String,
-    embedding: [F64],
+    embedding: [F32],
     content: String
 ) =>
     story <- N<Story_Cluster2>({uuid: story_uuid})
@@ -624,7 +624,7 @@ QUERY add_story_embedding_Cluster2 (
 // Comment Embedding operations
 QUERY add_comment_embedding_Cluster2 (
     comment_uuid: String,
-    embedding: [F64],
+    embedding: [F32],
     content: String
 ) =>
     comment <- N<Comment_Cluster2>({uuid: comment_uuid})
@@ -633,7 +633,7 @@ QUERY add_comment_embedding_Cluster2 (
     RETURN comment
 
 QUERY search_similar_stories_Cluster2 (
-    query_embedding: [F64],
+    query_embedding: [F32],
     k: I64
 ) =>
     matching_embeddings <- SearchV<StoryEmbedding_Cluster2>(query_embedding, k)

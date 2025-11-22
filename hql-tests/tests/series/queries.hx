@@ -109,7 +109,7 @@ QUERY addWarmConnect (user_id: ID, warm_connect_id: ID) =>
     metadata_to_warm_connect <- AddE<Metadata_to_WarmConnect>()::From(metadata)::To(warm_connect)
     RETURN warm_connect
 
-QUERY createUserBio (user_id: ID, bio: [F64]) =>
+QUERY createUserBio (user_id: ID, bio: [F32]) =>
     user_bio <- AddV<EmbeddedBio>(bio)
     user <- N<User>(user_id)
     user_user_bio <- AddE<User_to_EmbeddedBio>()::From(user)::To(user_bio)
@@ -156,7 +156,7 @@ QUERY getUsersByReferrer(referrer: String) =>
     RETURN users
 
 #[mcp]
-QUERY searchUsersByBio(bio_vector: [F64], k: I64) =>
+QUERY searchUsersByBio(bio_vector: [F32], k: I64) =>
     similar_bios <- SearchV<EmbeddedBio>(bio_vector, k)
     users <- similar_bios::In<User_to_EmbeddedBio>
     RETURN users

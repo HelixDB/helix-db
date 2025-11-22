@@ -17,13 +17,6 @@ E::Friend {
     To: User,
 }
 
-QUERY search_vector(query: [f64], k: I64) =>
+QUERY search_vector(query: [f32], k: I64) =>
     result <- N<User>::Out<Connection>::SearchV<Embedding>(query, k)
     RETURN result
-
-
-
-
-
-
-

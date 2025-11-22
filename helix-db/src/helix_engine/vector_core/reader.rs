@@ -6,11 +6,9 @@ use std::num::NonZeroUsize;
 use bumpalo::collections::CollectIn;
 use hashbrown::HashMap;
 use heed3::RoTxn;
-use heed3::types::Bytes;
 use heed3::types::DecodeIgnore;
 use min_max_heap::MinMaxHeap;
 use roaring::RoaringBitmap;
-use tracing::warn;
 
 use crate::helix_engine::vector_core::VectorCoreResult;
 use crate::helix_engine::vector_core::VectorError;
@@ -19,15 +17,19 @@ use crate::helix_engine::vector_core::distance::DistanceValue;
 use crate::helix_engine::vector_core::hnsw::ScoredLink;
 use crate::helix_engine::vector_core::item_iter::ItemIter;
 use crate::helix_engine::vector_core::key::{Key, KeyCodec, Prefix, PrefixCodec};
-#[cfg(not(windows))]
-use crate::helix_engine::vector_core::metadata::Metadata;
-use crate::helix_engine::vector_core::metadata::MetadataCodec;
+use crate::helix_engine::vector_core::metadata::{Metadata, MetadataCodec};
 use crate::helix_engine::vector_core::node::Node;
 use crate::helix_engine::vector_core::node::{Item, Links};
 use crate::helix_engine::vector_core::ordered_float::OrderedFloat;
-use crate::helix_engine::vector_core::unaligned_vector::{UnalignedVector, VectorCodec};
+use crate::helix_engine::vector_core::unaligned_vector::UnalignedVector;
 use crate::helix_engine::vector_core::version::{Version, VersionCodec};
 use crate::helix_engine::vector_core::{CoreDatabase, ItemId};
+
+#[cfg(not(windows))]
+use {
+    crate::helix_engine::vector_core::unaligned_vector::VectorCodec, heed3::types::Bytes,
+    tracing::warn,
+};
 
 /// A good default value for the `ef` parameter.
 const DEFAULT_EF_SEARCH: usize = 100;
@@ -320,7 +322,7 @@ impl<D: Distance> Reader<D> {
         _database: &CoreDatabase<D>,
         _index: u16,
         _metadata: &Metadata,
-    ) -> Result<()> {
+    ) -> VectorCoreResult<()> {
         // madvise crate does not support windows.
         Ok(())
     }

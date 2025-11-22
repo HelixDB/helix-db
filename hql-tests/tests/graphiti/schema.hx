@@ -20,7 +20,7 @@ E::Entity_to_Embedding {
 }
 
 V::Entity_Embedding {
-    name_embedding: [F64],
+    name_embedding: [F32],
 }
 
 E::Entity_Fact {
@@ -60,7 +60,7 @@ E::Fact_to_Embedding {
 }
 
 V::Fact_Embedding {
-    fact: [F64],
+    fact: [F32],
 }
 
 E::Fact_Entity {
@@ -118,7 +118,7 @@ E::Community_to_Embedding {
 }
 
 V::Community_Embedding {
-    name_embedding: [F64],
+    name_embedding: [F32],
 }
 
 E::Community_Entity {
