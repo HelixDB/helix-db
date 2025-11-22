@@ -86,7 +86,8 @@ fn test_stress_mixed_read_write_operations() {
 
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_edge("connects", None, id1, id2, false)
-                    .collect_to_obj().unwrap();
+                    .collect_to_obj()
+                    .unwrap();
 
                 wtxn.commit().unwrap();
                 write_ops.fetch_add(1, Ordering::Relaxed);
@@ -196,7 +197,8 @@ fn test_stress_rapid_graph_growth() {
                 let root_idx = local_count % root_ids.len();
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_edge("child_of", None, root_ids[root_idx], new_id, false)
-                    .collect_to_obj().unwrap();
+                    .collect_to_obj()
+                    .unwrap();
 
                 wtxn.commit().unwrap();
                 write_count.fetch_add(1, Ordering::Relaxed);

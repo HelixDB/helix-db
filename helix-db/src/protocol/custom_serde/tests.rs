@@ -60,11 +60,7 @@ mod node_serialization_tests {
     }
 
     /// Helper to create an old node with properties
-    fn create_old_node_with_props(
-        id: u128,
-        label: &str,
-        props: Vec<(&str, Value)>,
-    ) -> OldNode {
+    fn create_old_node_with_props(id: u128, label: &str, props: Vec<(&str, Value)>) -> OldNode {
         if props.is_empty() {
             OldNode {
                 id,
@@ -119,8 +115,10 @@ mod node_serialization_tests {
         println!("\nByte-by-byte comparison:");
         for (i, (old_byte, new_byte)) in old_bytes.iter().zip(new_bytes.iter()).enumerate() {
             if old_byte != new_byte {
-                println!("  Index {}: old={:02x} ({}), new={:02x} ({})",
-                    i, old_byte, old_byte, new_byte, new_byte);
+                println!(
+                    "  Index {}: old={:02x} ({}), new={:02x} ({})",
+                    i, old_byte, old_byte, new_byte, new_byte
+                );
             }
         }
 
@@ -137,7 +135,11 @@ mod node_serialization_tests {
         if let Err(e) = &deserialized {
             println!("Deserialization error: {:?}", e);
         }
-        assert!(deserialized.is_ok(), "Failed to deserialize new format: {:?}", deserialized.err());
+        assert!(
+            deserialized.is_ok(),
+            "Failed to deserialize new format: {:?}",
+            deserialized.err()
+        );
 
         // Test that new format can deserialize old format
         println!("Attempting to deserialize old_bytes...");
@@ -146,7 +148,11 @@ mod node_serialization_tests {
         if let Err(e) = &old_deserialized {
             println!("Deserialization error from old format: {:?}", e);
         }
-        assert!(old_deserialized.is_ok(), "Failed to deserialize old format: {:?}", old_deserialized.err());
+        assert!(
+            old_deserialized.is_ok(),
+            "Failed to deserialize old format: {:?}",
+            old_deserialized.err()
+        );
     }
 
     #[test]
@@ -313,7 +319,10 @@ mod node_serialization_tests {
             ("u16_val", Value::U16(65535)),
             ("u32_val", Value::U32(4294967295)),
             ("u64_val", Value::U64(18446744073709551615)),
-            ("u128_val", Value::U128(340282366920938463463374607431768211455)),
+            (
+                "u128_val",
+                Value::U128(340282366920938463463374607431768211455),
+            ),
             ("f32_val", Value::F32(3.14159)),
             ("f64_val", Value::F64(2.71828)),
             ("bool_val", Value::Boolean(true)),
@@ -328,7 +337,10 @@ mod node_serialization_tests {
 
         let props = deserialized.properties.unwrap();
         assert_eq!(props.len(), 13);
-        assert_eq!(props.get("string_val"), Some(&Value::String("test".to_string())));
+        assert_eq!(
+            props.get("string_val"),
+            Some(&Value::String("test".to_string()))
+        );
         assert_eq!(props.get("i8_val"), Some(&Value::I8(-42)));
         assert_eq!(props.get("i16_val"), Some(&Value::I16(1000)));
         assert_eq!(props.get("i32_val"), Some(&Value::I32(100000)));
@@ -336,8 +348,14 @@ mod node_serialization_tests {
         assert_eq!(props.get("u8_val"), Some(&Value::U8(255)));
         assert_eq!(props.get("u16_val"), Some(&Value::U16(65535)));
         assert_eq!(props.get("u32_val"), Some(&Value::U32(4294967295)));
-        assert_eq!(props.get("u64_val"), Some(&Value::U64(18446744073709551615)));
-        assert_eq!(props.get("u128_val"), Some(&Value::U128(340282366920938463463374607431768211455)));
+        assert_eq!(
+            props.get("u64_val"),
+            Some(&Value::U64(18446744073709551615))
+        );
+        assert_eq!(
+            props.get("u128_val"),
+            Some(&Value::U128(340282366920938463463374607431768211455))
+        );
         assert_eq!(props.get("f32_val"), Some(&Value::F32(3.14159)));
         assert_eq!(props.get("f64_val"), Some(&Value::F64(2.71828)));
         assert_eq!(props.get("bool_val"), Some(&Value::Boolean(true)));
@@ -349,14 +367,16 @@ mod node_serialization_tests {
         let id = 22222u128;
 
         let props = vec![
-            ("array", Value::Array(vec![
-                Value::I32(1),
-                Value::I32(2),
-                Value::I32(3),
-            ])),
+            (
+                "array",
+                Value::Array(vec![Value::I32(1), Value::I32(2), Value::I32(3)]),
+            ),
             ("nested_obj", {
                 let mut map = HashMap::new();
-                map.insert("inner_key".to_string(), Value::String("inner_value".to_string()));
+                map.insert(
+                    "inner_key".to_string(),
+                    Value::String("inner_value".to_string()),
+                );
                 Value::Object(map)
             }),
         ];
@@ -386,9 +406,17 @@ mod node_serialization_tests {
 
         // Check that both have the same keys and values (regardless of order)
         for (key, old_value) in old_props.iter() {
-            let new_value = new_props.get(key).unwrap_or_else(|| panic!("Missing key: {}", key));
+            let new_value = new_props
+                .get(key)
+                .unwrap_or_else(|| panic!("Missing key: {}", key));
             // For nested objects, we need to compare recursively since HashMap order may differ
-            assert!(values_equal(old_value, new_value), "Value mismatch for key {}: {:?} != {:?}", key, old_value, new_value);
+            assert!(
+                values_equal(old_value, new_value),
+                "Value mismatch for key {}: {:?} != {:?}",
+                key,
+                old_value,
+                new_value
+            );
         }
     }
 
@@ -413,7 +441,9 @@ mod node_serialization_tests {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
             }
             (Value::Object(a), Value::Object(b)) => {
-                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
             }
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Id(a), Value::Id(b)) => a == b,
@@ -476,7 +506,10 @@ mod node_serialization_tests {
 
         let props = deserialized_node.properties.unwrap();
         assert_eq!(props.len(), 2);
-        assert_eq!(props.get("name"), Some(&Value::String("Charlie".to_string())));
+        assert_eq!(
+            props.get("name"),
+            Some(&Value::String("Charlie".to_string()))
+        );
         assert_eq!(props.get("count"), Some(&Value::U64(42)));
     }
 
@@ -602,12 +635,7 @@ mod node_serialization_tests {
     fn test_node_serialization_utf8_labels() {
         let arena = Bump::new();
 
-        let utf8_labels = ["Hello",
-            "世界",
-            "🚀🌟",
-            "Привет",
-            "مرحبا",
-            "Ñoño"];
+        let utf8_labels = ["Hello", "世界", "🚀🌟", "Привет", "مرحبا", "Ñoño"];
 
         for (idx, label) in utf8_labels.iter().enumerate() {
             let id = idx as u128;
@@ -619,7 +647,8 @@ mod node_serialization_tests {
 
             assert_eq!(
                 old_bytes, new_bytes,
-                "UTF-8 label '{}' serialization differs", label
+                "UTF-8 label '{}' serialization differs",
+                label
             );
         }
     }
@@ -646,7 +675,10 @@ mod node_serialization_tests {
         assert_eq!(props.len(), 3);
         assert_eq!(props.get("名前"), Some(&Value::String("太郎".to_string())));
         assert_eq!(props.get("возраст"), Some(&Value::I32(25)));
-        assert_eq!(props.get("emoji_key_🎉"), Some(&Value::String("party_🎊".to_string())));
+        assert_eq!(
+            props.get("emoji_key_🎉"),
+            Some(&Value::String("party_🎊".to_string()))
+        );
     }
 
     #[test]
@@ -675,7 +707,12 @@ mod node_serialization_tests {
         // Verify all properties are present with correct values
         for i in 0..50 {
             let key = format!("key_{}", i);
-            assert_eq!(props.get(&key), Some(&Value::I32(i)), "Missing or incorrect value for {}", key);
+            assert_eq!(
+                props.get(&key),
+                Some(&Value::I32(i)),
+                "Missing or incorrect value for {}",
+                key
+            );
         }
     }
 
@@ -710,10 +747,7 @@ mod node_serialization_tests {
         let arena = Bump::new();
         let id = 13131u128;
 
-        let props = vec![
-            ("empty_val", Value::Empty),
-            ("normal_val", Value::I32(42)),
-        ];
+        let props = vec![("empty_val", Value::Empty), ("normal_val", Value::I32(42))];
 
         let new_node = create_arena_node_with_props(&arena, id, "EmptyValue", props);
         let new_bytes = bincode::serialize(&new_node).unwrap();
@@ -841,7 +875,9 @@ mod edge_serialization_tests {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
             }
             (Value::Object(a), Value::Object(b)) => {
-                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
             }
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Id(a), Value::Id(b)) => a == b,
@@ -936,8 +972,14 @@ mod edge_serialization_tests {
 
         // Check semantic equality (order may differ)
         for (key, old_value) in old_props.iter() {
-            let new_value = new_props.get(key).unwrap_or_else(|| panic!("Missing key: {}", key));
-            assert!(values_equal(old_value, new_value), "Value mismatch for key {}", key);
+            let new_value = new_props
+                .get(key)
+                .unwrap_or_else(|| panic!("Missing key: {}", key));
+            assert!(
+                values_equal(old_value, new_value),
+                "Value mismatch for key {}",
+                key
+            );
         }
     }
 
@@ -953,7 +995,8 @@ mod edge_serialization_tests {
             ("verified", Value::Boolean(true)),
         ];
 
-        let original = create_arena_edge_with_props(&arena, id, "RELATED_TO", from_node, to_node, props);
+        let original =
+            create_arena_edge_with_props(&arena, id, "RELATED_TO", from_node, to_node, props);
         let bytes = bincode::serialize(&original).unwrap();
 
         let arena2 = Bump::new();
@@ -1001,7 +1044,10 @@ mod edge_serialization_tests {
         let props = deserialized.properties.unwrap();
         assert_eq!(props.len(), 2);
         assert_eq!(props.get("strength"), Some(&Value::I32(5)));
-        assert_eq!(props.get("label_text"), Some(&Value::String("connection".to_string())));
+        assert_eq!(
+            props.get("label_text"),
+            Some(&Value::String("connection".to_string()))
+        );
     }
 
     #[test]
@@ -1014,18 +1060,25 @@ mod edge_serialization_tests {
         let props = vec![
             ("metadata", {
                 let mut map = HashMap::new();
-                map.insert("created_by".to_string(), Value::String("system".to_string()));
+                map.insert(
+                    "created_by".to_string(),
+                    Value::String("system".to_string()),
+                );
                 map.insert("timestamp".to_string(), Value::I64(1234567890));
                 Value::Object(map)
             }),
-            ("tags", Value::Array(vec![
-                Value::String("important".to_string()),
-                Value::String("verified".to_string()),
-            ])),
+            (
+                "tags",
+                Value::Array(vec![
+                    Value::String("important".to_string()),
+                    Value::String("verified".to_string()),
+                ]),
+            ),
         ];
 
         let old_edge = create_old_edge_with_props(id, "HAS_TAG", from_node, to_node, props.clone());
-        let new_edge = create_arena_edge_with_props(&arena, id, "HAS_TAG", from_node, to_node, props);
+        let new_edge =
+            create_arena_edge_with_props(&arena, id, "HAS_TAG", from_node, to_node, props);
 
         let old_bytes = bincode::serialize(&old_edge).unwrap();
         let new_bytes = bincode::serialize(&new_edge).unwrap();
@@ -1043,8 +1096,16 @@ mod edge_serialization_tests {
 
         // Compare nested values
         for (key, old_value) in old_props.iter() {
-            let new_value = new_props.get(key).unwrap_or_else(|| panic!("Missing key: {}", key));
-            assert!(values_equal(old_value, new_value), "Value mismatch for key {}: {:?} != {:?}", key, old_value, new_value);
+            let new_value = new_props
+                .get(key)
+                .unwrap_or_else(|| panic!("Missing key: {}", key));
+            assert!(
+                values_equal(old_value, new_value),
+                "Value mismatch for key {}: {:?} != {:?}",
+                key,
+                old_value,
+                new_value
+            );
         }
     }
 
@@ -1077,7 +1138,12 @@ mod edge_serialization_tests {
         // Verify all properties are present
         for i in 0..20 {
             let key = format!("prop_{}", i);
-            assert_eq!(props.get(&key), Some(&Value::I32(i)), "Property {} mismatch", key);
+            assert_eq!(
+                props.get(&key),
+                Some(&Value::I32(i)),
+                "Property {} mismatch",
+                key
+            );
         }
     }
 
@@ -1117,8 +1183,10 @@ mod edge_serialization_tests {
         println!("\nByte-by-byte comparison:");
         for (i, (old_byte, new_byte)) in old_bytes.iter().zip(new_bytes.iter()).enumerate() {
             if old_byte != new_byte {
-                println!("  Index {}: old={:02x} ({}), new={:02x} ({})",
-                    i, old_byte, old_byte, new_byte, new_byte);
+                println!(
+                    "  Index {}: old={:02x} ({}), new={:02x} ({})",
+                    i, old_byte, old_byte, new_byte, new_byte
+                );
             }
         }
 
@@ -1141,7 +1209,8 @@ mod edge_serialization_tests {
             ("emoji", Value::String("🔗".to_string())),
         ];
 
-        let new_edge = create_arena_edge_with_props(&arena, id, "繋がり", from_node, to_node, props);
+        let new_edge =
+            create_arena_edge_with_props(&arena, id, "繋がり", from_node, to_node, props);
         let bytes = bincode::serialize(&new_edge).unwrap();
 
         let arena2 = Bump::new();

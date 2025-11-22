@@ -46,8 +46,6 @@ async fn check_all_instances(project: &ProjectContext) -> Result<()> {
     Ok(())
 }
 
-
-
 /// Validate project syntax by parsing queries and schema (similar to build.rs but without generating files)
 fn validate_project_syntax(project: &ProjectContext) -> Result<()> {
     print_status("VALIDATE", "Parsing and validating Helix queries");
