@@ -258,20 +258,21 @@ impl HNSWConfig {
     }
 }
 
-pub struct VectorCoreStats {
+pub struct HnswIndex {
+    pub id: u16,
+    pub dimension: usize,
     pub num_vectors: AtomicUsize,
 }
 
 // TODO: Properties filters
 // TODO: Support different distances for each database
 pub struct VectorCore {
-    pub hsnw_index: CoreDatabase<Cosine>,
-    pub stats: VectorCoreStats,
+    pub hsnw: CoreDatabase<Cosine>,
     pub vector_properties_db: Database<U128<BE>, Bytes>,
     pub config: HNSWConfig,
 
-    /// Map labels to a different index and dimension
-    pub label_to_index: RwLock<HashMap<String, (u16, usize)>>,
+    /// Map labels to a different [HnswIndex]
+    pub label_to_index: RwLock<HashMap<String, HnswIndex>>,
     /// Track the last index
     curr_index: AtomicU16,
 
@@ -291,10 +292,7 @@ impl VectorCore {
             .create(txn)?;
 
         Ok(Self {
-            hsnw_index: vectors_db,
-            stats: VectorCoreStats {
-                num_vectors: AtomicUsize::new(0),
-            },
+            hsnw: vectors_db,
             vector_properties_db,
             config,
             label_to_index: RwLock::new(HashMap::new()),
@@ -315,12 +313,12 @@ impl VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<Searched<'arena>> {
         match self.label_to_index.read().unwrap().get(label) {
-            Some(&(index, dimension)) => {
-                if dimension != query.len() {
+            Some(index) => {
+                if index.dimension != query.len() {
                     return Err(VectorError::InvalidVectorLength);
                 }
 
-                let reader = Reader::open(txn, index, self.hsnw_index)?;
+                let reader = Reader::open(txn, index.id, self.hsnw)?;
                 reader.nns(k).by_vector(txn, query.as_slice(), arena)
             }
             None => Ok(Searched::new(bumpalo::vec![in &arena])),
@@ -335,16 +333,20 @@ impl VectorCore {
         dimension: usize,
         txn: &mut RwTxn,
     ) -> VectorCoreResult<Writer<Cosine>> {
-        if let Some(&(idx, dimension)) = self.label_to_index.read().unwrap().get(label) {
-            Ok(Writer::new(self.hsnw_index, idx, dimension))
+        if let Some(index) = self.label_to_index.read().unwrap().get(label) {
+            Ok(Writer::new(self.hsnw, index.id, dimension))
         } else {
             // Index do not exist, we should build it
             let idx = self.curr_index.fetch_add(1, atomic::Ordering::SeqCst);
-            self.label_to_index
-                .write()
-                .unwrap()
-                .insert(label.to_string(), (idx, dimension));
-            let writer = Writer::new(self.hsnw_index, idx, dimension);
+            self.label_to_index.write().unwrap().insert(
+                label.to_string(),
+                HnswIndex {
+                    id: idx,
+                    dimension,
+                    num_vectors: AtomicUsize::new(0),
+                },
+            );
+            let writer = Writer::new(self.hsnw, idx, dimension);
             let mut rng = StdRng::from_os_rng();
             let mut builder = writer.builder(&mut rng);
 
@@ -363,7 +365,6 @@ impl VectorCore {
         _properties: Option<ImmutablePropertiesMap<'arena>>,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
-        // index hasn't been built yet
         let writer = self.get_writer_or_create_index(label, data.len(), txn)?;
 
         let idx = self.curr_id.fetch_add(1, atomic::Ordering::SeqCst);
@@ -384,11 +385,21 @@ impl VectorCore {
             .write()
             .unwrap()
             .insert(idx, hvector.id);
-        self.stats
+        self.label_to_index
+            .read()
+            .unwrap()
+            .get(label)
+            .unwrap()
             .num_vectors
             .fetch_add(1, atomic::Ordering::SeqCst);
 
-        writer.add_item(txn, idx, data)?;
+        let mut rng = StdRng::from_os_rng();
+        let mut builder = writer.builder(&mut rng);
+
+        // FIXME: We shouldn't rebuild on every insertion
+        builder
+            .ef_construction(self.config.ef_construct)
+            .build(txn)?;
 
         Ok(hvector)
     }
@@ -396,17 +407,13 @@ impl VectorCore {
     pub fn delete(&self, txn: &mut RwTxn, id: u128) -> VectorCoreResult<()> {
         match self.global_to_local_id.read().unwrap().get(&id) {
             Some(&(idx, ref label)) => {
-                let &(index, dimension) = self
-                    .label_to_index
-                    .read()
-                    .unwrap()
+                let label_to_index = self.label_to_index.read().unwrap();
+                let index = label_to_index
                     .get(label)
                     .expect("if index exist label should also exist");
-                let writer = Writer::new(self.hsnw_index, index, dimension);
+                let writer = Writer::new(self.hsnw, index.id, index.dimension);
                 writer.del_item(txn, idx)?;
-                self.stats
-                    .num_vectors
-                    .fetch_add(1, atomic::Ordering::SeqCst);
+                index.num_vectors.fetch_add(1, atomic::Ordering::SeqCst);
                 Ok(())
             }
             None => Err(VectorError::VectorNotFound(format!(
@@ -438,7 +445,7 @@ impl VectorCore {
         let (item_id, _) = nns.first().unwrap();
         let global_id = local_to_global_id.get(item_id).unwrap();
         let (_, label) = global_to_local_id.get(global_id).unwrap();
-        let (index, _) = label_to_index.get(label).unwrap();
+        let index = label_to_index.get(label).unwrap();
         let label = arena.alloc_str(label);
 
         if with_data {
@@ -453,7 +460,7 @@ impl VectorCore {
                     level: None,
                     version: 0,
                     properties: None,
-                    data: get_item(self.hsnw_index, *index, txn, item_id).unwrap(),
+                    data: get_item(self.hsnw, index.id, txn, item_id).unwrap(),
                 });
             }
         } else {
@@ -486,10 +493,10 @@ impl VectorCore {
         let global_to_local_id = self.global_to_local_id.read().unwrap();
 
         let (item_id, label) = global_to_local_id.get(&id).unwrap();
-        let (index, _) = label_to_index.get(label).unwrap();
+        let index = label_to_index.get(label).unwrap();
         let label = arena.alloc_str(label);
 
-        let item = get_item(self.hsnw_index, *index, txn, *item_id)?.map(|i| i.clone_in(arena));
+        let item = get_item(self.hsnw, index.id, txn, *item_id)?.map(|i| i.clone_in(arena));
 
         Ok(HVector {
             id,
@@ -526,7 +533,12 @@ impl VectorCore {
     }
 
     pub fn num_inserted_vectors(&self) -> usize {
-        self.stats.num_vectors.load(atomic::Ordering::SeqCst)
+        self.label_to_index
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(_, i)| i.num_vectors.load(atomic::Ordering::SeqCst))
+            .sum()
     }
 
     pub fn get_all_vectors_by_label<'arena>(
@@ -537,13 +549,11 @@ impl VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
         let mut result = bumpalo::collections::Vec::new_in(arena);
-        let label_to_reader = self.label_to_reader.read().unwrap();
         let local_to_global_id = self.local_to_global_id.read().unwrap();
+        let label_to_index = self.label_to_index.read().unwrap();
+        let index = label_to_index.get(label).unwrap();
 
-        let reader = label_to_reader
-            .get(label)
-            .ok_or_else(|| VectorError::VectorCoreError("Label not found".to_string()))?;
-
+        let reader = Reader::open(txn, index.id, self.hsnw)?;
         let mut iter = reader.iter(txn)?;
 
         if get_vector_data {
@@ -585,15 +595,12 @@ impl VectorCore {
         get_vector_data: bool,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'_, HVector<'arena>>> {
-        let label_to_reader = self.label_to_reader.read().unwrap();
+        let label_to_index = self.label_to_index.read().unwrap();
         let local_to_global_id = self.local_to_global_id.read().unwrap();
         let mut result = bumpalo::collections::Vec::new_in(arena);
 
-        for (label, _) in label_to_reader.iter() {
-            let reader = label_to_reader
-                .get(label)
-                .ok_or_else(|| VectorError::VectorCoreError("Label not found".to_string()))?;
-
+        for (label, index) in label_to_index.iter() {
+            let reader = Reader::open(txn, index.id, self.hsnw)?;
             let mut iter = reader.iter(txn)?;
 
             if get_vector_data {
