@@ -229,7 +229,6 @@ mod tests {
         protocol::{request::Request, request::RequestType, Format},
         helix_gateway::router::router::HandlerInput,
         utils::id::ID,
-        helixc::generator::traversal_steps::EdgeType,
     };
 
     fn setup_test_engine() -> (HelixGraphEngine, TempDir) {

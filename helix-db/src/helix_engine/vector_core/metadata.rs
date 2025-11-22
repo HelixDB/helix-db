@@ -28,7 +28,7 @@ impl<'a> heed3::BytesEncode<'a> for MetadataCodec {
             distance,
             max_level,
         } = item;
-        debug_assert!(!distance.as_bytes().iter().any(|&b| b == 0));
+        debug_assert!(!distance.as_bytes().contains(&0));
 
         let mut output = Vec::with_capacity(
             size_of::<u32>()

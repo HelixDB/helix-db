@@ -684,7 +684,7 @@ mod tests {
 
         // Should be able to serialize batch
         let json_bytes = sonic_rs::to_vec(&events).unwrap();
-        assert!(json_bytes.len() > 0);
+        assert!(!json_bytes.is_empty());
 
         // Should be valid JSON array
         let json_str = String::from_utf8(json_bytes).unwrap();
