@@ -7,7 +7,7 @@ use heed3::BoxedError;
 use crate::helix_engine::vector_core::node_id::{NodeId, NodeMode};
 
 /// This whole structure must fit in an u64 so we can tell LMDB to optimize its storage.
-/// The `index` is specified by the user and is used to differentiate between multiple hannoy indexes.
+/// The `index` is specified by the user and is used to differentiate between multiple indexes.
 /// The `mode` indicates what we're looking at.
 /// The `item` point to a specific node.
 /// If the mode is:
