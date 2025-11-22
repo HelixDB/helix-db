@@ -77,7 +77,7 @@ fn get_reserved_property_type(prop_name: &str, item_type: &Type) -> Option<Field
         "distance" | "Distance" => {
             // Only valid for vectors
             match item_type {
-                Type::Vector(_) | Type::Vectors(_) => Some(FieldType::F64),
+                Type::Vector(_) | Type::Vectors(_) => Some(FieldType::F32),
                 _ => None,
             }
         }
@@ -85,7 +85,7 @@ fn get_reserved_property_type(prop_name: &str, item_type: &Type) -> Option<Field
             // Only valid for vectors
             match item_type {
                 Type::Vector(_) | Type::Vectors(_) => {
-                    Some(FieldType::Array(Box::new(FieldType::F64)))
+                    Some(FieldType::Array(Box::new(FieldType::F32)))
                 }
                 _ => None,
             }

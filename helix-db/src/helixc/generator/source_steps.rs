@@ -141,7 +141,7 @@ impl Display for AddV {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "insert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})",
+            "insert_v({}, {}, {})",
             self.vec,
             self.label,
             write_properties(&self.properties)

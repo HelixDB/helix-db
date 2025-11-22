@@ -467,7 +467,7 @@ use helix_db::{
             traversal_value::TraversalValue,
         },
         types::GraphError,
-        vector_core::vector::HVector,
+        vector_core::HVector,
     },
     helix_gateway::{
         embedding_providers::{EmbeddingModel, get_embedding_model},

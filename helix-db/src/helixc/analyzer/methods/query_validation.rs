@@ -14,8 +14,7 @@ use crate::helixc::{
     generator::{
         queries::{Parameter as GeneratedParameter, Query as GeneratedQuery},
         return_values::{
-            ReturnFieldInfo, ReturnFieldSource, ReturnFieldType, ReturnValue,
-            ReturnValueStruct,
+            ReturnFieldInfo, ReturnFieldSource, ReturnFieldType, ReturnValue, ReturnValueStruct,
         },
         source_steps::SourceStep,
         statements::Statement as GeneratedStatement,
@@ -167,13 +166,13 @@ fn build_return_fields(
             if should_add_field("data") {
                 fields.push(ReturnFieldInfo::new_implicit(
                     "data".to_string(),
-                    "&'a [f64]".to_string(),
+                    "&'a [f32]".to_string(),
                 ));
             }
             if should_add_field("score") {
                 fields.push(ReturnFieldInfo::new_implicit(
                     "score".to_string(),
-                    "f64".to_string(),
+                    "f32".to_string(),
                 ));
             }
         }
@@ -235,8 +234,8 @@ fn build_return_fields(
 
                         if is_implicit_field {
                             let rust_type = match *field_name {
-                                "data" => "&'a [f64]".to_string(),
-                                "score" => "f64".to_string(),
+                                "data" => "&'a [f32]".to_string(),
+                                "score" => "f32".to_string(),
                                 _ => "&'a str".to_string(),
                             };
                             fields.push(ReturnFieldInfo::new_implicit(
@@ -305,8 +304,8 @@ fn build_return_fields(
                     let rust_type = if is_implicit {
                         // Use the appropriate type based on the implicit field
                         match accessed_field.map(|s| s.as_str()) {
-                            Some("data") => "&'a [f64]".to_string(),
-                            Some("score") => "f64".to_string(),
+                            Some("data") => "&'a [f32]".to_string(),
+                            Some("score") => "f32".to_string(),
                             Some("id") | Some("ID") | Some("label") | Some("Label")
                             | Some("from_node") | Some("to_node") | None => "&'a str".to_string(),
                             _ => "Option<&'a Value>".to_string(),
@@ -434,13 +433,17 @@ fn process_object_literal<'a>(
                             // Handle traversal like app::{name}
                             // Extract variable name from start node
                             let var_name = match &trav.start {
-                                crate::helixc::parser::types::StartNode::Identifier(id) => id.clone(),
+                                crate::helixc::parser::types::StartNode::Identifier(id) => {
+                                    id.clone()
+                                }
                                 _ => "unknown".to_string(),
                             };
 
                             // Check if there's an Object step to extract property name
                             if let Some(step) = trav.steps.first() {
-                                if let crate::helixc::parser::types::StepType::Object(obj) = &step.step {
+                                if let crate::helixc::parser::types::StepType::Object(obj) =
+                                    &step.step
+                                {
                                     // Extract the first field name from the object step
                                     if let Some(field) = obj.fields.first() {
                                         let prop_name = &field.key;
@@ -475,9 +478,7 @@ fn process_object_literal<'a>(
                                 format!("json!({})", id)
                             }
                         }
-                        _ => {
-                            "serde_json::Value::Null".to_string()
-                        }
+                        _ => "serde_json::Value::Null".to_string(),
                     }
                 }
                 ReturnType::Object(nested_obj) => {
@@ -495,7 +496,11 @@ fn process_object_literal<'a>(
                                     ExpressionType::Identifier(id) => {
                                         // Look up the variable type and generate property extraction
                                         if let Some(var_info) = scope.get(id.as_str()) {
-                                            array_parts.push(build_identifier_json(ctx, id, &var_info.ty));
+                                            array_parts.push(build_identifier_json(
+                                                ctx,
+                                                id,
+                                                &var_info.ty,
+                                            ));
                                         } else {
                                             // Fallback
                                             array_parts.push(format!("json!({})", id));
@@ -504,24 +509,37 @@ fn process_object_literal<'a>(
                                     ExpressionType::Traversal(trav) => {
                                         // Handle traversal in array
                                         let var_name = match &trav.start {
-                                            crate::helixc::parser::types::StartNode::Identifier(id) => id.clone(),
+                                            crate::helixc::parser::types::StartNode::Identifier(
+                                                id,
+                                            ) => id.clone(),
                                             _ => "unknown".to_string(),
                                         };
 
                                         // Check for object step
                                         if let Some(step) = trav.steps.first() {
-                                            if let crate::helixc::parser::types::StepType::Object(obj) = &step.step {
+                                            if let crate::helixc::parser::types::StepType::Object(
+                                                obj,
+                                            ) = &step.step
+                                            {
                                                 if let Some(field) = obj.fields.first() {
                                                     let prop_name = &field.key;
                                                     if prop_name == "id" {
-                                                        array_parts.push(format!("uuid_str({}.id(), &arena)", var_name));
+                                                        array_parts.push(format!(
+                                                            "uuid_str({}.id(), &arena)",
+                                                            var_name
+                                                        ));
                                                     } else if prop_name == "label" {
-                                                        array_parts.push(format!("{}.label()", var_name));
+                                                        array_parts
+                                                            .push(format!("{}.label()", var_name));
                                                     } else {
-                                                        array_parts.push(format!("{}.get_property(\"{}\")", var_name, prop_name));
+                                                        array_parts.push(format!(
+                                                            "{}.get_property(\"{}\")",
+                                                            var_name, prop_name
+                                                        ));
                                                     }
                                                 } else {
-                                                    array_parts.push(format!("json!({})", var_name));
+                                                    array_parts
+                                                        .push(format!("json!({})", var_name));
                                                 }
                                             } else {
                                                 array_parts.push(format!("json!({})", var_name));
@@ -571,13 +589,19 @@ fn process_object_literal<'a>(
                         if *prop_name == "id" || *prop_name == "label" {
                             continue;
                         }
-                        props.push(format!("\"{}\":  {}.get_property(\"{}\")", prop_name, var_name, prop_name));
+                        props.push(format!(
+                            "\"{}\":  {}.get_property(\"{}\")",
+                            prop_name, var_name, prop_name
+                        ));
                     }
 
                     format!("json!({{\n        {}\n    }})", props.join(",\n        "))
                 } else {
                     // Fallback if schema not found
-                    format!("json!({{\"id\": uuid_str({}.id(), &arena), \"label\": {}.label()}})", var_name, var_name)
+                    format!(
+                        "json!({{\"id\": uuid_str({}.id(), &arena), \"label\": {}.label()}})",
+                        var_name, var_name
+                    )
                 }
             }
             Type::Edge(Some(label)) => {
@@ -593,12 +617,18 @@ fn process_object_literal<'a>(
                         if *prop_name == "id" || *prop_name == "label" {
                             continue;
                         }
-                        props.push(format!("\"{}\":  {}.get_property(\"{}\")", prop_name, var_name, prop_name));
+                        props.push(format!(
+                            "\"{}\":  {}.get_property(\"{}\")",
+                            prop_name, var_name, prop_name
+                        ));
                     }
 
                     format!("json!({{\n        {}\n    }})", props.join(",\n        "))
                 } else {
-                    format!("json!({{\"id\": uuid_str({}.id(), &arena), \"label\": {}.label()}})", var_name, var_name)
+                    format!(
+                        "json!({{\"id\": uuid_str({}.id(), &arena), \"label\": {}.label()}})",
+                        var_name, var_name
+                    )
                 }
             }
             _ => {
@@ -616,7 +646,10 @@ fn process_object_literal<'a>(
         ReturnValue {
             name: "serde_json::Value".to_string(),
             fields: vec![],
-            literal_value: Some(crate::helixc::generator::utils::GenRef::Std(format!("json!({})", json_code))),
+            literal_value: Some(crate::helixc::generator::utils::GenRef::Std(format!(
+                "json!({})",
+                json_code
+            ))),
         },
     ));
 
@@ -939,11 +972,20 @@ fn analyze_return_expr<'a>(
                                     ShouldCollect::ToVec => {
                                         // Collection - generate iteration code
                                         let iter_code = if property_name == "id" {
-                                            format!("{}.iter().map(|item| uuid_str(item.id(), &arena)).collect::<Vec<_>>()", field_name)
+                                            format!(
+                                                "{}.iter().map(|item| uuid_str(item.id(), &arena)).collect::<Vec<_>>()",
+                                                field_name
+                                            )
                                         } else if property_name == "label" {
-                                            format!("{}.iter().map(|item| item.label()).collect::<Vec<_>>()", field_name)
+                                            format!(
+                                                "{}.iter().map(|item| item.label()).collect::<Vec<_>>()",
+                                                field_name
+                                            )
                                         } else {
-                                            format!("{}.iter().map(|item| item.get_property(\"{}\")).collect::<Vec<_>>()", field_name, property_name)
+                                            format!(
+                                                "{}.iter().map(|item| item.get_property(\"{}\")).collect::<Vec<_>>()",
+                                                field_name, property_name
+                                            )
                                         };
                                         Some(GenRef::Std(iter_code))
                                     }
@@ -1233,14 +1275,7 @@ fn analyze_return_expr<'a>(
             } else {
                 // Complex nested object - use new object literal processing
                 let struct_name = format!("{}ReturnType", capitalize_first(&query.name));
-                process_object_literal(
-                    ctx,
-                    original_query,
-                    scope,
-                    query,
-                    values,
-                    struct_name,
-                );
+                process_object_literal(ctx, original_query, scope, query, values, struct_name);
 
                 // Note: process_object_literal adds to query.return_values
                 // and sets use_struct_returns = false, so no need to push to return_structs
