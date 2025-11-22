@@ -86,7 +86,7 @@ impl<'a, D: Distance> QueryBuilder<'a, D> {
         let res = self
             .reader
             .nns_by_item(rtxn, item, self, arena)?
-            .map(|res| Searched::new(res));
+            .map(Searched::new);
         Ok(res)
     }
 
@@ -222,11 +222,10 @@ impl<'a> Visitor<'a> {
                 // candidates bitmap, but the final result must *not* include them.
                 if res.len() < self.ef || dist < f_max {
                     search_queue.push((Reverse(OrderedFloat(dist)), point));
-                    if let Some(c) = self.candidates {
-                        if !c.contains(point) {
+                    if let Some(c) = self.candidates
+                        && !c.contains(point) {
                             continue;
                         }
-                    }
                     if res.len() == self.ef {
                         let _ = res.push_pop_max((OrderedFloat(dist), point));
                     } else {
@@ -481,7 +480,7 @@ impl<D: Distance> Reader<D> {
     ) -> VectorCoreResult<Option<bumpalo::collections::Vec<'arena, f32>>> {
         Ok(
             get_item(self.database, self.index, rtxn, item_id)?.map(|item| {
-                let mut vec = item.vector.to_vec(&arena);
+                let mut vec = item.vector.to_vec(arena);
                 vec.truncate(self.dimensions());
                 vec
             }),
@@ -535,16 +534,16 @@ impl<D: Distance> Reader<D> {
             .candidates
             .is_some_and(|c| self.item_ids().is_disjoint(c))
         {
-            return Ok(bumpalo::collections::Vec::new_in(&arena));
+            return Ok(bumpalo::collections::Vec::new_in(arena));
         }
 
         // If the number of candidates is less than a given threshold, perform linear search
         if let Some(candidates) = opt.candidates.filter(|c| c.len() < LINEAR_SEARCH_THRESHOLD) {
-            return self.brute_force_search(query, rtxn, candidates, opt.count, &arena);
+            return self.brute_force_search(query, rtxn, candidates, opt.count, arena);
         }
 
         // exhaustive search
-        self.hnsw_search(query, rtxn, opt, &arena)
+        self.hnsw_search(query, rtxn, opt, arena)
     }
 
     /// Directly retrieves items in the candidate list and ranks them by distance to the query.
@@ -557,7 +556,7 @@ impl<D: Distance> Reader<D> {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, (ItemId, f32)>> {
         let mut item_distances =
-            bumpalo::collections::Vec::with_capacity_in(candidates.len() as usize, &arena);
+            bumpalo::collections::Vec::with_capacity_in(candidates.len() as usize, arena);
 
         for item_id in candidates {
             let Some(vector) = self.item_vector(rtxn, item_id, arena)? else {

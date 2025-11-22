@@ -17,7 +17,7 @@ unsafe fn hsum256_ps_avx(x: __m256) -> f32 {
 pub(crate) unsafe fn euclid_similarity_avx(
     v1: &UnalignedVector<f32>,
     v2: &UnalignedVector<f32>,
-) -> f32 {
+) -> f32 { unsafe {
     // It is safe to load unaligned floats from a pointer.
     // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_loadu_ps&ig_expand=4134>
 
@@ -62,14 +62,14 @@ pub(crate) unsafe fn euclid_similarity_avx(
         result += (a - b).powi(2);
     }
     result
-}
+}}
 
 #[target_feature(enable = "avx")]
 #[target_feature(enable = "fma")]
 pub(crate) unsafe fn dot_similarity_avx(
     v1: &UnalignedVector<f32>,
     v2: &UnalignedVector<f32>,
-) -> f32 {
+) -> f32 { unsafe {
     // It is safe to load unaligned floats from a pointer.
     // <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_loadu_ps&ig_expand=4134>
 
@@ -116,7 +116,7 @@ pub(crate) unsafe fn dot_similarity_avx(
         result += a * b;
     }
     result
-}
+}}
 
 #[cfg(test)]
 mod tests {

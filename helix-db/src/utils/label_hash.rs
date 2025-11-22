@@ -149,13 +149,11 @@ mod tests {
     #[test]
     fn test_hash_label_similar_strings() {
         // Test labels that differ by only one character
-        let labels = vec![
-            "person",
+        let labels = ["person",
             "persons",
             "person1",
             "person_",
-            "Person",
-        ];
+            "Person"];
 
         let hashes: Vec<[u8; 4]> = labels.iter()
             .map(|l| hash_label(l, None))

@@ -211,7 +211,7 @@ mod vector_serialization_tests {
         assert_eq!(vector.label, label);
         assert_eq!(vector.len(), 4);
         assert_eq!(vector.version, 1);
-        assert_eq!(vector.deleted, false);
+        assert!(!vector.deleted);
         assert!(vector.properties.is_none());
     }
 
@@ -322,7 +322,7 @@ mod vector_serialization_tests {
         let deserialized =
             HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
-        assert_eq!(deserialized.deleted, true);
+        assert!(deserialized.deleted);
     }
 
     #[test]
@@ -340,7 +340,7 @@ mod vector_serialization_tests {
         let deserialized =
             HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
-        assert_eq!(deserialized.deleted, false);
+        assert!(!deserialized.deleted);
     }
 
     // ========================================================================

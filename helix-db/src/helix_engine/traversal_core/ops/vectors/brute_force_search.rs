@@ -31,7 +31,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     fn brute_force_search_v<K>(
         self,
-        query: &'arena [f32],
+        _query: &'arena [f32],
         k: K,
     ) -> RoTraversalIterator<
         'db,
@@ -43,12 +43,12 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let arena = bumpalo::Bump::new();
+        let _arena = bumpalo::Bump::new();
         let iter = self
             .inner
             .filter_map(|v| match v {
                 Ok(TraversalValue::Vector(mut v)) => {
-                    let mut bump_vec = bumpalo::collections::Vec::new_in(&self.arena);
+                    let mut bump_vec = bumpalo::collections::Vec::new_in(self.arena);
                     bump_vec.extend_from_slice(v.data_borrowed());
 
                     let d =
@@ -60,13 +60,13 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             })
             .sorted_by(|v1, v2| v1.partial_cmp(v2).unwrap())
             .take(k.try_into().unwrap())
-            .filter_map(move |mut item| {
+            .filter_map(move |item| {
                 match self
                     .storage
                     .vectors
                     .get_vector_properties(self.txn, item.id, self.arena)
                 {
-                    Ok(Some(vector_without_data)) => {
+                    Ok(Some(_vector_without_data)) => {
                         // todo!
                         // item.expand_from_vector_without_data(vector_without_data);
                         Some(item)
