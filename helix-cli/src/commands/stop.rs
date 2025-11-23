@@ -28,7 +28,7 @@ async fn stop_local_instance(project: &ProjectContext, instance_name: &str) -> R
     let docker = DockerManager::new(project);
 
     // Check Docker availability
-    DockerManager::check_docker_available()?;
+    DockerManager::check_runtime_available(docker.runtime)?;
 
     // Stop the instance
     docker.stop_instance(instance_name)?;

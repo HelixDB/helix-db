@@ -86,8 +86,10 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
 
     // For local instances, build Docker image
     if instance_config.should_build_docker_image() {
+        let runtime = project.config.project.container_runtime;
+        DockerManager::check_runtime_available(runtime)?;
         let docker = DockerManager::new(&project);
-        DockerManager::check_docker_available()?;
+
         docker.build_image(&instance_name, instance_config.docker_build_target())?;
     }
 
@@ -119,13 +121,19 @@ fn needs_cache_recreation(repo_cache: &std::path::Path) -> Result<bool> {
 
     match (DEV_MODE, is_git_repo) {
         (true, true) => {
-            print_status("CACHE", "Cache is git repo but DEV_MODE requires copy - recreating...");
+            print_status(
+                "CACHE",
+                "Cache is git repo but DEV_MODE requires copy - recreating...",
+            );
             Ok(true)
-        },
+        }
         (false, false) => {
-            print_status("CACHE", "Cache is copy but production mode requires git repo - recreating...");
+            print_status(
+                "CACHE",
+                "Cache is copy but production mode requires git repo - recreating...",
+            );
             Ok(true)
-        },
+        }
         _ => Ok(false),
     }
 }
@@ -290,10 +298,9 @@ async fn generate_docker_files(
         return Ok(());
     }
 
-    print_status("DOCKER", "Generating Docker configuration...");
-
     let docker = DockerManager::new(project);
 
+    print_status(docker.runtime.label(), "Generating configuration...");
     // Generate Dockerfile
     let dockerfile_content = docker.generate_dockerfile(instance_name, instance_config.clone())?;
     let dockerfile_path = project.dockerfile_path(instance_name);

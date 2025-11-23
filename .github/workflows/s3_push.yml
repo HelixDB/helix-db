@@ -1,0 +1,46 @@
+name: Push to S3
+
+on:
+  release:
+    types: [published, created]
+  create:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  upload-to-s3:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubActionsS3Role
+          aws-region: us-east-1
+
+      - name: Upload specified files and directories to S3
+        run: |
+          # Sync directories
+          aws s3 sync helix-cli/ s3://helix-repo/template/helix-cli/ --exclude "target/*"
+          aws s3 sync helix-container/ s3://helix-repo/template/helix-container/ --exclude "target/*"
+          aws s3 sync helix-macros/ s3://helix-repo/template/helix-macros/ --exclude "target/*"
+          aws s3 sync metrics/ s3://helix-repo/template/metrics/ --exclude "target/*"
+
+          # Upload root-level Cargo files
+          aws s3 cp Cargo.lock s3://helix-repo/template/Cargo.lock
+          aws s3 cp Cargo.toml s3://helix-repo/template/Cargo.toml
+
+      - name: Upload completion notification
+        if: success()
+        run: |
+          echo "Successfully uploaded all files to S3 bucket: helix-repo"
+          echo "Upload triggered by: ${{ github.event_name }}"
+          echo "Reference: ${{ github.ref }}"

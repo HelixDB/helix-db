@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 use helix_cli::{AuthAction, CloudDeploymentTypeCommand, MetricsAction};
 
+mod cleanup;
 mod commands;
 mod config;
 mod docker;
