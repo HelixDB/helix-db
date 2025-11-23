@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use eyre::Result;
 use helix_cli::{AuthAction, CloudDeploymentTypeCommand, MetricsAction};
+use std::path::PathBuf;
 
 mod cleanup;
 mod commands;
@@ -156,6 +157,16 @@ enum Commands {
         #[clap(long)]
         no_backup: bool,
     },
+
+    /// Backup instance at the given path
+    Backup {
+        /// Instance name to backup
+        instance: String,
+
+        /// Output directory for the backup. If omitted, ./backups/backup-<ts>/ will be used
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -204,7 +215,10 @@ async fn main() -> Result<()> {
             port,
             dry_run,
             no_backup,
-        } => commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await,
+        } => {
+            commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await
+        }
+        Commands::Backup { instance, output } => commands::backup::run(output, instance).await,
     };
 
     // Shutdown metrics sender
