@@ -6,7 +6,7 @@ use crate::config::{CloudConfig, InstanceInfo};
 use crate::docker::DockerManager;
 use crate::metrics_sender::MetricsSender;
 use crate::project::ProjectContext;
-use crate::utils::{print_status, print_success};
+use crate::utils::{print_status, print_success, spinner, helixc_utils::collect_hx_files};
 use eyre::Result;
 use std::time::Instant;
 
@@ -97,10 +97,11 @@ async fn push_local_instance(
     DockerManager::check_runtime_available(docker.runtime)?;
 
     // Build the instance first (this ensures it's up to date) and get metrics data
-    let metrics_data =
-        crate::commands::build::run(instance_name.to_string(), metrics_sender).await?;
+    // build::run() has its own status messages, so no spinner needed
+    let metrics_data = crate::commands::build::run(instance_name.to_string(), metrics_sender)
+        .await?;
 
-    // Start the instance
+    // Start the instance (has its own status messages, so no spinner needed)
     docker.start_instance(instance_name)?;
 
     // Get the instance configuration to show connection info
@@ -136,6 +137,7 @@ async fn push_cloud_instance(
 
     let metrics_data = if instance_config.should_build_docker_image() {
         // Build happens, get metrics data from build
+        // build::run() has its own status messages, so no spinner needed
         crate::commands::build::run(instance_name.to_string(), metrics_sender).await?
     } else {
         // No build, use lightweight parsing
@@ -151,26 +153,47 @@ async fn push_cloud_instance(
     let config = project.config.cloud.get(instance_name).unwrap();
     match config {
         CloudConfig::FlyIo(config) => {
-            let fly = FlyManager::new(project, config.auth_type.clone()).await?;
-            let docker = DockerManager::new(project);
-            // Get the correct image name from docker compose project name
-            let image_name = docker.image_name(instance_name, config.build_mode);
+            spinner::with_spinner(
+                "Deploying to Fly.io...",
+                async {
+                    let fly = FlyManager::new(project, config.auth_type.clone()).await?;
+                    let docker = DockerManager::new(project);
+                    // Get the correct image name from docker compose project name
+                    let image_name = docker.image_name(instance_name, config.build_mode);
 
-            fly.deploy_image(&docker, config, instance_name, &image_name)
-                .await?;
+                    fly.deploy_image(&docker, config, instance_name, &image_name)
+                        .await?;
+                    Ok::<(), eyre::Error>(())
+                },
+            )
+            .await?;
         }
         CloudConfig::Ecr(config) => {
-            let ecr = EcrManager::new(project, config.auth_type.clone()).await?;
-            let docker = DockerManager::new(project);
-            // Get the correct image name from docker compose project name
-            let image_name = docker.image_name(instance_name, config.build_mode);
+            spinner::with_spinner(
+                "Deploying to ECR...",
+                async {
+                    let ecr = EcrManager::new(project, config.auth_type.clone()).await?;
+                    let docker = DockerManager::new(project);
+                    // Get the correct image name from docker compose project name
+                    let image_name = docker.image_name(instance_name, config.build_mode);
 
-            ecr.deploy_image(&docker, config, instance_name, &image_name)
-                .await?;
+                    ecr.deploy_image(&docker, config, instance_name, &image_name)
+                        .await?;
+                    Ok::<(), eyre::Error>(())
+                },
+            )
+            .await?;
         }
         CloudConfig::Helix(_config) => {
-            let helix = HelixManager::new(project);
-            helix.deploy(None, instance_name.to_string()).await?;
+            spinner::with_spinner(
+                "Deploying to Helix Cloud...",
+                async {
+                    let helix = HelixManager::new(project);
+                    helix.deploy(None, instance_name.to_string()).await?;
+                    Ok::<(), eyre::Error>(())
+                },
+            )
+            .await?;
         }
     }
 
@@ -181,46 +204,16 @@ async fn push_cloud_instance(
 
 /// Lightweight parsing for metrics when no compilation happens  
 fn parse_queries_for_metrics(project: &ProjectContext) -> Result<MetricsData> {
-    use helix_db::helixc::parser::{
-        HelixParser,
-        types::{Content, HxFile, Source},
-    };
-    use std::fs;
+    use crate::utils::helixc_utils::{generate_content, parse_content};
 
-    // Collect .hx files in project root
-    let dir_entries: Vec<_> = std::fs::read_dir(&project.root)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.path().is_file() && entry.path().extension().map(|s| s == "hx").unwrap_or(false)
-        })
-        .collect();
+    // Collect .hx files using the configured queries path (consistent with build.rs)
+    let dir_entries = collect_hx_files(&project.root, &project.config.project.queries)?;
 
-    // Generate content from the files (similar to build.rs)
-    let hx_files: Vec<HxFile> = dir_entries
-        .iter()
-        .map(|file| {
-            let name = file.path().to_string_lossy().into_owned();
-            let content = fs::read_to_string(file.path())
-                .map_err(|e| eyre::eyre!("Failed to read file {}: {}", name, e))?;
-            Ok(HxFile { name, content })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let content_str = hx_files
-        .iter()
-        .map(|file| file.content.clone())
-        .collect::<Vec<String>>()
-        .join("\n");
-
-    let content = Content {
-        content: content_str,
-        files: hx_files,
-        source: Source::default(),
-    };
+    // Generate content from the files (same as build.rs)
+    let content = generate_content(&dir_entries)?;
 
     // Parse the content
-    let source =
-        HelixParser::parse_source(&content).map_err(|e| eyre::eyre!("Parse error: {}", e))?;
+    let source = parse_content(&content)?;
 
     // Extract query names
     let all_queries: Vec<String> = source.queries.iter().map(|q| q.name.clone()).collect();
