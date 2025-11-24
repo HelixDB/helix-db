@@ -11,8 +11,8 @@ fi
 file_name=$1
 
 
-helix compile --path "/Users/xav/GitHub/helix-db-core/hql-tests/tests/$file_name" --output "/Users/xav/GitHub/helix-db-core/helix-container/src"
-output=$(cargo check --manifest-path "/Users/xav/GitHub/helix-db-core/helix-container/Cargo.toml")
+helix compile --path "/Users/xav/GitHub/helix-db/hql-tests/tests/$file_name" --output "/Users/xav/GitHub/helix-db/helix-container/src"
+output=$(cargo check --manifest-path "/Users/xav/GitHub/helix-db/helix-container/Cargo.toml")
 if [ $? -ne 0 ]; then
     echo "Error: Cargo check failed"
     echo "Cargo check output: $output"

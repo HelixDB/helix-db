@@ -1,3 +1,4 @@
+use crate::cleanup::CleanupTracker;
 use crate::CloudDeploymentTypeCommand;
 use crate::commands::integrations::ecr::{EcrAuthType, EcrManager};
 use crate::commands::integrations::fly::{FlyAuthType, FlyManager, VmSize};
@@ -17,6 +18,36 @@ pub async fn run(
     _template: String,
     queries_path: String,
     deployment_type: Option<CloudDeploymentTypeCommand>,
+) -> Result<()> {
+    let mut cleanup_tracker = CleanupTracker::new();
+
+    // Execute the init logic, capturing any errors
+    let result = run_init_inner(
+        path,
+        _template,
+        queries_path,
+        deployment_type,
+        &mut cleanup_tracker,
+    )
+    .await;
+
+    // If there was an error, perform cleanup
+    if let Err(ref e) = result
+        && cleanup_tracker.has_tracked_resources() {
+            eprintln!("Init failed, performing cleanup: {}", e);
+            let summary = cleanup_tracker.cleanup();
+            summary.log_summary();
+        }
+
+    result
+}
+
+async fn run_init_inner(
+    path: Option<String>,
+    _template: String,
+    queries_path: String,
+    deployment_type: Option<CloudDeploymentTypeCommand>,
+    cleanup_tracker: &mut CleanupTracker,
 ) -> Result<()> {
     let project_dir = match path {
         Some(p) => std::path::PathBuf::from(p),
@@ -45,14 +76,22 @@ pub async fn run(
     );
 
     // Create project directory if it doesn't exist
+    let project_dir_existed = project_dir.exists();
     fs::create_dir_all(&project_dir)?;
+    if !project_dir_existed {
+        cleanup_tracker.track_dir(project_dir.clone());
+    }
 
     // Create default helix.toml with custom queries path
     let mut config = HelixConfig::default_config(project_name);
     config.project.queries = std::path::PathBuf::from(&queries_path);
+
+    // Save initial config and track it
     config.save_to_file(&config_path)?;
+    cleanup_tracker.track_file(config_path.clone());
+
     // Create project structure
-    create_project_structure(&project_dir, &queries_path)?;
+    create_project_structure(&project_dir, &queries_path, cleanup_tracker)?;
 
     // Initialize deployment type based on flags
 
@@ -82,6 +121,9 @@ pub async fn run(
                         project_name.to_string(),
                         CloudConfig::Helix(cloud_config.clone()),
                     );
+
+                    // Backup config before saving
+                    cleanup_tracker.backup_config(&config, config_path.clone());
 
                     // save config
                     config.save_to_file(&config_path)?;
@@ -116,6 +158,10 @@ pub async fn run(
                         project_name.to_string(),
                         CloudConfig::Ecr(ecr_config.clone()),
                     );
+
+                    // Backup config before saving
+                    cleanup_tracker.backup_config(&config, config_path.clone());
+
                     config.save_to_file(&config_path)?;
 
                     print_status("ECR", "AWS ECR repository initialized successfully");
@@ -156,6 +202,10 @@ pub async fn run(
                         project_name.to_string(),
                         CloudConfig::FlyIo(instance_config.clone()),
                     );
+
+                    // Backup config before saving
+                    cleanup_tracker.backup_config(&config, config_path.clone());
+
                     config.save_to_file(&config_path)?;
                 }
                 _ => {}
@@ -184,10 +234,19 @@ pub async fn run(
     Ok(())
 }
 
-fn create_project_structure(project_dir: &Path, queries_path: &str) -> Result<()> {
+fn create_project_structure(
+    project_dir: &Path,
+    queries_path: &str,
+    cleanup_tracker: &mut CleanupTracker,
+) -> Result<()> {
     // Create directories
-    fs::create_dir_all(project_dir.join(".helix"))?;
-    fs::create_dir_all(project_dir.join(queries_path))?;
+    let helix_dir = project_dir.join(".helix");
+    fs::create_dir_all(&helix_dir)?;
+    cleanup_tracker.track_dir(helix_dir);
+
+    let queries_dir = project_dir.join(queries_path);
+    fs::create_dir_all(&queries_dir)?;
+    cleanup_tracker.track_dir(queries_dir);
 
     // Create default schema.hx with proper Helix syntax
     let default_schema = r#"// Start building your schema here.
@@ -221,10 +280,9 @@ fn create_project_structure(project_dir: &Path, queries_path: &str) -> Result<()
 //     }
 // }
 "#;
-    fs::write(
-        project_dir.join(queries_path).join("schema.hx"),
-        default_schema,
-    )?;
+    let schema_path = project_dir.join(queries_path).join("schema.hx");
+    fs::write(&schema_path, default_schema)?;
+    cleanup_tracker.track_file(schema_path);
 
     // Create default queries.hx with proper Helix query syntax in the queries directory
     let default_queries = r#"// Start writing your queries here.
@@ -246,17 +304,18 @@ fn create_project_structure(project_dir: &Path, queries_path: &str) -> Result<()
 // see the documentation at https://docs.helix-db.com
 // or checkout our GitHub at https://github.com/HelixDB/helix-db
 "#;
-    fs::write(
-        project_dir.join(queries_path).join("queries.hx"),
-        default_queries,
-    )?;
+    let queries_path_file = project_dir.join(queries_path).join("queries.hx");
+    fs::write(&queries_path_file, default_queries)?;
+    cleanup_tracker.track_file(queries_path_file);
 
     // Create .gitignore
     let gitignore = r#".helix/
 target/
 *.log
 "#;
-    fs::write(project_dir.join(".gitignore"), gitignore)?;
+    let gitignore_path = project_dir.join(".gitignore");
+    fs::write(&gitignore_path, gitignore)?;
+    cleanup_tracker.track_file(gitignore_path);
 
     Ok(())
 }

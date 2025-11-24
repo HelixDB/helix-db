@@ -29,12 +29,13 @@ jobs:
     
     - name: Cache cargo registry
       uses: actions/cache@v3
+      continue-on-error: true
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') || 'fallback' }}
         restore-keys: |
           ${{ runner.os }}-cargo-
     

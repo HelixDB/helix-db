@@ -92,7 +92,6 @@ impl<'a> EcrManager<'a> {
         format!("helix-{}-{instance_name}", self.project.config.project.name)
     }
 
-
     fn image_name(&self, repository_name: &str, build_mode: BuildMode) -> String {
         let tag = match build_mode {
             BuildMode::Debug => "debug",
@@ -343,7 +342,7 @@ impl<'a> EcrManager<'a> {
             .to_string();
 
         use tokio::io::AsyncWriteExt;
-        let mut login_cmd = tokio::process::Command::new("docker");
+        let mut login_cmd = tokio::process::Command::new(docker.runtime.binary());
         login_cmd.args([
             "login",
             "--username",

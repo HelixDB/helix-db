@@ -78,6 +78,7 @@ pub enum ToolArgs {
         vector: Vec<f64>,
         k: usize,
         min_score: Option<f64>,
+        cutoff: Option<usize>,
     },
 }
 
@@ -380,30 +381,50 @@ where
             // SearchVecText requires embedding model initialization
             // It should be called via the dedicated search_vec_text MCP handler
             // not through the generic query chain execution
-            Err(GraphError::New(
-                format!("SearchVecText (query: {}, label: {}, k: {}) is not supported in generic query chains. Use the search_vec_text endpoint directly.", query, label, k)
-            ))
+            Err(GraphError::New(format!(
+                "SearchVecText (query: {}, label: {}, k: {}) is not supported in generic query chains. Use the search_vec_text endpoint directly.",
+                query, label, k
+            )))
         }
-        ToolArgs::SearchVec { vector, k, min_score } => {
+        ToolArgs::SearchVec {
+            vector,
+            k,
+            min_score,
+            cutoff,
+        } => {
             use crate::helix_engine::traversal_core::ops::vectors::brute_force_search::BruteForceSearchVAdapter;
 
             let query_vec = arena.alloc_slice_copy(vector);
-            let mut results = stream.map(|iter| iter.range(0, *k*3).brute_force_search_v(query_vec, *k));
+            let mut results = match cutoff {
+                Some(cutoff_val) => stream.map(|iter| {
+                    iter.range(0, *cutoff_val)
+                        .brute_force_search_v(query_vec, *k)
+                }),
+                None => stream.map(|iter| iter.brute_force_search_v(query_vec, *k)),
+            };
 
             // Apply min_score filter if specified
             if let Some(min_score_val) = min_score {
                 let min_score_copy = *min_score_val;
                 results = results.map(|iter| {
-                    let RoTraversalIterator { storage, arena, txn, inner } = iter;
-                    let filtered: DynIter<'arena, 'txn> = Box::new(
-                        inner.filter(move |item_res| {
-                            match item_res {
-                                Ok(TraversalValue::Vector(v)) => v.get_distance() > min_score_copy,
-                                _ => true, // Keep non-vector items
-                            }
-                        })
-                    );
-                    RoTraversalIterator { storage, arena, txn, inner: filtered }
+                    let RoTraversalIterator {
+                        storage,
+                        arena,
+                        txn,
+                        inner,
+                    } = iter;
+                    let filtered: DynIter<'arena, 'txn> = Box::new(inner.filter(move |item_res| {
+                        match item_res {
+                            Ok(TraversalValue::Vector(v)) => v.get_distance() > min_score_copy,
+                            _ => true, // Keep non-vector items
+                        }
+                    }));
+                    RoTraversalIterator {
+                        storage,
+                        arena,
+                        txn,
+                        inner: filtered,
+                    }
                 });
             }
 
