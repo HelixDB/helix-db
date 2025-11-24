@@ -1634,6 +1634,11 @@ impl Value {
     pub fn as_f64(&self) -> f64 {
         *self.into_primitive()
     }
+
+    #[inline(always)]
+    pub fn as_f32(&self) -> f32 {
+        *self.into_primitive()
+    }
 }
 
 #[cfg(test)]
