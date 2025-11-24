@@ -228,7 +228,7 @@ mod error_handling_tests {
     fn test_vector_cast_empty_raw_data_panics() {
         let arena = Bump::new();
         let empty_data: &[u8] = &[];
-        HVector::raw_vector_data_to_vec(empty_data, &arena);
+        HVector::raw_vector_data_to_vec(empty_data, &arena).unwrap();
     }
 
     #[test]
@@ -260,12 +260,12 @@ mod error_handling_tests {
     }
 
     #[test]
-    #[should_panic(expected = "is not a multiple of size_of::<f32>()")]
+    #[should_panic]
     fn test_vector_misaligned_data_bytes_panics() {
         let arena = Bump::new();
         // 7 bytes is not a multiple of 4 (size of f32)
         let misaligned: &[u8] = &[0, 1, 2, 3, 4, 5, 6];
-        HVector::raw_vector_data_to_vec(misaligned, &arena);
+        HVector::raw_vector_data_to_vec(misaligned, &arena).unwrap();
     }
 
     #[test]

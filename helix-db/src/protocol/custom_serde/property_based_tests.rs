@@ -344,7 +344,7 @@ mod property_based_tests {
 
             // Convert to bytes and back
             let bytes = create_vector_bytes(&data);
-            let restored = HVector::raw_vector_data_to_vec( &bytes,&arena);
+            let restored = HVector::raw_vector_data_to_vec( &bytes,&arena).unwrap();
 
             prop_assert_eq!(restored.len(), data.len());
 

@@ -94,7 +94,8 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
 
-                let data = HVector::raw_vector_data_to_vec(self.raw_vector_data, self.arena);
+                let data = HVector::raw_vector_data_to_vec(self.raw_vector_data, self.arena)
+                    .map_err(serde::de::Error::custom)?;
 
                 Ok(HVector {
                     id: self.id,
