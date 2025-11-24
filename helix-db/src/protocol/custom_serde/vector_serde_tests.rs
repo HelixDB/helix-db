@@ -175,7 +175,7 @@ mod vector_serialization_tests {
         let original_data: Vec<f32> = (0..128).map(|i| i as f32).collect();
         let raw_bytes = create_vector_bytes(&original_data);
 
-        let casted_data = HVector::raw_vector_data_to_vec(&raw_bytes, &arena);
+        let casted_data = HVector::raw_vector_data_to_vec(&raw_bytes, &arena).unwrap();
 
         assert_eq!(casted_data.len(), 128);
         for (i, &val) in casted_data.iter().enumerate() {
@@ -189,7 +189,7 @@ mod vector_serialization_tests {
         let original_data = vec![3.14159, 2.71828, 1.41421, 1.73205];
         let raw_bytes = create_vector_bytes(&original_data);
 
-        let casted_data = HVector::raw_vector_data_to_vec(&raw_bytes, &arena);
+        let casted_data = HVector::raw_vector_data_to_vec(&raw_bytes, &arena).unwrap();
 
         assert_eq!(casted_data.len(), original_data.len());
         for (orig, casted) in original_data.iter().zip(casted_data.iter()) {
