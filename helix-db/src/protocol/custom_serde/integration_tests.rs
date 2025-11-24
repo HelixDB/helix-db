@@ -635,7 +635,7 @@ mod integration_tests {
         let vector = create_simple_vector(&arena, id, "test", &data);
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
-        // Should be exactly 128 * 8 bytes (128 f64 values)
-        assert_eq!(data_bytes.len(), 128 * 8);
+        // Should be exactly 128 * 8 bytes (128 f32 values)
+        assert_eq!(data_bytes.len(), 128 * 4);
     }
 }
