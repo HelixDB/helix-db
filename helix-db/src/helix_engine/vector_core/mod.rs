@@ -230,10 +230,13 @@ impl<'arena> HVector<'arena> {
     pub fn raw_vector_data_to_vec<'txn>(
         raw_vector_data: &'txn [u8],
         arena: &'arena bumpalo::Bump,
-    ) -> bumpalo::collections::Vec<'arena, f32> {
+    ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, f32>> {
         let mut bump_vec = bumpalo::collections::Vec::<'arena, f32>::new_in(arena);
-        bump_vec.extend_from_slice(bytemuck::cast_slice(raw_vector_data));
-        bump_vec
+        bump_vec.extend_from_slice(bytemuck::try_cast_slice(raw_vector_data).map_err(|err| {
+            VectorError::ConversionError(format!("Error casting raw bytes to &[f32]: {}", err))
+        })?);
+
+        Ok(bump_vec)
     }
 
     pub fn from_raw_vector_data<'txn>(
@@ -510,7 +513,7 @@ impl VectorCore {
         let (item_id, _) = nns.first().unwrap();
         let global_id = self
             .local_to_global_id
-            .get(txn, &item_id)?
+            .get(txn, item_id)?
             .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
         let (_, label) = global_to_local_id.get(&global_id).unwrap();
         let index = label_to_index.get(label).unwrap();
