@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use heed3::RoTxn;
 use rand::Rng;
 use tempfile::TempDir;
 
@@ -25,12 +24,9 @@ use crate::{
             traversal_value::TraversalValue,
         },
         types::GraphError,
-        vector_core::HVector,
     },
     props,
 };
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();

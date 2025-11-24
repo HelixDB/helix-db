@@ -16,7 +16,7 @@ QUERY testRRFDefault(query_vec: [F32]) =>
     RETURN results
 
 // Test 2: RerankRRF with custom k parameter
-QUERY testRRFCustomK(query_vec: [F32], k_val: F64) =>
+QUERY testRRFCustomK(query_vec: [F32], k_val: F32) =>
     results <- SearchV<Document>(query_vec, 100)
         ::RerankRRF(k: k_val)
         ::RANGE(0, 10)
@@ -52,7 +52,7 @@ QUERY testChainedRerankers(query_vec: [F32]) =>
     RETURN results
 
 // Test 7: MMR with variable lambda
-QUERY testMMRVariableLambda(query_vec: [F32], lambda_val: F64) =>
+QUERY testMMRVariableLambda(query_vec: [F32], lambda_val: F32) =>
     results <- SearchV<Document>(query_vec, 100)
         ::RerankMMR(lambda: lambda_val)
         ::RANGE(0, 10)
