@@ -440,8 +440,7 @@ impl HybridSearch for HelixGraphStorage {
                     false,
                     &arena,
                 )?;
-                let scores =
-                    results.into_global_id(&self.vectors.local_to_global_id.read().unwrap());
+                let scores = self.vectors.into_global_id(&txn, &results)?;
                 Ok(Some(scores))
             });
 

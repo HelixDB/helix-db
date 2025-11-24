@@ -61,18 +61,24 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
         let iter = match vectors {
             Ok(vectors) => {
-                let hvectors = self.storage.vectors.nns_to_hvectors(
+                match self.storage.vectors.nns_to_hvectors(
                     self.txn,
                     vectors.into_nns(),
                     false,
                     self.arena,
-                );
-
-                hvectors
-                    .into_iter()
-                    .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
-                    .collect::<Vec<_>>()
-                    .into_iter()
+                ) {
+                    Ok(hvectors) => hvectors
+                        .into_iter()
+                        .map(|vector| {
+                            Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                    Err(err) => {
+                        let error = GraphError::VectorError(format!("{err}"));
+                        once(Err(error)).collect::<Vec<_>>().into_iter()
+                    }
+                }
             }
             Err(VectorError::VectorNotFound(id)) => {
                 let error = GraphError::VectorError(format!("vector not found for id {id}"));
