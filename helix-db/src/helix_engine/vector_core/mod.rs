@@ -203,7 +203,16 @@ impl<'arena> HVector<'arena> {
     pub fn distance_to(&self, rhs: &HVector<'arena>) -> VectorCoreResult<f32> {
         match (self.data.as_ref(), rhs.data.as_ref()) {
             (None, _) | (_, None) => Err(VectorError::HasNoData),
-            (Some(a), Some(b)) => Ok(Cosine::distance(a, b)),
+            (Some(a), Some(b)) => {
+                if a.vector.len() != b.vector.len() {
+                    return Err(VectorError::InvalidVecDimension {
+                        expected: a.vector.len(),
+                        received: b.vector.len(),
+                    });
+                }
+
+                Ok(Cosine::distance(a, b))
+            }
         }
     }
 
@@ -474,7 +483,8 @@ impl VectorCore {
     }
 
     pub fn delete(&self, txn: &mut RwTxn, id: u128) -> VectorCoreResult<()> {
-        match self.global_to_local_id.read().unwrap().get(&id) {
+        let mut global_to_local_id = self.global_to_local_id.write().unwrap();
+        match global_to_local_id.get(&id) {
             Some(&(idx, ref label)) => {
                 let label_to_index = self.label_to_index.read().unwrap();
                 let index = label_to_index
@@ -485,8 +495,16 @@ impl VectorCore {
 
                 // TODO: do we actually need to delete here?
                 self.local_to_global_id.delete(txn, &idx)?;
+                global_to_local_id.remove(&id);
 
                 index.num_vectors.fetch_sub(1, atomic::Ordering::SeqCst);
+
+                let mut rng = StdRng::from_os_rng();
+                let mut builder = writer.builder(&mut rng);
+
+                builder
+                    .ef_construction(self.config.ef_construct)
+                    .build(txn)?;
                 Ok(())
             }
             None => Err(VectorError::VectorNotFound(format!(
@@ -629,7 +647,9 @@ impl VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<Option<HVector<'arena>>> {
         let global_to_local_id = self.global_to_local_id.read().unwrap();
-        let (_, label) = global_to_local_id.get(&id).unwrap();
+        let (_, label) = global_to_local_id
+            .get(&id)
+            .ok_or_else(|| VectorError::VectorNotFound(format!("Vector not found: {}", id)))?;
 
         let properties = match self.vector_properties_db.get(txn, &id)? {
             Some(bytes) => bincode::options()
@@ -672,7 +692,10 @@ impl VectorCore {
     ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
         let mut result = bumpalo::collections::Vec::new_in(arena);
         let label_to_index = self.label_to_index.read().unwrap();
-        let index = label_to_index.get(label).unwrap();
+        let index = match label_to_index.get(label) {
+            Some(index) => index,
+            None => return Ok(bumpalo::collections::Vec::new_in(arena)),
+        };
 
         let reader = Reader::open(txn, index.id, self.hsnw)?;
         let mut iter = reader.iter(txn)?;
@@ -684,6 +707,17 @@ impl VectorCore {
                     .get(txn, &key.item)?
                     .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
 
+                let properties = match self.vector_properties_db.get(txn, &id)? {
+                    Some(bytes) => bincode::options()
+                        .with_fixint_encoding()
+                        .allow_trailing_bytes()
+                        .deserialize_seed(OptionPropertiesMapDeSeed { arena }, bytes)
+                        .map_err(|e| {
+                            VectorError::ConversionError(format!("Error deserializing vector: {e}"))
+                        })?,
+                    None => None,
+                };
+
                 result.push(HVector {
                     id,
                     label,
@@ -691,7 +725,7 @@ impl VectorCore {
                     deleted: false,
                     level: Some(key.layer as usize),
                     version: 0,
-                    properties: None,
+                    properties,
                     data: Some(item.clone_in(arena)),
                 });
             }
@@ -702,6 +736,17 @@ impl VectorCore {
                     .get(txn, &key.item)?
                     .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
 
+                let properties = match self.vector_properties_db.get(txn, &id)? {
+                    Some(bytes) => bincode::options()
+                        .with_fixint_encoding()
+                        .allow_trailing_bytes()
+                        .deserialize_seed(OptionPropertiesMapDeSeed { arena }, bytes)
+                        .map_err(|e| {
+                            VectorError::ConversionError(format!("Error deserializing vector: {e}"))
+                        })?,
+                    None => None,
+                };
+
                 result.push(HVector {
                     id,
                     label,
@@ -709,7 +754,7 @@ impl VectorCore {
                     deleted: false,
                     level: Some(key.layer as usize),
                     version: 0,
-                    properties: None,
+                    properties,
                     data: None,
                 });
             }

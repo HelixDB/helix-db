@@ -1,6 +1,6 @@
 use crate::commands::init::run;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Helper function to create a temporary test directory
@@ -9,7 +9,7 @@ fn setup_test_dir() -> TempDir {
 }
 
 /// Helper function to check if helix.toml exists and is valid
-fn assert_helix_config_exists(project_dir: &PathBuf) {
+fn assert_helix_config_exists(project_dir: &Path) {
     let config_path = project_dir.join("helix.toml");
     assert!(
         config_path.exists(),
@@ -104,7 +104,7 @@ async fn test_init_with_default_path() {
     .await;
 
     assert!(result.is_ok(), "Init with default path should succeed");
-    assert_helix_config_exists(&temp_dir.path().to_path_buf());
+    assert_helix_config_exists(temp_dir.path());
 }
 
 #[tokio::test]
