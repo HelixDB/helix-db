@@ -263,7 +263,7 @@ fn test_v_from_type_without_vector_data() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id(), vector_id);
 
-    // Verify it's a VectorWithoutData
+    // Verify it's a Vector with no data
     match &results[0] {
         crate::helix_engine::traversal_core::traversal_value::TraversalValue::Vector(v) => {
             assert_eq!(v.id, vector_id);
