@@ -13,15 +13,13 @@
 /// - Delete during search might return inconsistent results
 /// - LMDB transaction model provides MVCC but needs validation
 use bumpalo::Bump;
-use heed3::{Env, EnvOpenOptions, RoTxn, RwTxn};
+use heed3::{Env, EnvOpenOptions, RwTxn};
 use rand::Rng;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
 
-use crate::helix_engine::vector_core::{HNSWConfig, HVector, VectorCore};
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
+use crate::helix_engine::vector_core::{HNSWConfig, VectorCore};
 
 /// Setup test environment with larger map size for concurrent access
 ///
@@ -139,7 +137,7 @@ fn test_concurrent_inserts_single_label() {
     // Additional consistency check: Verify we can perform searches (entry point exists implicitly)
     let arena = Bump::new();
     let query = [0.5; 128];
-    let search_result = index.search(&rtxn, query.to_vec(), 10, "concurrent_test", false, &arena);
+    let search_result = index.search(&rtxn, query.to_vec(), 10, "concurrent_test", &arena);
     assert!(
         search_result.is_ok(),
         "Should be able to search after concurrent inserts (entry point exists)"
@@ -203,7 +201,7 @@ fn test_concurrent_searches_during_inserts() {
                 let rtxn = env.read_txn().unwrap();
                 let arena = Bump::new();
 
-                match index.search(&rtxn, query.to_vec(), 10, "search_test", false, &arena) {
+                match index.search(&rtxn, query.to_vec(), 10, "search_test", &arena) {
                     Ok(results) => {
                         total_searches += 1;
                         total_results += results.nns.len();
@@ -278,7 +276,7 @@ fn test_concurrent_searches_during_inserts() {
     // Verify we can still search successfully
     let arena = Bump::new();
     let results = index
-        .search(&rtxn, query.to_vec(), 10, "search_test", false, &arena)
+        .search(&rtxn, query.to_vec(), 10, "search_test", &arena)
         .unwrap();
     assert!(
         !results.nns.is_empty(),
@@ -351,7 +349,7 @@ fn test_concurrent_inserts_multiple_labels() {
 
         // Verify we can search for each label (entry point exists implicitly)
         let query = [0.5; 64];
-        let search_result = index.search(&rtxn, query.to_vec(), 5, &label, false, &arena);
+        let search_result = index.search(&rtxn, query.to_vec(), 5, &label, &arena);
         assert!(
             search_result.is_ok(),
             "Should be able to search label {}",
@@ -431,7 +429,7 @@ fn test_entry_point_consistency() {
 
     // If we can successfully search, entry point must be valid
     let query = [0.5; 32];
-    let search_result = index.search(&rtxn, query.to_vec(), 10, "entry_test", false, &arena);
+    let search_result = index.search(&rtxn, query.to_vec(), 10, "entry_test", &arena);
     assert!(
         search_result.is_ok(),
         "Entry point should exist and be valid"
@@ -514,14 +512,7 @@ fn test_graph_connectivity_after_concurrent_inserts() {
     for i in 0..10 {
         let query = random_vector(64);
         let results = index
-            .search(
-                &rtxn,
-                query.to_vec(),
-                10,
-                "connectivity_test",
-                false,
-                &arena,
-            )
+            .search(&rtxn, query.to_vec(), 10, "connectivity_test", &arena)
             .unwrap();
 
         assert!(

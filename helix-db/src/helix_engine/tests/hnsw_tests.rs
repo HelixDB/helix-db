@@ -1,11 +1,9 @@
 use bumpalo::Bump;
-use heed3::{Env, EnvOpenOptions, RoTxn};
+use heed3::{Env, EnvOpenOptions};
 use rand::Rng;
 use tempfile::TempDir;
 
-use crate::helix_engine::vector_core::{HNSWConfig, HVector, VectorCore};
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
+use crate::helix_engine::vector_core::{HNSWConfig, VectorCore};
 
 fn setup_env() -> (Env, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -59,7 +57,7 @@ fn test_hnsw_search_returns_results() {
     let txn = env.read_txn().unwrap();
     let query = [0.5, 0.5, 0.5, 0.5];
     let results = index
-        .search(&txn, query.to_vec(), 5, "vector", false, &arena)
+        .search(&txn, query.to_vec(), 5, "vector", &arena)
         .unwrap();
     assert!(!results.nns.is_empty());
 }

@@ -432,14 +432,9 @@ impl HybridSearch for HelixGraphStorage {
             task::spawn_blocking(move || -> Result<Option<Vec<(u128, f32)>>, GraphError> {
                 let txn = graph_env_vector.read_txn()?;
                 let arena = Bump::new(); // MOVE
-                let results = self.vectors.search(
-                    &txn,
-                    query_vector_owned,
-                    limit * 2,
-                    "vector",
-                    false,
-                    &arena,
-                )?;
+                let results =
+                    self.vectors
+                        .search(&txn, query_vector_owned, limit * 2, "vector", &arena)?;
                 let scores = self.vectors.into_global_id(&txn, &results)?;
                 Ok(Some(scores))
             });

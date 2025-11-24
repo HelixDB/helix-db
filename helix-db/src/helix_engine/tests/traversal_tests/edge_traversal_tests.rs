@@ -22,14 +22,10 @@ use crate::{
             traversal_value::TraversalValue,
         },
         types::GraphError,
-        vector_core::HVector,
     },
     props,
     protocol::value::Value,
 };
-use heed3::RoTxn;
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();

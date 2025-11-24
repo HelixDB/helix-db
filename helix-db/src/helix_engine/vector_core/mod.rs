@@ -28,7 +28,9 @@ use crate::{
         },
     },
     protocol::{
-        custom_serde::vector_serde::{VectoWithoutDataDeSeed, VectorDeSeed},
+        custom_serde::vector_serde::{
+            OptionPropertiesMapDeSeed, VectoWithoutDataDeSeed, VectorDeSeed,
+        },
         value::Value,
     },
     utils::{
@@ -123,10 +125,9 @@ impl<'arena> HVector<'arena> {
     }
 
     pub fn from_vec(label: &'arena str, data: bumpalo::collections::Vec<'arena, f32>) -> Self {
-        let id = v6_uuid();
         HVector {
-            id,
             label,
+            id: v6_uuid(),
             version: 1,
             data: Some(Item::<Cosine>::from_vec(data)),
             distance: None,
@@ -377,7 +378,6 @@ impl VectorCore {
         query: Vec<f32>,
         k: usize,
         label: &'arena str,
-        _should_trickle: bool,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<Searched<'arena>> {
         match self.label_to_index.read().unwrap().get(label) {
@@ -430,7 +430,7 @@ impl VectorCore {
         txn: &mut RwTxn,
         label: &'arena str,
         data: &'arena [f32],
-        _properties: Option<ImmutablePropertiesMap<'arena>>,
+        properties: Option<ImmutablePropertiesMap<'arena>>,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
         let writer = self.get_writer_or_create_index(label, data.len(), txn)?;
@@ -442,7 +442,8 @@ impl VectorCore {
 
         let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
         bump_vec.extend_from_slice(data);
-        let hvector = HVector::from_vec(label, bump_vec);
+        let mut hvector = HVector::from_vec(label, bump_vec);
+        hvector.properties = properties;
 
         self.global_to_local_id
             .write()
@@ -460,6 +461,9 @@ impl VectorCore {
 
         let mut rng = StdRng::from_os_rng();
         let mut builder = writer.builder(&mut rng);
+
+        self.vector_properties_db
+            .put(txn, &hvector.id, &bincode::serialize(&properties)?)?;
 
         // FIXME: We shouldn't rebuild on every insertion
         builder
@@ -526,14 +530,25 @@ impl VectorCore {
                     .get(txn, &item_id)?
                     .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
 
+                let properties = match self.vector_properties_db.get(txn, &global_id)? {
+                    Some(bytes) => bincode::options()
+                        .with_fixint_encoding()
+                        .allow_trailing_bytes()
+                        .deserialize_seed(OptionPropertiesMapDeSeed { arena }, bytes)
+                        .map_err(|e| {
+                            VectorError::ConversionError(format!("Error deserializing vector: {e}"))
+                        })?,
+                    None => None,
+                };
+
                 results.push(HVector {
                     id: global_id,
                     distance: Some(distance),
                     label,
+                    properties,
                     deleted: false,
                     level: None,
                     version: 0,
-                    properties: None,
                     data: get_item(self.hsnw, index.id, txn, item_id).unwrap(),
                 });
             }
@@ -544,13 +559,23 @@ impl VectorCore {
                     .get(txn, &item_id)?
                     .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
 
+                let properties = match self.vector_properties_db.get(txn, &global_id)? {
+                    Some(bytes) => bincode::options()
+                        .with_fixint_encoding()
+                        .allow_trailing_bytes()
+                        .deserialize_seed(OptionPropertiesMapDeSeed { arena }, bytes)
+                        .map_err(|e| {
+                            VectorError::ConversionError(format!("Error deserializing vector: {e}"))
+                        })?,
+                    None => None,
+                };
                 results.push(HVector {
                     id: global_id,
                     distance: Some(distance),
                     label,
                     deleted: false,
                     version: 0,
-                    properties: None,
+                    properties,
                     level: None,
                     data: None,
                 });
@@ -563,51 +588,68 @@ impl VectorCore {
     pub fn get_full_vector<'arena>(
         &self,
         txn: &RoTxn,
-        id: u128,
+        global_id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<HVector<'arena>> {
         let label_to_index = self.label_to_index.read().unwrap();
         let global_to_local_id = self.global_to_local_id.read().unwrap();
 
         let (item_id, label) = global_to_local_id
-            .get(&id)
-            .ok_or_else(|| VectorError::VectorNotFound(format!("Vector {id} not found")))?;
+            .get(&global_id)
+            .ok_or_else(|| VectorError::VectorNotFound(format!("Vector {global_id} not found")))?;
 
         let index = label_to_index.get(label).unwrap();
-        let label = arena.alloc_str(label);
-
-        let item = get_item(self.hsnw, index.id, txn, *item_id)?.map(|i| i.clone_in(arena));
+        let properties = match self.vector_properties_db.get(txn, &global_id)? {
+            Some(bytes) => bincode::options()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .deserialize_seed(OptionPropertiesMapDeSeed { arena }, bytes)
+                .map_err(|e| {
+                    VectorError::ConversionError(format!("Error deserializing vector: {e}"))
+                })?,
+            None => None,
+        };
 
         Ok(HVector {
-            id,
+            id: global_id,
+            properties,
             distance: None,
-            label,
+            label: arena.alloc_str(label),
             deleted: false,
             version: 0,
             level: None,
-            properties: None,
-            data: item.clone(),
+            data: get_item(self.hsnw, index.id, txn, *item_id)?.map(|i| i.clone_in(arena)),
         })
     }
 
     pub fn get_vector_properties<'arena>(
         &self,
-        _txn: &RoTxn,
+        txn: &RoTxn,
         id: u128,
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<Option<HVector<'arena>>> {
         let global_to_local_id = self.global_to_local_id.read().unwrap();
         let (_, label) = global_to_local_id.get(&id).unwrap();
 
-        // todo: actually take properties
+        let properties = match self.vector_properties_db.get(txn, &id)? {
+            Some(bytes) => bincode::options()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .deserialize_seed(OptionPropertiesMapDeSeed { arena }, bytes)
+                .map_err(|e| {
+                    VectorError::ConversionError(format!("Error deserializing vector: {e}"))
+                })?,
+            None => None,
+        };
+
         Ok(Some(HVector {
             id,
+            properties,
             distance: None,
             label: arena.alloc_str(label.as_str()),
             deleted: false,
             version: 0,
             level: None,
-            properties: None,
             data: None,
         }))
     }
