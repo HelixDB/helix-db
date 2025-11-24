@@ -4,7 +4,10 @@ use bytemuck::{Pod, Zeroable};
 use serde::Serialize;
 
 use crate::helix_engine::vector_core::{
-    distance::Distance, node::Item, spaces::simple::dot_product, unaligned_vector::UnalignedVector,
+    distance::{Distance, MAX_DISTANCE},
+    node::Item,
+    spaces::simple::dot_product,
+    unaligned_vector::UnalignedVector,
 };
 
 /// The Cosine similarity is a measure of similarity between two
@@ -55,7 +58,7 @@ impl Distance for Cosine {
             // cos =  1. -> 0.0
             1.0 - cos
         } else {
-            0.0
+            MAX_DISTANCE
         }
     }
 

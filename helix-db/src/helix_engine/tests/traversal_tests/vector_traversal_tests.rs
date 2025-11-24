@@ -171,8 +171,8 @@ fn test_drop_vector_removes_edges() {
     txn.commit().unwrap();
 
     let arena = Bump::new();
-    let txn = storage.graph_env.read_txn().unwrap();
-    let vectors = G::new(&storage, &txn, &arena)
+    let read_txn = storage.graph_env.read_txn().unwrap();
+    let vectors = G::new(&storage, &read_txn, &arena)
         .search_v::<Filter, _>(&[0.5, 0.5, 0.5], 10, "vector", None)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -187,6 +187,8 @@ fn test_drop_vector_removes_edges() {
     )
     .unwrap();
     txn.commit().unwrap();
+
+    drop(read_txn);
 
     let arena = Bump::new();
     let txn = storage.graph_env.read_txn().unwrap();

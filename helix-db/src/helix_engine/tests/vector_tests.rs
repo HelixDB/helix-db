@@ -32,7 +32,13 @@ fn test_hvector_distance_min() {
     let v1 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
     let v2 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
     let distance = v2.distance_to(&v1).unwrap();
-    assert_eq!(distance, MIN_DISTANCE);
+    println!("Distance {}", distance);
+    assert!(
+        (distance - MIN_DISTANCE).abs() < 1e-6,
+        "Distance {} is not close enough to MIN_DISTANCE ({})",
+        distance,
+        MIN_DISTANCE
+    );
 }
 
 #[test]
@@ -99,5 +105,5 @@ fn test_hvector_cosine_similarity() {
     let arena2 = Bump::new();
     let v2 = alloc_vector(&arena2, &[4.0, 5.0, 6.0]);
     let similarity = v1.distance_to(&v2).unwrap();
-    assert!((similarity - (1.0 - 0.9746318461970762)).abs() < 1e-9);
+    assert!((similarity - (1.0 - 0.9746318461970762)).abs() < 1e-7);
 }

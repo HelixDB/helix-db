@@ -219,8 +219,7 @@ mod error_handling_tests {
 
         let arena2 = Bump::new();
         let _result =
-            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), empty_data, id, true);
-        // Should panic due to assertion in cast_raw_vector_data
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), empty_data, id, true).unwrap();
     }
 
     #[test]
