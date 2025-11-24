@@ -15,7 +15,7 @@ pub trait SearchVAdapter<'db, 'arena, 'txn>:
         query: &'arena [f32],
         k: K,
         label: &'arena str,
-        filter: Option<&'arena [F]>,
+        filter: Option<F>,
     ) -> RoTraversalIterator<
         'db,
         'arena,
@@ -37,7 +37,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         query: &'arena [f32],
         k: K,
         label: &'arena str,
-        _filter: Option<&'arena [F]>,
+        filter: Option<F>,
     ) -> RoTraversalIterator<
         'db,
         'arena,
@@ -55,7 +55,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             query.to_vec(),
             k.try_into().unwrap(),
             label,
-            false,
             self.arena,
         );
 
@@ -67,13 +66,23 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     false,
                     self.arena,
                 ) {
-                    Ok(hvectors) => hvectors
-                        .into_iter()
-                        .map(|vector| {
-                            Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector))
-                        })
-                        .collect::<Vec<_>>()
-                        .into_iter(),
+                    Ok(hvectors) => match filter {
+                        Some(filter) => hvectors
+                            .into_iter()
+                            .filter(|vector| filter(vector, self.txn))
+                            .map(|vector| {
+                                Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector))
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                        None => hvectors
+                            .into_iter()
+                            .map(|vector| {
+                                Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector))
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                    },
                     Err(err) => {
                         let error = GraphError::VectorError(format!("{err}"));
                         once(Err(error)).collect::<Vec<_>>().into_iter()

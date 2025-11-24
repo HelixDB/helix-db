@@ -6,8 +6,8 @@ use serde::de::{DeserializeSeed, Visitor};
 use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
-struct OptionPropertiesMapDeSeed<'arena> {
-    arena: &'arena bumpalo::Bump,
+pub struct OptionPropertiesMapDeSeed<'arena> {
+    pub arena: &'arena bumpalo::Bump,
 }
 
 impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
