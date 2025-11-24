@@ -11,7 +11,7 @@ use byteorder::BE;
 use hashbrown::HashMap;
 use heed3::{
     Database, Env, Error as LmdbError, RoTxn, RwTxn,
-    types::{Bytes, U128},
+    types::{Bytes, U32, U128},
 };
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
@@ -55,6 +55,7 @@ pub mod writer;
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector's properties
+const DB_ID_MAP: &str = "id_map"; // for map ids
 
 pub type ItemId = u32;
 
@@ -336,7 +337,7 @@ pub struct VectorCore {
 
     /// Maps global id (u128) to internal id (u32) and label
     pub global_to_local_id: RwLock<HashMap<u128, (u32, String)>>,
-    pub local_to_global_id: RwLock<HashMap<u32, u128>>,
+    pub local_to_global_id: Database<U32<BE>, U128<BE>>,
     curr_id: AtomicU32,
 }
 
@@ -349,15 +350,21 @@ impl VectorCore {
             .name(DB_VECTOR_DATA)
             .create(txn)?;
 
+        let local_to_global_id = env
+            .database_options()
+            .types::<U32<BE>, U128<BE>>()
+            .name(DB_ID_MAP)
+            .create(txn)?;
+
         Ok(Self {
             hsnw: vectors_db,
             vector_properties_db,
             config,
+            local_to_global_id,
             label_to_index: RwLock::new(HashMap::new()),
             curr_index: AtomicU16::new(0),
             global_to_local_id: RwLock::new(HashMap::new()),
             curr_id: AtomicU32::new(0),
-            local_to_global_id: RwLock::new(HashMap::new()),
         })
     }
 
@@ -434,15 +441,12 @@ impl VectorCore {
         bump_vec.extend_from_slice(data);
         let hvector = HVector::from_vec(label, bump_vec);
 
-        let idx = self.curr_id.fetch_add(1, atomic::Ordering::SeqCst);
         self.global_to_local_id
             .write()
             .unwrap()
             .insert(hvector.id, (idx, label.to_string()));
-        self.local_to_global_id
-            .write()
-            .unwrap()
-            .insert(idx, hvector.id);
+        self.local_to_global_id.put(txn, &idx, &hvector.id)?;
+
         self.label_to_index
             .read()
             .unwrap()
@@ -471,7 +475,11 @@ impl VectorCore {
                     .expect("if index exist label should also exist");
                 let writer = Writer::new(self.hsnw, index.id, index.dimension);
                 writer.del_item(txn, idx)?;
-                index.num_vectors.fetch_add(1, atomic::Ordering::SeqCst);
+
+                // TODO: do we actually need to delete here?
+                self.local_to_global_id.delete(txn, &idx)?;
+
+                index.num_vectors.fetch_sub(1, atomic::Ordering::SeqCst);
                 Ok(())
             }
             None => Err(VectorError::VectorNotFound(format!(
@@ -487,7 +495,7 @@ impl VectorCore {
         nns: bumpalo::collections::Vec<'arena, (ItemId, f32)>,
         with_data: bool,
         arena: &'arena bumpalo::Bump,
-    ) -> bumpalo::collections::Vec<'arena, HVector<'arena>>
+    ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>>
     where
         'txn: 'arena,
     {
@@ -496,22 +504,27 @@ impl VectorCore {
             arena,
         );
 
-        let local_to_global_id = self.local_to_global_id.read().unwrap();
         let label_to_index = self.label_to_index.read().unwrap();
         let global_to_local_id = self.global_to_local_id.read().unwrap();
 
         let (item_id, _) = nns.first().unwrap();
-        let global_id = local_to_global_id.get(item_id).unwrap();
-        let (_, label) = global_to_local_id.get(global_id).unwrap();
+        let global_id = self
+            .local_to_global_id
+            .get(txn, &item_id)?
+            .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
+        let (_, label) = global_to_local_id.get(&global_id).unwrap();
         let index = label_to_index.get(label).unwrap();
         let label = arena.alloc_str(label);
 
         if with_data {
             for (item_id, distance) in nns.into_iter() {
-                let global_id = local_to_global_id.get(&item_id).unwrap();
+                let global_id = self
+                    .local_to_global_id
+                    .get(txn, &item_id)?
+                    .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
 
                 results.push(HVector {
-                    id: *global_id,
+                    id: global_id,
                     distance: Some(distance),
                     label,
                     deleted: false,
@@ -523,10 +536,13 @@ impl VectorCore {
             }
         } else {
             for (item_id, distance) in nns.into_iter() {
-                let global_id = local_to_global_id.get(&item_id).unwrap();
+                let global_id = self
+                    .local_to_global_id
+                    .get(txn, &item_id)?
+                    .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
 
                 results.push(HVector {
-                    id: *global_id,
+                    id: global_id,
                     distance: Some(distance),
                     label,
                     deleted: false,
@@ -538,7 +554,7 @@ impl VectorCore {
             }
         }
 
-        results
+        Ok(results)
     }
 
     pub fn get_full_vector<'arena>(
@@ -550,7 +566,10 @@ impl VectorCore {
         let label_to_index = self.label_to_index.read().unwrap();
         let global_to_local_id = self.global_to_local_id.read().unwrap();
 
-        let (item_id, label) = global_to_local_id.get(&id).unwrap();
+        let (item_id, label) = global_to_local_id
+            .get(&id)
+            .ok_or_else(|| VectorError::VectorNotFound(format!("Vector {id} not found")))?;
+
         let index = label_to_index.get(label).unwrap();
         let label = arena.alloc_str(label);
 
@@ -607,7 +626,6 @@ impl VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
         let mut result = bumpalo::collections::Vec::new_in(arena);
-        let local_to_global_id = self.local_to_global_id.read().unwrap();
         let label_to_index = self.label_to_index.read().unwrap();
         let index = label_to_index.get(label).unwrap();
 
@@ -616,7 +634,11 @@ impl VectorCore {
 
         if get_vector_data {
             while let Some((key, item)) = iter.next().transpose()? {
-                let &id = local_to_global_id.get(&key.item).unwrap();
+                let id = self
+                    .local_to_global_id
+                    .get(txn, &key.item)?
+                    .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
+
                 result.push(HVector {
                     id,
                     label,
@@ -630,7 +652,11 @@ impl VectorCore {
             }
         } else {
             while let Some(key) = iter.next_id().transpose()? {
-                let &id = local_to_global_id.get(&key.item).unwrap();
+                let id = self
+                    .local_to_global_id
+                    .get(txn, &key.item)?
+                    .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?;
+
                 result.push(HVector {
                     id,
                     label,
@@ -654,7 +680,6 @@ impl VectorCore {
         arena: &'arena bumpalo::Bump,
     ) -> VectorCoreResult<bumpalo::collections::Vec<'_, HVector<'arena>>> {
         let label_to_index = self.label_to_index.read().unwrap();
-        let local_to_global_id = self.local_to_global_id.read().unwrap();
         let mut result = bumpalo::collections::Vec::new_in(arena);
 
         for (label, index) in label_to_index.iter() {
@@ -663,7 +688,13 @@ impl VectorCore {
 
             if get_vector_data {
                 while let Some((key, item)) = iter.next().transpose()? {
-                    let &id = local_to_global_id.get(&key.item).unwrap();
+                    let id = self
+                        .local_to_global_id
+                        .get(txn, &key.item)?
+                        .ok_or_else(|| {
+                            VectorError::VectorNotFound("Vector not found".to_string())
+                        })?;
+
                     result.push(HVector {
                         id,
                         label: arena.alloc_str(label),
@@ -677,7 +708,13 @@ impl VectorCore {
                 }
             } else {
                 while let Some(key) = iter.next_id().transpose()? {
-                    let &id = local_to_global_id.get(&key.item).unwrap();
+                    let id = self
+                        .local_to_global_id
+                        .get(txn, &key.item)?
+                        .ok_or_else(|| {
+                            VectorError::VectorNotFound("Vector not found".to_string())
+                        })?;
+
                     result.push(HVector {
                         id,
                         label: arena.alloc_str(label),
@@ -690,6 +727,24 @@ impl VectorCore {
                     });
                 }
             }
+        }
+
+        Ok(result)
+    }
+
+    pub fn into_global_id(
+        &self,
+        txn: &RoTxn,
+        searched: &Searched,
+    ) -> VectorCoreResult<Vec<(u128, f32)>> {
+        let mut result = Vec::new();
+        for &(id, distance) in searched.nns.iter() {
+            result.push((
+                self.local_to_global_id
+                    .get(txn, &id)?
+                    .ok_or_else(|| VectorError::VectorNotFound("Vector not found".to_string()))?,
+                distance,
+            ))
         }
 
         Ok(result)
