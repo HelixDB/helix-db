@@ -53,7 +53,7 @@ impl Distance for Cosine {
             // cos =  0. -> 0.5
             // cos = -1. -> 1.0
             // cos =  1. -> 0.0
-            (1.0 - cos) / 2.0
+            1.0 - cos
         } else {
             0.0
         }
