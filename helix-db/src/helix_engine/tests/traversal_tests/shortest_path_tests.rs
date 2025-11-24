@@ -261,8 +261,8 @@ fn test_dijkstra_custom_weight_function() {
             .as_ref()
             .and_then(|props| props.get("distance"))
             .and_then(|v| match v {
-                Value::F64(f) => Some(*f),
-                Value::F32(f) => Some(*f as f64),
+                Value::F64(f) => Some(*f as f32),
+                Value::F32(f) => Some(*f),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -399,8 +399,8 @@ fn test_dijkstra_multi_context_weight() {
             .as_ref()
             .and_then(|props| props.get("distance"))
             .and_then(|v| match v {
-                Value::F64(f) => Some(*f),
-                Value::F32(f) => Some(*f as f64),
+                Value::F64(f) => Some(*f as f32),
+                Value::F32(f) => Some(*f),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -414,8 +414,8 @@ fn test_dijkstra_multi_context_weight() {
             .as_ref()
             .and_then(|props| props.get("traffic_factor"))
             .and_then(|v| match v {
-                Value::F64(f) => Some(*f),
-                Value::F32(f) => Some(*f as f64),
+                Value::F64(f) => Some(*f as f32),
+                Value::F32(f) => Some(*f),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -879,13 +879,13 @@ fn test_astar_custom_weight_and_heuristic() {
             .ok_or(crate::helix_engine::types::GraphError::New(
                 "distance property not found".to_string(),
             ))?
-            .as_f64();
+            .as_f32();
         let traffic = edge
             .get_property("traffic")
             .ok_or(crate::helix_engine::types::GraphError::New(
                 "traffic property not found".to_string(),
             ))?
-            .as_f64();
+            .as_f32();
         Ok(distance * traffic)
     };
 
