@@ -2,8 +2,6 @@
 name = "helix-sim"
 version = "0.1.0"
 edition = "2024"
-description = "Minimal deterministic async runtime for HelixDB simulation"
-license = "AGPL-3.0"
 
 [dependencies]
 tokio = { version = "1.44.2", features = ["full"] }
