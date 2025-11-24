@@ -113,13 +113,13 @@ QUERY deleteEpisodeEdge (episodeEdge_id: ID) =>
 //                          Community
 // #########################################################
 
-QUERY createCommunity (name: String, group_id: String, summary: String, created_at: Date, labels: [String], name_embedding: [F64]) =>
+QUERY createCommunity (name: String, group_id: String, summary: String, created_at: Date, labels: [String], name_embedding: [F32]) =>
     community <- AddN<Community>({name: name, group_id: group_id, summary: summary, created_at: created_at, labels: labels})
     embedding <- AddV<Community_Embedding>(name_embedding, {name_embedding: name_embedding})
     edge <- AddE<Community_to_Embedding>({group_id: group_id})::From(community)::To(embedding)
     RETURN community
 
-QUERY updateCommunity (community_id: ID, name: String, group_id: String, summary: String, created_at: Date, labels: [String], name_embedding: [F64]) =>
+QUERY updateCommunity (community_id: ID, name: String, group_id: String, summary: String, created_at: Date, labels: [String], name_embedding: [F32]) =>
     community <- N<Community>(community_id)::UPDATE({name: name, group_id: group_id, summary: summary, created_at: created_at, labels: labels})
     DROP N<Community>(community_id)::Out<Community_to_Embedding>
     embedding <- AddV<Community_Embedding>(name_embedding, {name_embedding: name_embedding})
