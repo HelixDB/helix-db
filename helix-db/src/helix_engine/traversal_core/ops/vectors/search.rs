@@ -25,8 +25,7 @@ pub trait SearchVAdapter<'db, 'arena, 'txn>:
     where
         F: Fn(&HVector, &RoTxn) -> bool,
         K: TryInto<usize>,
-        K::Error: std::fmt::Debug,
-        'txn: 'arena;
+        K::Error: std::fmt::Debug;
 }
 
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
@@ -48,7 +47,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         F: Fn(&HVector, &RoTxn) -> bool,
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
-        'txn: 'arena,
     {
         let vectors = self.storage.vectors.search(
             self.txn,
