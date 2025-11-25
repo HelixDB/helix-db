@@ -1,9 +1,16 @@
 [project]
-name = "add_n"
+name = "add-n"
 queries = "."
+container_runtime = "docker"
 
 [local.dev]
 port = 6969
 build_mode = "debug"
 
-[cloud]
+[cloud.fly-prod.fly]
+build_mode = "debug"
+vm_size = "shared-cpu-4x"
+volume = "helix_add_n_fly_prod_data:/data"
+volume_initial_size = 20
+private = false
+auth_type = "Cli"

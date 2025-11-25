@@ -368,7 +368,11 @@ impl<'a> FlyManager<'a> {
                     .map_err(|e| eyre!("Failed to run flyctl launch: {e}"))?;
 
                 if !launch_status.status.success() {
-                    return Err(eyre!("Failed to configure Fly.io app '{app_name}'"));
+                    let stderr = String::from_utf8_lossy(&launch_status.stderr);
+                    let stdout = String::from_utf8_lossy(&launch_status.stdout);
+                    return Err(eyre!(
+                        "Failed to configure Fly.io app '{app_name}':\n{stderr}\n{stdout}"
+                    ));
                 }
             }
         }
@@ -409,7 +413,8 @@ impl<'a> FlyManager<'a> {
                 let auth_args = vec!["auth", "docker"];
                 let auth_status = self.run_fly_command_async(&auth_args).await?;
                 if !auth_status.status.success() {
-                    return Err(eyre!("Failed to authenticate Docker with Fly.io"));
+                    let stderr = String::from_utf8_lossy(&auth_status.stderr);
+                    return Err(eyre!("Failed to authenticate Docker with Fly.io:\n{stderr}"));
                 }
 
                 docker.tag(image_name, FLY_REGISTRY_URL)?;
@@ -446,7 +451,11 @@ impl<'a> FlyManager<'a> {
                 let deploy_status = self.run_fly_command_async(&deploy_args).await?;
 
                 if !deploy_status.status.success() {
-                    return Err(eyre!("Failed to deploy image '{registry_image}'"));
+                    let stderr = String::from_utf8_lossy(&deploy_status.stderr);
+                    let stdout = String::from_utf8_lossy(&deploy_status.stdout);
+                    return Err(eyre!(
+                        "Failed to deploy image '{registry_image}':\n{stderr}\n{stdout}"
+                    ));
                 }
 
                 println!("[FLY] Image '{registry_image}' deployed successfully");
@@ -462,7 +471,8 @@ impl<'a> FlyManager<'a> {
             .run_fly_command_async(&["scale", "count", "0", "-a", &app_name, "-y"])
             .await?;
         if !stop_status.status.success() {
-            return Err(eyre!("Failed to stop Fly.io app '{app_name}'"));
+            let stderr = String::from_utf8_lossy(&stop_status.stderr);
+            return Err(eyre!("Failed to stop Fly.io app '{app_name}':\n{stderr}"));
         }
 
         println!("[FLY] App '{app_name}' stopped successfully");
@@ -476,7 +486,8 @@ impl<'a> FlyManager<'a> {
             .run_fly_command_async(&["scale", "count", "1", "-a", &app_name, "-y"])
             .await?;
         if !start_status.status.success() {
-            return Err(eyre!("Failed to start Fly.io app '{app_name}'"));
+            let stderr = String::from_utf8_lossy(&start_status.stderr);
+            return Err(eyre!("Failed to start Fly.io app '{app_name}':\n{stderr}"));
         }
 
         println!("[FLY] App '{app_name}' started successfully");
@@ -538,7 +549,8 @@ impl<'a> FlyManager<'a> {
             .await?;
 
         if !delete_status.status.success() {
-            return Err(eyre!("Failed to delete Fly.io app '{app_name}'"));
+            let stderr = String::from_utf8_lossy(&delete_status.stderr);
+            return Err(eyre!("Failed to delete Fly.io app '{app_name}':\n{stderr}"));
         }
 
         println!("[FLY] App '{app_name}' deleted successfully");
