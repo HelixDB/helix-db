@@ -514,16 +514,13 @@ impl VectorCore {
         }
     }
 
-    pub fn nns_to_hvectors<'arena, 'txn>(
+    pub fn nns_to_hvectors<'arena>(
         &self,
-        txn: &'txn RoTxn,
+        txn: &RoTxn,
         nns: bumpalo::collections::Vec<'arena, (ItemId, f32)>,
         with_data: bool,
         arena: &'arena bumpalo::Bump,
-    ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>>
-    where
-        'txn: 'arena,
-    {
+    ) -> VectorCoreResult<bumpalo::collections::Vec<'arena, HVector<'arena>>> {
         let mut results = bumpalo::collections::Vec::<'arena, HVector<'arena>>::with_capacity_in(
             nns.len(),
             arena,
@@ -567,7 +564,8 @@ impl VectorCore {
                     deleted: false,
                     level: None,
                     version: 0,
-                    data: get_item(self.hsnw, index.id, txn, item_id).unwrap(),
+                    data: get_item(self.hsnw, index.id, txn, item_id)?
+                        .map(|data| data.clone_in(arena)),
                 });
             }
         } else {
