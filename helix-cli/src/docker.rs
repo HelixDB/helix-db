@@ -543,11 +543,6 @@ networks:
 
     /// Build Docker/Podman image for an instance
     pub fn build_image(&self, instance_name: &str, _build_target: Option<&str>) -> Result<()> {
-        print_status(
-            self.runtime.label(),
-            &format!("Building image for instance '{instance_name}'..."),
-        );
-
         let output = self.run_compose_command(instance_name, vec!["build"])?;
 
         if !output.status.success() {
@@ -555,7 +550,6 @@ networks:
             return Err(eyre!("{} build failed:\n{stderr}", self.runtime.binary()));
         }
 
-        print_status(self.runtime.label(), "Image built successfully");
         Ok(())
     }
 

@@ -4,7 +4,7 @@ use crate::metrics_sender::MetricsSender;
 use crate::project::{ProjectContext, get_helix_repo_cache};
 use crate::utils::{
     copy_dir_recursive_excluding, diagnostic_source, helixc_utils::collect_hx_files, print_status,
-    print_success,
+    print_success, Spinner,
 };
 use eyre::Result;
 use std::time::Instant;
@@ -90,7 +90,10 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
         DockerManager::check_runtime_available(runtime)?;
         let docker = DockerManager::new(&project);
 
+        let mut spinner = Spinner::new("DOCKER", "Building Docker image...");
+        spinner.start();
         docker.build_image(&instance_name, instance_config.docker_build_target())?;
+        spinner.stop();
     }
 
     print_success(&format!("Instance '{instance_name}' built successfully"));

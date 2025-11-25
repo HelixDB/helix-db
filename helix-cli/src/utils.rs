@@ -3,6 +3,9 @@ use color_eyre::owo_colors::OwoColorize;
 use eyre::{Result, eyre};
 use helix_db::helixc::parser::types::HxFile;
 use std::{borrow::Cow, fs, path::Path};
+use tokio::sync::oneshot;
+use tokio::time::Duration;
+
 
 const IGNORES: [&str; 3] = ["target", ".git", ".helix"];
 
@@ -358,5 +361,73 @@ pub mod helixc_utils {
     pub fn generate_rust_code(source: GeneratedSource, path: &Path) -> Result<()> {
         generate(source, path)?;
         Ok(())
+    }
+}
+
+pub struct Spinner {
+    message: std::sync::Arc<std::sync::Mutex<String>>,
+    prefix: String,
+    stop_tx: Option<oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Spinner {
+    pub fn new(prefix: &str, message: &str) -> Self {
+        Self {
+            message: std::sync::Arc::new(std::sync::Mutex::new(message.to_string())),
+            prefix: prefix.to_string(),
+            stop_tx: None,
+            handle: None,
+        }
+    }
+    // function that starts the spinner
+    pub fn start(&mut self) {
+        let message = self.message.clone();
+        let prefix = self.prefix.clone();
+        let (tx, mut rx) = oneshot::channel::<()>();
+
+        let handle = tokio::spawn(async move {
+            let frames = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut frame_idx = 0;
+            loop {
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+                let frame = frames[frame_idx % frames.len()];
+                let msg = message.lock().unwrap().clone();
+                print!(
+                    "\r{} {frame} {msg}",
+                    format!("[{prefix}]").blue().bold()
+                );
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                frame_idx += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        self.handle = Some(handle);
+        self.stop_tx = Some(tx);
+    }
+    // function that Stops the spinner
+    pub fn stop(&mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.abort();
+        }
+        print!("\r");
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    }
+    /// function that updates the message
+    pub fn update(&mut self, message: &str) {
+        if let Ok(mut msg) = self.message.lock() {
+            *msg = message.to_string();
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
