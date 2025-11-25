@@ -1,10 +1,6 @@
 use crate::{
     debug_println,
-    helix_engine::{
-        storage_core::HelixGraphStorage,
-        types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector},
-    },
+    helix_engine::{storage_core::HelixGraphStorage, types::GraphError},
     utils::properties::ImmutablePropertiesMap,
 };
 
@@ -390,7 +386,7 @@ pub trait HybridSearch {
     fn hybrid_search(
         self,
         query: &str,
-        query_vector: &[f64],
+        query_vector: &[f32],
         alpha: f32,
         limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<(u128, f32)>, GraphError>> + Send;
@@ -400,12 +396,11 @@ impl HybridSearch for HelixGraphStorage {
     async fn hybrid_search(
         self,
         query: &str,
-        query_vector: &[f64],
+        query_vector: &[f32],
         alpha: f32,
         limit: usize,
     ) -> Result<Vec<(u128, f32)>, GraphError> {
         let query_owned = query.to_string();
-        let query_vector_owned = query_vector.to_vec();
 
         let graph_env_bm25 = self.graph_env.clone();
         let graph_env_vector = self.graph_env.clone();
@@ -418,27 +413,17 @@ impl HybridSearch for HelixGraphStorage {
             }
         });
 
-        let vector_handle = task::spawn_blocking(
-            move || -> Result<Option<Vec<(u128, f64)>>, GraphError> {
+        let query_vector_owned = query_vector.to_vec();
+        let vector_handle =
+            task::spawn_blocking(move || -> Result<Option<Vec<(u128, f32)>>, GraphError> {
                 let txn = graph_env_vector.read_txn()?;
-                let arena = Bump::new(); // MOVE 
-                let query_slice = arena.alloc_slice_copy(query_vector_owned.as_slice());
-                let results = self.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
-                    &txn,
-                    query_slice,
-                    limit * 2,
-                    "vector",
-                    None,
-                    false,
-                    &arena,
-                )?;
-                let scores = results
-                    .into_iter()
-                    .map(|vec| (vec.id, vec.distance.unwrap_or(0.0)))
-                    .collect::<Vec<(u128, f64)>>();
+                let arena = Bump::new(); // MOVE
+                let results =
+                    self.vectors
+                        .search(&txn, query_vector_owned, limit * 2, "vector", &arena)?;
+                let scores = self.vectors.into_global_id(&txn, &results)?;
                 Ok(Some(scores))
-            },
-        );
+            });
 
         let (bm25_results, vector_results) = match tokio::try_join!(bm25_handle, vector_handle) {
             Ok((a, b)) => (a, b),
@@ -454,7 +439,7 @@ impl HybridSearch for HelixGraphStorage {
         // correct_score = alpha * bm25_score + (1.0 - alpha) * vector_score
         if let Some(vector_results) = vector_results? {
             for (doc_id, score) in vector_results {
-                let similarity = (1.0 / (1.0 + score)) as f32;
+                let similarity = 1.0 / (1.0 + score);
                 combined_scores
                     .entry(doc_id)
                     .and_modify(|existing_score| *existing_score += (1.0 - alpha) * similarity)

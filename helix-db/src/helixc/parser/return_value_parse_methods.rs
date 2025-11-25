@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
 use crate::helixc::parser::{
-    HelixParser, Rule,
+    HelixParser, ParserError, Rule,
     location::HasLoc,
-    ParserError,
     types::{Expression, ExpressionType, ReturnType},
 };
 use pest::iterators::Pair;

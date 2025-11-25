@@ -47,11 +47,13 @@ impl<'arena> serde::Serialize for Node<'arena> {
         if serializer.is_human_readable() {
             // Include id for JSON serialization
             let mut buffer = [0u8; 36];
-            let mut state = serializer.serialize_map(Some(3 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0)))?;
+            let mut state = serializer.serialize_map(Some(
+                3 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            ))?;
             state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
-            state.serialize_entry("label",    self.label)?;
+            state.serialize_entry("label", self.label)?;
             state.serialize_entry("version", &self.version)?;
-            if let Some(properties  ) = &self.properties {
+            if let Some(properties) = &self.properties {
                 for (key, value) in properties.iter() {
                     state.serialize_entry(key, value)?;
                 }
@@ -177,7 +179,9 @@ impl<'arena> serde::Serialize for Edge<'arena> {
         if serializer.is_human_readable() {
             // Include id for JSON serialization
             let mut buffer = [0u8; 36];
-            let mut state = serializer.serialize_map(Some(5 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0)))?;
+            let mut state = serializer.serialize_map(Some(
+                5 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            ))?;
             state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
             state.serialize_entry("label", self.label)?;
             state.serialize_entry("version", &self.version)?;

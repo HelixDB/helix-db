@@ -1,5 +1,5 @@
 use paste::paste;
-use std::fmt::{Debug};
+use std::fmt::Debug;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -118,7 +118,6 @@ pub enum ErrorCode {
     E652,
     /// `E653` - `inner type of in variable is not an object`
     E653,
-
 
     /// `W101` - `query has no return`
     W101,

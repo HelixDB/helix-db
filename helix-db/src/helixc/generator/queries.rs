@@ -86,7 +86,7 @@ impl Query {
 
             for (i, _) in self.hoisted_embedding_calls.iter().enumerate() {
                 let name = EmbedData::name_from_index(i);
-                writeln!(f, "let {name}: Vec<f64> = {name}?;")?;
+                writeln!(f, "let {name}: Vec<f32> = {name}?;")?;
             }
         }
         Ok(())
@@ -168,8 +168,7 @@ impl Query {
                     writeln!(
                         f,
                         "    \"{}\": {}",
-                        struct_def.source_variable,
-                        struct_def.source_variable
+                        struct_def.source_variable, struct_def.source_variable
                     )?;
                 } else if struct_def.source_variable.is_empty() {
                     // Object literal - construct from multiple sources
@@ -891,8 +890,7 @@ impl Query {
                     writeln!(
                         f,
                         "    \"{}\": {}",
-                        struct_def.source_variable,
-                        struct_def.source_variable
+                        struct_def.source_variable, struct_def.source_variable
                     )?;
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code

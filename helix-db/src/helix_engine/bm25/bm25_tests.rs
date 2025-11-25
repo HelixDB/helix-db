@@ -7,14 +7,13 @@ mod tests {
             },
             storage_core::{HelixGraphStorage, version_info::VersionInfo},
             traversal_core::config::Config,
-            vector_core::{hnsw::HNSW, vector::HVector},
         },
         protocol::value::Value,
         utils::properties::ImmutablePropertiesMap,
     };
 
     use bumpalo::Bump;
-    use heed3::{Env, EnvOpenOptions, RoTxn};
+    use heed3::{Env, EnvOpenOptions};
     use rand::Rng;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -50,14 +49,14 @@ mod tests {
         (storage, temp_dir)
     }
 
-    fn generate_random_vectors(n: usize, d: usize) -> Vec<Vec<f64>> {
+    fn generate_random_vectors(n: usize, d: usize) -> Vec<Vec<f32>> {
         let mut rng = rand::rng();
         let mut vectors = Vec::with_capacity(n);
 
         for _ in 0..n {
             let mut vector = Vec::with_capacity(d);
             for _ in 0..d {
-                vector.push(rng.random::<f64>());
+                vector.push(rng.random::<f32>());
             }
             vectors.push(vector);
         }
@@ -203,7 +202,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -271,7 +272,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1258,7 +1261,9 @@ mod tests {
         for (i, props) in nodes.iter().enumerate() {
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
-                props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+                props
+                    .iter()
+                    .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
                 &arena,
             );
             let data = props_map.flatten_bm25();
@@ -1445,10 +1450,9 @@ mod tests {
         let vectors = generate_random_vectors(800, 650);
         let mut arena = Bump::new();
         for vec in &vectors {
-            let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", vec.as_slice(), None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1493,7 +1497,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();
@@ -1539,7 +1543,7 @@ mod tests {
             let slice = arena.alloc_slice_copy(vec.as_slice());
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, "vector", slice, None, &arena);
+                .insert(&mut wtxn, "vector", slice, None, &arena);
             arena.reset();
         }
         wtxn.commit().unwrap();

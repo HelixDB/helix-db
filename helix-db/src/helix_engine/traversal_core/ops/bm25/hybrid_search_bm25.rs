@@ -79,4 +79,3 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>>> HybridSearchBM2
     }
 }
 */
-
