@@ -160,9 +160,7 @@ impl<'a> DockerManager<'a> {
             "windows" => {
                 print_status("DOCKER", "Starting Docker Desktop for Windows...");
                 // Try Docker Desktop CLI (4.37+) first
-                let cli_result = Command::new("docker")
-                    .args(["desktop", "start"])
-                    .output();
+                let cli_result = Command::new("docker").args(["desktop", "start"]).output();
 
                 match cli_result {
                     Ok(output) if output.status.success() => {
@@ -172,7 +170,12 @@ impl<'a> DockerManager<'a> {
                         // Fallback to direct executable path for older versions
                         // Note: Empty string "" is required as window title parameter
                         Command::new("cmd")
-                            .args(["/c", "start", "", "\"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\""])
+                            .args([
+                                "/c",
+                                "start",
+                                "",
+                                "\"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"",
+                            ])
                             .output()
                             .map_err(|e| eyre!("Failed to start Docker Desktop: {}", e))?;
                     }
@@ -289,6 +292,7 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the cached repo workspace first (contains all dependencies and Cargo.toml files)
