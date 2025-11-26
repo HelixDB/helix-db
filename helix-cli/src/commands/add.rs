@@ -66,14 +66,9 @@ async fn run_add_inner(
             // Add Helix cloud instance
             let helix_manager = HelixManager::new(&project_context);
 
-            // Create cloud instance configuration
+            // Create cloud instance configuration (without cluster_id yet)
             let cloud_config = helix_manager
-                .create_instance_config(&instance_name, region)
-                .await?;
-
-            // Initialize the cloud cluster
-            helix_manager
-                .init_cluster(&instance_name, &cloud_config)
+                .create_instance_config(&instance_name, region.clone())
                 .await?;
 
             // Insert into project configuration
@@ -82,7 +77,35 @@ async fn run_add_inner(
                 CloudConfig::Helix(cloud_config.clone()),
             );
 
+            // Save config first
+            let config_path = project_context.root.join("helix.toml");
+            project_context.config.save_to_file(&config_path)?;
+
             print_status("CLOUD", "Helix cloud instance configuration added");
+
+            // Prompt user to create cluster now
+            println!();
+            println!("\nWould you like to create the cluster now?");
+            println!("This will open Stripe for payment and provision your cluster.");
+            println!();
+            print!("Create cluster now? [Y/n]: ");
+            use std::io::{self, Write};
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_lowercase();
+
+            if input.is_empty() || input == "y" || input == "yes" {
+                // Run create-cluster flow
+                crate::commands::create_cluster::run(&instance_name, region).await?;
+            } else {
+                println!();
+                print_status(
+                    "INFO",
+                    &format!("Cluster creation skipped. Run 'helix create-cluster {}' when ready.", instance_name)
+                );
+            }
         }
         CloudDeploymentTypeCommand::Ecr { .. } => {
             // Add ECR instance

@@ -2,22 +2,14 @@ use crate::{
     AuthAction,
     commands::integrations::helix::CLOUD_AUTHORITY,
     metrics_sender::{load_metrics_config, save_metrics_config},
+    sse_client::{SseClient, SseEvent},
     utils::{print_info, print_line, print_status, print_success, print_warning},
 };
 use color_eyre::owo_colors::OwoColorize;
-use eyre::{OptionExt, Result};
-use futures_util::StreamExt;
-use serde::Deserialize;
+use eyre::{OptionExt, Result, eyre};
 use std::{
     fs::{self, File},
     path::PathBuf,
-};
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        Message,
-        protocol::{CloseFrame, frame::coding::CloseCode},
-    },
 };
 
 pub async fn run(action: AuthAction) -> Result<()> {
@@ -175,45 +167,55 @@ impl Credentials {
     }
 }
 
-#[derive(Deserialize)]
-struct UserCodeMsg {
-    user_code: String,
-    verification_uri: String,
-}
-
-#[derive(Deserialize)]
-struct ApiKeyMsg {
-    user_id: String,
-    key: String,
-}
 pub async fn github_login() -> Result<(String, String)> {
-    let url = format!("ws://{}/login", *CLOUD_AUTHORITY);
-    let (mut ws_stream, _) = connect_async(url).await?;
+    let url = format!("http://{}/github-login", *CLOUD_AUTHORITY);
+    let client = SseClient::new(url).post();
 
-    let init_msg: UserCodeMsg = match ws_stream.next().await {
-        Some(Ok(Message::Text(payload))) => serde_json::from_str(&payload)?,
-        Some(Ok(m)) => return Err(eyre::eyre!("Unexpected message: {m:?}")),
-        Some(Err(e)) => return Err(e.into()),
-        None => return Err(eyre::eyre!("Connection Closed Unexpectedly")),
-    };
+    let mut api_key: Option<String> = None;
+    let mut user_id: Option<String> = None;
 
-    println!(
-        "To Login please go \x1b]8;;{}\x1b\\here\x1b]8;;\x1b\\({}),\nand enter the code: {}",
-        init_msg.verification_uri,
-        init_msg.verification_uri,
-        init_msg.user_code.bold()
-    );
+    client
+        .connect(|event| {
+            match event {
+                SseEvent::UserVerification {
+                    user_code,
+                    verification_uri,
+                    ..
+                } => {
+                    println!(
+                        "To Login please go \x1b]8;;{}\x1b\\here\x1b]8;;\x1b\\({}),\nand enter the code: {}",
+                        verification_uri,
+                        verification_uri,
+                        user_code.bold()
+                    );
+                    Ok(true) // Continue processing events
+                }
+                SseEvent::Success { data } => {
+                    // Extract API key and user_id from success event
+                    if let Some(key) = data.get("key").and_then(|v| v.as_str()) {
+                        api_key = Some(key.to_string());
+                    }
+                    if let Some(id) = data.get("user_id").and_then(|v| v.as_str()) {
+                        user_id = Some(id.to_string());
+                    }
+                    Ok(false) // Stop processing - login complete
+                }
+                SseEvent::DeviceCodeTimeout { message } => {
+                    Err(eyre!("Login timeout: {}. Please try again.", message))
+                }
+                SseEvent::Error { error } => {
+                    Err(eyre!("Login error: {}", error))
+                }
+                _ => {
+                    // Ignore other event types during login
+                    Ok(true)
+                }
+            }
+        })
+        .await?;
 
-    let msg: ApiKeyMsg = match ws_stream.next().await {
-        Some(Ok(Message::Text(payload))) => serde_json::from_str(&payload)?,
-        Some(Ok(Message::Close(Some(CloseFrame {
-            code: CloseCode::Error,
-            reason,
-        })))) => return Err(eyre::eyre!("Error: {reason}")),
-        Some(Ok(m)) => return Err(eyre::eyre!("Unexpected message: {m:?}")),
-        Some(Err(e)) => return Err(e.into()),
-        None => return Err(eyre::eyre!("Connection Closed Unexpectedly")),
-    };
-
-    Ok((msg.key, msg.user_id))
+    match (api_key, user_id) {
+        (Some(key), Some(id)) => Ok((key, id)),
+        _ => Err(eyre!("Login completed but credentials were not received")),
+    }
 }

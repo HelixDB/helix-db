@@ -132,6 +132,8 @@ pub struct CloudInstanceConfig {
     pub region: Option<String>,
     #[serde(default = "default_dev_build_mode")]
     pub build_mode: BuildMode,
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>,
     #[serde(flatten)]
     pub db_config: DbConfig,
 }

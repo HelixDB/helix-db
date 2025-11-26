@@ -106,17 +106,12 @@ async fn run_init_inner(
                     // Create Helix manager
                     let helix_manager = HelixManager::new(&project_context);
 
-                    // Create cloud instance configuration
+                    // Create cloud instance configuration (without cluster_id yet)
                     let cloud_config = helix_manager
-                        .create_instance_config(project_name, region)
+                        .create_instance_config(project_name, region.clone())
                         .await?;
 
-                    // Initialize the cloud cluster
-                    helix_manager
-                        .init_cluster(project_name, &cloud_config)
-                        .await?;
-
-                    // Insert into config
+                    // Insert into config first
                     config.cloud.insert(
                         project_name.to_string(),
                         CloudConfig::Helix(cloud_config.clone()),
@@ -125,8 +120,33 @@ async fn run_init_inner(
                     // Backup config before saving
                     cleanup_tracker.backup_config(&config, config_path.clone());
 
-                    // save config
+                    // Save config
                     config.save_to_file(&config_path)?;
+
+                    // Prompt user to create cluster now
+                    println!();
+                    print_status("CLUSTER", "Helix Cloud instance configuration saved");
+                    println!("\nWould you like to create the cluster now?");
+                    println!("This will open Stripe for payment and provision your cluster.");
+                    println!();
+                    print!("Create cluster now? [Y/n]: ");
+                    use std::io::{self, Write};
+                    io::stdout().flush()?;
+
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    let input = input.trim().to_lowercase();
+
+                    if input.is_empty() || input == "y" || input == "yes" {
+                        // Run create-cluster flow
+                        crate::commands::create_cluster::run(project_name, region).await?;
+                    } else {
+                        println!();
+                        print_status(
+                            "INFO",
+                            &format!("Cluster creation skipped. Run 'helix create-cluster {}' when ready.", project_name)
+                        );
+                    }
                 }
                 CloudDeploymentTypeCommand::Ecr { .. } => {
                     let cwd = env::current_dir()?;
