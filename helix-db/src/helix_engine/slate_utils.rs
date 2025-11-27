@@ -55,7 +55,7 @@ impl SlateUtils for slatedb::DBTransaction {
         prefix: &[u8],
     ) -> Result<DbIterator, slatedb::Error> {
         let options = slatedb::config::ScanOptions::default();
-        self.scan_with_options(Prefix::<N>::new_with_table(table, prefix), &options)
+        self.scan_with_options(TablePrefix::<N>::new(table, prefix), &options)
             .await
     }
 
@@ -81,12 +81,32 @@ impl<const N: usize> Prefix<N> {
             end: prefix_successor(new),
         }
     }
+}
 
-    fn new_with_table(table: TableIndex, prefix: &[u8]) -> Self {
-        assert_eq!(N, prefix.len() + 2);
+impl<const N: usize> RangeBounds<[u8; N]> for Prefix<N> {
+    fn start_bound(&self) -> std::ops::Bound<&[u8; N]> {
+        std::ops::Bound::Included(&self.prefix)
+    }
+
+    fn end_bound(&self) -> std::ops::Bound<&[u8; N]> {
+        match self.end {
+            Some(ref end) => std::ops::Bound::Excluded(end),
+            None => std::ops::Bound::Unbounded,
+        }
+    }
+}
+
+pub(crate) struct TablePrefix<const N: usize> {
+    prefix: [u8; N],
+    end: Option<[u8; N]>,
+}
+
+impl<const N: usize> TablePrefix<N> {
+    fn new(table: TableIndex, prefix: &[u8]) -> Self {
+        assert_eq!(N, prefix.len() + 2); // might not be needed
         let mut new = [0u8; N];
         new[0..2].copy_from_slice(table.as_bytes());
-        new[0..prefix.len()].copy_from_slice(prefix);
+        new[2..prefix.len() + 2].copy_from_slice(prefix);
         Self {
             prefix: new,
             end: prefix_successor(new),
@@ -94,7 +114,7 @@ impl<const N: usize> Prefix<N> {
     }
 }
 
-impl<const N: usize> RangeBounds<[u8; N]> for Prefix<N> {
+impl<const N: usize> RangeBounds<[u8; N]> for TablePrefix<N> {
     fn start_bound(&self) -> std::ops::Bound<&[u8; N]> {
         std::ops::Bound::Included(&self.prefix)
     }
