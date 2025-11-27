@@ -32,3 +32,20 @@ impl WriteTransaction for Arc<rocksdb::TransactionDB<rocksdb::MultiThreaded>> {
         Ok(self.transaction())
     }
 }
+
+#[cfg(feature = "slate")]
+use std::sync::Arc;
+
+#[cfg(feature = "slate")]
+impl ReadTransaction for Arc<slatedb::Db> {
+    fn read_txn(&self) -> Result<RTxn<'_>, GraphError> {
+        Ok(self.begin(slatedb::IsolationLevel::Snapshot))
+    }
+}
+
+#[cfg(feature = "slate")]
+impl WriteTransaction for Arc<slatedb::Db> {
+    fn write_txn(&self) -> Result<WTxn<'_>, GraphError> {
+        Ok(self.begin(slatedb::IsolationLevel::Snapshot))
+    }
+}

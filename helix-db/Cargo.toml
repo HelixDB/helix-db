@@ -35,6 +35,8 @@ mimalloc = "0.1.48"
 bumpalo = { version = "3.19.0", features = ["collections", "boxed", "serde"] }
 bytemuck = "1.24.0"
 num_cpus = "1.17.0"
+futures = "0.3.25"
+
 
 heed3 = { version = "0.22.0", optional = true }
 rocksdb = { version = "0.24.0",  features = ["multi-threaded-cf"], optional = true }
@@ -62,6 +64,7 @@ polars = { version = "0.46.0", features = [
 ], optional = true }
 subtle = "2.6.1"
 sha_256 = "=0.1.1"
+slatedb = { version = "0.9.2", optional = true, features = ["aws"]}
 
 [dev-dependencies]
 rand = "0.9.0"
@@ -88,5 +91,6 @@ dev = ["debug-output", "server", "bench"]
 dev-instance = []
 lmdb = ["server", "heed3"]
 rocks = ["server", "rocksdb"]
-default = ["rocks"]
+slate = ["server", "slatedb"]
+default = ["slate"]
 production = ["api-key"]

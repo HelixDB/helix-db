@@ -5,7 +5,10 @@ extern crate syn;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream}, parse_macro_input, Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem
+    Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token,
+    TraitItem,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
 };
 
 #[proc_macro_attribute]
@@ -97,7 +100,6 @@ pub fn get_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     expanded.into()
 }
-
 
 #[proc_macro_attribute]
 pub fn tool_calls(_attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -365,6 +367,176 @@ pub fn helix_node(_attr: TokenStream, input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+#[proc_macro_derive(Len)]
+pub fn enum_len_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let variant_count = match &input.data {
+        Data::Enum(data_enum) => data_enum.variants.len(),
+        _ => {
+            return TokenStream::from(quote! {
+                compile_error!("EnumLen can only be derived for enums");
+            });
+        }
+    };
+
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let expanded = quote! {
+        impl #impl_generics #name #ty_generics #where_clause {
+            pub const fn len() -> usize {
+                #variant_count
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+#[proc_macro_attribute]
+pub fn index(args: TokenStream, input: TokenStream) -> TokenStream {
+    let index_type = parse_macro_input!(args as syn::Type);
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let vis = &input.vis;
+    let attrs = &input.attrs;
+
+    // Determine byte size from type
+    let type_str = quote!(#index_type).to_string();
+    let byte_size: usize = match type_str.as_str() {
+        "u8" => 1,
+        "u16" => 2,
+        "u32" => 4,
+        "u64" => 8,
+        _ => panic!("index only supports u8, u16, u32, u64"),
+    };
+
+    let variants = match &input.data {
+        Data::Enum(data_enum) => &data_enum.variants,
+        _ => {
+            return TokenStream::from(quote! {
+                compile_error!("index can only be applied to enums");
+            });
+        }
+    };
+
+    // Generate match arms for as_bytes (big-endian)
+    let as_bytes_arms: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .map(|(i, variant)| {
+            let variant_ident = &variant.ident;
+            let bytes: Vec<u8> = (0..byte_size)
+                .rev()
+                .map(|b| ((i >> (b * 8)) & 0xFF) as u8)
+                .collect();
+            quote! {
+                #name::#variant_ident => &[#(#bytes),*]
+            }
+        })
+        .collect();
+
+    // Generate match arms for from_bytes
+    let from_bytes_arms: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .map(|(i, variant)| {
+            let variant_ident = &variant.ident;
+            let idx = i as u64;
+            quote! {
+                #idx => Some(#name::#variant_ident)
+            }
+        })
+        .collect();
+
+    // Generate match arms for next_index_as_bytes
+    let variant_count = variants.len();
+    let next_index_arms: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .map(|(i, variant)| {
+            let variant_ident = &variant.ident;
+            if i + 1 < variant_count {
+                let next_bytes: Vec<u8> = (0..byte_size)
+                    .rev()
+                    .map(|b| (((i + 1) >> (b * 8)) & 0xFF) as u8)
+                    .collect();
+                quote! {
+                    #name::#variant_ident => Some(&[#(#next_bytes),*])
+                }
+            } else {
+                quote! {
+                    #name::#variant_ident => None
+                }
+            }
+        })
+        .collect();
+
+    let byte_size_lit = byte_size;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let expanded = quote! {
+        #(#attrs)*
+        #[repr(#index_type)]
+        #vis enum #name #ty_generics #where_clause {
+            #variants
+        }
+
+        impl #impl_generics From<#name #ty_generics> for #index_type #where_clause {
+            fn from(index: #name #ty_generics) -> Self {
+                index as #index_type
+            }
+        }
+
+        impl #impl_generics From<&[u8; #byte_size_lit]> for #name #ty_generics #where_clause {
+            fn from(bytes: &[u8; #byte_size_lit]) -> Self {
+                Self::from_bytes(bytes).expect("invalid index value")
+            }
+        }
+
+        impl #impl_generics #name #ty_generics #where_clause {
+            pub const fn as_bytes(&self) -> &'static [u8] {
+                match self {
+                    #(#as_bytes_arms),*
+                }
+            }
+
+            pub const fn to_bytes(&self) -> [u8; #byte_size_lit] {
+                let mut bytes = [0u8; #byte_size_lit];
+                let val = *self as u64;
+                let mut i = 0;
+                while i < #byte_size_lit {
+                    bytes[#byte_size_lit - 1 - i] = (val >> (i * 8)) as u8;
+                    i += 1;
+                }
+                bytes
+            }
+
+            pub const fn from_bytes(bytes: &[u8; #byte_size_lit]) -> Option<Self> {
+                let mut val: u64 = 0;
+                let mut i = 0;
+                while i < #byte_size_lit {
+                    val = (val << 8) | bytes[i] as u64;
+                    i += 1;
+                }
+                match val {
+                    #(#from_bytes_arms,)*
+                    _ => None,
+                }
+            }
+
+            pub const fn next_index_as_bytes(&self) -> Option<&'static [u8]> {
+                match self {
+                    #(#next_index_arms),*
+                }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 #[proc_macro_derive(Traversable)]
 pub fn traversable_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -372,20 +544,17 @@ pub fn traversable_derive(input: TokenStream) -> TokenStream {
 
     // Verify that the struct has an 'id' field
     let has_id_field = match &input.data {
-        Data::Struct(data) => {
-            data.fields.iter().any(|field| {
-                field.ident.as_ref().map(|i| i == "id").unwrap_or(false)
-            })
-        }
+        Data::Struct(data) => data
+            .fields
+            .iter()
+            .any(|field| field.ident.as_ref().map(|i| i == "id").unwrap_or(false)),
         _ => false,
     };
 
     if !has_id_field {
-        return TokenStream::from(
-            quote! {
-                compile_error!("Traversable can only be derived for structs with an 'id: &'a str' field");
-            }
-        );
+        return TokenStream::from(quote! {
+            compile_error!("Traversable can only be derived for structs with an 'id: &'a str' field");
+        });
     }
 
     // Extract lifetime parameter if present

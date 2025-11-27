@@ -26,6 +26,7 @@ bumpalo = "3.19.0"
 [features]
 lmdb = ["helix-db/lmdb"]
 rocks = ["helix-db/rocks"]
+slate = ["helix-db/slate"]
 prod = ["helix-db/production", "helix-db/rocks"]
 dev = ["helix-db/dev-instance", "rocks"]
-default = ["rocks"]
+default = ["slate"]

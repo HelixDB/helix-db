@@ -32,6 +32,8 @@ use std::{
 pub use lmdb::*;
 #[cfg(feature = "rocks")]
 pub use rocks::*;
+#[cfg(feature = "slate")]
+pub use slate::*;
 
 pub type NodeId = u128;
 pub type EdgeId = u128;
@@ -1100,6 +1102,558 @@ pub mod rocks {
         fn drop_vector<'db>(&self, txn: &Txn<'db>, id: u128) -> Result<(), GraphError> {
             use crate::helix_engine::rocks_utils::RocksUtils;
 
+            let arena = bumpalo::Bump::new();
+            let mut edges = HashSet::new();
+            let mut out_edges = HashSet::new();
+            let mut in_edges = HashSet::new();
+
+            let mut other_out_edges = Vec::new();
+            let mut other_in_edges = Vec::new();
+
+            let cf_out_edges = self.cf_out_edges();
+            let cf_in_edges = self.cf_in_edges();
+            let cf_edges = self.cf_edges();
+
+            // Delete outgoing edges
+            let mut iter = txn.raw_prefix_iter(&cf_out_edges, &id.to_be_bytes());
+
+            while let Some(key) = iter.key() {
+                assert_eq!(key.len(), 52);
+                let (_, label, to_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                edges.insert(edge_id);
+                out_edges.insert((label, to_node_id, edge_id));
+                other_in_edges.push((to_node_id, label, edge_id));
+                iter.next();
+            }
+            iter.status().map_err(GraphError::from)?;
+
+            // Delete incoming edges
+            let mut iter = txn.raw_prefix_iter(&cf_in_edges, &id.to_be_bytes());
+
+            while let Some(key) = iter.key() {
+                assert_eq!(key.len(), 52);
+                let (_, label, from_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                edges.insert(edge_id);
+                in_edges.insert((label, from_node_id, edge_id));
+                other_out_edges.push((from_node_id, label, edge_id));
+                iter.next();
+            }
+            iter.status().map_err(GraphError::from)?;
+
+            // Delete all related data
+            for edge in edges {
+                txn.delete_cf(&cf_edges, Self::edge_key(edge))?;
+            }
+            for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
+                txn.delete_cf(
+                    &cf_out_edges,
+                    Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id),
+                )?;
+            }
+            for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
+                txn.delete_cf(
+                    &cf_in_edges,
+                    Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id),
+                )?;
+            }
+
+            for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
+                txn.delete_cf(
+                    &cf_out_edges,
+                    Self::out_edge_key(*other_node_id, label_bytes, id, *edge_id),
+                )?;
+            }
+            for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
+                txn.delete_cf(
+                    &cf_in_edges,
+                    Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id),
+                )?;
+            }
+
+            // Delete vector data
+            self.vectors.delete(txn, id, &arena)?;
+
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "slate")]
+pub mod slate {
+
+    use crate::helix_engine::slate_utils::SlateUtils;
+
+    use super::*;
+
+    use async_trait::async_trait;
+    use futures::TryFutureExt;
+    use helix_macros::{Len, index};
+    use serde::{Deserialize, Serialize};
+    use slatedb::object_store::{ObjectStore, aws::*};
+    use slatedb::{Db, Error, WriteBatch};
+    use std::ops::RangeBounds;
+    use std::sync::Arc;
+
+    pub struct Txn<'db> {
+        pub txn: slatedb::DBTransaction,
+        _phantom: std::marker::PhantomData<&'db ()>,
+    }
+
+    // impl<'db> Txn<'db> {
+    //     pub async fn commit(self) -> Result<(), Error> {
+    //         self.txn.commit().await
+    //     }
+    // }
+
+    impl<'db> std::ops::Deref for Txn<'db> {
+        type Target = slatedb::DBTransaction;
+
+        fn deref(&self) -> &Self::Target {
+            &self.txn
+        }
+    }
+
+    impl<'db> std::ops::DerefMut for Txn<'db> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.txn
+        }
+    }
+
+    pub struct HelixGraphStorage {
+        pub graph_env: Arc<slatedb::Db>,
+        pub secondary_indices: HashMap<String, u16>, // Store CF names instead of handles
+        pub vectors: VectorCore,
+        pub bm25: Option<HBM25Config>,
+        pub version_info: VersionInfo,
+        pub storage_config: StorageConfig,
+    }
+
+    #[derive(Clone, Copy, Serialize, Deserialize, Len)]
+    #[index(u16)]
+    pub enum TableIndex {
+        Nodes = 0,
+        Edges = 1,
+        OutEdges = 2,
+        InEdges = 3,
+        Metadata = 4,
+    }
+
+    impl HelixGraphStorage {
+        /// Create a read transaction (snapshot)
+        pub async fn read_txn(&self) -> Result<slatedb::DBTransaction, GraphError> {
+            self.graph_env
+                .begin(slatedb::IsolationLevel::Snapshot)
+                .await
+                .map_err(GraphError::from)
+        }
+
+        /// Create a write transaction
+        pub async fn write_txn(&self) -> Result<slatedb::DBTransaction, GraphError> {
+            self.graph_env
+                .begin(slatedb::IsolationLevel::Snapshot)
+                .await
+                .map_err(GraphError::from)
+        }
+
+        pub async fn new(
+            path: &str,
+            config: Config,
+            version_info: VersionInfo,
+        ) -> Result<HelixGraphStorage, GraphError> {
+            use std::sync::Arc;
+
+            fs::create_dir_all(path)?;
+
+            let bucket_name =
+                std::env::var("AWS_S3_BUCKET_NAME").expect("AWS_S3_BUCKET_NAME not set");
+
+            // TODO: configure properly
+
+            let object_store: Arc<dyn ObjectStore> = Arc::new(
+                AmazonS3Builder::new()
+                    .with_bucket_name(bucket_name)
+                    .build()?,
+            );
+            // Open database with optimistic transactions
+            let db = Arc::new(slatedb::Db::open(path, object_store).await?);
+
+            let mut secondary_indices =
+                config
+                    .get_graph_config()
+                    .secondary_indices
+                    .map_or(HashMap::new(), |indices| {
+                        indices
+                            .iter()
+                            .enumerate()
+                            .map(|(i, k)| (k.clone(), (i + TableIndex::len()) as u16))
+                            .collect::<HashMap<_, _>>()
+                    });
+
+            // Initialize vector storage
+            let vector_config = config.get_vector_config();
+            let vectors = VectorCore::new(
+                Arc::clone(&db),
+                HNSWConfig::new(
+                    vector_config.m,
+                    vector_config.ef_construction,
+                    vector_config.ef_search,
+                ),
+            )?;
+
+            let bm25 = config
+                .get_bm25()
+                .then(|| HBM25Config::new(Arc::clone(&db)))
+                .transpose()?;
+
+            let storage_config = StorageConfig::new(
+                config.schema,
+                config.graphvis_node_label,
+                config.embedding_model,
+            );
+
+            let storage = Self {
+                graph_env: db,
+                secondary_indices,
+                vectors,
+                bm25,
+                storage_config,
+                version_info,
+            };
+
+            // TODO: Implement RocksDB-specific migration if needed
+            // storage_migration is LMDB-specific for now
+
+            Ok(storage)
+        }
+
+        // // Merge operator for secondary indices (replaces DUP_SORT)
+        // fn merge_append(
+        //     _key: &[u8],
+        //     existing: Option<&[u8]>,
+        //     operands: &rocksdb::MergeOperands,
+        // ) -> Option<Vec<u8>> {
+        //     let mut result = existing.map(|v| v.to_vec()).unwrap_or_default();
+        //     for op in operands {
+        //         result.extend_from_slice(op);
+        //     }
+        //     Some(result)
+        // }
+
+        /// Used because in the case the key changes in the future.
+        /// Believed to not introduce any overhead being inline and using a reference.
+        #[must_use]
+        #[inline(always)]
+        pub fn node_key(id: u128) -> [u8; 18] {
+            let mut key = [0u8; 18];
+            key[0..2].copy_from_slice(TableIndex::Nodes.as_bytes());
+            key[2..18].copy_from_slice(&id.to_be_bytes());
+            key
+        }
+
+        /// Used because in the case the key changes in the future.
+        /// Believed to not introduce any overhead being inline and using a reference.
+        #[must_use]
+        #[inline(always)]
+        pub fn edge_key(id: u128) -> [u8; 18] {
+            let mut key = [0u8; 18];
+            key[0..2].copy_from_slice(TableIndex::Edges.as_bytes());
+            key[2..18].copy_from_slice(&id.to_be_bytes());
+            key
+        }
+
+        /// Out edge key generator. Creates a 20 byte array and copies in the node id and 4 byte label.
+        ///
+        /// key = `from-node(16)` | `label-id(4)`                 ← 20 B
+        ///
+        /// The generated out edge key will remain the same for the same from_node_id and label.
+        /// To save space, the key is only stored once,
+        /// with the values being stored in a sorted sub-tree, with this key being the root.
+        #[inline(always)]
+        pub fn out_edge_key(
+            from_node_id: u128,
+            label: &[u8; 4],
+            to_node_id: u128,
+            edge_id: u128,
+        ) -> [u8; 54] {
+            let mut key = [0u8; 54];
+            key[0..2].copy_from_slice(TableIndex::OutEdges.as_bytes());
+            key[2..18].copy_from_slice(&to_node_id.to_be_bytes());
+            key[18..22].copy_from_slice(label);
+            key[22..38].copy_from_slice(&from_node_id.to_be_bytes());
+            key[38..54].copy_from_slice(&edge_id.to_be_bytes());
+            key
+        }
+
+        #[inline(always)]
+        pub fn out_edge_key_prefix(from_node_id: u128, label: &[u8; 4]) -> [u8; 22] {
+            let mut key = [0u8; 22];
+            key[0..2].copy_from_slice(TableIndex::OutEdges.as_bytes());
+            key[2..18].copy_from_slice(&from_node_id.to_be_bytes());
+            key[18..22].copy_from_slice(label);
+            key
+        }
+
+        /// In edge key prefix generator. Creates a 20 byte array with the to_node_id and label.
+        /// Used for prefix iteration in RocksDB.
+        ///
+        /// key = `to-node(16)` | `label-id(4)`                 ← 20 B
+        #[inline(always)]
+        pub fn in_edge_key_prefix(to_node_id: u128, label: &[u8; 4]) -> [u8; 22] {
+            let mut key = [0u8; 22];
+            key[0..2].copy_from_slice(TableIndex::InEdges.as_bytes());
+            key[2..18].copy_from_slice(&to_node_id.to_be_bytes());
+            key[18..22].copy_from_slice(label);
+            key
+        }
+
+        /// In edge key generator. Creates a 36 byte array with to_node, label, and from_node.
+        ///
+        /// key = `to-node(16)` | `label-id(4)` | `from-node(16)`    ← 36 B
+        ///
+        /// The generated in edge key will be unique for each edge.
+        #[inline(always)]
+        pub fn in_edge_key(
+            to_node_id: u128,
+            label: &[u8; 4],
+            from_node_id: u128,
+            edge_id: u128,
+        ) -> [u8; 54] {
+            let mut key = [0u8; 54];
+            key[0..2].copy_from_slice(TableIndex::InEdges.as_bytes());
+            key[2..18].copy_from_slice(&to_node_id.to_be_bytes());
+            key[18..22].copy_from_slice(label);
+            key[22..38].copy_from_slice(&from_node_id.to_be_bytes());
+            key[38..54].copy_from_slice(&edge_id.to_be_bytes());
+            key
+        }
+
+        #[inline(always)]
+        pub fn unpack_adj_edge_key(
+            data: &[u8],
+        ) -> Result<(NodeId, [u8; 4], NodeId, EdgeId), GraphError> {
+            let _index = TableIndex::from(
+                &data[0..2]
+                    .try_into()
+                    .map_err(|_| GraphError::from("invalid index bytes"))?,
+            );
+            let node_id = u128::from_be_bytes(
+                data[1..17]
+                    .try_into()
+                    .map_err(|_| GraphError::SliceLengthError)?,
+            );
+            let label = data[17..21]
+                .try_into()
+                .map_err(|_| GraphError::SliceLengthError)?;
+            let node_id2 = u128::from_be_bytes(
+                data[21..37]
+                    .try_into()
+                    .map_err(|_| GraphError::SliceLengthError)?,
+            );
+            let edge_id = EdgeId::from_be_bytes(
+                data[37..53]
+                    .try_into()
+                    .map_err(|_| GraphError::SliceLengthError)?,
+            );
+            Ok((node_id, label, node_id2, edge_id))
+        }
+
+        /// clears buffer then writes secondary index key
+        #[inline(always)]
+        pub fn secondary_index_key<'a>(
+            buf: &'a mut bumpalo::collections::Vec<u8>,
+            key: &[u8],
+            node_id: u128,
+        ) -> &'a mut [u8] {
+            buf.clear();
+            buf.extend_from_slice(key);
+            buf.extend_from_slice(&node_id.to_be_bytes());
+            buf
+        }
+    }
+
+    impl DBMethods for HelixGraphStorage {
+        /// Creates a secondary index lmdb db (table) for a given index name
+        fn create_secondary_index(&mut self, _name: &str) -> Result<(), GraphError> {
+            unimplemented!(
+                "cannot be implemented for rocks db due to table having to be declared at creation time"
+            )
+        }
+
+        /// Drops a secondary index lmdb db (table) for a given index name
+        /// left as sync
+        fn drop_secondary_index(&mut self, name: &str) -> Result<(), GraphError> {
+            let si_prefix = self
+                .secondary_indices
+                .remove(name)
+                .ok_or(GraphError::from("secondary index not found"))?;
+            let _ = futures::executor::block_on(async {
+                let txn = self
+                    .graph_env
+                    .begin(slatedb::IsolationLevel::Snapshot)
+                    .await
+                    .unwrap();
+
+                let mut batch = WriteBatch::new();
+                let mut iterator = txn.secondary_index_iter(si_prefix).await.unwrap();
+                while let Some(kv) = iterator.next().await.unwrap() {
+                    batch.delete(kv.key);
+                }
+            });
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl StorageMethods for HelixGraphStorage {
+        #[inline]
+        async fn get_node<'db, 'arena>(
+            &self,
+            txn: &Txn<'db>,
+            id: u128,
+            arena: &'arena bumpalo::Bump,
+        ) -> Result<Node<'arena>, GraphError> {
+            let node = match txn.get(Self::node_key(id)).await.unwrap() {
+                Some(data) => data,
+                None => return Err(GraphError::NodeNotFound),
+            };
+            let node: Node = Node::from_bincode_bytes(id, &node, arena)?;
+            let node = self.version_info.upgrade_to_node_latest(node);
+            Ok(node)
+        }
+
+        #[inline]
+        fn get_edge<'db, 'arena>(
+            &self,
+            txn: &Txn<'db>,
+            id: u128,
+            arena: &'arena bumpalo::Bump,
+        ) -> Result<Edge<'arena>, GraphError> {
+            let edge = match txn.get_pinned_cf(&cf, Self::edge_key(id)).unwrap() {
+                Some(data) => data,
+                None => return Err(GraphError::EdgeNotFound),
+            };
+            let edge: Edge = Edge::from_bincode_bytes(id, &edge, arena)?;
+            Ok(self.version_info.upgrade_to_edge_latest(edge))
+        }
+
+        fn drop_node<'db>(&self, txn: &Txn<'db>, id: u128) -> Result<(), GraphError> {
+            let arena = bumpalo::Bump::new();
+            let mut edges = HashSet::new();
+            let mut out_edges = HashSet::new();
+            let mut in_edges = HashSet::new();
+
+            let mut other_out_edges = Vec::new();
+            let mut other_in_edges = Vec::new();
+
+            let cf_out_edges = self.cf_out_edges();
+            let cf_in_edges = self.cf_in_edges();
+            let cf_edges = self.cf_edges();
+
+            // Delete outgoing edges
+            let mut iter = txn.raw_prefix_iter(&cf_out_edges, &id.to_be_bytes());
+
+            while let Some(key) = iter.key() {
+                assert_eq!(key.len(), 52);
+                let (_, label, to_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                edges.insert(edge_id);
+                out_edges.insert((label, to_node_id, edge_id));
+                other_in_edges.push((to_node_id, label, edge_id));
+                iter.next();
+            }
+            iter.status().map_err(GraphError::from)?;
+
+            // Delete incoming edges
+            let mut iter = txn.raw_prefix_iter(&cf_in_edges, &id.to_be_bytes());
+
+            while let Some(key) = iter.key() {
+                assert_eq!(key.len(), 52);
+                let (_, label, from_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                edges.insert(edge_id);
+                in_edges.insert((label, from_node_id, edge_id));
+                other_out_edges.push((from_node_id, label, edge_id));
+                iter.next();
+            }
+            iter.status().map_err(GraphError::from)?;
+
+            // Delete all related data
+            for edge in edges {
+                txn.delete_cf(&cf_edges, Self::edge_key(edge))?;
+            }
+            for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
+                txn.delete_cf(
+                    &cf_out_edges,
+                    Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id),
+                )?;
+            }
+            for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
+                txn.delete_cf(
+                    &cf_in_edges,
+                    Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id),
+                )?;
+            }
+
+            for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
+                txn.delete_cf(
+                    &cf_out_edges,
+                    Self::out_edge_key(*other_node_id, label_bytes, id, *edge_id),
+                )?;
+            }
+            for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
+                txn.delete_cf(
+                    &cf_in_edges,
+                    Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id),
+                )?;
+            }
+
+            // delete secondary indices
+            let node = self.get_node(txn, id, &arena)?;
+
+            for (index_name, cf_name) in &self.secondary_indices {
+                let cf = self.graph_env.cf_handle(cf_name).unwrap();
+                let mut buf = bumpalo::collections::Vec::new_in(&arena);
+                match node.get_property(index_name) {
+                    Some(value) => match bincode::serialize(value) {
+                        Ok(serialized) => {
+                            txn.delete_cf(
+                                &cf,
+                                Self::secondary_index_key(&mut buf, &serialized, node.id),
+                            )?;
+                        }
+                        Err(e) => return Err(GraphError::from(e)),
+                    },
+                    None => {
+                        // Property not found - this is expected for some indices
+                    }
+                }
+            }
+
+            // Delete node data
+            let cf_nodes = self.cf_nodes();
+            txn.delete_cf(&cf_nodes, Self::node_key(id))
+                .map_err(GraphError::from)
+        }
+
+        fn drop_edge<'db>(&self, txn: &Txn<'db>, edge_id: u128) -> Result<(), GraphError> {
+            let arena = bumpalo::Bump::new();
+            let edge = self.get_edge(txn, edge_id, &arena)?;
+            let label_hash = hash_label(edge.label, None);
+            let out_edge_key =
+                Self::out_edge_key(edge.from_node, &label_hash, edge.to_node, edge_id);
+            let in_edge_key = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node, edge_id);
+
+            // Get column family handles
+            let cf_edges = self.cf_edges();
+            let cf_out_edges = self.cf_out_edges();
+            let cf_in_edges = self.cf_in_edges();
+
+            // Delete all edge-related data
+            txn.delete_cf(&cf_edges, Self::edge_key(edge_id))?;
+            txn.delete_cf(&cf_out_edges, out_edge_key)?;
+            txn.delete_cf(&cf_in_edges, in_edge_key)?;
+            Ok(())
+        }
+
+        fn drop_vector<'db>(&self, txn: &Txn<'db>, id: u128) -> Result<(), GraphError> {
             let arena = bumpalo::Bump::new();
             let mut edges = HashSet::new();
             let mut out_edges = HashSet::new();

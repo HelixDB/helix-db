@@ -124,6 +124,19 @@ impl From<rocksdb::Error> for GraphError {
     }
 }
 
+#[cfg(feature = "slate")]
+impl From<slatedb::Error> for GraphError {
+    fn from(error: slatedb::Error) -> Self {
+        GraphError::ConversionError(format!("slatedb error: {error}"))
+    }
+}
+#[cfg(feature = "slate")]
+impl From<slatedb::object_store::Error> for GraphError {
+    fn from(error: slatedb::object_store::Error) -> Self {
+        GraphError::ConversionError(format!("slatedb error: {error}"))
+    }
+}
+
 impl From<ParserError> for GraphError {
     fn from(error: ParserError) -> Self {
         GraphError::ConversionError(format!("ParserError: {error}"))

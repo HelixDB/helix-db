@@ -3,6 +3,8 @@ pub mod ops;
 pub mod traversal_iter;
 pub mod traversal_value;
 
+#[cfg(feature = "slate")]
+use crate::helix_engine::storage_core::Txn;
 use crate::helix_engine::storage_core::{HelixGraphStorage, version_info::VersionInfo};
 use crate::helix_engine::traversal_core::config::Config;
 use crate::helix_engine::types::GraphError;
@@ -66,3 +68,8 @@ pub type RTxn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
 pub type WTxn<'db> = heed3::RwTxn<'db>;
 #[cfg(feature = "lmdb")]
 pub type RTxn<'db> = heed3::RoTxn<'db>;
+
+#[cfg(feature = "slate")]
+pub type WTxn<'db> = Txn<'db>;
+#[cfg(feature = "slate")]
+pub type RTxn<'db> = Txn<'db>;
