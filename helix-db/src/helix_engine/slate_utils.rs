@@ -6,7 +6,7 @@ use std::{
 
 use slatedb::DbIterator;
 
-use crate::helix_engine::storage_core::TableIndexes;
+use crate::helix_engine::storage_core::TableIndex;
 use async_trait::async_trait;
 
 #[async_trait]
@@ -16,11 +16,11 @@ pub trait SlateUtils {
         prefix: &[u8],
     ) -> Result<DbIterator, slatedb::Error>;
 
-    async fn table_iter(&self, table: TableIndexes) -> Result<DbIterator, slatedb::Error>;
+    async fn table_iter(&self, table: TableIndex) -> Result<DbIterator, slatedb::Error>;
 
     async fn table_prefix_iter<const N: usize>(
         &self,
-        table: TableIndexes,
+        table: TableIndex,
         prefix: &[u8],
     ) -> Result<DbIterator, slatedb::Error>;
 
@@ -38,7 +38,7 @@ impl SlateUtils for slatedb::DBTransaction {
             .await
     }
 
-    async fn table_iter(&self, table: TableIndexes) -> Result<DbIterator, slatedb::Error> {
+    async fn table_iter(&self, table: TableIndex) -> Result<DbIterator, slatedb::Error> {
         let options = slatedb::config::ScanOptions::default();
         match table.next_index_as_bytes() {
             Some(next_table_index) => {
@@ -51,7 +51,7 @@ impl SlateUtils for slatedb::DBTransaction {
 
     async fn table_prefix_iter<const N: usize>(
         &self,
-        table: TableIndexes,
+        table: TableIndex,
         prefix: &[u8],
     ) -> Result<DbIterator, slatedb::Error> {
         let options = slatedb::config::ScanOptions::default();
@@ -82,7 +82,7 @@ impl<const N: usize> Prefix<N> {
         }
     }
 
-    fn new_with_table(table: TableIndexes, prefix: &[u8]) -> Self {
+    fn new_with_table(table: TableIndex, prefix: &[u8]) -> Self {
         assert_eq!(N, prefix.len() + 2);
         let mut new = [0u8; N];
         new[0..2].copy_from_slice(table.as_bytes());
