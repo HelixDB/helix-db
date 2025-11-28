@@ -172,7 +172,7 @@ impl<'db> HBM25 {
         Ok(())
     }
 
-    pub async fn delete_doc(&self, txn: &mut WTxn<'db>, doc_id: u128) -> Result<(), GraphError> {
+    pub async fn delete_doc(&self, txn: WTxn<'db>, doc_id: u128) -> Result<(), GraphError> {
         // Find all composite keys for this doc_id
         let keys_to_delete = {
             let mut keys = Vec::new();

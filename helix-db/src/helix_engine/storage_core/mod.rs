@@ -1559,7 +1559,6 @@ pub mod slate {
             &self,
             txn: &Txn<'db>,
             id: u128,
-            batch: &mut slatedb::WriteBatch,
             arena: &bumpalo_herd::Herd,
         ) -> Result<(), GraphError> {
             let mut edges = HashSet::new();
@@ -1597,17 +1596,17 @@ pub mod slate {
 
             // Delete all related data
             for edge in edges {
-                batch.delete(Self::edge_key(edge));
+                txn.delete(Self::edge_key(edge));
             }
             for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
-                batch.delete(Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id));
+                txn.delete(Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id));
             }
             for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
-                batch.delete(Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id));
+                txn.delete(Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id));
             }
 
             for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
-                batch.delete(Self::out_edge_key(
+                txn.delete(Self::out_edge_key(
                     *other_node_id,
                     label_bytes,
                     id,
@@ -1615,7 +1614,7 @@ pub mod slate {
                 ));
             }
             for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
-                batch.delete(Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id));
+                txn.delete(Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id));
             }
 
             // delete secondary indices
@@ -1627,7 +1626,7 @@ pub mod slate {
                 match node.get_property(index_name) {
                     Some(value) => match bincode::serialize(value) {
                         Ok(serialized) => {
-                            batch.delete(Self::secondary_index_key(
+                            txn.delete(Self::secondary_index_key(
                                 &mut buf,
                                 *si_index,
                                 &serialized,
@@ -1643,15 +1642,14 @@ pub mod slate {
             }
 
             // Delete node data
-            batch.delete(Self::node_key(id));
+            txn.delete(Self::node_key(id));
             Ok(())
         }
 
-        async fn drop_edge<'db>(
+        pub async fn drop_edge<'db>(
             &self,
             txn: &Txn<'db>,
             edge_id: u128,
-            batch: &mut slatedb::WriteBatch,
             arena: &bumpalo_herd::Herd,
         ) -> Result<(), GraphError> {
             let edge = self.get_edge(txn, edge_id, arena).await?;
@@ -1661,17 +1659,16 @@ pub mod slate {
             let in_edge_key = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node, edge_id);
 
             // Delete all edge-related data
-            batch.delete(Self::edge_key(edge_id));
-            batch.delete(out_edge_key);
-            batch.delete(in_edge_key);
+            txn.delete(Self::edge_key(edge_id));
+            txn.delete(out_edge_key);
+            txn.delete(in_edge_key);
             Ok(())
         }
 
-        async fn drop_vector<'db>(
+        pub async fn drop_vector<'db>(
             &self,
             txn: &Txn<'db>,
             id: u128,
-            batch: &mut slatedb::WriteBatch,
             arena: &bumpalo_herd::Herd,
         ) -> Result<(), GraphError> {
             let mut edges = HashSet::new();
@@ -1711,17 +1708,17 @@ pub mod slate {
 
             // Delete all related data
             for edge in edges {
-                batch.delete(Self::edge_key(edge));
+                txn.delete(Self::edge_key(edge));
             }
             for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
-                batch.delete(Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id));
+                txn.delete(Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id));
             }
             for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
-                batch.delete(Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id));
+                txn.delete(Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id));
             }
 
             for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
-                batch.delete(Self::out_edge_key(
+                txn.delete(Self::out_edge_key(
                     *other_node_id,
                     label_bytes,
                     id,
@@ -1729,7 +1726,7 @@ pub mod slate {
                 ));
             }
             for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
-                batch.delete(Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id));
+                txn.delete(Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id));
             }
 
             // Delete vector data

@@ -60,16 +60,16 @@ impl HelixGraphEngine {
 }
 
 #[cfg(feature = "rocks")]
-pub type WTxn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+pub type WTxn<'db> = &rocksdb::Transaction<'db, rocksdb::TransactionDB>;
 #[cfg(feature = "rocks")]
-pub type RTxn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+pub type RTxn<'db> = &rocksdb::Transaction<'db, rocksdb::TransactionDB>;
 
 #[cfg(feature = "lmdb")]
-pub type WTxn<'db> = heed3::RwTxn<'db>;
+pub type WTxn<'db> = &mut heed3::RwTxn<'db>;
 #[cfg(feature = "lmdb")]
-pub type RTxn<'db> = heed3::RoTxn<'db>;
+pub type RTxn<'db> = &heed3::RoTxn<'db>;
 
 #[cfg(feature = "slate")]
-pub type WTxn<'db> = Txn<'db>;
+pub type WTxn<'db> = &Txn<'db>;
 #[cfg(feature = "slate")]
-pub type RTxn<'db> = Txn<'db>;
+pub type RTxn<'db> = &Txn<'db>;
