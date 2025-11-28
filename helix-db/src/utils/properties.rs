@@ -5,6 +5,7 @@ use std::{marker, slice};
 use bincode::Options;
 use serde::Serialize;
 
+use crate::helix_engine::storage_core::Arena;
 use crate::protocol::value::Value;
 
 /// For every node stored that we must read, we need to deserialize the Properties map.
@@ -35,7 +36,7 @@ impl<'arena> ImmutablePropertiesMap<'arena> {
     pub fn new(
         len: usize,
         items: impl Iterator<Item = (&'arena str, Value)>,
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> Self {
         let Ok(map) = Self::new_from_try(len, items.map(Ok::<_, Infallible>), arena);
         map
@@ -43,7 +44,7 @@ impl<'arena> ImmutablePropertiesMap<'arena> {
 
     pub fn from_bincode_bytes<'txn>(
         bytes: &'txn [u8],
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> bincode::Result<Self> {
         bincode::options()
             .with_fixint_encoding()
@@ -54,7 +55,7 @@ impl<'arena> ImmutablePropertiesMap<'arena> {
     pub fn new_from_try<Error>(
         len: usize,
         items: impl Iterator<Item = Result<(&'arena str, Value), Error>>,
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> Result<Self, Error> {
         if len == 0 {
             return Ok(Self {
@@ -176,7 +177,7 @@ impl<'arena> Serialize for ImmutablePropertiesMap<'arena> {
 }
 
 pub struct ImmutablePropertiesMapDeSeed<'arena> {
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
 }
 
 impl<'de, 'arena> serde::de::DeserializeSeed<'de> for ImmutablePropertiesMapDeSeed<'arena> {
@@ -187,7 +188,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for ImmutablePropertiesMapDeSe
         D: serde::de::Deserializer<'de>,
     {
         struct ImmutablePropertiesMapVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
         }
 
         impl<'de, 'arena> serde::de::Visitor<'de> for ImmutablePropertiesMapVisitor<'arena> {

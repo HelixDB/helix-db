@@ -1,13 +1,16 @@
-use crate::utils::{
-    items::Edge,
-    properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
+use crate::{
+    helix_engine::storage_core::Arena,
+    utils::{
+        items::Edge,
+        properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
+    },
 };
-use std::fmt;
 use serde::de::{DeserializeSeed, Visitor};
+use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
 struct OptionPropertiesMapDeSeed<'arena> {
-    arena: &'arena bumpalo::Bump,
+    arena: Arena<'arena>,
 }
 
 impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
@@ -18,7 +21,7 @@ impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
         D: serde::Deserializer<'de>,
     {
         struct OptVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
         }
 
         impl<'de, 'arena> Visitor<'de> for OptVisitor<'arena> {
@@ -51,7 +54,7 @@ impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
 
 /// DeserializeSeed for Node that allocates label and properties into the arena
 pub struct EdgeDeSeed<'arena> {
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
     pub id: u128,
 }
 
@@ -63,7 +66,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for EdgeDeSeed<'arena> {
         D: serde::de::Deserializer<'de>,
     {
         struct EdgeVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
             id: u128,
         }
 

@@ -1,5 +1,8 @@
 use crate::{
-    helix_engine::vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
+    helix_engine::{
+        storage_core::Arena,
+        vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
+    },
     utils::properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
 };
 use serde::de::{DeserializeSeed, Visitor};
@@ -7,7 +10,7 @@ use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
 struct OptionPropertiesMapDeSeed<'arena> {
-    arena: &'arena bumpalo::Bump,
+    arena: Arena<'arena>,
 }
 
 impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
@@ -18,7 +21,7 @@ impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
         D: serde::Deserializer<'de>,
     {
         struct OptVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
         }
 
         impl<'de, 'arena> Visitor<'de> for OptVisitor<'arena> {
@@ -51,7 +54,7 @@ impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
 
 /// DeserializeSeed for Node that allocates label and properties into the arena
 pub struct VectorDeSeed<'txn, 'arena> {
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
     pub raw_vector_data: &'txn [u8],
     pub id: u128,
 }
@@ -64,7 +67,7 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
         D: serde::de::Deserializer<'de>,
     {
         struct VectorVisitor<'txn, 'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
             raw_vector_data: &'txn [u8],
             id: u128,
         }
@@ -123,7 +126,7 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
 
 /// DeserializeSeed for Node that allocates label and properties into the arena
 pub struct VectoWithoutDataDeSeed<'arena> {
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
     pub id: u128,
 }
 
@@ -135,7 +138,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
         D: serde::de::Deserializer<'de>,
     {
         struct VectorVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
             id: u128,
         }
 

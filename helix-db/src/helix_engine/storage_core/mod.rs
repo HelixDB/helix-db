@@ -1181,7 +1181,7 @@ pub mod rocks {
 #[cfg(feature = "slate")]
 pub mod slate {
 
-    use crate::helix_engine::slate_utils::SlateUtils;
+    use crate::helix_engine::slate_utils::{Entries, SlateUtils, table_prefix_delete};
 
     use super::*;
 
@@ -1193,6 +1193,9 @@ pub mod slate {
     use slatedb::{Db, Error, WriteBatch};
     use std::ops::RangeBounds;
     use std::sync::Arc;
+
+    pub type Herd = bumpalo_herd::Herd;
+    pub type Arena<'db> = bumpalo_herd::Member<'db>;
 
     pub struct Txn<'db> {
         pub txn: slatedb::DBTransaction,
@@ -1237,6 +1240,11 @@ pub mod slate {
         InEdges = 3,
         Metadata = 4,
     }
+
+    const NODE_KEY_LEN: usize = 18;
+    const EDGE_KEY_LEN: usize = 18;
+    const VECTOR_KEY_LEN: usize = 18;
+    const DIRECTION_KEY_LEN: usize = 54;
 
     impl HelixGraphStorage {
         /// Create a read transaction (snapshot)
@@ -1437,20 +1445,20 @@ pub mod slate {
                     .map_err(|_| GraphError::from("invalid index bytes"))?,
             );
             let node_id = u128::from_be_bytes(
-                data[1..17]
+                data[2..18]
                     .try_into()
                     .map_err(|_| GraphError::SliceLengthError)?,
             );
-            let label = data[17..21]
+            let label = data[18..22]
                 .try_into()
                 .map_err(|_| GraphError::SliceLengthError)?;
             let node_id2 = u128::from_be_bytes(
-                data[21..37]
+                data[22..38]
                     .try_into()
                     .map_err(|_| GraphError::SliceLengthError)?,
             );
             let edge_id = EdgeId::from_be_bytes(
-                data[37..53]
+                data[38..54]
                     .try_into()
                     .map_err(|_| GraphError::SliceLengthError)?,
             );
@@ -1461,17 +1469,17 @@ pub mod slate {
         #[inline(always)]
         pub fn secondary_index_key<'a>(
             buf: &'a mut bumpalo::collections::Vec<u8>,
+            table_index: u16,
             key: &[u8],
             node_id: u128,
         ) -> &'a mut [u8] {
             buf.clear();
+            buf.extend_from_slice(&table_index.to_be_bytes());
             buf.extend_from_slice(key);
             buf.extend_from_slice(&node_id.to_be_bytes());
             buf
         }
-    }
 
-    impl DBMethods for HelixGraphStorage {
         /// Creates a secondary index lmdb db (table) for a given index name
         fn create_secondary_index(&mut self, _name: &str) -> Result<(), GraphError> {
             unimplemented!(
@@ -1501,43 +1509,45 @@ pub mod slate {
             });
             Ok(())
         }
-    }
 
-    #[async_trait]
-    impl StorageMethods for HelixGraphStorage {
         #[inline]
-        async fn get_node<'db, 'arena>(
+        pub async fn get_node<'db, 'arena>(
             &self,
             txn: &Txn<'db>,
             id: u128,
-            arena: &'arena bumpalo::Bump,
+            arena: &'arena Herd,
         ) -> Result<Node<'arena>, GraphError> {
             let node = match txn.get(Self::node_key(id)).await.unwrap() {
                 Some(data) => data,
                 None => return Err(GraphError::NodeNotFound),
             };
-            let node: Node = Node::from_bincode_bytes(id, &node, arena)?;
+            let node: Node = Node::from_bincode_bytes(id, &node, arena.get())?;
             let node = self.version_info.upgrade_to_node_latest(node);
             Ok(node)
         }
 
         #[inline]
-        fn get_edge<'db, 'arena>(
+        pub async fn get_edge<'db, 'arena>(
             &self,
             txn: &Txn<'db>,
             id: u128,
-            arena: &'arena bumpalo::Bump,
+            arena: &'arena Herd,
         ) -> Result<Edge<'arena>, GraphError> {
-            let edge = match txn.get_pinned_cf(&cf, Self::edge_key(id)).unwrap() {
+            let edge = match txn.get(Self::edge_key(id)).await.unwrap() {
                 Some(data) => data,
                 None => return Err(GraphError::EdgeNotFound),
             };
-            let edge: Edge = Edge::from_bincode_bytes(id, &edge, arena)?;
+            let edge: Edge = Edge::from_bincode_bytes(id, &edge, arena.get())?;
             Ok(self.version_info.upgrade_to_edge_latest(edge))
         }
 
-        fn drop_node<'db>(&self, txn: &Txn<'db>, id: u128) -> Result<(), GraphError> {
-            let arena = bumpalo::Bump::new();
+        pub async fn drop_node<'db>(
+            &self,
+            txn: &Txn<'db>,
+            id: u128,
+            batch: &mut slatedb::WriteBatch,
+            arena: &bumpalo_herd::Herd,
+        ) -> Result<(), GraphError> {
             let mut edges = HashSet::new();
             let mut out_edges = HashSet::new();
             let mut in_edges = HashSet::new();
@@ -1545,79 +1555,70 @@ pub mod slate {
             let mut other_out_edges = Vec::new();
             let mut other_in_edges = Vec::new();
 
-            let cf_out_edges = self.cf_out_edges();
-            let cf_in_edges = self.cf_in_edges();
-            let cf_edges = self.cf_edges();
-
             // Delete outgoing edges
-            let mut iter = txn.raw_prefix_iter(&cf_out_edges, &id.to_be_bytes());
+            let mut iter = txn
+                .table_prefix_iter::<DIRECTION_KEY_LEN>(TableIndex::OutEdges, &id.to_be_bytes())
+                .await?;
 
-            while let Some(key) = iter.key() {
+            while let Some(key) = iter.key().await? {
                 assert_eq!(key.len(), 52);
-                let (_, label, to_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                let (_, label, to_node_id, edge_id) = Self::unpack_adj_edge_key(&key)?;
                 edges.insert(edge_id);
                 out_edges.insert((label, to_node_id, edge_id));
                 other_in_edges.push((to_node_id, label, edge_id));
-                iter.next();
             }
-            iter.status().map_err(GraphError::from)?;
 
             // Delete incoming edges
-            let mut iter = txn.raw_prefix_iter(&cf_in_edges, &id.to_be_bytes());
+            let mut iter = txn
+                .table_prefix_iter::<DIRECTION_KEY_LEN>(TableIndex::InEdges, &id.to_be_bytes())
+                .await?;
 
-            while let Some(key) = iter.key() {
+            while let Some(key) = iter.key().await? {
                 assert_eq!(key.len(), 52);
-                let (_, label, from_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                let (_, label, from_node_id, edge_id) = Self::unpack_adj_edge_key(&key)?;
                 edges.insert(edge_id);
                 in_edges.insert((label, from_node_id, edge_id));
                 other_out_edges.push((from_node_id, label, edge_id));
-                iter.next();
             }
-            iter.status().map_err(GraphError::from)?;
 
             // Delete all related data
             for edge in edges {
-                txn.delete_cf(&cf_edges, Self::edge_key(edge))?;
+                batch.delete(Self::edge_key(edge));
             }
             for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
-                txn.delete_cf(
-                    &cf_out_edges,
-                    Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id),
-                )?;
+                batch.delete(Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id));
             }
             for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
-                txn.delete_cf(
-                    &cf_in_edges,
-                    Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id),
-                )?;
+                batch.delete(Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id));
             }
 
             for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
-                txn.delete_cf(
-                    &cf_out_edges,
-                    Self::out_edge_key(*other_node_id, label_bytes, id, *edge_id),
-                )?;
+                batch.delete(Self::out_edge_key(
+                    *other_node_id,
+                    label_bytes,
+                    id,
+                    *edge_id,
+                ));
             }
             for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
-                txn.delete_cf(
-                    &cf_in_edges,
-                    Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id),
-                )?;
+                batch.delete(Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id));
             }
 
             // delete secondary indices
-            let node = self.get_node(txn, id, &arena)?;
+            let node = self.get_node(txn, id, &arena).await?;
 
-            for (index_name, cf_name) in &self.secondary_indices {
-                let cf = self.graph_env.cf_handle(cf_name).unwrap();
-                let mut buf = bumpalo::collections::Vec::new_in(&arena);
+            let member = arena.get();
+            for (index_name, si_index) in &self.secondary_indices {
+                let mut buf = bumpalo::collections::Vec::new_in(member.as_bump());
                 match node.get_property(index_name) {
                     Some(value) => match bincode::serialize(value) {
                         Ok(serialized) => {
-                            txn.delete_cf(
-                                &cf,
-                                Self::secondary_index_key(&mut buf, &serialized, node.id),
-                            )?;
+                            batch.delete(Self::secondary_index_key(
+                                &mut buf,
+                                *si_index,
+                                &serialized,
+                                node.id,
+                            ));
                         }
                         Err(e) => return Err(GraphError::from(e)),
                     },
@@ -1628,101 +1629,97 @@ pub mod slate {
             }
 
             // Delete node data
-            let cf_nodes = self.cf_nodes();
-            txn.delete_cf(&cf_nodes, Self::node_key(id))
-                .map_err(GraphError::from)
+            batch.delete(Self::node_key(id));
+            Ok(())
         }
 
-        fn drop_edge<'db>(&self, txn: &Txn<'db>, edge_id: u128) -> Result<(), GraphError> {
-            let arena = bumpalo::Bump::new();
-            let edge = self.get_edge(txn, edge_id, &arena)?;
+        async fn drop_edge<'db>(
+            &self,
+            txn: &Txn<'db>,
+            edge_id: u128,
+            batch: &mut slatedb::WriteBatch,
+            arena: &bumpalo_herd::Herd,
+        ) -> Result<(), GraphError> {
+            let edge = self.get_edge(txn, edge_id, arena).await?;
             let label_hash = hash_label(edge.label, None);
             let out_edge_key =
                 Self::out_edge_key(edge.from_node, &label_hash, edge.to_node, edge_id);
             let in_edge_key = Self::in_edge_key(edge.to_node, &label_hash, edge.from_node, edge_id);
 
-            // Get column family handles
-            let cf_edges = self.cf_edges();
-            let cf_out_edges = self.cf_out_edges();
-            let cf_in_edges = self.cf_in_edges();
-
             // Delete all edge-related data
-            txn.delete_cf(&cf_edges, Self::edge_key(edge_id))?;
-            txn.delete_cf(&cf_out_edges, out_edge_key)?;
-            txn.delete_cf(&cf_in_edges, in_edge_key)?;
+            batch.delete(Self::edge_key(edge_id));
+            batch.delete(out_edge_key);
+            batch.delete(in_edge_key);
             Ok(())
         }
 
-        fn drop_vector<'db>(&self, txn: &Txn<'db>, id: u128) -> Result<(), GraphError> {
-            let arena = bumpalo::Bump::new();
+        async fn drop_vector<'db>(
+            &self,
+            txn: &Txn<'db>,
+            id: u128,
+            batch: &mut slatedb::WriteBatch,
+            arena: &bumpalo_herd::Herd,
+        ) -> Result<(), GraphError> {
             let mut edges = HashSet::new();
             let mut out_edges = HashSet::new();
             let mut in_edges = HashSet::new();
 
-            let mut other_out_edges = Vec::new();
-            let mut other_in_edges = Vec::new();
-
-            let cf_out_edges = self.cf_out_edges();
-            let cf_in_edges = self.cf_in_edges();
-            let cf_edges = self.cf_edges();
+            // this is okay as allocated vecs are tied to member lifetime
+            let member = arena.get();
+            let mut other_out_edges = bumpalo::collections::Vec::new_in(member.as_bump());
+            let mut other_in_edges = bumpalo::collections::Vec::new_in(member.as_bump());
 
             // Delete outgoing edges
-            let mut iter = txn.raw_prefix_iter(&cf_out_edges, &id.to_be_bytes());
+            let mut iter = txn
+                .table_prefix_iter::<DIRECTION_KEY_LEN>(TableIndex::OutEdges, &id.to_be_bytes())
+                .await?;
 
-            while let Some(key) = iter.key() {
+            while let Some(key) = iter.key().await? {
                 assert_eq!(key.len(), 52);
-                let (_, label, to_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                let (_, label, to_node_id, edge_id) = Self::unpack_adj_edge_key(&key)?;
                 edges.insert(edge_id);
                 out_edges.insert((label, to_node_id, edge_id));
                 other_in_edges.push((to_node_id, label, edge_id));
-                iter.next();
             }
-            iter.status().map_err(GraphError::from)?;
 
             // Delete incoming edges
-            let mut iter = txn.raw_prefix_iter(&cf_in_edges, &id.to_be_bytes());
+            let mut iter = txn
+                .table_prefix_iter::<DIRECTION_KEY_LEN>(TableIndex::InEdges, &id.to_be_bytes())
+                .await?;
 
-            while let Some(key) = iter.key() {
+            while let Some(key) = iter.key().await? {
                 assert_eq!(key.len(), 52);
-                let (_, label, from_node_id, edge_id) = Self::unpack_adj_edge_key(key)?;
+                let (_, label, from_node_id, edge_id) = Self::unpack_adj_edge_key(&key)?;
                 edges.insert(edge_id);
                 in_edges.insert((label, from_node_id, edge_id));
                 other_out_edges.push((from_node_id, label, edge_id));
-                iter.next();
             }
-            iter.status().map_err(GraphError::from)?;
 
             // Delete all related data
             for edge in edges {
-                txn.delete_cf(&cf_edges, Self::edge_key(edge))?;
+                batch.delete(Self::edge_key(edge));
             }
             for (label_bytes, to_node_id, edge_id) in out_edges.iter() {
-                txn.delete_cf(
-                    &cf_out_edges,
-                    Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id),
-                )?;
+                batch.delete(Self::out_edge_key(id, label_bytes, *to_node_id, *edge_id));
             }
             for (label_bytes, from_node_id, edge_id) in in_edges.iter() {
-                txn.delete_cf(
-                    &cf_in_edges,
-                    Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id),
-                )?;
+                batch.delete(Self::in_edge_key(id, label_bytes, *from_node_id, *edge_id));
             }
 
             for (other_node_id, label_bytes, edge_id) in other_out_edges.iter() {
-                txn.delete_cf(
-                    &cf_out_edges,
-                    Self::out_edge_key(*other_node_id, label_bytes, id, *edge_id),
-                )?;
+                batch.delete(Self::out_edge_key(
+                    *other_node_id,
+                    label_bytes,
+                    id,
+                    *edge_id,
+                ));
             }
             for (other_node_id, label_bytes, edge_id) in other_in_edges.iter() {
-                txn.delete_cf(
-                    &cf_in_edges,
-                    Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id),
-                )?;
+                batch.delete(Self::in_edge_key(*other_node_id, label_bytes, id, *edge_id));
             }
 
             // Delete vector data
+            todo!("implement deleting vectors");
             self.vectors.delete(txn, id, &arena)?;
 
             Ok(())

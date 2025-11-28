@@ -1,10 +1,10 @@
 use std::{
     io::Read,
-    ops::{Range, RangeBounds},
+    ops::{Bound, Range, RangeBounds},
     slice::Iter,
 };
 
-use slatedb::DbIterator;
+use slatedb::{DbIterator, object_store::prefix};
 
 use crate::helix_engine::storage_core::TableIndex;
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ impl SlateUtils for slatedb::DBTransaction {
         prefix: &[u8],
     ) -> Result<DbIterator, slatedb::Error> {
         let options = slatedb::config::ScanOptions::default();
-        self.scan_with_options(Prefix::<N>::new(prefix), &options)
+        self.scan_with_options(prefix_bound::<N>(prefix), &options)
             .await
     }
 
@@ -55,7 +55,7 @@ impl SlateUtils for slatedb::DBTransaction {
         prefix: &[u8],
     ) -> Result<DbIterator, slatedb::Error> {
         let options = slatedb::config::ScanOptions::default();
-        self.scan_with_options(TablePrefix::<N>::new(table, prefix), &options)
+        self.scan_with_options(table_prefix_bound::<N>(table, prefix), &options)
             .await
     }
 
@@ -66,82 +66,110 @@ impl SlateUtils for slatedb::DBTransaction {
     }
 }
 
-pub(crate) struct Prefix<const N: usize> {
-    // pub table: TableIndexes,
-    prefix: [u8; N],
-    end: Option<[u8; N]>,
+fn prefix_bound<const N: usize>(prefix_slice: &[u8]) -> (Bound<[u8; N]>, Bound<[u8; N]>) {
+    let mut prefix = [0u8; N];
+    prefix.copy_from_slice(prefix_slice);
+
+    let mut end_buf = prefix;
+
+    let start = Bound::Included(prefix);
+    let end =
+        prefix_successor_bytes(&mut end_buf).map_or(Bound::Unbounded, |_| Bound::Excluded(end_buf));
+
+    (start, end)
 }
 
-impl<const N: usize> Prefix<N> {
-    fn new(prefix: &[u8]) -> Self {
-        let mut new = [0u8; N];
-        new.copy_from_slice(prefix);
-        Self {
-            prefix: new,
-            end: prefix_successor(new),
-        }
-    }
-}
+fn table_prefix_bound<const N: usize>(
+    table: TableIndex,
+    prefix_slice: &[u8],
+) -> (Bound<[u8; N]>, Bound<[u8; N]>) {
+    assert_eq!(N, prefix_slice.len() + 2); // might not be needed
+    let mut prefix = [0u8; N];
+    prefix[0..2].copy_from_slice(table.as_bytes());
+    prefix[2..prefix_slice.len() + 2].copy_from_slice(prefix_slice);
 
-impl<const N: usize> RangeBounds<[u8; N]> for Prefix<N> {
-    fn start_bound(&self) -> std::ops::Bound<&[u8; N]> {
-        std::ops::Bound::Included(&self.prefix)
-    }
+    let mut end_buf = prefix;
+    let start = Bound::Included(prefix);
+    let end =
+        prefix_successor_bytes(&mut end_buf).map_or(Bound::Unbounded, |_| Bound::Excluded(end_buf));
 
-    fn end_bound(&self) -> std::ops::Bound<&[u8; N]> {
-        match self.end {
-            Some(ref end) => std::ops::Bound::Excluded(end),
-            None => std::ops::Bound::Unbounded,
-        }
-    }
-}
-
-pub(crate) struct TablePrefix<const N: usize> {
-    prefix: [u8; N],
-    end: Option<[u8; N]>,
-}
-
-impl<const N: usize> TablePrefix<N> {
-    fn new(table: TableIndex, prefix: &[u8]) -> Self {
-        assert_eq!(N, prefix.len() + 2); // might not be needed
-        let mut new = [0u8; N];
-        new[0..2].copy_from_slice(table.as_bytes());
-        new[2..prefix.len() + 2].copy_from_slice(prefix);
-        Self {
-            prefix: new,
-            end: prefix_successor(new),
-        }
-    }
-}
-
-impl<const N: usize> RangeBounds<[u8; N]> for TablePrefix<N> {
-    fn start_bound(&self) -> std::ops::Bound<&[u8; N]> {
-        std::ops::Bound::Included(&self.prefix)
-    }
-
-    fn end_bound(&self) -> std::ops::Bound<&[u8; N]> {
-        match self.end {
-            Some(ref end) => std::ops::Bound::Excluded(end),
-            None => std::ops::Bound::Unbounded,
-        }
-    }
+    (start, end)
 }
 
 /// computes the smallest byte sequence that is greater than all keys starting with the prefix
-const fn prefix_successor<const N: usize>(prefix: [u8; N]) -> Option<[u8; N]> {
-    let mut i = N;
-    while i > 0 {
-        i -= 1;
+fn prefix_successor_bytes(prefix: &mut [u8]) -> Option<()> {
+    for i in (0..prefix.len()).rev() {
         if prefix[i] < 0xFF {
-            let mut end = prefix;
-            end[i] += 1;
-            let mut j = i + 1;
-            while j < N {
-                end[j] = 0;
-                j += 1;
-            }
-            return Some(end);
+            prefix[i] += 1;
+            prefix[i + 1..].fill(0);
+            return Some(());
         }
     }
     None
+}
+
+#[async_trait]
+pub trait Entries {
+    type Key;
+    type Value;
+
+    async fn entry(&mut self) -> Result<Option<(Self::Key, Self::Value)>, slatedb::Error>;
+    async fn key(&mut self) -> Result<Option<Self::Key>, slatedb::Error>;
+    async fn value(&mut self) -> Result<Option<Self::Value>, slatedb::Error>;
+}
+
+#[async_trait]
+impl Entries for slatedb::DbIterator {
+    type Key = bytes::Bytes;
+    type Value = bytes::Bytes;
+
+    async fn entry(&mut self) -> Result<Option<(Self::Key, Self::Value)>, slatedb::Error> {
+        self.next()
+            .await
+            .map(|entry| entry.map(|kv| (kv.key, kv.value)))
+    }
+
+    async fn key(&mut self) -> Result<Option<Self::Key>, slatedb::Error> {
+        self.next().await.map(|entry| entry.map(|kv| kv.key))
+    }
+
+    async fn value(&mut self) -> Result<Option<Self::Value>, slatedb::Error> {
+        self.next().await.map(|entry| entry.map(|kv| kv.value))
+    }
+}
+
+pub async fn table_prefix_delete<const N: usize>(
+    txn: &slatedb::DBTransaction,
+    batch: &mut slatedb::WriteBatch,
+    table: TableIndex,
+    prefix: &[u8],
+) -> Result<(), slatedb::Error> {
+    let options = slatedb::config::ScanOptions::new()
+        .with_max_fetch_tasks(8)
+        .with_read_ahead_bytes(64 * 1024);
+    let mut iter = txn
+        .scan_with_options(table_prefix_bound::<N>(table, prefix), &options)
+        .await?;
+    while let Some(key) = iter.next().await?.map(|entry| entry.key) {
+        batch.delete(key);
+    }
+    Ok(())
+}
+
+pub async fn table_scan_delete<const N: usize>(
+    txn: &slatedb::DBTransaction,
+    batch: &mut slatedb::WriteBatch,
+    table: TableIndex,
+    prefix: &[u8],
+) -> Result<(), slatedb::Error> {
+    let options = slatedb::config::ScanOptions::new()
+        .with_max_fetch_tasks(8)
+        .with_read_ahead_bytes(64 * 1024);
+    let mut iter = txn
+        .scan_with_options(table_prefix_bound::<N>(table, prefix), &options)
+        .await?;
+    while let Some(key) = iter.next().await?.map(|entry| entry.key) {
+        batch.delete(key);
+    }
+    Ok(())
 }

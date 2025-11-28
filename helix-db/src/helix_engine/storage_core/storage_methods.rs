@@ -101,34 +101,34 @@ pub trait StorageMethods {
 #[async_trait]
 pub trait StorageMethods {
     /// Gets a node object for a given node id
-    async fn get_node<'arena>(
+    async fn get_node<'db, 'arena>(
         &self,
-        txn: &slate::Txn<'_>,
+        txn: &slate::Txn<'db>,
         id: u128,
-        arena: &'arena bumpalo::Bump,
+        arena: &'arena bumpalo_herd::Herd,
     ) -> Result<Node<'arena>, GraphError>;
 
     /// Gets a edge object for a given edge id
-    async fn get_edge<'arena>(
+    async fn get_edge<'db, 'arena>(
         &self,
-        txn: &slate::Txn<'_>,
+        txn: &slate::Txn<'db>,
         id: u128,
-        arena: &'arena bumpalo::Bump,
+        arena: &'arena bumpalo_herd::Herd,
     ) -> Result<Edge<'arena>, GraphError>;
 
     /// Removes the following from the storage engine:
     /// - The given node
     /// - All connected incoming AND outgoing edge mappings and the actual edges
     /// - All secondary indexes for the given node
-    async fn drop_node(&self, txn: &slate::Txn<'_>, id: u128) -> Result<(), GraphError>;
+    async fn drop_node<'db>(&self, txn: &slate::Txn<'db>, id: u128) -> Result<(), GraphError>;
 
     /// Removes the following from the storage engine:
     /// - The given edge
     /// - All incoming and outgoing mappings for that edge
-    async fn drop_edge(&self, txn: &slate::Txn<'_>, id: u128) -> Result<(), GraphError>;
+    async fn drop_edge<'db>(&self, txn: &slate::Txn<'db>, id: u128) -> Result<(), GraphError>;
 
     /// Sets the `deleted` field of a vector to true
     ///
     /// NOTE: The vector is not ACTUALLY deleted and is still present in the db.
-    async fn drop_vector(&self, txn: &slate::Txn<'_>, id: u128) -> Result<(), GraphError>;
+    async fn drop_vector<'db>(&self, txn: &slate::Txn<'db>, id: u128) -> Result<(), GraphError>;
 }

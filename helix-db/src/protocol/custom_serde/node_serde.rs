@@ -1,14 +1,17 @@
-use std::fmt;
-use serde::de::{DeserializeSeed, Visitor};
-use crate::utils::{
-    items::Node,
-    properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
+use crate::{
+    helix_engine::storage_core::Arena,
+    utils::{
+        items::Node,
+        properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
+    },
 };
+use serde::de::{DeserializeSeed, Visitor};
+use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
 /// This is needed because we can't use next_element::<Option<T>>() with custom DeserializeSeed
 struct OptionPropertiesMapDeSeed<'arena> {
-    arena: &'arena bumpalo::Bump,
+    arena: Arena<'arena>,
 }
 
 impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
@@ -19,7 +22,7 @@ impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
         D: serde::Deserializer<'de>,
     {
         struct OptVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
         }
 
         impl<'de, 'arena> Visitor<'de> for OptVisitor<'arena> {
@@ -52,7 +55,7 @@ impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
 
 /// DeserializeSeed for Node that allocates label and properties into the arena
 pub struct NodeDeSeed<'arena> {
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
     pub id: u128,
 }
 
@@ -64,7 +67,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for NodeDeSeed<'arena> {
         D: serde::de::Deserializer<'de>,
     {
         struct NodeVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
+            arena: Arena<'arena>,
             id: u128,
         }
 
@@ -84,7 +87,9 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for NodeDeSeed<'arena> {
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                 let label = self.arena.alloc_str(label_string);
 
-                let version: u8 = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                let version: u8 = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
 
                 // Bincode serializes Option<T> as ONE field: 0x00 (None) or 0x01+data (Some)
                 // Use our custom DeserializeSeed that handles the Option wrapper

@@ -4,6 +4,7 @@
 //!
 //! Nodes and edges are serialised without enum variant names in JSON format.
 
+use crate::helix_engine::storage_core::Arena;
 use crate::protocol::custom_serde::edge_serde::EdgeDeSeed;
 use crate::protocol::custom_serde::node_serde::NodeDeSeed;
 use crate::protocol::value::Value;
@@ -47,11 +48,13 @@ impl<'arena> serde::Serialize for Node<'arena> {
         if serializer.is_human_readable() {
             // Include id for JSON serialization
             let mut buffer = [0u8; 36];
-            let mut state = serializer.serialize_map(Some(3 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0)))?;
+            let mut state = serializer.serialize_map(Some(
+                3 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            ))?;
             state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
-            state.serialize_entry("label",    self.label)?;
+            state.serialize_entry("label", self.label)?;
             state.serialize_entry("version", &self.version)?;
-            if let Some(properties  ) = &self.properties {
+            if let Some(properties) = &self.properties {
                 for (key, value) in properties.iter() {
                     state.serialize_entry(key, value)?;
                 }
@@ -84,7 +87,7 @@ impl<'arena> Node<'arena> {
     pub fn from_bincode_bytes<'txn>(
         id: u128,
         bytes: &'txn [u8],
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> bincode::Result<Self> {
         // Use fixint encoding to match bincode::serialize() behavior (8-byte lengths)
         // Allow trailing bytes since we manually control Option reading
@@ -177,7 +180,9 @@ impl<'arena> serde::Serialize for Edge<'arena> {
         if serializer.is_human_readable() {
             // Include id for JSON serialization
             let mut buffer = [0u8; 36];
-            let mut state = serializer.serialize_map(Some(5 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0)))?;
+            let mut state = serializer.serialize_map(Some(
+                5 + self.properties.as_ref().map(|p| p.len()).unwrap_or(0),
+            ))?;
             state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
             state.serialize_entry("label", self.label)?;
             state.serialize_entry("version", &self.version)?;
@@ -218,7 +223,7 @@ impl<'arena> Edge<'arena> {
     pub fn from_bincode_bytes<'txn>(
         id: u128,
         bytes: &'txn [u8],
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> bincode::Result<Self> {
         // Use fixint encoding to match bincode::serialize() behavior (8-byte lengths)
         bincode::DefaultOptions::new()
