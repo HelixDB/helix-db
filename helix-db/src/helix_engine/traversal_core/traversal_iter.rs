@@ -17,7 +17,7 @@ where
 {
     pub storage: &'db HelixGraphStorage,
     pub arena: Arena<'arena>,
-    pub txn: &'txn RTxn<'db>,
+    pub txn: RTxn<'txn, 'db>,
     pub inner: I,
 }
 
@@ -87,7 +87,7 @@ where
 {
     pub storage: &'db HelixGraphStorage,
     pub arena: &'arena bumpalo::Bump,
-    pub txn: &'txn mut WTxn<'db>,
+    pub txn: WTxn<'txn, 'db>,
     pub inner: I,
 }
 
@@ -107,7 +107,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 {
     pub fn new(
         storage: &'db HelixGraphStorage,
-        txn: &'txn mut WTxn<'db>,
+        txn: WTxn<'txn, 'db>,
         arena: &'arena bumpalo::Bump,
         inner: I,
     ) -> Self {

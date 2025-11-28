@@ -5,7 +5,7 @@ use crate::helix_engine::{
 
 pub struct Map<'db, 'txn, I, F> {
     iter: I,
-    txn: &'txn RTxn<'db>,
+    txn: RTxn<'txn, 'db>,
     f: F,
 }
 
@@ -13,7 +13,7 @@ pub struct Map<'db, 'txn, I, F> {
 impl<'db, 'arena, 'txn, I, F> Iterator for Map<'db, 'txn, I, F>
 where
     I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    F: FnMut(TraversalValue<'arena>, &RTxn<'db>) -> Result<TraversalValue<'arena>, GraphError>,
+    F: FnMut(TraversalValue<'arena>, RTxn) -> Result<TraversalValue<'arena>, GraphError>,
 {
     type Item = I::Item;
 
@@ -55,7 +55,7 @@ pub trait MapAdapter<'db, 'arena, 'txn>:
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     >
     where
-        F: FnMut(TraversalValue<'arena>, &RTxn<'db>) -> Result<TraversalValue<'arena>, GraphError>;
+        F: FnMut(TraversalValue<'arena>, RTxn) -> Result<TraversalValue<'arena>, GraphError>;
 }
 
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
@@ -72,7 +72,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     >
     where
-        F: FnMut(TraversalValue<'arena>, &RTxn<'db>) -> Result<TraversalValue<'arena>, GraphError>,
+        F: FnMut(TraversalValue<'arena>, RTxn) -> Result<TraversalValue<'arena>, GraphError>,
     {
         RoTraversalIterator {
             storage: self.storage,
