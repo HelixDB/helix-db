@@ -1236,17 +1236,29 @@ pub mod slate {
     #[derive(Clone, Copy, Serialize, Deserialize, Len)]
     #[index(u16)]
     pub enum TableIndex {
+        // Graph
         Nodes = 0,
         Edges = 1,
         OutEdges = 2,
         InEdges = 3,
         Metadata = 4,
+        // Vector
+        Vectors = 5,
+        VectorProperties = 6,
+        VectorEdges = 7,
+        // BM25
+        InvertedIndex = 8,
+        DocLengths = 9,
+        TermFrequencies = 10,
+        BM25Metadata = 11,
     }
 
-    const NODE_KEY_LEN: usize = 18;
-    const EDGE_KEY_LEN: usize = 18;
-    const VECTOR_KEY_LEN: usize = 18;
-    const DIRECTION_KEY_LEN: usize = 54;
+    pub const NODE_KEY_LEN: usize = 18;
+    pub const EDGE_KEY_LEN: usize = 18;
+    pub const VECTOR_KEY_LEN: usize = 18;
+    pub const DIRECTION_KEY_LEN: usize = 54;
+    pub const DIRECTION_LABEL_PREFIX_LEN: usize = 22;
+    pub const DIRECTION_PREFIX_LEN: usize = 18;
 
     impl HelixGraphStorage {
         /// Create a read transaction (snapshot)

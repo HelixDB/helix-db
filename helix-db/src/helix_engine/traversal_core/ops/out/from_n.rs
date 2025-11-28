@@ -1,3 +1,5 @@
+#[cfg(feature = "slate")]
+use crate::helix_engine::traversal_core::traversal_iter::AsyncRoTraversalIterator;
 use crate::helix_engine::{
     storage_core::storage_methods::StorageMethods,
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
@@ -78,6 +80,59 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             arena: self.arena,
             txn: self.txn,
             inner: iter,
+        }
+    }
+}
+
+#[cfg(feature = "slate")]
+use futures::Stream;
+
+#[cfg(feature = "slate")]
+pub trait AsyncFromNAdapter<'db, 'arena, 'txn>: Sized {
+    fn from_n(
+        self,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
+}
+
+#[cfg(feature = "slate")]
+impl<'db, 'arena, 'txn, S> AsyncFromNAdapter<'db, 'arena, 'txn>
+    for AsyncRoTraversalIterator<'db, 'arena, 'txn, S>
+where
+    S: Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+{
+    #[inline(always)]
+    fn from_n(
+        self,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        use futures::StreamExt;
+
+        let stream = async_stream::try_stream! {
+            let mut inner = Box::pin(self.inner);
+
+            while let Some(item) = inner.next().await {
+                let item = item?;
+                if let TraversalValue::Edge(edge) = item {
+                    let node = self.storage.get_node(self.txn, edge.from_node, self.arena).await?;
+                    yield TraversalValue::Node(node);
+                }
+            }
+        };
+
+        AsyncRoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: stream,
         }
     }
 }

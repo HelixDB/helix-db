@@ -232,103 +232,128 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
     }
 }
 
+#[cfg(feature = "slate")]
+use crate::helix_engine::traversal_core::traversal_iter::AsyncRoTraversalIterator;
+#[cfg(feature = "slate")]
+use futures::Stream;
+
+#[cfg(feature = "slate")]
+pub trait AsyncAddNAdapter<'db, 'arena, 'txn, 's>: Sized {
+    fn add_n(
+        self,
+        label: &'arena str,
+        properties: Option<ImmutablePropertiesMap<'arena>>,
+        secondary_indices: Option<&'s [&str]>,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
+}
+
 // SlateDB Implementation
-#[cfg(feature = "slatedb")]
-impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
-    AddNAdapter<'db, 'arena, 'txn, 's> for RwTraversalIterator<'db, 'arena, 'txn, I>
+#[cfg(feature = "slate")]
+impl<'db, 'arena, 'txn, 's, I: Stream<Item = Result<TraversalValue<'arena>, GraphError>>>
+    AsyncAddNAdapter<'db, 'arena, 'txn, 's> for AsyncRoTraversalIterator<'db, 'arena, 'txn, I>
 {
     fn add_n(
         self,
         label: &'arena str,
         properties: Option<ImmutablePropertiesMap<'arena>>,
         secondary_indices: Option<&'s [&str]>,
-    ) -> RwTraversalIterator<
+    ) -> AsyncRoTraversalIterator<
         'db,
         'arena,
         'txn,
-        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
-        let node = Node {
-            id: v6_uuid(),
-            label,
-            version: 1,
-            properties,
-        };
-        let secondary_indices = secondary_indices.unwrap_or(&[]).to_vec();
-        let mut result: Result<TraversalValue, GraphError> = Ok(TraversalValue::Empty);
+        let iter = futures::stream::once(async {
+            let node = Node {
+                id: v6_uuid(),
+                label,
+                version: 1,
+                properties,
+            };
+            let secondary_indices = secondary_indices.unwrap_or(&[]).to_vec();
+            let mut result: Result<TraversalValue, GraphError> = Ok(TraversalValue::Empty);
 
-        match bincode::serialize(&node) {
-            Ok(bytes) => {
-                if let Err(e) = self.txn.put(HelixGraphStorage::node_key(node.id), &bytes) {
-                    result = Err(GraphError::from(e));
-                }
-            }
-            Err(e) => result = Err(GraphError::from(e)),
-        }
-
-        for index in secondary_indices {
-            println!("{index}");
-            match self.storage.secondary_indices.get(index) {
-                Some(table_index) => {
-                    let key = match node.get_property(index) {
-                        Some(value) => value,
-                        None => continue,
-                    };
-                    // Serialize the property value
-                    match bincode::serialize(&key) {
-                        Ok(serialized) => {
-                            // Create composite key: serialized_value | node_id
-                            let mut buf = bumpalo::collections::Vec::new_in(self.arena);
-                            let composite_key = HelixGraphStorage::secondary_index_key(
-                                &mut buf,
-                                *table_index,
-                                &serialized,
-                                node.id,
-                            );
-
-                            if let Err(e) = self.txn.put(composite_key, []) {
-                                println!(
-                                    "{} Error adding node to secondary index: {:?}",
-                                    line!(),
-                                    e
-                                );
-                                result = Err(GraphError::from(e));
-                            }
-                        }
-                        Err(e) => result = Err(GraphError::from(e)),
+            match bincode::serialize(&node) {
+                Ok(bytes) => {
+                    if let Err(e) = self.txn.put(HelixGraphStorage::node_key(node.id), &bytes) {
+                        result = Err(GraphError::from(e));
                     }
                 }
-                None => {
-                    result = Err(GraphError::New(format!(
-                        "Secondary Index {index} not found"
-                    )));
+                Err(e) => result = Err(GraphError::from(e)),
+            }
+
+            let bump = self.arena.get();
+            for index in secondary_indices {
+                println!("{index}");
+                match self.storage.secondary_indices.get(index) {
+                    Some(table_index) => {
+                        let key = match node.get_property(index) {
+                            Some(value) => value,
+                            None => continue,
+                        };
+                        // Serialize the property value
+                        match bincode::serialize(&key) {
+                            Ok(serialized) => {
+                                // Create composite key: serialized_value | node_id
+                                let mut buf = bumpalo::collections::Vec::new_in(bump.as_bump());
+                                let composite_key = HelixGraphStorage::secondary_index_key(
+                                    &mut buf,
+                                    *table_index,
+                                    &serialized,
+                                    node.id,
+                                );
+
+                                if let Err(e) = self.txn.put(composite_key, []) {
+                                    println!(
+                                        "{} Error adding node to secondary index: {:?}",
+                                        line!(),
+                                        e
+                                    );
+                                    result = Err(GraphError::from(e));
+                                }
+                            }
+                            Err(e) => result = Err(GraphError::from(e)),
+                        }
+                    }
+                    None => {
+                        result = Err(GraphError::New(format!(
+                            "Secondary Index {index} not found"
+                        )));
+                    }
                 }
             }
-        }
 
-        if let Some(bm25) = &self.storage.bm25
-            && let Some(props) = node.properties.as_ref()
-        {
-            let mut data = props.flatten_bm25();
-            data.push_str(node.label);
-            if let Err(e) = bm25.insert_doc(self.txn, node.id, &data) {
-                result = Err(e);
+            if let Some(bm25) = &self.storage.bm25
+                && let Some(props) = node.properties.as_ref()
+            {
+                let mut data = props.flatten_bm25();
+                data.push_str(node.label);
+                if let Err(e) = bm25.insert_doc(self.txn, node.id, &data) {
+                    result = Err(e);
+                }
             }
-        }
 
-        if result.is_ok() {
-            result = Ok(TraversalValue::Node(node));
-        } else {
-            result = Err(GraphError::New(
-                "Failed to add node to secondary indices".to_string(),
-            ));
-        }
+            if result.is_ok() {
+                result = Ok(TraversalValue::Node(node));
+            } else {
+                result = Err(GraphError::New(
+                    "Failed to add node to secondary indices".to_string(),
+                ));
+            }
 
-        RwTraversalIterator {
+            result
+        });
+
+        AsyncRoTraversalIterator {
             storage: self.storage,
             arena: self.arena,
             txn: self.txn,
-            inner: std::iter::once(result),
+            inner: iter,
         }
     }
 }

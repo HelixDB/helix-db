@@ -1,3 +1,5 @@
+#[cfg(feature = "slate")]
+use crate::helix_engine::traversal_core::traversal_iter::AsyncRoTraversalIterator;
 use crate::{
     helix_engine::{
         storage_core::HelixGraphStorage,
@@ -321,6 +323,132 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             storage: self.storage,
             arena: self.arena,
             txn: self.txn,
+        }
+    }
+}
+
+#[cfg(feature = "slate")]
+use futures::Stream;
+
+#[cfg(feature = "slate")]
+pub trait AsyncInAdapter<'db, 'arena, 'txn, 's>: Sized {
+    fn in_vec(
+        self,
+        edge_label: &'s str,
+        get_vector_data: bool,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
+
+    fn in_node(
+        self,
+        edge_label: &'s str,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
+}
+
+#[cfg(feature = "slate")]
+impl<'db, 'arena, 'txn, 's, S> AsyncInAdapter<'db, 'arena, 'txn, 's>
+    for AsyncRoTraversalIterator<'db, 'arena, 'txn, S>
+where
+    S: Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+{
+    fn in_vec(
+        self,
+        edge_label: &'s str,
+        get_vector_data: bool,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        use crate::helix_engine::{
+            slate_utils::SlateUtils, storage_core::DIRECTION_LABEL_PREFIX_LEN,
+        };
+        use futures::StreamExt;
+
+        let stream = async_stream::try_stream! {
+            let edge_label_hash = hash_label(edge_label, None);
+            let mut inner = Box::pin(self.inner);
+
+            while let Some(item) = inner.next().await {
+                let item = item?;
+                let node_id = item.id();
+
+                let prefix = HelixGraphStorage::in_edge_key_prefix(node_id, &edge_label_hash);
+                let mut iter = self.txn.prefix_iter::<DIRECTION_LABEL_PREFIX_LEN>(&prefix).await?;
+
+                while let Some(kv) = iter.next().await? {
+                    let key = kv.key;
+                    let (_, _, from_node_id, _) = HelixGraphStorage::unpack_adj_edge_key(&key)?;
+
+                    if get_vector_data {
+                        // TODO: implement get_full_vector for slate
+                        todo!("get_full_vector not yet implemented for slate");
+                    } else {
+                        // TODO: implement get_vector_properties for slate
+                        todo!("get_vector_properties not yet implemented for slate");
+                    }
+                }
+            }
+        };
+
+        AsyncRoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: stream,
+        }
+    }
+
+    fn in_node(
+        self,
+        edge_label: &'s str,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        use crate::helix_engine::{
+            slate_utils::SlateUtils, storage_core::DIRECTION_LABEL_PREFIX_LEN,
+        };
+        use futures::StreamExt;
+
+        let stream = async_stream::try_stream! {
+            let edge_label_hash = hash_label(edge_label, None);
+            let mut inner = Box::pin(self.inner);
+
+            while let Some(item) = inner.next().await {
+                let item = item?;
+                let node_id = item.id();
+
+                let prefix = HelixGraphStorage::in_edge_key_prefix(node_id, &edge_label_hash);
+                let mut iter = self.txn.prefix_iter::<DIRECTION_LABEL_PREFIX_LEN>(&prefix).await?;
+
+                while let Some(kv) = iter.next().await? {
+                    let key = kv.key;
+                    let (_, _, from_node_id, _) = HelixGraphStorage::unpack_adj_edge_key(&key)?;
+
+                    let node = self.storage.get_node(self.txn, from_node_id, self.arena).await?;
+                    yield TraversalValue::Node(node);
+                }
+            }
+        };
+
+        AsyncRoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: stream,
         }
     }
 }
