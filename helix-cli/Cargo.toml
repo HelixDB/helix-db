@@ -41,4 +41,4 @@ path = "src/main.rs"
 lmdb = ["helix-db/lmdb"]
 rocks = ["helix-db/rocks"]
 slate = ["helix-db/slate"]
-default = ["lmdb"]
+default = ["slate"]

@@ -1512,7 +1512,7 @@ pub mod slate {
             Ok(())
         }
 
-        #[inline]
+        #[inline(always)]
         pub async fn get_node<'db, 'arena>(
             &self,
             txn: &Txn<'db>,
@@ -1528,7 +1528,7 @@ pub mod slate {
             Ok(node)
         }
 
-        #[inline]
+        #[inline(always)]
         pub async fn get_edge<'db, 'arena>(
             &self,
             txn: &Txn<'db>,

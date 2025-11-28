@@ -1,6 +1,8 @@
+#[cfg(feature = "slate")]
+use crate::helix_engine::storage_core::Txn;
 use crate::{
     helix_engine::{
-        storage_core::HelixGraphStorage,
+        storage_core::{Arena, HelixGraphStorage},
         traversal_core::{RTxn, WTxn, traversal_value::TraversalValue},
         types::GraphError,
     },
@@ -14,7 +16,7 @@ where
     'arena: 'txn,
 {
     pub storage: &'db HelixGraphStorage,
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
     pub txn: &'txn RTxn<'db>,
     pub inner: I,
 }
@@ -152,4 +154,17 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         };
         val
     }
+}
+
+#[cfg(feature = "slate")]
+pub struct AsyncRoTraversalIterator<'db, 'arena, 'txn, S>
+where
+    'db: 'arena,
+    'arena: 'txn,
+    S: futures::Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+{
+    pub storage: &'db HelixGraphStorage,
+    pub arena: &'arena bumpalo_herd::Herd,
+    pub txn: &'txn Txn<'db>,
+    pub inner: S,
 }

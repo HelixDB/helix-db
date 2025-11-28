@@ -67,6 +67,7 @@ sha_256 = "=0.1.1"
 slatedb = { version = "0.9.2", optional = true, features = ["aws"]}
 bumpalo-herd = "0.1.2"
 bytes = "1.11.0"
+async-stream = "0.3.6"
 
 [dev-dependencies]
 rand = "0.9.0"
@@ -94,5 +95,5 @@ dev-instance = []
 lmdb = ["server", "heed3"]
 rocks = ["server", "rocksdb"]
 slate = ["server", "slatedb"]
-default = ["lmdb"]
+default = ["slate"]
 production = ["api-key"]

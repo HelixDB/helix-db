@@ -1,3 +1,6 @@
+#[cfg(feature = "slate")]
+#[cfg(feature = "slate")]
+use crate::helix_engine::traversal_core::traversal_iter::AsyncRoTraversalIterator;
 use crate::{
     helix_engine::{
         traversal_core::{
@@ -187,6 +190,88 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             arena,
             txn,
             inner,
+        }
+    }
+}
+
+#[cfg(feature = "slate")]
+use futures::Stream;
+
+#[cfg(feature = "slate")]
+pub trait AsyncNFromTypeAdapter<'db, 'arena, 'txn, 's>: Sized {
+    fn n_from_type(
+        self,
+        label: &'s str,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    >;
+}
+
+#[cfg(feature = "slate")]
+impl<'db, 'arena, 'txn, 's, S> AsyncNFromTypeAdapter<'db, 'arena, 'txn, 's>
+    for AsyncRoTraversalIterator<'db, 'arena, 'txn, S>
+where
+    S: Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+{
+    fn n_from_type(
+        self,
+        label: &'s str,
+    ) -> AsyncRoTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        use crate::helix_engine::{slate_utils::SlateUtils, storage_core::TableIndex};
+        let stream = async_stream::try_stream! {
+            let label_len = label.len();
+            let label_as_bytes = label.as_bytes();
+            let mut iter = self.txn.table_iter(TableIndex::Nodes).await?;
+            while let Some(kv) = iter.next().await? {
+                let key = kv.key;
+                let value = kv.value;
+                let id = u128::from_be_bytes(key[2..18].try_into().expect("Failed to convert [2..18] part of key to u128"));
+
+                if value.len() < LMDB_STRING_HEADER_LENGTH {
+                    panic!(
+                        "value length does not contain header which means the `label` field was missing from the node on insertion"
+                    );
+                }
+
+                let length_of_label_in_db =
+                    u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap())
+                        as usize;
+
+                if length_of_label_in_db != label_len {
+                    iter.next();
+                    continue;
+                }
+
+                let end = LMDB_STRING_HEADER_LENGTH + length_of_label_in_db;
+                if value.len() < end {
+                    panic!(
+                        "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
+                    );
+                }
+
+                let label_in_db = &value[LMDB_STRING_HEADER_LENGTH..end];
+                if label_in_db == label_as_bytes {
+                     let node = Node::<'arena>::from_bincode_bytes(id, &value, self.arena.get())?;
+                     yield TraversalValue::Node(node)
+                } else {
+                    continue;
+                }
+            }
+        };
+
+        AsyncRoTraversalIterator {
+            storage: self.storage,
+            arena: self.arena,
+            txn: self.txn,
+            inner: stream,
         }
     }
 }
