@@ -81,6 +81,7 @@ pub mod lmdb {
     }
 
     pub type Txn<'db> = heed3::RoTxn<'db>;
+    pub type Arena<'arena> = &'arena bumpalo::Bump;
 
     impl HelixGraphStorage {
         // database names for different stores
@@ -569,6 +570,7 @@ pub mod rocks {
     }
 
     pub type Txn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+    pub type Arena<'arena> = &'arena bumpalo::Bump;
 
     pub fn default_helix_rocksdb_options() -> rocksdb::Options {
         let mut db_opts = rocksdb::Options::default();
@@ -1195,7 +1197,7 @@ pub mod slate {
     use std::sync::Arc;
 
     pub type Herd = bumpalo_herd::Herd;
-    pub type Arena<'db> = bumpalo_herd::Member<'db>;
+    pub type Arena<'arena> = bumpalo_herd::Member<'arena>;
 
     pub struct Txn<'db> {
         pub txn: slatedb::DBTransaction,
