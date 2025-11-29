@@ -1325,6 +1325,7 @@ dependencies = [
  "eyre",
  "flume",
  "futures-util",
+ "heed3",
  "helix-db",
  "helix-metrics",
  "iota",
