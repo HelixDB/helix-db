@@ -213,3 +213,9 @@ impl From<rocksdb::Error> for VectorError {
         VectorError::ConversionError(format!("rocksdb error: {error}"))
     }
 }
+
+impl From<String> for VectorError {
+    fn from(error: String) -> Self {
+        VectorError::ConversionError(format!("String error: {error}"))
+    }
+}

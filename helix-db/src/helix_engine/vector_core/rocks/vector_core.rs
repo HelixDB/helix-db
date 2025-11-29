@@ -3,7 +3,7 @@ use crate::{
     debug_println,
     helix_engine::{
         storage_core::Txn,
-        types::VectorError,
+        types::{GraphError, VectorError},
         vector_core::{
             rocks::{
                 hnsw::HNSW,
@@ -429,13 +429,17 @@ impl VectorCore {
         self_operand: [u8; 18],
         neighbor_key: [u8; EDGE_LENGTH],
         neighbor_operand: [u8; 18],
-    ) -> Result<(), rocksdb::Error> {
+    ) -> Result<(), VectorError> {
         if self_key <= neighbor_key {
-            txn.merge_cf(cf_edges, self_key, self_operand)?;
-            txn.merge_cf(cf_edges, neighbor_key, neighbor_operand)?;
+            txn.merge_cf(cf_edges, self_key, self_operand)
+                .map_err(|err| VectorError::from(format!("error merging edge pair1: {}", err)))?;
+            txn.merge_cf(cf_edges, neighbor_key, neighbor_operand)
+                .map_err(|err| VectorError::from(format!("error merging edge pair2: {}", err)))?;
         } else {
-            txn.merge_cf(cf_edges, neighbor_key, neighbor_operand)?;
-            txn.merge_cf(cf_edges, self_key, self_operand)?;
+            txn.merge_cf(cf_edges, neighbor_key, neighbor_operand)
+                .map_err(|err| VectorError::from(format!("error merging edge pair3: {}", err)))?;
+            txn.merge_cf(cf_edges, self_key, self_operand)
+                .map_err(|err| VectorError::from(format!("error merging edge pair4: {}", err)))?;
         }
         Ok(())
     }
