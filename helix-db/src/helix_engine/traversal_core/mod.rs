@@ -38,11 +38,9 @@ impl HelixGraphEngine {
     #[cfg(not(feature = "slate"))]
     pub fn new(opts: HelixGraphEngineOpts) -> Result<HelixGraphEngine, GraphError> {
         let should_use_mcp = opts.config.mcp;
-        let storage = match HelixGraphStorage::new(opts.path.leak(), opts.config, opts.version_info)
-        {
-            Ok(db) => Arc::new(db),
-            Err(err) => return Err(err),
-        };
+        let storage = Arc::new(
+            HelixGraphStorage::new(opts.path.leak(), opts.config, opts.version_info).await?,
+        );
 
         let (mcp_backend, mcp_connections) = if should_use_mcp.unwrap_or(false) {
             let mcp_backend = Arc::new(McpBackend::new(storage.clone()));

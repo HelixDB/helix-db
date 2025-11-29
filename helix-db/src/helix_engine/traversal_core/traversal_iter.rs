@@ -86,7 +86,7 @@ where
     'arena: 'txn,
 {
     pub storage: &'db HelixGraphStorage,
-    pub arena: &'arena bumpalo::Bump,
+    pub arena: Arena<'arena>,
     pub txn: WTxn<'txn, 'db>,
     pub inner: I,
 }
@@ -108,7 +108,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     pub fn new(
         storage: &'db HelixGraphStorage,
         txn: WTxn<'txn, 'db>,
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
         inner: I,
     ) -> Self {
         Self {
@@ -167,4 +167,25 @@ where
     pub arena: &'arena bumpalo_herd::Herd,
     pub txn: &'txn Txn<'db>,
     pub inner: S,
+}
+
+impl<'db, 'arena, 'txn, S> AsyncRoTraversalIterator<'db, 'arena, 'txn, S>
+where
+    'db: 'arena,
+    'arena: 'txn,
+    S: futures::Stream<Item = Result<TraversalValue<'arena>, GraphError>>,
+{
+    pub fn new(
+        storage: &'db HelixGraphStorage,
+        arena: &'arena bumpalo_herd::Herd,
+        txn: &'txn Txn<'db>,
+        inner: S,
+    ) -> Self {
+        Self {
+            storage,
+            arena,
+            txn,
+            inner,
+        }
+    }
 }

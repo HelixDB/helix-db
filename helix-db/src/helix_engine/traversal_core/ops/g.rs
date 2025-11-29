@@ -1,5 +1,5 @@
 use crate::helix_engine::{
-    storage_core::HelixGraphStorage,
+    storage_core::{Arena, HelixGraphStorage},
     traversal_core::{
         RTxn, WTxn,
         traversal_iter::{RoTraversalIterator, RwTraversalIterator},
@@ -28,8 +28,8 @@ impl G {
     #[inline]
     pub fn new<'db: 'arena, 'arena: 'txn, 'txn>(
         storage: &'db HelixGraphStorage,
-        txn: &'txn RTxn<'db>,
-        arena: &'arena bumpalo::Bump,
+        txn: RTxn<'txn, 'db>,
+        arena: Arena<'arena>,
     ) -> RoTraversalIterator<
         'db,
         'arena,
@@ -64,9 +64,9 @@ impl G {
     /// ```
     pub fn from_iter<'db: 'arena, 'arena: 'txn, 'txn>(
         storage: &'db HelixGraphStorage,
-        txn: &'txn RTxn<'db>,
+        txn: RTxn<'txn, 'db>,
         items: impl Iterator<Item = TraversalValue<'arena>>,
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> RoTraversalIterator<
         'db,
         'arena,
@@ -98,8 +98,8 @@ impl G {
     /// ```
     pub fn new_mut<'db: 'arena, 'arena: 'txn, 'txn>(
         storage: &'db HelixGraphStorage,
-        arena: &'arena bumpalo::Bump,
-        txn: &'txn mut WTxn<'db>,
+        arena: Arena<'arena>,
+        txn: WTxn<'txn, 'db>,
     ) -> RwTraversalIterator<
         'db,
         'arena,
@@ -119,9 +119,9 @@ impl G {
 
     pub fn new_mut_from_iter<'db: 'arena, 'arena: 'txn, 'txn>(
         storage: &'db HelixGraphStorage,
-        txn: &'txn mut WTxn<'db>,
+        txn: WTxn<'txn, 'db>,
         items: impl Iterator<Item = TraversalValue<'arena>>,
-        arena: &'arena bumpalo::Bump,
+        arena: Arena<'arena>,
     ) -> RwTraversalIterator<
         'db,
         'arena,
