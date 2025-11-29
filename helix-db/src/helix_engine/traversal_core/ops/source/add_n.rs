@@ -145,7 +145,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
         let node = Node {
-            id: v6_uuid(),
+            id: uuid::Uuid::new_v4().as_u128(),
             label,
             version: 1,
             properties,
@@ -215,14 +215,14 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             }
         }
 
-        match result {
-            Ok(_) => {
-                result = Ok(TraversalValue::Node(node));
-            }
-            Err(e) => {
-                result = Err(e);
-            }
-        }
+        // match result {
+        //     Ok(_) => {
+        //         result = Ok(TraversalValue::Node(node));
+        //     }
+        //     Err(e) => {
+        //         result = Err(e);
+        //     }
+        // }
 
         RwTraversalIterator {
             storage: self.storage,
