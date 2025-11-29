@@ -228,7 +228,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             storage: self.storage,
             arena: self.arena,
             txn: self.txn,
-            inner: std::iter::once(result),
+            inner: std::iter::once(result.map(|_| TraversalValue::Node(node))),
         }
     }
 }
