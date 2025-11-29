@@ -215,12 +215,13 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             }
         }
 
-        if result.is_ok() {
-            result = Ok(TraversalValue::Node(node));
-        } else {
-            result = Err(GraphError::New(
-                "Failed to add node to secondary indices".to_string(),
-            ));
+        match result {
+            Ok(_) => {
+                result = Ok(TraversalValue::Node(node));
+            }
+            Err(e) => {
+                result = Err(e);
+            }
         }
 
         RwTraversalIterator {
