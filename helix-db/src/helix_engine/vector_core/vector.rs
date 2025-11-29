@@ -112,7 +112,7 @@ impl Debug for HVector<'_> {
 impl<'arena> HVector<'arena> {
     #[inline(always)]
     pub fn from_slice(label: &'arena str, level: usize, data: &'arena [f64]) -> Self {
-        let id = v6_uuid();
+        let id = uuid::Uuid::new_v4().as_u128();
         HVector {
             id,
             // is_deleted: false,

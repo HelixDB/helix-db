@@ -386,24 +386,57 @@ impl VectorCore {
 
         for entry in removes {
             let operand = EdgeOp::encode(EdgeOp::Remove, &entry);
-            txn.merge_cf(&cf_edges, key, operand)?;
-
-            let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
-            let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
+            let neighbor_key = Self::edges_key(
+                u128::from_be_bytes(entry[..16].try_into().unwrap()),
+                entry[16],
+            );
             let reciprocal_operand = EdgeOp::encode(EdgeOp::Remove, &reciprocal);
-            txn.merge_cf(&cf_edges, neighbor_key, reciprocal_operand)?;
+            Self::merge_edge_pair(
+                txn,
+                &cf_edges,
+                key,
+                operand,
+                neighbor_key,
+                reciprocal_operand,
+            )?;
         }
 
         for entry in adds {
             let operand = EdgeOp::encode(EdgeOp::Add, &entry);
-            txn.merge_cf(&cf_edges, key, operand)?;
-
-            let neighbor_id = u128::from_be_bytes(entry[..16].try_into().unwrap());
-            let neighbor_key = Self::edges_key(neighbor_id, entry[16]);
+            let neighbor_key = Self::edges_key(
+                u128::from_be_bytes(entry[..16].try_into().unwrap()),
+                entry[16],
+            );
             let reciprocal_operand = EdgeOp::encode(EdgeOp::Add, &reciprocal);
-            txn.merge_cf(&cf_edges, neighbor_key, reciprocal_operand)?;
+            Self::merge_edge_pair(
+                txn,
+                &cf_edges,
+                key,
+                operand,
+                neighbor_key,
+                reciprocal_operand,
+            )?;
         }
 
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn merge_edge_pair(
+        txn: &Txn<'_>,
+        cf_edges: &Arc<rocksdb::BoundColumnFamily<'_>>,
+        self_key: [u8; EDGE_LENGTH],
+        self_operand: [u8; 18],
+        neighbor_key: [u8; EDGE_LENGTH],
+        neighbor_operand: [u8; 18],
+    ) -> Result<(), rocksdb::Error> {
+        if self_key <= neighbor_key {
+            txn.merge_cf(cf_edges, self_key, self_operand)?;
+            txn.merge_cf(cf_edges, neighbor_key, neighbor_operand)?;
+        } else {
+            txn.merge_cf(cf_edges, neighbor_key, neighbor_operand)?;
+            txn.merge_cf(cf_edges, self_key, self_operand)?;
+        }
         Ok(())
     }
 
