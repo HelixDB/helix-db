@@ -160,10 +160,10 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                     HelixGraphStorage::node_key(node.id),
                     &bytes,
                 ) {
-                    result = Err(GraphError::from(e));
+                    result = Err(GraphError::from(format!("Failed to add node: {}", e)));
                 }
             }
-            Err(e) => result = Err(GraphError::from(e)),
+            Err(e) => result = Err(GraphError::from(format!("Failed to serialize node: {}", e))),
         }
 
         for index in secondary_indices {
@@ -191,10 +191,16 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                                     line!(),
                                     e
                                 );
-                                result = Err(GraphError::from(e));
+                                result = Err(GraphError::from(format!(
+                                    "Failed to add node to secondary index: {}",
+                                    e
+                                )));
                             }
                         }
-                        Err(e) => result = Err(GraphError::from(e)),
+                        Err(e) => {
+                            result =
+                                Err(GraphError::from(format!("Failed to serialize node: {}", e)))
+                        }
                     }
                 }
                 None => {
@@ -205,15 +211,15 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             }
         }
 
-        if let Some(bm25) = &self.storage.bm25
-            && let Some(props) = node.properties.as_ref()
-        {
-            let mut data = props.flatten_bm25();
-            data.push_str(node.label);
-            if let Err(e) = bm25.insert_doc(self.txn, node.id, &data) {
-                result = Err(e);
-            }
-        }
+        // if let Some(bm25) = &self.storage.bm25
+        //     && let Some(props) = node.properties.as_ref()
+        // {
+        //     let mut data = props.flatten_bm25();
+        //     data.push_str(node.label);
+        //     if let Err(e) = bm25.insert_doc(self.txn, node.id, &data) {
+        //         result = Err(e);
+        //     }
+        // }
 
         // match result {
         //     Ok(_) => {

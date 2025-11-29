@@ -691,7 +691,10 @@ pub mod rocks {
                     .collect::<Vec<_>>(),
             );
             // TODO: TransactionDB tuning
-            let txn_db_opts = rocksdb::TransactionDBOptions::new();
+            let mut txn_db_opts = rocksdb::TransactionDBOptions::new();
+            txn_db_opts.set_default_lock_timeout(10000);
+            txn_db_opts.set_txn_lock_timeout(10000);
+            txn_db_opts.set_num_stripes(32);
 
             // Open database with optimistic transactions
             let db = Arc::new(
