@@ -569,21 +569,84 @@ pub mod rocks {
     pub type Txn<'db> = rocksdb::Transaction<'db, rocksdb::TransactionDB>;
 
     pub fn default_helix_rocksdb_options() -> rocksdb::Options {
-        let mut db_opts = rocksdb::Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
+        let mut opts = rocksdb::Options::default();
+
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
 
         // Optimize for concurrent writes
-        db_opts.set_max_background_jobs(6);
-        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
-        db_opts.set_max_write_buffer_number(4);
-        db_opts.set_allow_concurrent_memtable_write(true);
-        db_opts.set_enable_write_thread_adaptive_yield(true);
-        db_opts.increase_parallelism(num_cpus::get() as i32);
+        opts.set_write_buffer_size(256 * 1024 * 1024); // 128MB
+        opts.set_max_write_buffer_number(4);
+        opts.set_allow_concurrent_memtable_write(true);
+        opts.set_enable_write_thread_adaptive_yield(true);
+        opts.increase_parallelism(num_cpus::get() as i32);
+
+        opts.set_enable_blob_files(true);
+        opts.set_min_blob_size(1024);
+        opts.set_enable_blob_gc(true);
+
+        let block_cache = rocksdb::Cache::new_lru_cache(1024 * 1024 * 1024 * 32);
+        let mut bbt_opt = rocksdb::BlockBasedOptions::default();
+        bbt_opt.set_index_type(rocksdb::BlockBasedIndexType::TwoLevelIndexSearch);
+        bbt_opt.set_bloom_filter(10.0, false);
+        bbt_opt.set_partition_filters(true);
+        bbt_opt.set_metadata_block_size(4096);
+        bbt_opt.set_cache_index_and_filter_blocks(true);
+        bbt_opt.set_pin_top_level_index_and_filter(true);
+        bbt_opt.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        bbt_opt.set_block_size(1024 * 64);
+        bbt_opt.set_block_cache(&block_cache);
+        bbt_opt.set_format_version(5);
+        bbt_opt.set_data_block_index_type(rocksdb::DataBlockIndexType::BinaryAndHash);
+        bbt_opt.set_data_block_hash_ratio(0.5);
+        bbt_opt.set_ribbon_filter(10.0);
+        opts.set_block_based_table_factory(&bbt_opt);
+
+        opts.set_min_write_buffer_number_to_merge(2);
+
+        opts.set_max_background_jobs(num_cpus::get() as i32 * 2); // Total background threads
+        opts.set_max_subcompactions(4);
+
+        opts.set_level_zero_file_num_compaction_trigger(4);
+        opts.set_level_zero_slowdown_writes_trigger(20);
+        opts.set_level_zero_stop_writes_trigger(36);
 
         // Compression
-        db_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        db_opts
+        opts.set_compaction_style(rocksdb::DBCompactionStyle::Universal);
+
+        let mut universal_opts = rocksdb::UniversalCompactOptions::default();
+        // universal_opts.set_size_ratio(1);
+        // universal_opts.set_min_merge_width(2);
+        // universal_opts.set_max_merge_width(5);
+        // universal_opts.set_compression_size_percent(80);
+        opts.set_universal_compaction_options(&universal_opts);
+
+        opts.set_level_compaction_dynamic_level_bytes(true);
+        // opts.set_max_open_files(2000);
+        opts.set_use_direct_reads(true);
+
+        opts.set_advise_random_on_open(true);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+
+        opts.set_compression_per_level(&[
+            rocksdb::DBCompressionType::None, // L0: No compression (about to be compacted)
+            rocksdb::DBCompressionType::None, // L1: No compression (hot data)
+            rocksdb::DBCompressionType::Lz4,  // L2: Fast compression
+            rocksdb::DBCompressionType::Lz4,  // L3: Fast compression
+            rocksdb::DBCompressionType::Lz4,  // L4: Fast compression
+            rocksdb::DBCompressionType::Zstd, // L5: Strong compression
+            rocksdb::DBCompressionType::Zstd, // L6: Strong compression (cold data)
+        ]);
+
+        opts.set_manual_wal_flush(false);
+        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1 GB max WAL
+        opts.set_wal_size_limit_mb(0); // No size limit per file
+        opts.set_wal_ttl_seconds(0); // No time-based deletion
+
+        opts.set_recycle_log_file_num(4);
+
+        opts
     }
 
     #[cfg(feature = "rocks")]
