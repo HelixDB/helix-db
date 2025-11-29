@@ -695,7 +695,9 @@ impl HNSW for VectorCore {
 
         let mut query = HVector::from_slice(label, 0, data);
         query.properties = properties;
-        self.put_vector(txn, &query)?;
+        self.put_vector(txn, &query).map_err(|err| {
+            VectorError::VectorCoreError(format!("Failed to put vector: {} {}", line!(), err))
+        })?;
 
         query.level = new_level as usize; // TODO: change vector to take level as u8
 
@@ -703,7 +705,13 @@ impl HNSW for VectorCore {
             Ok(ep) => ep,
             Err(_) => {
                 // TODO: use proper error handling
-                self.set_entry_point(txn, &query)?;
+                self.set_entry_point(txn, &query).map_err(|err| {
+                    VectorError::VectorCoreError(format!(
+                        "Failed to set entry point: {} {}",
+                        line!(),
+                        err
+                    ))
+                })?;
                 query.set_distance(0.0);
 
                 return Ok(query);
@@ -737,7 +745,15 @@ impl HNSW for VectorCore {
 
             let neighbors =
                 self.select_neighbors::<F>(txn, label, &query, nearest, level, true, None, arena)?;
-            self.set_neighbours(txn, query.id, &neighbors, level)?;
+
+            self.set_neighbours(txn, query.id, &neighbors, level)
+                .map_err(|err| {
+                    VectorError::VectorCoreError(format!(
+                        "Failed to set neighbors: {} {}",
+                        line!(),
+                        err
+                    ))
+                })?;
 
             for e in neighbors {
                 let id = e.id;
@@ -747,12 +763,25 @@ impl HNSW for VectorCore {
                 );
                 let e_new_conn = self
                     .select_neighbors::<F>(txn, label, &query, e_conns, level, true, None, arena)?;
-                self.set_neighbours(txn, id, &e_new_conn, level)?;
+                self.set_neighbours(txn, id, &e_new_conn, level)
+                    .map_err(|err| {
+                        VectorError::VectorCoreError(format!(
+                            "Failed to set neighbors: {} {}",
+                            line!(),
+                            err
+                        ))
+                    })?;
             }
         }
 
         if new_level > l {
-            self.set_entry_point(txn, &query)?;
+            self.set_entry_point(txn, &query).map_err(|err| {
+                VectorError::VectorCoreError(format!(
+                    "Failed to set entry point: {} {}",
+                    line!(),
+                    err
+                ))
+            })?;
         }
 
         debug_println!("vector inserted with id {}", query.id);
