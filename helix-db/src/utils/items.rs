@@ -324,7 +324,7 @@ mod tests {
     // Helper function to create ImmutablePropertiesMap from a HashMap
     fn create_props_map<'arena>(
         props: HashMap<&'arena str, PropsValue>,
-        arena: &'arena Bump,
+        arena: Arena<'arena>,
     ) -> ImmutablePropertiesMap<'arena> {
         let len = props.len();
         ImmutablePropertiesMap::new(len, props.into_iter(), arena)
