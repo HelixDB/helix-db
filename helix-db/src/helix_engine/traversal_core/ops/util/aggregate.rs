@@ -26,11 +26,15 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     ) -> Result<Aggregate<'arena>, GraphError> {
         let mut groups: HashMap<String, AggregateItem> = HashMap::new();
 
+        let properties_len = properties.len();
+
         for item in self.inner {
             let item = item?;
 
-            let mut kvs = Vec::new();
-            let mut key_parts = Vec::new();
+            // TODO HANDLE COUNT
+            // Pre-allocate with exact capacity - size is known from properties.len()
+            let mut kvs = Vec::with_capacity(properties_len);
+            let mut key_parts = Vec::with_capacity(properties_len);
 
             for property in properties {
                 match item.get_property(property) {

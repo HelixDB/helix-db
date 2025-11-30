@@ -54,7 +54,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K::Error: std::fmt::Debug,
     {
         let results = match self.storage.bm25.as_ref() {
-            Some(s) => s.search(self.txn, query, k.try_into().unwrap())?,
+            Some(s) => s.search(self.txn, query, k.try_into().unwrap(), self.arena)?,
             None => return Err(GraphError::from("BM25 not enabled!")),
         };
 
