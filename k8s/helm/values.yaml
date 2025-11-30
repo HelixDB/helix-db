@@ -1,0 +1,30 @@
+# Namespace for the deployment
+namespace: helixdb 
+
+image:
+  # Image repository and tag
+  repository: "example.com/helixdb"
+  tag: "2.1.2" 
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  # TCP port used by the application
+  port: 6969
+
+pvc:
+  # PVC name (required)
+  name: helixdb-data
+  # Optional storage class (default = cluster default)
+  storageClassName: ""
+  # Requested storage size
+  size: "10Gi"
+
+resources: {}    
+
+probes:
+  enabled: true
+  path: /introspect
+  port: 6969
+  initialDelaySeconds: 5
+  periodSeconds: 10      
