@@ -20,10 +20,14 @@ impl HelixParser {
     /// ```
     pub(super) fn parse_order_by(&self, pair: Pair<Rule>) -> Result<OrderBy, ParserError> {
         let mut inner = pair.clone().into_inner();
-        let order_by_type = match inner.try_next_inner().try_next()?.as_rule() {
+        let order_by_rule = inner.try_next_inner().try_next()?;
+        let order_by_type = match order_by_rule.as_rule() {
             Rule::asc => OrderByType::Asc,
             Rule::desc => OrderByType::Desc,
-            _ => unreachable!(),
+            other => return Err(ParserError::from(format!(
+                "Unexpected rule in parse_order_by: {:?}",
+                other
+            ))),
         };
         let expression = self.parse_expression(inner.try_next()?)?;
         Ok(OrderBy {
@@ -408,7 +412,10 @@ impl HelixParser {
                                     Some(p.try_inner_next()?.as_str().to_string()),
                                     to,
                                 )),
-                                _ => unreachable!(),
+                                other => Err(ParserError::from(format!(
+                                    "Unexpected rule in shortest_path to_from: {:?}",
+                                    other
+                                ))),
                             },
                             None => Ok((type_arg, from, to)),
                         },
@@ -469,7 +476,10 @@ impl HelixParser {
                                         Some(p.into_inner().next().unwrap().as_str().to_string()),
                                         to,
                                     )),
-                                    _ => unreachable!(),
+                                    other => Err(ParserError::from(format!(
+                                        "Unexpected rule in shortest_path_dijkstras to_from: {:?}",
+                                        other
+                                    ))),
                                 },
                                 None => Ok((type_arg, weight_expr, from, to)),
                             },
@@ -542,7 +552,10 @@ impl HelixParser {
                                     Some(p.into_inner().next().unwrap().as_str().to_string()),
                                     to,
                                 )),
-                                _ => unreachable!(),
+                                other => Err(ParserError::from(format!(
+                                    "Unexpected rule in shortest_path_bfs to_from: {:?}",
+                                    other
+                                ))),
                             },
                             None => Ok((type_arg, from, to)),
                         },

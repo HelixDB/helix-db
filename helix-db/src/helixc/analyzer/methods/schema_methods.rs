@@ -291,7 +291,19 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
             );
         }
         if let Some(v) = edge.properties.as_ref() {
-            v.iter().for_each(|f| {
+            // Check for duplicate field names (case-insensitive)
+            let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for f in v {
+                let lower_name = f.name.to_lowercase();
+                if !seen_fields.insert(lower_name) {
+                    push_schema_err(
+                        ctx,
+                        f.loc.clone(),
+                        ErrorCode::E109,
+                        format!("duplicate field `{}` in edge `{}`", f.name, edge.name.1),
+                        Some("rename the field or remove the duplicate".to_string()),
+                    );
+                }
                 if NODE_RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
                     push_schema_err(
                         ctx,
@@ -310,12 +322,24 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
                         Some("use built-in types only (String, U32, etc.)".to_string()),
                     );
                 }
-            })
+            }
         }
         ctx.output.edges.push(edge.clone().into());
     }
     for node in &ctx.src.get_latest_schema()?.node_schemas {
-        node.fields.iter().for_each(|f| {
+        // Check for duplicate field names (case-insensitive)
+        let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in &node.fields {
+            let lower_name = f.name.to_lowercase();
+            if !seen_fields.insert(lower_name) {
+                push_schema_err(
+                    ctx,
+                    f.loc.clone(),
+                    ErrorCode::E109,
+                    format!("duplicate field `{}` in node `{}`", f.name, node.name.1),
+                    Some("rename the field or remove the duplicate".to_string()),
+                );
+            }
             if EDGE_RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
                 push_schema_err(
                     ctx,
@@ -334,11 +358,23 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
                     Some("use built-in types only (String, U32, etc.)".to_string()),
                 );
             }
-        });
+        }
         ctx.output.nodes.push(node.clone().into());
     }
     for vector in &ctx.src.get_latest_schema()?.vector_schemas {
-        vector.fields.iter().for_each(|f: &Field| {
+        // Check for duplicate field names (case-insensitive)
+        let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in &vector.fields {
+            let lower_name = f.name.to_lowercase();
+            if !seen_fields.insert(lower_name) {
+                push_schema_err(
+                    ctx,
+                    f.loc.clone(),
+                    ErrorCode::E109,
+                    format!("duplicate field `{}` in vector `{}`", f.name, vector.name),
+                    Some("rename the field or remove the duplicate".to_string()),
+                );
+            }
             if VEC_RESERVED_FIELD_NAMES.contains(&f.name.to_lowercase().as_str()) {
                 push_schema_err(
                     ctx,
@@ -357,7 +393,7 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
                     Some("use built-in types only (String, U32, etc.)".to_string()),
                 );
             }
-        });
+        }
         ctx.output.vectors.push(vector.clone().into());
     }
     Ok(())
@@ -372,9 +408,10 @@ fn is_valid_schema_field_type(ft: &FieldType) -> bool {
     }
 }
 
-const NODE_RESERVED_FIELD_NAMES: &[&str] = &["id", "label"];
-const EDGE_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "to_node", "from_node"];
-const VEC_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "data", "score"];
+const NODE_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "type", "version"];
+const EDGE_RESERVED_FIELD_NAMES: &[&str] =
+    &["id", "label", "to_node", "from_node", "type", "version"];
+const VEC_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "data", "score", "type", "version"];
 
 #[cfg(test)]
 mod tests {
@@ -848,5 +885,148 @@ mod tests {
 
         assert!(result.is_ok());
         // Schema with only vectors should be valid
+    }
+
+    // ============================================================================
+    // Duplicate Field Name Tests
+    // ============================================================================
+
+    #[test]
+    fn test_duplicate_field_name_in_node() {
+        let source = r#"
+            N::Person { name: String, age: U32, name: U32 }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate field") && d.message.contains("name"))
+        );
+    }
+
+    #[test]
+    fn test_duplicate_field_name_in_edge() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person, Properties: { since: Date, since: String } }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate field") && d.message.contains("since"))
+        );
+    }
+
+    #[test]
+    fn test_duplicate_field_name_in_vector() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32], content: U32 }
+
+            QUERY test() =>
+                d <- V<Document>
+                RETURN d
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate field") && d.message.contains("content"))
+        );
+    }
+
+    #[test]
+    fn test_duplicate_field_name_case_insensitive() {
+        let source = r#"
+            N::Person { name: String, Name: U32 }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should detect "Name" as duplicate of "name" (case-insensitive)
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
+    }
+
+    #[test]
+    fn test_no_duplicate_field_names_valid_schema() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+            E::Knows { From: Person, To: Person, Properties: { since: Date, strength: F64 } }
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not have any E109 errors for valid schema
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
+    }
+
+    #[test]
+    fn test_multiple_duplicate_fields_in_node() {
+        let source = r#"
+            N::Person { name: String, age: U32, name: U32, age: F64 }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should detect both duplicates
+        let dup_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.error_code == ErrorCode::E109)
+            .collect();
+        assert_eq!(dup_errors.len(), 2);
     }
 }

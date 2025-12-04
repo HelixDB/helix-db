@@ -359,4 +359,51 @@ pub mod helixc_utils {
         generate(source, path)?;
         Ok(())
     }
+
+    /// Collect all .hx file contents as a single string with file path headers.
+    /// Used for GitHub issue reporting.
+    /// Filters out files that only contain comments (no actual schema or query definitions).
+    pub fn collect_hx_contents(root: &Path, queries_dir: &Path) -> Result<String> {
+        let files = collect_hx_files(root, queries_dir)?;
+        let mut combined = String::new();
+
+        for file in files {
+            let path = file.path();
+            let content = fs::read_to_string(&path)
+                .map_err(|e| eyre::eyre!("Failed to read file {}: {e}", path.display()))?;
+
+            // Skip files that only contain comments
+            if !has_actual_content(&content) {
+                continue;
+            }
+
+            // Get relative path for cleaner display
+            let relative_path = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+
+            combined.push_str(&format!("// File: {}\n", relative_path));
+            combined.push_str(&content);
+            combined.push_str("\n\n");
+        }
+
+        Ok(combined.trim().to_string())
+    }
+
+    /// Check if a .hx file has actual content (not just comments and whitespace).
+    /// Returns true if the file contains any non-comment, non-whitespace content.
+    fn has_actual_content(content: &str) -> bool {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Skip empty lines and comment lines
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            // Found actual content
+            return true;
+        }
+        false
+    }
 }

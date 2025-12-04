@@ -80,8 +80,15 @@ pub fn nodes_by_label_inner(input: HandlerInput) -> Result<protocol::Response, G
     };
 
     let label = label.ok_or_else(|| GraphError::New("label is required".to_string()))?;
+    const MAX_PREALLOCATE_CAPACITY: usize = 100_000;
 
-    let mut nodes_json = Vec::new();
+    let initial_capacity = match limit {
+        Some(n) if n <= MAX_PREALLOCATE_CAPACITY => n,
+        Some(_) => MAX_PREALLOCATE_CAPACITY,
+        None => 100,
+    };
+
+    let mut nodes_json = Vec::with_capacity(initial_capacity);
     let mut count = 0;
 
     #[cfg(feature = "lmdb")]

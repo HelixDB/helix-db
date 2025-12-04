@@ -82,7 +82,7 @@ pub(crate) fn validate_statements<'a>(
         }
 
         Drop(expr) => {
-            let (_, stmt) = infer_expr_type(ctx, expr, scope, original_query, None, query);
+            let (expr_ty, stmt) = infer_expr_type(ctx, expr, scope, original_query, None, query);
             stmt.as_ref()?;
 
             query.is_mut = true;
@@ -91,7 +91,8 @@ pub(crate) fn validate_statements<'a>(
                 tr.should_collect = ShouldCollect::No;
                 Some(GeneratedStatement::Drop(GeneratedDrop { expression: tr }))
             } else {
-                panic!("Drop should only be applied to traversals");
+                generate_error!(ctx, original_query, expr.loc.clone(), E628, &expr_ty.get_type_name());
+                None
             }
         }
 

@@ -360,7 +360,7 @@ cargo test --benches
 - **Discord**: Join our [Discord community](https://discord.gg/2stgMPr5BD) for real-time discussions, questions, and support
 - **GitHub Issues**: Report bugs or request features at [github.com/HelixDB/helix-db/issues](https://github.com/HelixDB/helix-db/issues)
 - **Documentation**: Check [docs.helix-db.com](https://docs.helix-db.com) for comprehensive guides
-- **Twitter/X**: Follow [@hlx_db](https://x.com/hlx_db) for updates and announcements
+- **Twitter/X**: Follow [@helixdb](https://x.com/helixdb) for updates and announcements
 
 ### Before You Ask
 - Search existing GitHub issues and Discord for similar questions

@@ -10,7 +10,7 @@
   <a href="https://helix-db.com">Website</a> |
   <a href="https://docs.helix-db.com">Docs</a> |
   <a href="https://discord.gg/2stgMPr5BD">Discord</a> |
-  <a href="https://x.com/hlx_db">X/Twitter</a>
+  <a href="https://x.com/helixdb">X/Twitter</a>
 </h3>
 
 [![Docs](https://img.shields.io/badge/docs-latest-blue)](https://docs.helix-db.com)

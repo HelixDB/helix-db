@@ -8,7 +8,10 @@ use crate::{
     utils::properties::ImmutablePropertiesMap,
 };
 
-use bumpalo::Bump;
+use bumpalo::{
+    Bump,
+    collections::{String as BString, Vec as BVec},
+};
 use heed3::{Database, Env, RoTxn, RwTxn, types::*};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,6 +62,7 @@ pub trait BM25 {
         txn: &RoTxn,
         query: &str,
         limit: usize,
+        arena: &Bump,
     ) -> Result<Vec<(u128, f32)>, GraphError>;
 }
 
@@ -331,10 +335,17 @@ impl BM25 for HBM25Config {
         txn: &RoTxn,
         query: &str,
         limit: usize,
+        arena: &Bump,
     ) -> Result<Vec<(u128, f32)>, GraphError> {
-        let query_terms = self.tokenize::<true>(query);
+        let query_terms: BVec<BString> = BVec::from_iter_in(
+            self.tokenize::<true>(query)
+                .into_iter()
+                .map(|s| BString::from_str_in(&s, arena)),
+            arena,
+        );
         // (node uuid, score)
-        let mut doc_scores: HashMap<u128, f32> = HashMap::with_capacity(limit);
+        let estimated_capacity = (query_terms.len() * 50).min(limit * 4);
+        let mut doc_scores: HashMap<u128, f32> = HashMap::with_capacity(estimated_capacity);
 
         let metadata = self
             .metadata_db
@@ -375,7 +386,9 @@ impl BM25 for HBM25Config {
         }
 
         // Sort by score and return top results
-        let mut results: Vec<(u128, f32)> = doc_scores.into_iter().collect();
+        // Pre-allocate with exact capacity to avoid reallocation during collection
+        let mut results: Vec<(u128, f32)> = Vec::with_capacity(doc_scores.len());
+        results.extend(doc_scores);
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 
@@ -412,8 +425,9 @@ impl HybridSearch for HelixGraphStorage {
 
         let bm25_handle = task::spawn_blocking(move || -> Result<Vec<(u128, f32)>, GraphError> {
             let txn = graph_env_bm25.read_txn()?;
+            let arena = Bump::new();
             match self.bm25.as_ref() {
-                Some(s) => s.search(&txn, &query_owned, limit * 2),
+                Some(s) => s.search(&txn, &query_owned, limit * 2, &arena),
                 None => Err(GraphError::from("BM25 not enabled!")),
             }
         });
@@ -461,7 +475,9 @@ impl HybridSearch for HelixGraphStorage {
             }
         }
 
-        let mut results = combined_scores.into_iter().collect::<Vec<(u128, f32)>>();
+        // Pre-allocate with exact capacity to avoid reallocation during collection
+        let mut results = Vec::with_capacity(combined_scores.len());
+        results.extend(combined_scores);
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 

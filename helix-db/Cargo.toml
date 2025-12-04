@@ -1,6 +1,6 @@
 [package]
 name = "helix-db"
-version = "1.1.2"
+version = "1.1.3"
 edition = "2024"
 description = "HelixDB is a powerful, open-source, graph-vector database built in Rust for intelligent data storage for RAG and AI."
 license = "AGPL-3.0"
@@ -88,5 +88,9 @@ dev = ["debug-output", "server", "bench"]
 dev-instance = []
 lmdb = ["server", "heed3"]
 rocks = ["server", "rocksdb"]
-default = ["rocks"]
 production = ["api-key"]
+default = ["rocks"]
+
+[[test]]
+name = "capacity_optimization_benches"
+path = "benches/capacity_optimization_benches.rs"

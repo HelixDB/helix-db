@@ -9,7 +9,10 @@ use crate::{
     utils::properties::ImmutablePropertiesMap,
 };
 
-use bumpalo::Bump;
+use bumpalo::{
+    Bump,
+    collections::{String as BString, Vec as BVec},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::task;
@@ -50,8 +53,13 @@ pub trait BM25 {
         avgdl: f64,      // average document length
     ) -> f32;
 
-    fn search(&self, txn: &RTxn, query: &str, limit: usize)
-    -> Result<Vec<(u128, f32)>, GraphError>;
+    fn search(
+        &self,
+        txn: &RTxn,
+        query: &str,
+        limit: usize,
+        arena: &Bump,
+    ) -> Result<Vec<(u128, f32)>, GraphError>;
 }
 
 pub struct HBM25Config {
@@ -292,8 +300,14 @@ impl BM25 for HBM25Config {
         txn: &RTxn,
         query: &str,
         limit: usize,
+        arena: &Bump,
     ) -> Result<Vec<(u128, f32)>, GraphError> {
-        let query_terms = self.tokenize::<true>(query);
+        let query_terms: BVec<BString> = BVec::from_iter_in(
+            self.tokenize::<true>(query)
+                .into_iter()
+                .map(|s| BString::from_str_in(&s, arena)),
+            arena,
+        );
         // (node uuid, score)
         let mut doc_scores: HashMap<u128, f32> = HashMap::with_capacity(limit);
 
@@ -383,8 +397,9 @@ impl HybridSearch for HelixGraphStorage {
 
         let bm25_handle = task::spawn_blocking(move || -> Result<Vec<(u128, f32)>, GraphError> {
             let txn = graph_env_bm25.transaction();
+            let arena = Bump::new();
             match self.bm25.as_ref() {
-                Some(s) => s.search(&txn, &query_owned, limit * 2),
+                Some(s) => s.search(&txn, &query_owned, limit * 2, &arena),
                 None => Err(GraphError::from("BM25 not enabled!")),
             }
         });

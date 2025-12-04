@@ -65,16 +65,20 @@ impl HelixParser {
                     .next()
                     .ok_or_else(|| ParserError::from("Missing traversal"))?;
 
+                let parsed_traversal = match traversal.as_rule() {
+                    Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
+                    Rule::id_traversal => self.parse_traversal(traversal)?,
+                    Rule::traversal => self.parse_traversal(traversal)?,
+                    other => return Err(ParserError::from(format!(
+                        "Unexpected rule in exists expression: {:?}",
+                        other
+                    ))),
+                };
                 let expr = ExpressionType::Exists(ExistsExpression {
                     loc: loc.clone(),
                     expr: Box::new(Expression {
                         loc: loc.clone(),
-                        expr: ExpressionType::Traversal(Box::new(match traversal.as_rule() {
-                            Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
-                            Rule::id_traversal => self.parse_traversal(traversal)?,
-                            Rule::traversal => self.parse_traversal(traversal)?,
-                            _ => unreachable!(),
-                        })),
+                        expr: ExpressionType::Traversal(Box::new(parsed_traversal)),
                     }),
                 });
                 Ok(Expression {
@@ -215,16 +219,20 @@ impl HelixParser {
                 let traversal = inner
                     .next()
                     .ok_or_else(|| ParserError::from("Missing traversal"))?;
+                let parsed_traversal = match traversal.as_rule() {
+                    Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
+                    Rule::id_traversal => self.parse_traversal(traversal)?,
+                    Rule::traversal => self.parse_traversal(traversal)?,
+                    other => return Err(ParserError::from(format!(
+                        "Unexpected rule in and_or_expression exists: {:?}",
+                        other
+                    ))),
+                };
                 let expr = ExpressionType::Exists(ExistsExpression {
                     loc: loc.clone(),
                     expr: Box::new(Expression {
                         loc: loc.clone(),
-                        expr: ExpressionType::Traversal(Box::new(match traversal.as_rule() {
-                            Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
-                            Rule::id_traversal => self.parse_traversal(traversal)?,
-                            Rule::traversal => self.parse_traversal(traversal)?,
-                            _ => unreachable!(),
-                        })),
+                        expr: ExpressionType::Traversal(Box::new(parsed_traversal)),
                     }),
                 });
                 Ok(Expression {
@@ -239,7 +247,10 @@ impl HelixParser {
                 })
             }
 
-            _ => unreachable!(),
+            other => Err(ParserError::from(format!(
+                "Unexpected rule in parse_and_or_expression: {:?}",
+                other
+            ))),
         }
     }
     pub(super) fn parse_expression_vec(
@@ -270,7 +281,10 @@ impl HelixParser {
                 Rule::evaluates_to_bool => {
                     expressions.push(self.parse_boolean_expression(p)?);
                 }
-                _ => unreachable!(),
+                other => return Err(ParserError::from(format!(
+                    "Unexpected rule in parse_expression_vec: {:?}",
+                    other
+                ))),
             }
         }
         Ok(expressions)

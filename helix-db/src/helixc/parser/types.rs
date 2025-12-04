@@ -1085,7 +1085,10 @@ impl From<Value> for ValueType {
                 value: Value::Empty,
                 loc: Loc::empty(),
             },
-            _ => unreachable!(),
+            other => ValueType::Literal {
+                value: other,
+                loc: Loc::empty(),
+            },
         }
     }
 }

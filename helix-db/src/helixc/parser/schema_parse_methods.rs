@@ -22,7 +22,7 @@ impl HelixParser {
         let name = pairs.try_next()?.as_str().to_string();
         let fields = self.parse_node_body(pairs.try_next()?, filepath.clone())?;
         Ok(NodeSchema {
-            name: (pair.loc(), name),
+            name: (pair.loc_with_filepath(filepath.clone()), name),
             fields,
             loc: pair.loc_with_filepath(filepath),
         })
@@ -249,7 +249,10 @@ impl HelixParser {
                                             ))
                                         })?,
                                     ),
-                                    _ => unreachable!(), // throw error
+                                    other => return Err(ParserError::from(format!(
+                                        "Float default value not valid for field type {:?}",
+                                        other
+                                    ))),
                                 }
                             }
                             Rule::integer => {
@@ -326,7 +329,10 @@ impl HelixParser {
                                             ))
                                         })?,
                                     ),
-                                    _ => unreachable!(), // throw error
+                                    other => return Err(ParserError::from(format!(
+                                        "Integer default value not valid for field type {:?}",
+                                        other
+                                    ))),
                                 }
                             }
                             Rule::now => DefaultValue::Now,
@@ -338,7 +344,10 @@ impl HelixParser {
                                     ))
                                 })?,
                             ),
-                            _ => unreachable!(), // throw error
+                            other => return Err(ParserError::from(format!(
+                                "Unexpected rule for default value: {:?}",
+                                other
+                            ))),
                         },
                         None => DefaultValue::Empty,
                     };
@@ -405,7 +414,10 @@ impl HelixParser {
                     "U32" => Ok(FieldType::U32),
                     "U64" => Ok(FieldType::U64),
                     "U128" => Ok(FieldType::U128),
-                    _ => unreachable!(),
+                    other => Err(ParserError::from(format!(
+                        "Unknown named type: {}",
+                        other
+                    ))),
                 }
             }
             Rule::array => {
@@ -434,9 +446,10 @@ impl HelixParser {
             Rule::identifier => Ok(FieldType::Identifier(field.as_str().to_string())),
             Rule::ID_TYPE => Ok(FieldType::Uuid),
             Rule::date_type => Ok(FieldType::Date),
-            _ => {
-                unreachable!()
-            }
+            other => Err(ParserError::from(format!(
+                "Unexpected rule in parse_field_type: {:?}",
+                other
+            ))),
         }
     }
 
@@ -498,7 +511,7 @@ impl HelixParser {
         };
 
         Ok(EdgeSchema {
-            name: (pair.loc(), name),
+            name: (pair.loc_with_filepath(filepath.clone()), name),
             from,
             to,
             properties,

@@ -65,7 +65,7 @@ fn setup_env() -> (DB, TempDir) {
             rocksdb::ColumnFamilyDescriptor::new("ep", rocksdb::Options::default()),
         ];
         cf_descriptors.extend(vector_cf_descriptors);
-        let mut db_opts = default_helix_rocksdb_options();
+        let db_opts = default_helix_rocksdb_options();
         let txn_db_opts = rocksdb::TransactionDBOptions::new();
         let db = Arc::new(
             rocksdb::TransactionDB::<rocksdb::MultiThreaded>::open_cf_descriptors(
@@ -111,8 +111,6 @@ fn test_hnsw_insert_and_count() {
     }
 
     txn.commit().unwrap();
-    let txn = env.read_txn().unwrap();
-
     #[cfg(feature = "rocks")]
     assert!(
         env.iterator_cf(&index.cf_vectors(), rocksdb::IteratorMode::Start)

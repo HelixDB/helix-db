@@ -5,7 +5,7 @@ use crate::{
     helixc::{
         analyzer::{Ctx, errors::push_query_err, types::Type},
         generator::{
-            traversal_steps::{Step, ReservedProp},
+            traversal_steps::{ReservedProp, Step},
             utils::{GenRef, GeneratedValue},
         },
         parser::{location::Loc, types::*},
@@ -24,7 +24,7 @@ pub(super) fn is_valid_identifier(
 ) -> bool {
     match name {
         "true" | "false" | "NONE" | "String" | "Boolean" | "F32" | "F64" | "I8" | "I16" | "I32"
-        | "I64" | "U8" | "U16" | "U32" | "U64" | "U128" | "Uuid" | "Date" => {
+        | "I64" | "U8" | "U16" | "U32" | "U64" | "U128" | "Uuid" | "Date" | "ID" => {
             generate_error!(ctx, original_query, loc.clone(), E105, name);
             false
         }

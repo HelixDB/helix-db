@@ -1,10 +1,12 @@
 // Library interface for helix-cli to enable testing
 use clap::Subcommand;
 
+pub mod cleanup;
 pub mod commands;
 pub mod config;
 pub mod docker;
 pub mod errors;
+pub mod github_issue;
 pub mod metrics_sender;
 pub mod project;
 pub mod update;

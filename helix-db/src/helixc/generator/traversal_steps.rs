@@ -476,6 +476,9 @@ impl Display for WhereRef {
                         BoolOp::Neq(neq) => format!("{} != {}", value_expr, neq.right),
                         BoolOp::Contains(contains) => format!("{}{}", value_expr, contains),
                         BoolOp::IsIn(is_in) => format!("{}{}", value_expr, is_in),
+                        BoolOp::PropertyEq(_) | BoolOp::PropertyNeq(_) => {
+                            unreachable!("PropertyEq/PropertyNeq should not be used with reserved properties")
+                        }
                     };
                     return write!(
                         f,
@@ -501,6 +504,8 @@ impl Display for WhereRef {
                         BoolOp::Neq(neq) => format!("{neq}"),
                         BoolOp::Contains(contains) => format!("v{contains}"),
                         BoolOp::IsIn(is_in) => format!("v{is_in}"),
+                        BoolOp::PropertyEq(prop_eq) => format!("{prop_eq}"),
+                        BoolOp::PropertyNeq(prop_neq) => format!("{prop_neq}"),
                     };
                     return write!(
                         f,

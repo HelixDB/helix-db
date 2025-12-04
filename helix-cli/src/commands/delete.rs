@@ -37,7 +37,8 @@ pub async fn run(instance_name: String) -> Result<()> {
     print_status("DELETE", &format!("Deleting instance '{instance_name}'"));
 
     // Stop and remove Docker containers and volumes
-    if DockerManager::check_docker_available().is_ok() {
+    let runtime = project.config.project.container_runtime;
+    if DockerManager::check_runtime_available(runtime).is_ok() {
         let docker = DockerManager::new(&project);
 
         // Remove containers and Docker volumes

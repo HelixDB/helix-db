@@ -2,7 +2,7 @@ use crate::helixc::analyzer::error_codes::*;
 use crate::helixc::analyzer::utils::{
     DEFAULT_VAR_NAME, VariableInfo, check_identifier_is_fieldtype,
 };
-use crate::helixc::generator::bool_ops::{Contains, IsIn};
+use crate::helixc::generator::bool_ops::{Contains, IsIn, PropertyEq, PropertyNeq};
 use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
 use crate::helixc::generator::traversal_steps::{AggregateBy, GroupBy};
 use crate::helixc::generator::utils::{EmbedData, VecData};
@@ -89,6 +89,45 @@ fn get_reserved_property_type(prop_name: &str, item_type: &Type) -> Option<Field
                 }
                 _ => None,
             }
+        }
+        _ => None,
+    }
+}
+
+/// Checks if a traversal is a "simple" property access (no graph navigation steps)
+/// and returns the variable name and property name if so.
+///
+/// A simple traversal is one that only accesses properties on an already-bound variable,
+/// without any graph navigation (Out, In, etc.). For example: `toUser::{login}`
+///
+/// Returns: Some((variable_name, property_name)) if simple, None otherwise
+fn is_simple_property_traversal(tr: &Traversal) -> Option<(String, String)> {
+    // Check if the start is an identifier (not a type-based query)
+    let var_name = match &tr.start {
+        StartNode::Identifier(id) => id.clone(),
+        _ => return None,
+    };
+
+    // Check if there's exactly one step and it's an Object (property access)
+    if tr.steps.len() != 1 {
+        return None;
+    }
+
+    // Check if the single step is an Object step (property access like {login})
+    match &tr.steps[0].step {
+        StepType::Object(obj) => {
+            // Check if it's a simple property fetch (single field, no spread)
+            if obj.fields.len() == 1 && !obj.should_spread {
+                let field = &obj.fields[0];
+                // Check if it's a simple field selection (Empty or Identifier, not a complex expression)
+                match &field.value.value {
+                    FieldValueType::Empty | FieldValueType::Identifier(_) => {
+                        return Some((var_name, field.key.clone()));
+                    }
+                    _ => return None,
+                }
+            }
+            None
         }
         _ => None,
     }
@@ -1170,7 +1209,32 @@ pub(crate) fn validate_traversal<'a>(
                         })
                     }
                     BooleanOpType::Equal(expr) => {
-                        let v = match &expr.expr {
+                        // Check if the right-hand side is a simple property traversal
+                        if let ExpressionType::Traversal(traversal) = &expr.expr {
+                            if let Some((var, property)) = is_simple_property_traversal(traversal) {
+                                // Use PropertyEq for simple traversals to avoid unnecessary G::from_iter
+                                BoolOp::PropertyEq(PropertyEq { var, property })
+                            } else {
+                                // Complex traversal - parse normally
+                                let mut gen_traversal = GeneratedTraversal::default();
+                                validate_traversal(
+                                    ctx,
+                                    traversal,
+                                    scope,
+                                    original_query,
+                                    parent_ty.clone(),
+                                    &mut gen_traversal,
+                                    gen_query,
+                                );
+                                gen_traversal.should_collect = ShouldCollect::ToValue;
+                                let v = GeneratedValue::Traversal(Box::new(gen_traversal));
+                                BoolOp::Eq(Eq {
+                                    left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
+                                    right: v,
+                                })
+                            }
+                        } else {
+                            let v = match &expr.expr {
                             ExpressionType::BooleanLiteral(b) => {
                                 GeneratedValue::Primitive(GenRef::Std(b.to_string()))
                             }
@@ -1191,33 +1255,44 @@ pub(crate) fn validate_traversal<'a>(
                                     i.as_str(),
                                 );
                                 gen_identifier_or_param(original_query, i.as_str(), false, true)
-                            }
-                            ExpressionType::Traversal(traversal) => {
-                                // parse traversal
-                                let mut gen_traversal = GeneratedTraversal::default();
-                                validate_traversal(
-                                    ctx,
-                                    traversal,
-                                    scope,
-                                    original_query,
-                                    parent_ty.clone(),
-                                    &mut gen_traversal,
-                                    gen_query,
-                                );
-                                gen_traversal.should_collect = ShouldCollect::ToValue;
-                                GeneratedValue::Traversal(Box::new(gen_traversal))
                             }
                             _ => {
                                 unreachable!("Cannot reach here");
                             }
                         };
-                        BoolOp::Eq(Eq {
-                            left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
-                            right: v,
-                        })
+                            BoolOp::Eq(Eq {
+                                left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
+                                right: v,
+                            })
+                        }
                     }
                     BooleanOpType::NotEqual(expr) => {
-                        let v = match &expr.expr {
+                        // Check if the right-hand side is a simple property traversal
+                        if let ExpressionType::Traversal(traversal) = &expr.expr {
+                            if let Some((var, property)) = is_simple_property_traversal(traversal) {
+                                // Use PropertyNeq for simple traversals to avoid unnecessary G::from_iter
+                                BoolOp::PropertyNeq(PropertyNeq { var, property })
+                            } else {
+                                // Complex traversal - parse normally
+                                let mut gen_traversal = GeneratedTraversal::default();
+                                validate_traversal(
+                                    ctx,
+                                    traversal,
+                                    scope,
+                                    original_query,
+                                    parent_ty.clone(),
+                                    &mut gen_traversal,
+                                    gen_query,
+                                );
+                                gen_traversal.should_collect = ShouldCollect::ToValue;
+                                let v = GeneratedValue::Traversal(Box::new(gen_traversal));
+                                BoolOp::Neq(Neq {
+                                    left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
+                                    right: v,
+                                })
+                            }
+                        } else {
+                            let v = match &expr.expr {
                             ExpressionType::BooleanLiteral(b) => {
                                 GeneratedValue::Primitive(GenRef::Std(b.to_string()))
                             }
@@ -1239,27 +1314,13 @@ pub(crate) fn validate_traversal<'a>(
                                 );
                                 gen_identifier_or_param(original_query, i.as_str(), false, true)
                             }
-                            ExpressionType::Traversal(traversal) => {
-                                // parse traversal
-                                let mut gen_traversal = GeneratedTraversal::default();
-                                validate_traversal(
-                                    ctx,
-                                    traversal,
-                                    scope,
-                                    original_query,
-                                    parent_ty.clone(),
-                                    &mut gen_traversal,
-                                    gen_query,
-                                );
-                                gen_traversal.should_collect = ShouldCollect::ToValue;
-                                GeneratedValue::Traversal(Box::new(gen_traversal))
-                            }
                             _ => unreachable!("Cannot reach here"),
                         };
-                        BoolOp::Neq(Neq {
-                            left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
-                            right: v,
-                        })
+                            BoolOp::Neq(Neq {
+                                left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
+                                right: v,
+                            })
+                        }
                     }
                     BooleanOpType::Contains(expr) => {
                         let v = match &expr.expr {
@@ -1484,12 +1545,14 @@ pub(crate) fn validate_traversal<'a>(
                                         ExpressionType::BooleanLiteral(i) => {
                                             GeneratedValue::Primitive(GenRef::Std(i.to_string()))
                                         }
-                                        _ => {
-                                            panic!("expr be primitive or value")
+                                        other => {
+                                            generate_error!(ctx, original_query, e.loc.clone(), E206, &format!("{:?}", other));
+                                            GeneratedValue::Unknown
                                         }
                                     },
-                                    _ => {
-                                        panic!("Should be primitive or value")
+                                    other => {
+                                        generate_error!(ctx, original_query, field.value.loc.clone(), E206, &format!("{:?}", other));
+                                        GeneratedValue::Unknown
                                     }
                                 },
                             )

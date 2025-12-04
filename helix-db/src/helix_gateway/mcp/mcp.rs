@@ -1036,6 +1036,7 @@ pub fn search_vector(input: &mut MCPToolInput) -> Result<Response, GraphError> {
         vector: req.data.vector,
         k: req.data.k,
         min_score: req.data.min_score,
+        cutoff: None,
     };
 
     execute_tool_step(input, &req.connection_id, tool)

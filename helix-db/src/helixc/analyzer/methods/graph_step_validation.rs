@@ -387,7 +387,10 @@ pub(crate) fn apply_graph_step<'a>(
                             to: Some(GenRef::from(to)),
                             algorithm,
                         },
-                        (None, None) => panic!("Invalid shortest path"),
+                        (None, None) => {
+                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPath");
+                            return None;
+                        }
                     },
                 )));
             traversal.should_collect = ShouldCollect::ToVec;
@@ -511,7 +514,10 @@ pub(crate) fn apply_graph_step<'a>(
                             to: Some(GenRef::from(to)),
                             weight_calculation: weight_calculation.clone(),
                         },
-                        (None, None) => panic!("Invalid shortest path dijkstras"),
+                        (None, None) => {
+                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPathDijkstras");
+                            return None;
+                        }
                     },
                 )));
             traversal.should_collect = ShouldCollect::ToVec;
@@ -539,7 +545,10 @@ pub(crate) fn apply_graph_step<'a>(
                             from: None,
                             to: Some(GenRef::from(to)),
                         },
-                        (None, None) => panic!("Invalid shortest path bfs"),
+                        (None, None) => {
+                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPathBFS");
+                            return None;
+                        }
                     },
                 )));
             traversal.should_collect = ShouldCollect::ToVec;
@@ -602,7 +611,10 @@ pub(crate) fn apply_graph_step<'a>(
                             weight_calculation,
                             heuristic_property,
                         },
-                        (None, None) => panic!("Invalid shortest path astar"),
+                        (None, None) => {
+                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPathAStar");
+                            return None;
+                        }
                     },
                 )));
             traversal.should_collect = ShouldCollect::ToVec;

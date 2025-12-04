@@ -1,7 +1,10 @@
 use core::fmt;
 use std::fmt::Display;
 
-use crate::helixc::generator::traversal_steps::{Step, Traversal, TraversalType};
+use crate::helixc::generator::{
+    source_steps::SourceStep,
+    traversal_steps::{Step, Traversal, TraversalType},
+};
 
 use super::utils::{GenRef, GeneratedValue, Separator};
 
@@ -15,6 +18,8 @@ pub enum BoolOp {
     Neq(Neq),
     Contains(Contains),
     IsIn(IsIn),
+    PropertyEq(PropertyEq),
+    PropertyNeq(PropertyNeq),
 }
 impl Display for BoolOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -27,6 +32,8 @@ impl Display for BoolOp {
             BoolOp::Neq(neq) => format!("{neq}"),
             BoolOp::Contains(contains) => format!("v{contains}"),
             BoolOp::IsIn(is_in) => format!("v{is_in}"),
+            BoolOp::PropertyEq(prop_eq) => format!("{prop_eq}"),
+            BoolOp::PropertyNeq(prop_neq) => format!("{prop_neq}"),
         };
         write!(f, "map_value_or(false, |v| {s})?")
     }
@@ -98,6 +105,28 @@ impl Display for Neq {
 }
 
 #[derive(Clone, Debug)]
+pub struct PropertyEq {
+    pub var: String,
+    pub property: String,
+}
+impl Display for PropertyEq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.get_property(\"{}\").map_or(false, |w| w == v)", self.var, self.property)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PropertyNeq {
+    pub var: String,
+    pub property: String,
+}
+impl Display for PropertyNeq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.get_property(\"{}\").map_or(false, |w| w != v)", self.var, self.property)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Contains {
     pub value: GeneratedValue,
 }
@@ -157,7 +186,13 @@ impl Display for BoExp {
                 // Optimize Exists expressions in filter context to use std::iter::once for single values
                 let is_val_traversal = match &traversal.traversal_type {
                     TraversalType::FromIter(var) | TraversalType::FromSingle(var) => match var {
-                        GenRef::Std(s) | GenRef::Literal(s) => s == "val",
+                        GenRef::Std(s) | GenRef::Literal(s) => {
+                            s == "val"
+                                && matches!(
+                                    traversal.source_step.inner(),
+                                    SourceStep::Identifier(_) | SourceStep::Anonymous
+                                )
+                        }
                         _ => false,
                     },
                     _ => false,
@@ -232,6 +267,8 @@ impl Display for BoExp {
                             BoolOp::Neq(neq) => format!("{neq}"),
                             BoolOp::Contains(contains) => format!("v{contains}"),
                             BoolOp::IsIn(is_in) => format!("v{is_in}"),
+                            BoolOp::PropertyEq(prop_eq) => format!("{prop_eq}"),
+                            BoolOp::PropertyNeq(prop_neq) => format!("{prop_neq}"),
                         };
                         return write!(
                             f,

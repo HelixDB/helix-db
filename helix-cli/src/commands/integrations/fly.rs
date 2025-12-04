@@ -8,12 +8,14 @@ use crate::{
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use tokio::io::AsyncWriteExt;
 
 const FLY_MACHINES_API_URL: &str = "https://api.machines.dev/v1/";
 const FLY_REGISTRY_URL: &str = "registry.fly.io";
 const INTERNAL_PORT: &str = "6969";
+const MAX_APP_NAME_LENGTH: usize = 32;
 
 pub struct FlyManager<'a> {
     project: &'a ProjectContext,
@@ -170,11 +172,10 @@ impl<'a> FlyManager<'a> {
     // === CENTRALIZED NAMING METHODS ===
 
     /// Get the Fly.io app name for an instance
+    /// Note: Underscores in project names are converted to hyphens for fly.io compatibility
     fn app_name(&self, instance_name: &str) -> String {
-        format!(
-            "helix-{}-{}",
-            self.project.config.project.name, instance_name
-        )
+        let sanitized_project_name = self.project.config.project.name.replace('_', "-");
+        format!("helix-{}-{}", sanitized_project_name, instance_name)
     }
 
     /// Get the volume name for an instance
@@ -266,6 +267,50 @@ impl<'a> FlyManager<'a> {
         Ok(())
     }
 
+    /// Check if a Fly.io app exists by name
+    pub async fn app_exists(&self, app_name: &str) -> Result<bool> {
+        match &self.auth {
+            FlyAuth::ApiKey(api_key) => {
+                let (client, _) = self.get_api_client()?;
+                let response = client
+                    .get(format!("{FLY_MACHINES_API_URL}/apps/{app_name}"))
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .send()
+                    .await?;
+
+                Ok(response.status().is_success())
+            }
+            FlyAuth::Cli => {
+                let status_output = self
+                    .run_fly_command_async(&["status", "-a", app_name])
+                    .await?;
+                Ok(status_output.status.success())
+            }
+        }
+    }
+
+    /// Read the app name from an existing fly.toml file
+    pub fn read_app_name_from_fly_toml(fly_toml_path: &Path) -> Result<Option<String>> {
+        if !fly_toml_path.exists() {
+            return Ok(None);
+        }
+
+        let content = std::fs::read_to_string(fly_toml_path)
+            .map_err(|e| eyre!("Failed to read fly.toml: {e}"))?;
+
+        // Parse the TOML to extract the app name
+        let toml: toml::Value = content
+            .parse()
+            .map_err(|e| eyre!("Failed to parse fly.toml: {e}"))?;
+
+        let app_name = toml
+            .get("app")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        Ok(app_name)
+    }
+
     // === INSTANCE CONFIGURATION ===
 
     /// Create a Fly.io instance configuration
@@ -297,6 +342,41 @@ impl<'a> FlyManager<'a> {
     /// Initialize a new Fly.io application
     pub async fn init_app(&self, instance_name: &str, config: &FlyInstanceConfig) -> Result<()> {
         let app_name = self.app_name(instance_name);
+
+        if app_name.len() > MAX_APP_NAME_LENGTH {
+            return Err(eyre!(
+                "Fly.io app name '{}' exceeds {} characters (length: {}). \
+                Consider using a shorter project name or instance name.",
+                app_name,
+                MAX_APP_NAME_LENGTH,
+                app_name.len()
+            ));
+        }
+
+        // Check if fly.toml already exists for this instance
+        let fly_toml_path = self.project.instance_workspace(instance_name).join("fly.toml");
+        if let Some(existing_app_name) = Self::read_app_name_from_fly_toml(&fly_toml_path)? {
+            // Check if the app in fly.toml exists on Fly.io
+            if self.app_exists(&existing_app_name).await? {
+                return Err(eyre!(
+                    "A fly.toml already exists at '{}' with app name '{}', and this app already exists on Fly.io. \
+                    Either delete the existing Fly.io app with 'flyctl apps destroy {}' or remove the fly.toml file.",
+                    fly_toml_path.display(),
+                    existing_app_name,
+                    existing_app_name
+                ));
+            }
+        }
+
+        // Check if the target app name already exists on Fly.io
+        if self.app_exists(&app_name).await? {
+            return Err(eyre!(
+                "Fly.io app '{}' already exists. Either delete the existing app with 'flyctl apps destroy {}' \
+                or use a different instance name.",
+                app_name,
+                app_name
+            ));
+        }
 
         print_status("FLY", &format!("Creating Fly.io app '{app_name}'"));
 
@@ -498,7 +578,8 @@ impl<'a> FlyManager<'a> {
             .map_err(|e| eyre!("Failed to parse Fly.io apps JSON: {e}"))?;
 
         let mut statuses = Vec::new();
-        let project_prefix = format!("helix-{}-", self.project.config.project.name);
+        let sanitized_project_name = self.project.config.project.name.replace('_', "-");
+        let project_prefix = format!("helix-{}-", sanitized_project_name);
 
         if let Some(apps_array) = apps.as_array() {
             for app in apps_array {

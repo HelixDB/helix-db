@@ -2,10 +2,12 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 use helix_cli::{AuthAction, CloudDeploymentTypeCommand, MetricsAction};
 
+mod cleanup;
 mod commands;
 mod config;
 mod docker;
 mod errors;
+mod github_issue;
 mod metrics_sender;
 mod project;
 mod update;
@@ -181,7 +183,7 @@ async fn main() -> Result<()> {
             cloud,
         } => commands::init::run(path, template, queries_path, cloud).await,
         Commands::Add { cloud } => commands::add::run(cloud).await,
-        Commands::Check { instance } => commands::check::run(instance, None).await,
+        Commands::Check { instance } => commands::check::run(instance, &metrics_sender).await,
         Commands::Compile { output, path } => commands::compile::run(output, path).await,
         Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
             .await
@@ -203,7 +205,9 @@ async fn main() -> Result<()> {
             port,
             dry_run,
             no_backup,
-        } => commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await,
+        } => {
+            commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await
+        }
     };
 
     // Shutdown metrics sender

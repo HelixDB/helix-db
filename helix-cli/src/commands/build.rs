@@ -86,8 +86,10 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
 
     // For local instances, build Docker image
     if instance_config.should_build_docker_image() {
+        let runtime = project.config.project.container_runtime;
+        DockerManager::check_runtime_available(runtime)?;
         let docker = DockerManager::new(&project);
-        DockerManager::check_docker_available()?;
+
         docker.build_image(&instance_name, instance_config.docker_build_target())?;
     }
 
@@ -96,7 +98,7 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
     Ok(metrics_data.clone())
 }
 
-async fn ensure_helix_repo_cached() -> Result<()> {
+pub(crate) async fn ensure_helix_repo_cached() -> Result<()> {
     let repo_cache = get_helix_repo_cache()?;
 
     if needs_cache_recreation(&repo_cache)? {
@@ -119,13 +121,19 @@ fn needs_cache_recreation(repo_cache: &std::path::Path) -> Result<bool> {
 
     match (DEV_MODE, is_git_repo) {
         (true, true) => {
-            print_status("CACHE", "Cache is git repo but DEV_MODE requires copy - recreating...");
+            print_status(
+                "CACHE",
+                "Cache is git repo but DEV_MODE requires copy - recreating...",
+            );
             Ok(true)
-        },
+        }
         (false, false) => {
-            print_status("CACHE", "Cache is copy but production mode requires git repo - recreating...");
+            print_status(
+                "CACHE",
+                "Cache is copy but production mode requires git repo - recreating...",
+            );
             Ok(true)
-        },
+        }
         _ => Ok(false),
     }
 }
@@ -215,7 +223,7 @@ fn update_git_cache(repo_cache: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn prepare_instance_workspace(project: &ProjectContext, instance_name: &str) -> Result<()> {
+pub(crate) async fn prepare_instance_workspace(project: &ProjectContext, instance_name: &str) -> Result<()> {
     print_status(
         "PREPARE",
         &format!("Preparing workspace for '{instance_name}'"),
@@ -245,7 +253,7 @@ async fn prepare_instance_workspace(project: &ProjectContext, instance_name: &st
     Ok(())
 }
 
-async fn compile_project(project: &ProjectContext, instance_name: &str) -> Result<MetricsData> {
+pub(crate) async fn compile_project(project: &ProjectContext, instance_name: &str) -> Result<MetricsData> {
     print_status("COMPILE", "Compiling Helix queries...");
 
     // Create helix-container directory in instance workspace for generated files
@@ -290,10 +298,9 @@ async fn generate_docker_files(
         return Ok(());
     }
 
-    print_status("DOCKER", "Generating Docker configuration...");
-
     let docker = DockerManager::new(project);
 
+    print_status(docker.runtime.label(), "Generating configuration...");
     // Generate Dockerfile
     let dockerfile_content = docker.generate_dockerfile(instance_name, instance_config.clone())?;
     let dockerfile_path = project.dockerfile_path(instance_name);
