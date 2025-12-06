@@ -117,7 +117,7 @@ impl HelixParser {
                                         },
                                         Rule::float => ValueType::Literal {
                                             value: Value::from(
-                                                val.as_str().parse::<f64>().map_err(|_| {
+                                                val.as_str().parse::<f32>().map_err(|_| {
                                                     ParserError::from("Invalid float value")
                                                 })?,
                                             ),
@@ -273,7 +273,7 @@ impl HelixParser {
                                     },
                                     Rule::float => ValueType::Literal {
                                         value: Value::from(
-                                            value_inner.as_str().parse::<f64>().map_err(|_| {
+                                            value_inner.as_str().parse::<f32>().map_err(|_| {
                                                 ParserError::from("Invalid float value")
                                             })?,
                                         ),

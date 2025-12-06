@@ -1,11 +1,8 @@
 pub mod graph_visualization;
 pub mod metadata;
 pub mod storage_methods;
-pub mod storage_migration;
 pub mod version_info;
 
-#[cfg(test)]
-mod storage_migration_tests;
 #[cfg(test)]
 mod storage_concurrent_tests;
 
@@ -18,10 +15,7 @@ use crate::{
         },
         traversal_core::config::Config,
         types::GraphError,
-        vector_core::{
-            hnsw::HNSW,
-            vector_core::{HNSWConfig, VectorCore},
-        },
+        vector_core::{HNSWConfig, VectorCore},
     },
     utils::{
         items::{Edge, Node},
@@ -179,7 +173,7 @@ impl HelixGraphStorage {
 
         wtxn.commit()?;
 
-        let mut storage = Self {
+        let storage = Self {
             graph_env,
             nodes_db,
             edges_db,
@@ -192,8 +186,6 @@ impl HelixGraphStorage {
             storage_config,
             version_info,
         };
-
-        storage_migration::migrate(&mut storage)?;
 
         Ok(storage)
     }
@@ -470,7 +462,6 @@ impl StorageMethods for HelixGraphStorage {
     }
 
     fn drop_vector(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
-        let arena = bumpalo::Bump::new();
         let mut edges = HashSet::new();
         let mut out_edges = HashSet::new();
         let mut in_edges = HashSet::new();
@@ -507,9 +498,6 @@ impl StorageMethods for HelixGraphStorage {
             other_out_edges.push((from_node_id, label, edge_id));
         }
 
-        // println!("In edges: {}", in_edges.len());
-
-        // println!("Deleting edges: {}", );
         // Delete all related data
         for edge in edges {
             self.edges_db.delete(txn, Self::edge_key(&edge))?;
@@ -539,7 +527,7 @@ impl StorageMethods for HelixGraphStorage {
         }
 
         // Delete vector data
-        self.vectors.delete(txn, *id, &arena)?;
+        self.vectors.delete(txn, *id)?;
 
         Ok(())
     }

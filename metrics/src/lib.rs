@@ -602,7 +602,6 @@ mod tests {
 
             // Channel should have fewer or equal batches
             let _final_count = METRICS_STATE.events_rx.len();
-            
         }
     }
 
@@ -684,12 +683,11 @@ mod tests {
 
         // Should be able to serialize batch
         let json_bytes = sonic_rs::to_vec(&events).unwrap();
-        assert!(json_bytes.len() > 0);
+        assert!(!json_bytes.is_empty());
 
         // Should be valid JSON array
         let json_str = String::from_utf8(json_bytes).unwrap();
         assert!(json_str.starts_with('['));
         assert!(json_str.ends_with(']'));
     }
-
 }

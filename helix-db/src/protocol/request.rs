@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn test_request_type_clone() {
         let rt1 = RequestType::MCP;
-        let rt2 = rt1.clone();
+        let rt2 = rt1;
 
         assert!(matches!(rt1, RequestType::MCP));
         assert!(matches!(rt2, RequestType::MCP));
@@ -320,7 +320,10 @@ mod tests {
             out_fmt: Format::Json,
         };
 
-        assert_ne!(request1.api_key_hash.unwrap(), request2.api_key_hash.unwrap());
+        assert_ne!(
+            request1.api_key_hash.unwrap(),
+            request2.api_key_hash.unwrap()
+        );
     }
 
     #[test]

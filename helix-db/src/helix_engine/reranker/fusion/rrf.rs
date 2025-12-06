@@ -7,14 +7,12 @@
 //! Formula: RRF_score(d) = Σ 1/(k + rank_i(d))
 //! where k is typically 60 (default).
 
-use crate::{
-    helix_engine::{
-        reranker::{
-            errors::{RerankerError, RerankerResult},
-            reranker::{update_score, Reranker},
-        },
-        traversal_core::traversal_value::TraversalValue,
+use crate::helix_engine::{
+    reranker::{
+        errors::{RerankerError, RerankerResult},
+        reranker::{Reranker, update_score},
     },
+    traversal_core::traversal_value::TraversalValue,
 };
 use std::collections::HashMap;
 
@@ -25,7 +23,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct RRFReranker {
     /// The k parameter in the RRF formula (default: 60)
-    k: f64,
+    k: f32,
 }
 
 impl RRFReranker {
@@ -38,7 +36,7 @@ impl RRFReranker {
     ///
     /// # Arguments
     /// * `k` - The k parameter in the RRF formula. Higher values give less weight to ranking position.
-    pub fn with_k(k: f64) -> RerankerResult<Self> {
+    pub fn with_k(k: f32) -> RerankerResult<Self> {
         if k <= 0.0 {
             return Err(RerankerError::InvalidParameter(
                 "k must be positive".to_string(),
@@ -55,7 +53,10 @@ impl RRFReranker {
     ///
     /// # Returns
     /// A vector of items reranked by RRF scores
-    pub fn fuse_lists<'arena, I>(lists: Vec<I>, k: f64) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    pub fn fuse_lists<'arena, I>(
+        lists: Vec<I>,
+        k: f32,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -63,7 +64,7 @@ impl RRFReranker {
             return Err(RerankerError::EmptyInput);
         }
 
-        let mut rrf_scores: HashMap<u128, f64> = HashMap::new();
+        let mut rrf_scores: HashMap<u128, f32> = HashMap::new();
         let mut items_map: HashMap<u128, TraversalValue<'arena>> = HashMap::new();
 
         // Process each ranked list
@@ -78,7 +79,7 @@ impl RRFReranker {
 
                 // Calculate reciprocal rank: 1 / (k + rank)
                 // rank starts at 0, so actual rank is rank + 1
-                let rr_score = 1.0 / (k + (rank as f64) + 1.0);
+                let rr_score = 1.0 / (k + (rank as f32) + 1.0);
 
                 // Sum reciprocal ranks across all lists
                 *rrf_scores.entry(id).or_insert(0.0) += rr_score;
@@ -89,7 +90,7 @@ impl RRFReranker {
         }
 
         // Convert to scored items and sort by RRF score (descending)
-        let mut scored_items: Vec<(u128, f64)> = rrf_scores.into_iter().collect();
+        let mut scored_items: Vec<(u128, f32)> = rrf_scores.into_iter().collect();
         scored_items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Update scores and collect results
@@ -112,7 +113,11 @@ impl Default for RRFReranker {
 }
 
 impl Reranker for RRFReranker {
-    fn rerank<'arena, I>(&self, items: I, _query: Option<&str>) -> RerankerResult<Vec<TraversalValue<'arena>>>
+    fn rerank<'arena, I>(
+        &self,
+        items: I,
+        _query: Option<&str>,
+    ) -> RerankerResult<Vec<TraversalValue<'arena>>>
     where
         I: Iterator<Item = TraversalValue<'arena>>,
     {
@@ -127,7 +132,7 @@ impl Reranker for RRFReranker {
 
         for (rank, mut item) in items_vec.into_iter().enumerate() {
             // Calculate RRF score for this item based on its rank
-            let rrf_score = 1.0 / (self.k + (rank as f64) + 1.0);
+            let rrf_score = 1.0 / (self.k + (rank as f32) + 1.0);
             update_score(&mut item, rrf_score)?;
             results.push(item);
         }
@@ -143,15 +148,13 @@ impl Reranker for RRFReranker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        helix_engine::vector_core::vector::HVector,
-        utils::items::Node,
-    };
+    use crate::{helix_engine::vector_core::HVector, utils::items::Node};
     use bumpalo::Bump;
 
-    fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
-        let slice = arena.alloc_slice_copy(data);
-        HVector::from_slice("test_vector", 0, slice)
+    fn alloc_vector<'a>(arena: &'a Bump, data: &[f32]) -> HVector<'a> {
+        let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+        bump_vec.extend_from_slice(data);
+        HVector::from_vec("test_vector", bump_vec)
     }
 
     #[test]
@@ -162,7 +165,7 @@ mod tests {
         let vectors: Vec<TraversalValue> = (0..5)
             .map(|i| {
                 let mut v = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
-                v.distance = Some((i + 1) as f64);
+                v.distance = Some((i + 1) as f32);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })
@@ -175,7 +178,7 @@ mod tests {
         // Check that RRF scores are calculated correctly
         for (rank, item) in results.iter().enumerate() {
             if let TraversalValue::Vector(v) = item {
-                let expected_score = 1.0 / (60.0 + (rank as f64) + 1.0);
+                let expected_score = 1.0 / (60.0 + (rank as f32) + 1.0);
                 assert!((v.distance.unwrap() - expected_score).abs() < 1e-10);
             }
         }
@@ -242,11 +245,8 @@ mod tests {
             },
         ];
 
-        let results = RRFReranker::fuse_lists(
-            vec![list1.into_iter(), list2.into_iter()],
-            60.0,
-        )
-        .unwrap();
+        let results =
+            RRFReranker::fuse_lists(vec![list1.into_iter(), list2.into_iter()], 60.0).unwrap();
 
         // Items 1 and 2 appear in both lists, so should have higher scores
         assert_eq!(results.len(), 4);
@@ -280,7 +280,8 @@ mod tests {
 
     #[test]
     fn test_rrf_fuse_empty_lists() {
-        let result = RRFReranker::fuse_lists(Vec::<std::vec::IntoIter<TraversalValue>>::new(), 60.0);
+        let result =
+            RRFReranker::fuse_lists(Vec::<std::vec::IntoIter<TraversalValue>>::new(), 60.0);
         assert!(result.is_err());
     }
 
@@ -400,17 +401,15 @@ mod tests {
             },
         ];
 
-        let results = RRFReranker::fuse_lists(
-            vec![list1.into_iter(), list2.into_iter()],
-            60.0,
-        )
-        .unwrap();
+        let results =
+            RRFReranker::fuse_lists(vec![list1.into_iter(), list2.into_iter()], 60.0).unwrap();
 
         // All items should be present with equal RRF scores for same ranks
         assert_eq!(results.len(), 4);
 
         // Items at rank 0 in their respective lists should have same score
-        if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) = (&results[0], &results[1]) {
+        if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) = (&results[0], &results[1])
+        {
             let score1 = v1.distance.unwrap();
             let score2 = v2.distance.unwrap();
             assert!((score1 - score2).abs() < 1e-10);
@@ -542,11 +541,8 @@ mod tests {
             })
             .collect();
 
-        let results = RRFReranker::fuse_lists(
-            vec![list1.into_iter(), list2.into_iter()],
-            60.0,
-        )
-        .unwrap();
+        let results =
+            RRFReranker::fuse_lists(vec![list1.into_iter(), list2.into_iter()], 60.0).unwrap();
 
         // Items 5, 6, 7 appear in both lists, should rank higher
         assert_eq!(results.len(), 10);
@@ -573,7 +569,9 @@ mod tests {
 
         // Scores should be monotonically decreasing
         for i in 0..results.len() - 1 {
-            if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) = (&results[i], &results[i + 1]) {
+            if let (TraversalValue::Vector(v1), TraversalValue::Vector(v2)) =
+                (&results[i], &results[i + 1])
+            {
                 assert!(v1.distance.unwrap() >= v2.distance.unwrap());
             }
         }
@@ -592,7 +590,7 @@ mod tests {
 
         let vectors: Vec<TraversalValue> = (0..3)
             .map(|i| {
-                let mut v = alloc_vector(&arena, &[1.0 * i as f64, 2.0 * i as f64]);
+                let mut v = alloc_vector(&arena, &[1.0 * i as f32, 2.0 * i as f32]);
                 v.id = i as u128;
                 TraversalValue::Vector(v)
             })
@@ -602,10 +600,10 @@ mod tests {
 
         // Verify vector data is preserved
         if let TraversalValue::Vector(v) = &results[0] {
-            assert_eq!(v.data, &[0.0, 0.0]);
+            assert_eq!(v.data_borrowed(), &[0.0, 0.0]);
         }
         if let TraversalValue::Vector(v) = &results[1] {
-            assert_eq!(v.data, &[1.0, 2.0]);
+            assert_eq!(v.data_borrowed(), &[1.0, 2.0]);
         }
     }
 }
