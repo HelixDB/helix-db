@@ -3,8 +3,6 @@ use crate::helix_engine::{
     types::GraphError,
     vector_core::{binary_heap::BinaryHeap, vector::HVector, vector_distance::cosine_similarity},
 };
-use itertools::Itertools;
-
 pub trait BruteForceSearchVAdapter<'db, 'arena, 'txn>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
 {
@@ -44,10 +42,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         let arena = self.arena;
         let storage = self.storage;
         let txn = self.txn;
-
-        // Phase 1: Collect top-k using bounded heap O(n log k)
-        // Due to HVector's Ord, this is effectively a min-heap by similarity
-        // peek() returns lowest similarity among tracked items
         let mut heap: BinaryHeap<'arena, HVector<'arena>> = BinaryHeap::with_capacity(arena, k);
 
         for item in self.inner {
@@ -58,7 +52,6 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 if heap.len() < k {
                     heap.push(v);
                 } else if let Some(min) = heap.peek() {
-                    // min has lowest similarity - evict if new item is better
                     if sim > min.get_distance() {
                         heap.pop();
                         heap.push(v);
@@ -66,16 +59,12 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 }
             }
         }
-
-        // Phase 2: Extract in sorted order (highest similarity first)
-        // pop() returns ascending order, so we reverse
         let mut results = bumpalo::collections::Vec::with_capacity_in(heap.len(), arena);
         while let Some(v) = heap.pop() {
             results.push(v);
         }
         results.reverse();
 
-        // Phase 3: Lazy property fetching iterator
         let iter = results
             .into_iter()
             .filter_map(move |mut item| {
