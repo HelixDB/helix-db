@@ -1,7 +1,7 @@
 use crate::helix_engine::{
     traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
     types::GraphError,
-    vector_core::vector_distance::cosine_similarity,
+    vector_core::{binary_heap::BinaryHeap, vector::HVector, vector_distance::cosine_similarity},
 };
 use itertools::Itertools;
 
@@ -40,30 +40,54 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let iter = self
-            .inner
-            .filter_map(|v| match v {
-                Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.data, query).unwrap();
-                    v.set_distance(d);
-                    Some(v)
+        let k: usize = k.try_into().unwrap();
+        let arena = self.arena;
+        let storage = self.storage;
+        let txn = self.txn;
+
+        // Phase 1: Collect top-k using bounded heap O(n log k)
+        // Due to HVector's Ord, this is effectively a min-heap by similarity
+        // peek() returns lowest similarity among tracked items
+        let mut heap: BinaryHeap<'arena, HVector<'arena>> = BinaryHeap::with_capacity(arena, k);
+
+        for item in self.inner {
+            if let Ok(TraversalValue::Vector(mut v)) = item {
+                let sim = cosine_similarity(v.data, query).unwrap();
+                v.set_distance(sim);
+
+                if heap.len() < k {
+                    heap.push(v);
+                } else if let Some(min) = heap.peek() {
+                    // min has lowest similarity - evict if new item is better
+                    if sim > min.get_distance() {
+                        heap.pop();
+                        heap.push(v);
+                    }
                 }
-                _ => None,
-            })
-            .sorted_by(|v1, v2| v1.partial_cmp(v2).unwrap())
-            .take(k.try_into().unwrap())
+            }
+        }
+
+        // Phase 2: Extract in sorted order (highest similarity first)
+        // pop() returns ascending order, so we reverse
+        let mut results = bumpalo::collections::Vec::with_capacity_in(heap.len(), arena);
+        while let Some(v) = heap.pop() {
+            results.push(v);
+        }
+        results.reverse();
+
+        // Phase 3: Lazy property fetching iterator
+        let iter = results
+            .into_iter()
             .filter_map(move |mut item| {
-                match self
-                    .storage
+                match storage
                     .vectors
-                    .get_vector_properties(self.txn, *item.id(), self.arena)
+                    .get_vector_properties(txn, *item.id(), arena)
                 {
                     Ok(Some(vector_without_data)) => {
                         item.expand_from_vector_without_data(vector_without_data);
                         Some(item)
                     }
-
-                    Ok(None) => None, // TODO: maybe should be an error?
+                    Ok(None) => None,
                     Err(e) => {
                         println!("error getting vector data: {e:?}");
                         None
@@ -73,9 +97,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             .map(|v| Ok(TraversalValue::Vector(v)));
 
         RoTraversalIterator {
-            storage: self.storage,
-            arena: self.arena,
-            txn: self.txn,
+            storage,
+            arena,
+            txn,
             inner: iter.into_iter(),
         }
     }
