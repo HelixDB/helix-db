@@ -1,4 +1,5 @@
 //! Semantic analyzer for Helix‑QL.
+use super::object_validation::mark_vector_steps_for_data_fetch;
 use crate::helixc::analyzer::error_codes::ErrorCode;
 use crate::helixc::analyzer::utils::{VariableInfo, type_in_scope};
 use crate::helixc::generator::traversal_steps::EdgeType;
@@ -753,6 +754,8 @@ pub(crate) fn apply_graph_step<'a>(
                 .push(Separator::Period(GeneratedStep::SearchVector(
                     SearchVectorStep { vec, k },
                 )));
+            // SearchV needs vector data from preceding traversal steps
+            mark_vector_steps_for_data_fetch(traversal);
             // traversal.traversal_type = TraversalType::Ref;
             traversal.should_collect = ShouldCollect::ToVec;
             Some(Type::Vectors(Some(vector_ty.clone())))

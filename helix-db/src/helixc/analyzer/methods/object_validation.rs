@@ -28,8 +28,9 @@ use paste::paste;
 use std::{borrow::Cow, collections::HashMap};
 
 /// Marks all Out/In steps with EdgeType::Vec in the traversal to fetch vector data
-/// This should be called when the 'data' field is accessed on a Vector type
-fn mark_vector_steps_for_data_fetch(gen_traversal: &mut GeneratedTraversal) {
+/// This should be called when the 'data' field is accessed on a Vector type,
+/// or when a SearchV operation is performed (which implicitly needs vector data)
+pub(super) fn mark_vector_steps_for_data_fetch(gen_traversal: &mut GeneratedTraversal) {
     use crate::helixc::generator::traversal_steps::{EdgeType, Step};
     use crate::helixc::generator::utils::Separator;
 

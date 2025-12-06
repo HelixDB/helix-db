@@ -1,0 +1,9 @@
+[project]
+name = "search_v_as_assignment_and_expr"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]
