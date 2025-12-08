@@ -137,10 +137,12 @@ impl HelixParser {
                                             ));
                                         }
                                     },
-                                    other => return Err(ParserError::from(format!(
-                                        "Unexpected rule in start_node by_index: {:?}",
-                                        other
-                                    ))),
+                                    other => {
+                                        return Err(ParserError::from(format!(
+                                            "Unexpected rule in start_node by_index: {:?}",
+                                            other
+                                        )));
+                                    }
                                 };
                                 vec![IdType::ByIndex {
                                     index: Box::new(index),
@@ -149,10 +151,12 @@ impl HelixParser {
                                 }]
                             })
                         }
-                        other => return Err(ParserError::from(format!(
-                            "Unexpected rule in start_node: {:?}",
-                            other
-                        ))),
+                        other => {
+                            return Err(ParserError::from(format!(
+                                "Unexpected rule in start_node: {:?}",
+                                other
+                            )));
+                        }
                     }
                 }
                 Ok(StartNode::Node { node_type, ids })
@@ -191,10 +195,12 @@ impl HelixParser {
                             }
                             ids = Some(new_ids);
                         }
-                        other => return Err(ParserError::from(format!(
-                            "Unexpected rule in start_edge: {:?}",
-                            other
-                        ))),
+                        other => {
+                            return Err(ParserError::from(format!(
+                                "Unexpected rule in start_edge: {:?}",
+                                other
+                            )));
+                        }
                     }
                 }
                 Ok(StartNode::Edge { edge_type, ids })
@@ -301,10 +307,12 @@ impl HelixParser {
                             }
                             ids = Some(new_ids);
                         }
-                        other => return Err(ParserError::from(format!(
-                            "Unexpected rule in start_vector: {:?}",
-                            other
-                        ))),
+                        other => {
+                            return Err(ParserError::from(format!(
+                                "Unexpected rule in start_vector: {:?}",
+                                other
+                            )));
+                        }
                     }
                 }
                 Ok(StartNode::Vector { vector_type, ids })

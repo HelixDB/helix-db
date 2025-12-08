@@ -105,5 +105,5 @@ fn test_hvector_cosine_similarity() {
     let arena2 = Bump::new();
     let v2 = alloc_vector(&arena2, &[4.0, 5.0, 6.0]);
     let similarity = v1.distance_to(&v2).unwrap();
-    assert!((similarity - (1.0 - 0.9746318461970762)).abs() < 1e-7);
+    assert!((similarity - (1.0 - 0.974_631_85)).abs() < 1e-7);
 }

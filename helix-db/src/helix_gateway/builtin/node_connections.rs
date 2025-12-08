@@ -223,7 +223,6 @@ mod tests {
             },
         },
         helix_gateway::router::router::HandlerInput,
-        helixc::generator::traversal_steps::EdgeType,
         protocol::{Format, request::Request, request::RequestType},
         utils::id::ID,
     };

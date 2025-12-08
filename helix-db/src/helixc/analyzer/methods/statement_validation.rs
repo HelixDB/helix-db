@@ -97,7 +97,13 @@ pub(crate) fn validate_statements<'a>(
                 tr.should_collect = ShouldCollect::No;
                 Some(GeneratedStatement::Drop(GeneratedDrop { expression: tr }))
             } else {
-                generate_error!(ctx, original_query, expr.loc.clone(), E628, &expr_ty.get_type_name());
+                generate_error!(
+                    ctx,
+                    original_query,
+                    expr.loc.clone(),
+                    E628,
+                    &expr_ty.get_type_name()
+                );
                 None
             }
         }

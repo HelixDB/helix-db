@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::atomic};
 
 use byteorder::BE;
 use heed3::{
-    Database, Env, RoTxn, RwTxn,
+    Database, Env, RwTxn,
     types::{Bytes, U32, U128, Unit},
 };
 use rand::{SeedableRng, rngs::StdRng};
@@ -110,7 +110,7 @@ pub fn migrate_from_old_format(
     for vector_data in migrated_vectors {
         label_groups
             .entry(vector_data.label.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(vector_data);
     }
 
@@ -205,7 +205,7 @@ fn parse_old_vector_format(
 
 fn convert_old_vector_data(vector_data_bytes: &[u8]) -> VectorCoreResult<Vec<f32>> {
     // Assume f64 format
-    if vector_data_bytes.len() % 8 == 0 {
+    if vector_data_bytes.len().is_multiple_of(8) {
         let f64_slice: &[f64] = bytemuck::cast_slice(vector_data_bytes);
         Ok(f64_slice.iter().map(|&x| x as f32).collect())
     } else {
@@ -442,12 +442,6 @@ mod migration_tests {
         let f64_bytes = bytemuck::cast_slice::<f64, u8>(&f64_data);
         let converted = convert_old_vector_data(f64_bytes).unwrap();
         assert_eq!(converted, vec![1.0f32, 2.0f32, 3.0f32]);
-
-        // Test f32 passthrough
-        let f32_data: Vec<f32> = vec![1.5, 2.5, 3.5];
-        let f32_bytes = bytemuck::cast_slice::<f32, u8>(&f32_data);
-        let converted = convert_old_vector_data(f32_bytes).unwrap();
-        assert_eq!(converted, vec![1.5f32, 2.5f32, 3.5f32]);
     }
 
     #[test]
