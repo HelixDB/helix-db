@@ -44,6 +44,7 @@ pub mod hnsw;
 pub mod item_iter;
 pub mod key;
 pub mod metadata;
+pub mod migration;
 pub mod node;
 pub mod node_id;
 pub mod ordered_float;
@@ -381,6 +382,19 @@ impl VectorCore {
         })
     }
 
+    pub fn new_with_migration(
+        env: &Env,
+        txn: &mut RwTxn,
+        config: HNSWConfig,
+    ) -> VectorCoreResult<Self> {
+        // Check if we need to migrate from old format
+        if migration::needs_migration_from_old_format(env, txn)? {
+            migration::migrate_from_old_format(env, txn, config)
+        } else {
+            Self::new(env, txn, config)
+        }
+    }
+
     pub fn search<'arena>(
         &self,
         txn: &RoTxn,
@@ -404,7 +418,7 @@ impl VectorCore {
 
     /// Get a writer based on label. If it doesn't exist build a new index
     /// and return a writer to it
-    fn get_writer_or_create_index(
+    pub(crate) fn get_writer_or_create_index(
         &self,
         label: &str,
         dimension: usize,

@@ -15,6 +15,7 @@ helix-metrics = { path = "../metrics" }
 # external dependencies
 tokio = { version = "1.44.2", features = ["full"] }
 serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.143"
 bincode = "1.3.3" # TODO: Figure out bincode 2 impl with current serde impl
 sonic-rs = "0.5.0"
 inventory = "0.3.16"

@@ -1494,6 +1494,7 @@ dependencies = [
  "roaring",
  "rustc-hash",
  "serde",
+ "serde_json",
  "sha_256",
  "sonic-rs",
  "subtle",
