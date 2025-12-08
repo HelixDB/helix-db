@@ -24,10 +24,12 @@ impl HelixParser {
         let order_by_type = match order_by_rule.as_rule() {
             Rule::asc => OrderByType::Asc,
             Rule::desc => OrderByType::Desc,
-            other => return Err(ParserError::from(format!(
-                "Unexpected rule in parse_order_by: {:?}",
-                other
-            ))),
+            other => {
+                return Err(ParserError::from(format!(
+                    "Unexpected rule in parse_order_by: {:?}",
+                    other
+                )));
+            }
         };
         let expression = self.parse_expression(inner.try_next()?)?;
         Ok(OrderBy {

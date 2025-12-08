@@ -69,10 +69,12 @@ impl HelixParser {
                     Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
                     Rule::id_traversal => self.parse_traversal(traversal)?,
                     Rule::traversal => self.parse_traversal(traversal)?,
-                    other => return Err(ParserError::from(format!(
-                        "Unexpected rule in exists expression: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(ParserError::from(format!(
+                            "Unexpected rule in exists expression: {:?}",
+                            other
+                        )));
+                    }
                 };
                 let expr = ExpressionType::Exists(ExistsExpression {
                     loc: loc.clone(),
@@ -223,10 +225,12 @@ impl HelixParser {
                     Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
                     Rule::id_traversal => self.parse_traversal(traversal)?,
                     Rule::traversal => self.parse_traversal(traversal)?,
-                    other => return Err(ParserError::from(format!(
-                        "Unexpected rule in and_or_expression exists: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(ParserError::from(format!(
+                            "Unexpected rule in and_or_expression exists: {:?}",
+                            other
+                        )));
+                    }
                 };
                 let expr = ExpressionType::Exists(ExistsExpression {
                     loc: loc.clone(),
@@ -281,10 +285,12 @@ impl HelixParser {
                 Rule::evaluates_to_bool => {
                     expressions.push(self.parse_boolean_expression(p)?);
                 }
-                other => return Err(ParserError::from(format!(
-                    "Unexpected rule in parse_expression_vec: {:?}",
-                    other
-                ))),
+                other => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in parse_expression_vec: {:?}",
+                        other
+                    )));
+                }
             }
         }
         Ok(expressions)

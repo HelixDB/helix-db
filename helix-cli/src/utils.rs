@@ -2,11 +2,10 @@ use crate::errors::CliError;
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{Result, eyre};
 use helix_db::helixc::parser::types::HxFile;
+use std::io::IsTerminal;
 use std::{borrow::Cow, fs, path::Path};
 use tokio::sync::oneshot;
 use tokio::time::Duration;
-use std::io::IsTerminal;
-
 
 const IGNORES: [&str; 3] = ["target", ".git", ".helix"];
 
@@ -495,10 +494,7 @@ impl Spinner {
                 }
                 let frame = frames[frame_idx % frames.len()];
                 let msg = message.lock().unwrap().clone();
-                print!(
-                    "\r{} {frame} {msg}",
-                    format!("[{prefix}]").blue().bold()
-                );
+                print!("\r{} {frame} {msg}", format!("[{prefix}]").blue().bold());
                 std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 frame_idx += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;

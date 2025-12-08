@@ -111,7 +111,11 @@ pub struct PropertyEq {
 }
 impl Display for PropertyEq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.get_property(\"{}\").map_or(false, |w| w == v)", self.var, self.property)
+        write!(
+            f,
+            "{}.get_property(\"{}\").map_or(false, |w| w == v)",
+            self.var, self.property
+        )
     }
 }
 
@@ -122,7 +126,11 @@ pub struct PropertyNeq {
 }
 impl Display for PropertyNeq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.get_property(\"{}\").map_or(false, |w| w != v)", self.var, self.property)
+        write!(
+            f,
+            "{}.get_property(\"{}\").map_or(false, |w| w != v)",
+            self.var, self.property
+        )
     }
 }
 

@@ -358,7 +358,10 @@ impl<'a> FlyManager<'a> {
         }
 
         // Check if fly.toml already exists for this instance
-        let fly_toml_path = self.project.instance_workspace(instance_name).join("fly.toml");
+        let fly_toml_path = self
+            .project
+            .instance_workspace(instance_name)
+            .join("fly.toml");
         if let Some(existing_app_name) = Self::read_app_name_from_fly_toml(&fly_toml_path)? {
             // Check if the app in fly.toml exists on Fly.io
             if self.app_exists(&existing_app_name).await? {

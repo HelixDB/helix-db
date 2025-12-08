@@ -9,8 +9,8 @@ mod tests {
     use heed3::RoTxn;
     use helix_db::{
         helix_engine::{
-            bm25::bm25::{HBM25Config, BM25},
-            storage_core::{storage_methods::StorageMethods, HelixGraphStorage},
+            bm25::bm25::{BM25, HBM25Config},
+            storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
             traversal_core::{
                 config::Config,
                 ops::{
@@ -138,10 +138,10 @@ mod tests {
                 .filter_map(|result| match result {
                     Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                         Ok((edge_id, to_node)) => {
-                            if connected_node_ids.insert(to_node) {
-                                if let Ok(node) = storage.get_node(&rtxn, &to_node, &arena) {
-                                    connected_nodes.push(TraversalValue::Node(node));
-                                }
+                            if connected_node_ids.insert(to_node)
+                                && let Ok(node) = storage.get_node(&rtxn, &to_node, &arena)
+                            {
+                                connected_nodes.push(TraversalValue::Node(node));
                             }
                             match storage.get_edge(&rtxn, &edge_id, &arena) {
                                 Ok(edge) => Some(TraversalValue::Edge(edge)),
@@ -173,10 +173,10 @@ mod tests {
                 .filter_map(|result| match result {
                     Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                         Ok((edge_id, to_node)) => {
-                            if connected_node_ids.insert(to_node) {
-                                if let Ok(node) = storage.get_node(&rtxn, &to_node, &arena) {
-                                    connected_nodes.push(TraversalValue::Node(node));
-                                }
+                            if connected_node_ids.insert(to_node)
+                                && let Ok(node) = storage.get_node(&rtxn, &to_node, &arena)
+                            {
+                                connected_nodes.push(TraversalValue::Node(node));
                             }
                             match storage.get_edge(&rtxn, &edge_id, &arena) {
                                 Ok(edge) => Some(TraversalValue::Edge(edge)),
@@ -206,10 +206,10 @@ mod tests {
                 .filter_map(|result| match result {
                     Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                         Ok((edge_id, to_node)) => {
-                            if connected_node_ids.insert(to_node) {
-                                if let Ok(node) = storage.get_node(&rtxn, &to_node, &arena) {
-                                    connected_nodes.push(TraversalValue::Node(node));
-                                }
+                            if connected_node_ids.insert(to_node)
+                                && let Ok(node) = storage.get_node(&rtxn, &to_node, &arena)
+                            {
+                                connected_nodes.push(TraversalValue::Node(node));
                             }
                             match storage.get_edge(&rtxn, &edge_id, &arena) {
                                 Ok(edge) => Some(TraversalValue::Edge(edge)),
@@ -241,10 +241,10 @@ mod tests {
                 .filter_map(|result| match result {
                     Ok((_, value)) => match HelixGraphStorage::unpack_adj_edge_data(value) {
                         Ok((edge_id, to_node)) => {
-                            if connected_node_ids.insert(to_node) {
-                                if let Ok(node) = storage.get_node(&rtxn, &to_node, &arena) {
-                                    connected_nodes.push(TraversalValue::Node(node));
-                                }
+                            if connected_node_ids.insert(to_node)
+                                && let Ok(node) = storage.get_node(&rtxn, &to_node, &arena)
+                            {
+                                connected_nodes.push(TraversalValue::Node(node));
                             }
                             match storage.get_edge(&rtxn, &edge_id, &arena) {
                                 Ok(edge) => Some(TraversalValue::Edge(edge)),
@@ -322,10 +322,10 @@ mod tests {
             let mut nodes = Vec::new();
             for result in storage.nodes_db.iter(&rtxn).unwrap() {
                 let (id, node_data) = result.unwrap();
-                if let Ok(node) = Node::from_bincode_bytes(id, node_data, &arena) {
-                    if node.label == "person" {
-                        nodes.push(node);
-                    }
+                if let Ok(node) = Node::from_bincode_bytes(id, node_data, &arena)
+                    && node.label == "person"
+                {
+                    nodes.push(node);
                 }
             }
             times_no_capacity.push(start.elapsed().as_micros());
@@ -348,10 +348,10 @@ mod tests {
             let mut nodes = Vec::with_capacity(initial_capacity);
             for result in storage.nodes_db.iter(&rtxn).unwrap() {
                 let (id, node_data) = result.unwrap();
-                if let Ok(node) = Node::from_bincode_bytes(id, node_data, &arena) {
-                    if node.label == "person" {
-                        nodes.push(node);
-                    }
+                if let Ok(node) = Node::from_bincode_bytes(id, node_data, &arena)
+                    && node.label == "person"
+                {
+                    nodes.push(node);
                 }
             }
             times_with_capacity.push(start.elapsed().as_micros());
@@ -515,7 +515,7 @@ mod tests {
         let variance = times
             .iter()
             .map(|&t| {
-                let diff = if t > mean { t - mean } else { mean - t };
+                let diff = t.abs_diff(mean);
                 diff * diff
             })
             .sum::<u128>()
