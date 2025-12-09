@@ -7,6 +7,7 @@ use crate::{
         storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
+        vector_core::vector::HVector,
     },
     protocol::value::Value,
     utils::{
@@ -44,6 +45,8 @@ pub trait UpsertAdapter<'db, 'arena, 'txn>: Iterator {
 
     fn upsert_v(
         self,
+        query: Option<&'arena [f64]>,
+        label: &'arena str,
         props: &[(&'static str, Value)],
     ) -> RwTraversalIterator<
         'db,
@@ -294,6 +297,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 // Non-node value in iterator - ignore
             }
         }
+
         RwTraversalIterator {
             storage: self.storage,
             arena: self.arena,
@@ -450,21 +454,246 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
     }
 
     fn upsert_v(
-        self,
-        _props: &[(&'static str, Value)],
+        mut self,
+        query: Option<&'arena [f64]>,
+        label: &'arena str,
+        props: &[(&'static str, Value)],
     ) -> RwTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
+        let mut result: Result<TraversalValue, GraphError> = Ok(TraversalValue::Empty);
+        match self.inner.next() {
+            Some(Ok(TraversalValue::Vector(mut vector))) => {
+                match vector.properties {
+                    None => {
+                        // Insert secondary indices
+                        for (k, v) in props.iter() {
+                            let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                continue;
+                            };
+
+                            match bincode::serialize(v) {
+                                Ok(v_serialized) => {
+                                    if let Err(e) = db.put_with_flags(
+                                        self.txn,
+                                        PutFlags::APPEND_DUP,
+                                        &v_serialized,
+                                        &vector.id,
+                                    ) {
+                                        result = Err(GraphError::from(e));
+                                    }
+                                }
+                                Err(e) => result = Err(GraphError::from(e)),
+                            }
+                        }
+
+                        // Create properties map and insert node
+                        let map = ImmutablePropertiesMap::new(
+                            props.len(),
+                            props.iter().map(|(k, v)| (*k, v.clone())),
+                            self.arena,
+                        );
+
+                        vector.properties = Some(map);
+                    }
+                    Some(old) => {
+                        for (k, v) in props.iter() {
+                            let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                continue;
+                            };
+
+                            // delete secondary indexes for the props changed
+                            let Some(old_value) = old.get(k) else {
+                                continue;
+                            };
+
+                            match bincode::serialize(old_value) {
+                                Ok(old_serialized) => {
+                                    if let Err(e) = db.delete_one_duplicate(
+                                        self.txn,
+                                        &old_serialized,
+                                        &vector.id,
+                                    ) {
+                                        result = Err(GraphError::from(e));
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    result = Err(GraphError::from(e));
+                                    continue;
+                                }
+                            }
+
+                            // create new secondary indexes for the props changed
+                            match bincode::serialize(v) {
+                                Ok(v_serialized) => {
+                                    if let Err(e) = db.put_with_flags(
+                                        self.txn,
+                                        PutFlags::APPEND_DUP,
+                                        &v_serialized,
+                                        &vector.id,
+                                    ) {
+                                        result = Err(GraphError::from(e));
+                                    }
+                                }
+                                Err(e) => result = Err(GraphError::from(e)),
+                            }
+                        }
+
+                        let diff = props
+                            .iter()
+                            .filter(|(k, _)| !old.iter().map(|(old_k, _)| old_k).contains(k));
+
+                        // Add secondary indices for NEW properties (not in old)
+                        for (k, v) in diff.clone() {
+                            let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                continue;
+                            };
+
+                            match bincode::serialize(v) {
+                                Ok(v_serialized) => {
+                                    if let Err(e) = db.put_with_flags(
+                                        self.txn,
+                                        PutFlags::APPEND_DUP,
+                                        &v_serialized,
+                                        &vector.id,
+                                    ) {
+                                        result = Err(GraphError::from(e));
+                                    }
+                                }
+                                Err(e) => result = Err(GraphError::from(e)),
+                            }
+                        }
+
+                        // find out how many new properties we'll need space for
+                        let len_diff = diff.clone().count();
+
+                        let merged = old
+                            .iter()
+                            .map(|(old_k, old_v)| {
+                                props
+                                    .iter()
+                                    .find_map(|(k, v)| old_k.eq(*k).then_some(v))
+                                    .map_or_else(|| (old_k, old_v.clone()), |v| (old_k, v.clone()))
+                            })
+                            .chain(diff.cloned());
+
+                        // make new props, updated by current props
+                        let new_map =
+                            ImmutablePropertiesMap::new(old.len() + len_diff, merged, self.arena);
+
+                        vector.properties = Some(new_map);
+                    }
+                }
+
+                // Update BM25 index for existing node
+                if let Some(bm25) = &self.storage.bm25
+                    && let Some(props) = vector.properties.as_ref()
+                {
+                    let mut data = props.flatten_bm25();
+                    data.push_str(vector.label);
+                    if let Err(e) = bm25.update_doc(self.txn, vector.id, &data) {
+                        result = Err(e);
+                    }
+                }
+
+                match self.storage.vectors.put_vector(self.txn, &vector) {
+                    Ok(_) => {
+                        if result.is_ok() {
+                            result = Ok(TraversalValue::Vector(vector));
+                        }
+                    }
+                    Err(e) => result = Err(GraphError::from(e)),
+                }
+            }
+            // No previous vector found, create a new one
+            None => {
+                let version = self.storage.version_info.get_latest(label);
+                let properties = {
+                    if props.is_empty() {
+                        None
+                    } else {
+                        Some(ImmutablePropertiesMap::new(
+                            props.len(),
+                            props.iter().map(|(k, v)| (*k, v.clone())),
+                            self.arena,
+                        ))
+                    }
+                };
+
+                let vector = HVector {
+                    id: v6_uuid(),
+                    label: label,
+                    version,
+                    deleted: false,
+                    level: 1,
+                    distance: None,
+                    data: query.unwrap_or(&[]),
+                    properties,
+                };
+
+                match self.storage.vectors.put_vector(self.txn, &vector) {
+                    Ok(_) => {
+                        if result.is_ok() {
+                            result = Ok(TraversalValue::Vector(vector));
+                        }
+                    }
+                    Err(e) => result = Err(GraphError::from(e)),
+                }
+
+                for (k, v) in props.iter() {
+                    let Some(db) = self.storage.secondary_indices.get(*k) else {
+                        continue;
+                    };
+
+                    match bincode::serialize(v) {
+                        Ok(v_serialized) => {
+                            if let Err(e) = db.put_with_flags(
+                                self.txn,
+                                PutFlags::APPEND_DUP,
+                                &v_serialized,
+                                &vector.id,
+                            ) {
+                                result = Err(GraphError::from(e));
+                            }
+                        }
+                        Err(e) => result = Err(GraphError::from(e)),
+                    }
+                }
+
+                if let Some(bm25) = &self.storage.bm25
+                    && let Some(props) = vector.properties.as_ref()
+                {
+                    let mut data = props.flatten_bm25();
+                    data.push_str(vector.label);
+                    if let Err(e) = bm25.insert_doc(self.txn, vector.id, &data) {
+                        result = Err(e);
+                    }
+                }
+
+                if result.is_ok() {
+                    result = Ok(TraversalValue::Vector(vector));
+                }
+                // Don't overwrite existing errors with a generic message
+            }
+            Some(Err(e)) => {
+                result = Err(e);
+            }
+            Some(Ok(_)) => {
+                // Non-Vector value in iterator - ignore
+                // Ignoring VectorWithoutData as well since it will be
+                // removed in next release
+            }
+        }
+
         RwTraversalIterator {
             storage: self.storage,
             arena: self.arena,
             txn: self.txn,
-            inner: std::iter::once(Err(GraphError::New(
-                "upsert_v not yet implemented".to_string(),
-            ))),
+            inner: std::iter::once(result),
         }
     }
 }
