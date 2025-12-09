@@ -26,21 +26,21 @@ jobs:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/GitHubActionsS3Role
           aws-region: us-east-1
 
-      - name: Upload specified files and directories to S3
+      - name: Create and upload template.tar.gz
         run: |
-          # Sync directories
-          aws s3 sync helix-cli/ s3://helix-repo/template/helix-cli/ --exclude "target/*"
-          aws s3 sync helix-container/ s3://helix-repo/template/helix-container/ --exclude "target/*"
-          aws s3 sync helix-macros/ s3://helix-repo/template/helix-macros/ --exclude "target/*"
-          aws s3 sync metrics/ s3://helix-repo/template/metrics/ --exclude "target/*"
+          # Create tarball excluding .git and target directories
+          tar -czvf template.tar.gz \
+            --exclude='.git' \
+            --exclude='target' \
+            --exclude='*.tar.gz' \
+            .
 
-          # Upload root-level Cargo files
-          aws s3 cp Cargo.lock s3://helix-repo/template/Cargo.lock
-          aws s3 cp Cargo.toml s3://helix-repo/template/Cargo.toml
+          # Upload to S3
+          aws s3 cp template.tar.gz s3://helix-repo/template.tar.gz
 
       - name: Upload completion notification
         if: success()
         run: |
-          echo "Successfully uploaded all files to S3 bucket: helix-repo"
+          echo "Successfully uploaded template.tar.gz to S3 bucket: helix-repo"
           echo "Upload triggered by: ${{ github.event_name }}"
           echo "Reference: ${{ github.ref }}"
