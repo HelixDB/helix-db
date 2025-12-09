@@ -29,14 +29,14 @@ jobs:
       - name: Create and upload template.tar.gz
         run: |
           # Create tarball excluding .git and target directories
-          tar -czvf template.tar.gz \
+          # Write to /tmp to avoid modifying the source directory during archiving
+          tar -czvf /tmp/template.tar.gz \
             --exclude='.git' \
             --exclude='target' \
-            --exclude='*.tar.gz' \
             .
 
           # Upload to S3
-          aws s3 cp template.tar.gz s3://helix-repo/template.tar.gz
+          aws s3 cp /tmp/template.tar.gz s3://helix-repo/template.tar.gz
 
       - name: Upload completion notification
         if: success()
