@@ -29,8 +29,8 @@ jobs:
       - name: Create and upload template.tar.gz
         run: |
           # Create tarball excluding .git and target directories
+          # Write to /tmp to avoid modifying the source directory during archiving
           tar -czvf /tmp/template.tar.gz \
-            --warning=no-file-changed \
             --exclude='.git' \
             --exclude='target' \
             .
