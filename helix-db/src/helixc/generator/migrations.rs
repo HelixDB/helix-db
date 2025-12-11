@@ -153,7 +153,9 @@ mod tests {
                 remappings: vec![Separator::Semicolon(
                     GeneratedMigrationPropertyMapping::FieldAdditionFromOldField {
                         old_field: GeneratedValue::Literal(GenRef::Literal("name".to_string())),
-                        new_field: GeneratedValue::Literal(GenRef::Literal("full_name".to_string())),
+                        new_field: GeneratedValue::Literal(GenRef::Literal(
+                            "full_name".to_string(),
+                        )),
                     },
                 )],
                 should_spread: false,
@@ -203,7 +205,9 @@ mod tests {
                     ),
                     Separator::Semicolon(
                         GeneratedMigrationPropertyMapping::FieldAdditionFromValue {
-                            new_field_name: GeneratedValue::Literal(GenRef::Literal("c".to_string())),
+                            new_field_name: GeneratedValue::Literal(GenRef::Literal(
+                                "c".to_string(),
+                            )),
                             new_field_type: FieldType::Boolean,
                             value: GeneratedValue::Primitive(GenRef::Std("true".to_string())),
                         },
