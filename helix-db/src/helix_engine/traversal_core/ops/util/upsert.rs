@@ -306,6 +306,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         }
     }
 
+    // TODO: better error handling. We're wasting time by doing work after something goes wrong.
     fn upsert_e(
         mut self,
         label: &'arena str,
