@@ -458,6 +458,7 @@ use helix_db::{
                     filter_ref::FilterRefAdapter, map::MapAdapter, paths::{PathAlgorithm, ShortestPathAdapter},
                     range::RangeAdapter, update::UpdateAdapter, order::OrderByAdapter,
                     aggregate::AggregateAdapter, group_by::GroupByAdapter, count::CountAdapter,
+                    upsert::UpsertAdapter,
                 },
                 vectors::{
                     brute_force_search::BruteForceSearchVAdapter, insert::InsertVAdapter,

@@ -1235,31 +1235,31 @@ pub(crate) fn validate_traversal<'a>(
                             }
                         } else {
                             let v = match &expr.expr {
-                            ExpressionType::BooleanLiteral(b) => {
-                                GeneratedValue::Primitive(GenRef::Std(b.to_string()))
-                            }
-                            ExpressionType::IntegerLiteral(i) => {
-                                GeneratedValue::Primitive(GenRef::Std(i.to_string()))
-                            }
-                            ExpressionType::FloatLiteral(f) => {
-                                GeneratedValue::Primitive(GenRef::Std(f.to_string()))
-                            }
-                            ExpressionType::StringLiteral(s) => {
-                                GeneratedValue::Primitive(GenRef::Literal(s.to_string()))
-                            }
-                            ExpressionType::Identifier(i) => {
-                                is_valid_identifier(
-                                    ctx,
-                                    original_query,
-                                    expr.loc.clone(),
-                                    i.as_str(),
-                                );
-                                gen_identifier_or_param(original_query, i.as_str(), false, true)
-                            }
-                            _ => {
-                                unreachable!("Cannot reach here");
-                            }
-                        };
+                                ExpressionType::BooleanLiteral(b) => {
+                                    GeneratedValue::Primitive(GenRef::Std(b.to_string()))
+                                }
+                                ExpressionType::IntegerLiteral(i) => {
+                                    GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                                }
+                                ExpressionType::FloatLiteral(f) => {
+                                    GeneratedValue::Primitive(GenRef::Std(f.to_string()))
+                                }
+                                ExpressionType::StringLiteral(s) => {
+                                    GeneratedValue::Primitive(GenRef::Literal(s.to_string()))
+                                }
+                                ExpressionType::Identifier(i) => {
+                                    is_valid_identifier(
+                                        ctx,
+                                        original_query,
+                                        expr.loc.clone(),
+                                        i.as_str(),
+                                    );
+                                    gen_identifier_or_param(original_query, i.as_str(), false, true)
+                                }
+                                _ => {
+                                    unreachable!("Cannot reach here");
+                                }
+                            };
                             BoolOp::Eq(Eq {
                                 left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
                                 right: v,
@@ -1293,29 +1293,29 @@ pub(crate) fn validate_traversal<'a>(
                             }
                         } else {
                             let v = match &expr.expr {
-                            ExpressionType::BooleanLiteral(b) => {
-                                GeneratedValue::Primitive(GenRef::Std(b.to_string()))
-                            }
-                            ExpressionType::IntegerLiteral(i) => {
-                                GeneratedValue::Primitive(GenRef::Std(i.to_string()))
-                            }
-                            ExpressionType::FloatLiteral(f) => {
-                                GeneratedValue::Primitive(GenRef::Std(f.to_string()))
-                            }
-                            ExpressionType::StringLiteral(s) => {
-                                GeneratedValue::Primitive(GenRef::Literal(s.to_string()))
-                            }
-                            ExpressionType::Identifier(i) => {
-                                is_valid_identifier(
-                                    ctx,
-                                    original_query,
-                                    expr.loc.clone(),
-                                    i.as_str(),
-                                );
-                                gen_identifier_or_param(original_query, i.as_str(), false, true)
-                            }
-                            _ => unreachable!("Cannot reach here"),
-                        };
+                                ExpressionType::BooleanLiteral(b) => {
+                                    GeneratedValue::Primitive(GenRef::Std(b.to_string()))
+                                }
+                                ExpressionType::IntegerLiteral(i) => {
+                                    GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                                }
+                                ExpressionType::FloatLiteral(f) => {
+                                    GeneratedValue::Primitive(GenRef::Std(f.to_string()))
+                                }
+                                ExpressionType::StringLiteral(s) => {
+                                    GeneratedValue::Primitive(GenRef::Literal(s.to_string()))
+                                }
+                                ExpressionType::Identifier(i) => {
+                                    is_valid_identifier(
+                                        ctx,
+                                        original_query,
+                                        expr.loc.clone(),
+                                        i.as_str(),
+                                    );
+                                    gen_identifier_or_param(original_query, i.as_str(), false, true)
+                                }
+                                _ => unreachable!("Cannot reach here"),
+                            };
                             BoolOp::Neq(Neq {
                                 left: GeneratedValue::Primitive(GenRef::Std("*v".to_string())),
                                 right: v,
@@ -1546,12 +1546,24 @@ pub(crate) fn validate_traversal<'a>(
                                             GeneratedValue::Primitive(GenRef::Std(i.to_string()))
                                         }
                                         other => {
-                                            generate_error!(ctx, original_query, e.loc.clone(), E206, &format!("{:?}", other));
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                e.loc.clone(),
+                                                E206,
+                                                &format!("{:?}", other)
+                                            );
                                             GeneratedValue::Unknown
                                         }
                                     },
                                     other => {
-                                        generate_error!(ctx, original_query, field.value.loc.clone(), E206, &format!("{:?}", other));
+                                        generate_error!(
+                                            ctx,
+                                            original_query,
+                                            field.value.loc.clone(),
+                                            E206,
+                                            &format!("{:?}", other)
+                                        );
                                         GeneratedValue::Unknown
                                     }
                                 },
@@ -1571,6 +1583,16 @@ pub(crate) fn validate_traversal<'a>(
                     generate_error!(ctx, original_query, add.loc.clone(), E102, ty);
                 }
                 cur_ty = Type::Edges(add.edge_type.clone());
+                excluded.clear();
+            }
+
+            StepType::UpsertEdge(upsert) => {
+                if let Some(ref ty) = upsert.edge_type
+                    && !ctx.edge_map.contains_key(ty.as_str())
+                {
+                    generate_error!(ctx, original_query, upsert.loc.clone(), E102, ty);
+                }
+                cur_ty = Type::Edges(upsert.edge_type.clone());
                 excluded.clear();
             }
 
