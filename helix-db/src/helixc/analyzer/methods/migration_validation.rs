@@ -8,9 +8,7 @@ use crate::{
             },
             utils::{GenRef, GeneratedValue, Separator},
         },
-        parser::types::{
-            FieldValueType, Migration, MigrationItem, MigrationPropertyMapping,
-        },
+        parser::types::{FieldValueType, Migration, MigrationItem, MigrationPropertyMapping},
     },
     protocol::value::Value,
 };
@@ -26,7 +24,10 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
             ctx,
             migration.from_version.0.clone(),
             ErrorCode::E108,
-            format!("Migration references non-existent schema version: {}", migration.from_version.1),
+            format!(
+                "Migration references non-existent schema version: {}",
+                migration.from_version.1
+            ),
             Some("Ensure the schema version exists before referencing it in a migration".into()),
         );
         return;
@@ -41,7 +42,10 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
             ctx,
             migration.to_version.0.clone(),
             ErrorCode::E108,
-            format!("Migration references non-existent schema version: {}", migration.to_version.1),
+            format!(
+                "Migration references non-existent schema version: {}",
+                migration.to_version.1
+            ),
             Some("Ensure the schema version exists before referencing it in a migration".into()),
         );
         return;
@@ -80,8 +84,13 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
                     ctx,
                     item.from_item.0.clone(),
                     ErrorCode::E201,
-                    format!("Migration item '{item_name}' does not exist in schema version {}", migration.from_version.1),
-                    Some(format!("Ensure '{item_name}' is defined in the source schema")),
+                    format!(
+                        "Migration item '{item_name}' does not exist in schema version {}",
+                        migration.from_version.1
+                    ),
+                    Some(format!(
+                        "Ensure '{item_name}' is defined in the source schema"
+                    )),
                 );
                 continue;
             }
@@ -99,8 +108,13 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
                     ctx,
                     item.to_item.0.clone(),
                     ErrorCode::E201,
-                    format!("Migration item '{item_name}' does not exist in schema version {}", migration.to_version.1),
-                    Some(format!("Ensure '{item_name}' is defined in the target schema")),
+                    format!(
+                        "Migration item '{item_name}' does not exist in schema version {}",
+                        migration.to_version.1
+                    ),
+                    Some(format!(
+                        "Ensure '{item_name}' is defined in the target schema"
+                    )),
                 );
                 continue;
             }
@@ -113,8 +127,11 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
                 ctx,
                 item.loc.clone(),
                 ErrorCode::E205,
-                format!("Migration item types do not match: '{}' to '{}'",
-                    item.from_item.1.inner(), item.to_item.1.inner()),
+                format!(
+                    "Migration item types do not match: '{}' to '{}'",
+                    item.from_item.1.inner(),
+                    item.to_item.1.inner()
+                ),
                 Some("Migration between different item types is not yet supported".into()),
             );
             continue;
@@ -143,9 +160,15 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
                         ctx,
                         property_name.0.clone(),
                         ErrorCode::E202,
-                        format!("Property '{}' does not exist in target schema for '{}'",
-                            property_name.1, item.to_item.1.inner()),
-                        Some(format!("Ensure property '{}' is defined in the target schema", property_name.1)),
+                        format!(
+                            "Property '{}' does not exist in target schema for '{}'",
+                            property_name.1,
+                            item.to_item.1.inner()
+                        ),
+                        Some(format!(
+                            "Ensure property '{}' is defined in the target schema",
+                            property_name.1
+                        )),
                     );
                     continue;
                 }
@@ -175,9 +198,14 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
                             ctx,
                             property_value.loc.clone(),
                             ErrorCode::E202,
-                            format!("Identifier '{}' does not exist in source schema for '{}'",
-                                identifier, item.from_item.1.inner()),
-                            Some(format!("Ensure '{identifier}' is a valid field in the source schema")),
+                            format!(
+                                "Identifier '{}' does not exist in source schema for '{}'",
+                                identifier,
+                                item.from_item.1.inner()
+                            ),
+                            Some(format!(
+                                "Ensure '{identifier}' is a valid field in the source schema"
+                            )),
                         );
                         continue;
                     }
@@ -188,7 +216,10 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
                         property_value.loc.clone(),
                         ErrorCode::E206,
                         "Unsupported property value type in migration".into(),
-                        Some("Only literal values and identifiers are supported in migrations".into()),
+                        Some(
+                            "Only literal values and identifiers are supported in migrations"
+                                .into(),
+                        ),
                     );
                     continue;
                 }
@@ -196,30 +227,42 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
 
             // check default value is valid for the new field type
             if let Some(default) = &default
-                && to_property_field.field_type != *default {
-                    push_schema_err(
-                        ctx,
-                        property_value.loc.clone(),
-                        ErrorCode::E205,
-                        format!("Default value type mismatch: expected '{}' but got '{:?}'",
-                            to_property_field.field_type, default),
-                        Some("Ensure the default value type matches the field type in the target schema".into()),
-                    );
-                    continue;
+                && to_property_field.field_type != *default
+            {
+                push_schema_err(
+                    ctx,
+                    property_value.loc.clone(),
+                    ErrorCode::E205,
+                    format!(
+                        "Default value type mismatch: expected '{}' but got '{:?}'",
+                        to_property_field.field_type, default
+                    ),
+                    Some(
+                        "Ensure the default value type matches the field type in the target schema"
+                            .into(),
+                    ),
+                );
+                continue;
             }
 
             // check the cast is valid for the new field type
             if let Some(cast) = &cast
-                && to_property_field.field_type != cast.cast_to {
-                    push_schema_err(
-                        ctx,
-                        cast.loc.clone(),
-                        ErrorCode::E205,
-                        format!("Cast target type mismatch: expected '{}' but got '{}'",
-                            to_property_field.field_type, cast.cast_to),
-                        Some("Ensure the cast target type matches the field type in the target schema".into()),
-                    );
-                    continue;
+                && to_property_field.field_type != cast.cast_to
+            {
+                push_schema_err(
+                    ctx,
+                    cast.loc.clone(),
+                    ErrorCode::E205,
+                    format!(
+                        "Cast target type mismatch: expected '{}' but got '{}'",
+                        to_property_field.field_type, cast.cast_to
+                    ),
+                    Some(
+                        "Ensure the cast target type matches the field type in the target schema"
+                            .into(),
+                    ),
+                );
+                continue;
             }
 
             // // warnings if name is same

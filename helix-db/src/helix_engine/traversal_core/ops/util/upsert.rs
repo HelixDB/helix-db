@@ -627,7 +627,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
                 let vector = HVector {
                     id: v6_uuid(),
-                    label: label,
+                    label,
                     version,
                     deleted: false,
                     level: 1,

@@ -1,5 +1,5 @@
 use crate::config::HelixConfig;
-use crate::project::{get_helix_cache_dir, ProjectContext};
+use crate::project::{ProjectContext, get_helix_cache_dir};
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -180,7 +180,10 @@ fn test_project_context_ensure_instance_dirs() {
 
     assert!(!workspace.exists(), "Workspace should not exist initially");
     assert!(!volume.exists(), "Volume should not exist initially");
-    assert!(!container.exists(), "Container dir should not exist initially");
+    assert!(
+        !container.exists(),
+        "Container dir should not exist initially"
+    );
 
     let result = context.ensure_instance_dirs("test-instance");
     assert!(result.is_ok(), "Should create instance directories");
@@ -242,7 +245,10 @@ fn test_project_context_with_custom_queries_path() {
     fs::create_dir_all(project_path.join(".helix")).expect("Failed to create .helix");
 
     let result = ProjectContext::find_and_load(Some(&project_path));
-    assert!(result.is_ok(), "Should load project with custom queries path");
+    assert!(
+        result.is_ok(),
+        "Should load project with custom queries path"
+    );
 
     let context = result.unwrap();
     assert_eq!(
@@ -297,5 +303,8 @@ fn test_find_project_root_stops_at_filesystem_root() {
     fs::create_dir_all(&deep_path).expect("Failed to create deep path");
 
     let result = ProjectContext::find_and_load(Some(&deep_path));
-    assert!(result.is_err(), "Should fail after reaching filesystem root");
+    assert!(
+        result.is_err(),
+        "Should fail after reaching filesystem root"
+    );
 }
