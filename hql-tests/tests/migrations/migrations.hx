@@ -9,13 +9,14 @@ MIGRATION schema::1 => schema::2 {
         Properties: {
             created_at: since,
             updated_at: since,
+            ..
         }
     }
 
     N::OtherUser => _::{
         username: name,
         age: age AS U32,
-        post_count: 0
+        post_count: 0,
+        ..
     }
 }
-

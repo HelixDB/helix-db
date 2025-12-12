@@ -186,18 +186,24 @@ impl HelixParser {
                 )));
             }
         };
-        let remappings = match pairs.next() {
+        let (remappings, should_spread) = match pairs.next() {
             Some(p) => match p.as_rule() {
-                Rule::node_migration => p
-                    .try_inner_next()?
-                    .into_inner()
-                    .map(|p| self.parse_field_migration(p))
-                    .collect::<Result<Vec<_>, _>>()?,
-                Rule::edge_migration => p
-                    .try_inner_next()?
-                    .into_inner()
-                    .map(|p| self.parse_field_migration(p))
-                    .collect::<Result<Vec<_>, _>>()?,
+                Rule::node_migration | Rule::edge_migration => {
+                    let mut should_spread = false;
+                    let mappings = p
+                        .try_inner_next()?
+                        .into_inner()
+                        .filter_map(|inner| {
+                            if inner.as_rule() == Rule::spread_object {
+                                should_spread = true;
+                                None
+                            } else {
+                                Some(self.parse_field_migration(inner))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (mappings, should_spread)
+                }
                 _ => {
                     return Err(ParserError::from(
                         "Expected node_migration or edge_migration",
@@ -215,6 +221,7 @@ impl HelixParser {
             from_item: from_item_type,
             to_item: to_item_type,
             remappings,
+            should_spread,
             loc: pair.loc(),
         })
     }

@@ -35,7 +35,7 @@ item_def = { node_decl | edge_decl | vec_decl }
 cast = { "AS" ~ (named_type | ID_TYPE | date_type) }
 
 field_migration = { identifier ~ ":" ~ ((now | float | integer | boolean | string_literal | none) | (identifier ~ cast?))}
-field_migrations = { (field_migration ~ ",")* ~ (field_migration ~ ","?)?  }
+field_migrations = { ((field_migration ~ ",")* ~ spread_object ~ ","?) | ((field_migration ~ ",")* ~ (field_migration ~ ","?)?) }
 
 node_migration = { "{" ~ field_migrations ~ "}" }
 edge_migration = { "{" ~ "Properties" ~ ":" ~ "{" ~ field_migrations ~ "}" ~ "}" }

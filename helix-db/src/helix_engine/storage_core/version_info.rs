@@ -8,17 +8,25 @@ use std::collections::HashMap;
 pub struct VersionInfo(pub HashMap<&'static str, ItemInfo>);
 
 impl<'arena> VersionInfo {
-    pub fn upgrade_to_node_latest(&self, node: Node<'arena>) -> Node<'arena> {
+    pub fn upgrade_to_node_latest(
+        &self,
+        node: Node<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Node<'arena> {
         match self.0.get(&node.label) {
-            Some(item_info) => item_info.upgrade_node_to_latest(node),
+            Some(item_info) => item_info.upgrade_node_to_latest(node, arena),
             None => node,
         }
     }
 
-    pub fn upgrade_to_edge_latest(&self, node: Edge<'arena>) -> Edge<'arena> {
-        match self.0.get(&node.label) {
-            Some(item_info) => item_info.upgrade_edge_to_latest(node),
-            None => node,
+    pub fn upgrade_to_edge_latest(
+        &self,
+        edge: Edge<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Edge<'arena> {
+        match self.0.get(&edge.label) {
+            Some(item_info) => item_info.upgrade_edge_to_latest(edge, arena),
+            None => edge,
         }
     }
 
@@ -31,11 +39,16 @@ impl<'arena> VersionInfo {
 }
 
 type Props<'arena> = ImmutablePropertiesMap<'arena>;
+
+/// Function pointer type for migration functions.
+/// Takes the arena for allocation and the old properties, returns new properties.
+pub type MigrationFn = for<'arena> fn(&'arena bumpalo::Bump, Props<'arena>) -> Props<'arena>;
+
 #[derive(Clone, Debug)]
 pub struct TransitionFn {
     pub from_version: u8,
     pub to_version: u8,
-    pub func: fn(Props) -> Props,
+    pub func: MigrationFn,
 }
 
 #[derive(Clone, Debug)]
@@ -48,14 +61,18 @@ pub struct ItemInfo {
 }
 
 impl<'arena> ItemInfo {
-    fn upgrade_node_to_latest(&self, mut node: Node<'arena>) -> Node<'arena> {
+    fn upgrade_node_to_latest(
+        &self,
+        mut node: Node<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Node<'arena> {
         if node.version < self.latest
             && let Some(mut node_props) = node.properties.take()
         {
             for TransitionFn { func, .. } in
                 self.transition_fns.iter().skip(node.version as usize - 1)
             {
-                node_props = func(node_props);
+                node_props = func(arena, node_props);
             }
 
             node.properties = Some(node_props);
@@ -64,14 +81,18 @@ impl<'arena> ItemInfo {
         node
     }
 
-    fn upgrade_edge_to_latest(&self, mut edge: Edge<'arena>) -> Edge<'arena> {
+    fn upgrade_edge_to_latest(
+        &self,
+        mut edge: Edge<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Edge<'arena> {
         if edge.version < self.latest
             && let Some(mut edge_props) = edge.properties.take()
         {
             for TransitionFn { func, .. } in
                 self.transition_fns.iter().skip(edge.version as usize - 1)
             {
-                edge_props = func(edge_props);
+                edge_props = func(arena, edge_props);
             }
 
             edge.properties = Some(edge_props);
@@ -95,7 +116,7 @@ pub struct Transition {
     pub item_label: &'static str,
     pub from_version: u8,
     pub to_version: u8,
-    pub func: fn(Props) -> Props,
+    pub func: MigrationFn,
 }
 
 impl Transition {
@@ -103,7 +124,7 @@ impl Transition {
         item_label: &'static str,
         from_version: u8,
         to_version: u8,
-        func: fn(Props) -> Props,
+        func: MigrationFn,
     ) -> Self {
         Self {
             item_label,

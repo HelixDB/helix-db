@@ -326,7 +326,7 @@ impl StorageMethods for HelixGraphStorage {
             None => return Err(GraphError::NodeNotFound),
         };
         let node: Node = Node::from_bincode_bytes(*id, node, arena)?;
-        let node = self.version_info.upgrade_to_node_latest(node);
+        let node = self.version_info.upgrade_to_node_latest(node, arena);
         Ok(node)
     }
 
@@ -342,7 +342,7 @@ impl StorageMethods for HelixGraphStorage {
             None => return Err(GraphError::EdgeNotFound),
         };
         let edge: Edge = Edge::from_bincode_bytes(*id, edge, arena)?;
-        Ok(self.version_info.upgrade_to_edge_latest(edge))
+        Ok(self.version_info.upgrade_to_edge_latest(edge, arena))
     }
 
     fn drop_node(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {

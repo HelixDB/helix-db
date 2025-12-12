@@ -139,6 +139,7 @@ pub struct MigrationItemMapping {
     pub from_item: (Loc, MigrationItem),
     pub to_item: (Loc, MigrationItem),
     pub remappings: Vec<MigrationPropertyMapping>,
+    pub should_spread: bool,
     pub loc: Loc,
 }
 

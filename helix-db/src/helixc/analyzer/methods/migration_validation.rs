@@ -124,7 +124,7 @@ pub(crate) fn validate_migration(ctx: &mut Ctx, migration: &Migration) {
             from_item: item.from_item.1.inner().to_string(),
             to_item: item.to_item.1.inner().to_string(),
             remappings: Vec::new(),
-            should_spread: true,
+            should_spread: item.should_spread,
         };
 
         for MigrationPropertyMapping {

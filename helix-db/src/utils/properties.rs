@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::{alloc, fmt, iter, ptr, str};
 use std::{marker, slice};
@@ -156,6 +157,28 @@ impl<'arena> ImmutablePropertiesMap<'arena> {
                 str::from_utf8_unchecked(bytes)
             })
             .zip(values)
+    }
+
+    /// Converts this immutable properties map to a mutable HashMap.
+    /// Used for migrations where we need to modify properties.
+    pub fn to_hashmap(&self) -> HashMap<String, Value> {
+        self.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// Creates an ImmutablePropertiesMap from a HashMap.
+    /// The keys are allocated into the arena.
+    pub fn from_hashmap(
+        map: HashMap<String, Value>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Self {
+        let len = map.len();
+        let items = map.into_iter().map(|(k, v)| {
+            let k: &'arena str = arena.alloc_str(&k);
+            (k, v)
+        });
+        Self::new(len, items, arena)
     }
 }
 

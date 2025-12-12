@@ -314,33 +314,47 @@ pub fn migration(args: TokenStream, item: TokenStream) -> TokenStream {
 
     let input_fn = parse_macro_input!(item as ItemFn);
     let fn_name = &input_fn.sig.ident;
-    let fn_name_str = fn_name.to_string();
 
-    println!("fn_name_str: {fn_name_str}");
     // Create a unique static name for each handler
     let static_name = quote::format_ident!(
         "_MAIN_HANDLER_REGISTRATION_{}",
         fn_name.to_string().to_uppercase()
     );
 
+    // Create the wrapper function name
+    let wrapper_fn_name = quote::format_ident!("__{}_wrapper", fn_name);
+
     let item = &args.item;
     let from_version = &args.from_version;
     let to_version = &args.to_version;
 
     let expanded = quote! {
+        // The user's migration function (works with HashMap)
         #input_fn
 
+        // Wrapper function that converts between ImmutablePropertiesMap and HashMap
+        fn #wrapper_fn_name<'arena>(
+            arena: &'arena bumpalo::Bump,
+            props: ::helix_db::utils::properties::ImmutablePropertiesMap<'arena>,
+        ) -> ::helix_db::utils::properties::ImmutablePropertiesMap<'arena> {
+            // Convert ImmutablePropertiesMap to HashMap
+            let hash_map = props.to_hashmap();
+            // Call the user's migration function
+            let result = #fn_name(hash_map);
+            // Convert back to ImmutablePropertiesMap
+            ::helix_db::utils::properties::ImmutablePropertiesMap::from_hashmap(result, arena)
+        }
 
         #[doc(hidden)]
         #[used]
         static #static_name: () = {
             inventory::submit! {
-                ::helix_db::helix_engine::graph_core::ops::version_info::TransitionSubmission(
-                    ::helix_db::helix_engine::graph_core::ops::version_info::Transition::new(
+                ::helix_db::helix_engine::storage_core::version_info::TransitionSubmission(
+                    ::helix_db::helix_engine::storage_core::version_info::Transition::new(
                         stringify!(#item),
                         #from_version,
                         #to_version,
-                        #fn_name
+                        #wrapper_fn_name
                     )
                 )
             }
