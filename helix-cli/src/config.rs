@@ -348,7 +348,6 @@ impl<'a> InstanceInfo<'a> {
 
         json
     }
-    ///
     pub fn queries_path(&self, project_queries: &'a Path) -> &'a Path {
         match self {
             InstanceInfo::Local(config) => {
