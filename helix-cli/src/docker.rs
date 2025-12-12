@@ -117,6 +117,11 @@ impl<'a> DockerManager<'a> {
             env_vars.push(format!("GEMINI_API_KEY={gemini_key}"));
         }
 
+        // Pass device ID to container for metrics correlation
+        if let Some(device_id) = crate::metrics_sender::get_device_id() {
+            env_vars.push(format!("HELIX_DEVICE_ID={device_id}"));
+        }
+
         env_vars
     }
 

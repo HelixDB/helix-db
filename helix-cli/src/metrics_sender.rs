@@ -425,7 +425,7 @@ fn get_current_timestamp() -> u64 {
 
 /// Get a deterministic device ID derived from the machine's unique identifier.
 /// This ID is stable across CLI reinstalls and file deletions.
-fn get_device_id() -> Option<&'static str> {
+pub fn get_device_id() -> Option<&'static str> {
     get_machine_id()
         .map(|id| hash_to_device_id(&id))
         .map(|s| -> &'static str { s.leak() })

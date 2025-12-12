@@ -47,6 +47,13 @@ pub static METRICS_ENABLED: LazyLock<bool> = LazyLock::new(|| {
     true
 });
 
+/// Device ID passed from CLI when deploying container (for metrics correlation)
+pub static HELIX_DEVICE_ID: LazyLock<Option<&'static str>> = LazyLock::new(|| {
+    std::env::var("HELIX_DEVICE_ID")
+        .ok()
+        .map(|s| -> &'static str { s.leak() })
+});
+
 pub const METRICS_URL: &str = "https://logs.helix-db.com/v2";
 
 // Thread-local buffer for events
@@ -213,7 +220,7 @@ fn create_raw_event(
             .expect("Failed to get system time")
             .as_secs(),
         email: None,
-        device_id: None,
+        device_id: *HELIX_DEVICE_ID,
     }
 }
 
