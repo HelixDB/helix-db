@@ -8,10 +8,12 @@ use helix_metrics::events::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::PathBuf,
+    process::Command,
 };
 use tokio::task::JoinHandle;
 
@@ -32,6 +34,7 @@ pub struct MetricsConfig {
     pub user_id: Option<&'static str>,
     pub email: Option<&'static str>,
     pub name: Option<&'static str>,
+    pub device_id: Option<&'static str>,
     pub last_updated: u64,
     pub install_event_sent: bool,
 }
@@ -43,6 +46,7 @@ impl Default for MetricsConfig {
             user_id: None,
             email: None,
             name: None,
+            device_id: get_device_id(),
             last_updated: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -59,6 +63,7 @@ impl MetricsConfig {
             user_id,
             email: None,
             name: None,
+            device_id: get_device_id(),
             last_updated: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -246,6 +251,7 @@ impl MetricsSender {
                 event_data: EventData::CliInstall,
                 user_id: get_user_id(),
                 email: get_email(),
+                device_id: get_device_id(),
                 timestamp: get_current_timestamp(),
             };
             self.send_event(event);
@@ -278,6 +284,7 @@ impl MetricsSender {
             }),
             user_id: get_user_id(),
             email: get_email(),
+            device_id: get_device_id(),
             timestamp: get_current_timestamp(),
         };
         self.send_event(event);
@@ -305,6 +312,7 @@ impl MetricsSender {
             }),
             user_id: get_user_id(),
             email: get_email(),
+            device_id: get_device_id(),
             timestamp: get_current_timestamp(),
         };
         self.send_event(event);
@@ -332,6 +340,7 @@ impl MetricsSender {
             }),
             user_id: get_user_id(),
             email: get_email(),
+            device_id: get_device_id(),
             timestamp: get_current_timestamp(),
         };
         self.send_event(event);
@@ -359,6 +368,7 @@ impl MetricsSender {
             }),
             user_id: get_user_id(),
             email: get_email(),
+            device_id: get_device_id(),
             timestamp: get_current_timestamp(),
         };
         self.send_event(event);
@@ -387,6 +397,7 @@ impl MetricsSender {
             }),
             user_id: get_user_id(),
             email: get_email(),
+            device_id: get_device_id(),
             timestamp: get_current_timestamp(),
         };
         self.send_event(event);
@@ -410,4 +421,184 @@ fn get_current_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Get a deterministic device ID derived from the machine's unique identifier.
+/// This ID is stable across CLI reinstalls and file deletions.
+fn get_device_id() -> Option<&'static str> {
+    get_machine_id()
+        .map(|id| hash_to_device_id(&id))
+        .map(|s| -> &'static str { s.leak() })
+}
+
+/// Hash the machine ID to create a privacy-preserving device identifier.
+fn hash_to_device_id(machine_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"helix-device-id:");
+    hasher.update(machine_id.as_bytes());
+    let result = hasher.finalize();
+    // Use first 16 bytes (32 hex chars) for a shorter but still unique ID
+    hex::encode(&result[..16])
+}
+
+/// Get the machine's unique identifier (platform-specific).
+#[cfg(target_os = "macos")]
+fn get_machine_id() -> Option<String> {
+    // macOS: Use IOPlatformUUID from IOKit
+    Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .find(|line| line.contains("IOPlatformUUID"))
+                .and_then(|line| {
+                    line.split('"')
+                        .nth(3)
+                        .map(|s| s.to_string())
+                })
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn get_machine_id() -> Option<String> {
+    // Linux: Read from /etc/machine-id or /var/lib/dbus/machine-id
+    fs::read_to_string("/etc/machine-id")
+        .or_else(|_| fs::read_to_string("/var/lib/dbus/machine-id"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn get_machine_id() -> Option<String> {
+    // Windows: Read MachineGuid from registry
+    Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ])
+        .output()
+        .ok()
+        .and_then(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .find(|line| line.contains("MachineGuid"))
+                .and_then(|line| line.split_whitespace().last())
+                .map(|s| s.to_string())
+        })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn get_machine_id() -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_machine_id_returns_value() {
+        // Machine ID should be available on macOS, Linux, and Windows
+        let machine_id = get_machine_id();
+
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            assert!(
+                machine_id.is_some(),
+                "Machine ID should be available on this platform"
+            );
+            let id = machine_id.unwrap();
+            assert!(!id.is_empty(), "Machine ID should not be empty");
+            println!("Machine ID: {}", id);
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            // On unsupported platforms, it's expected to be None
+            assert!(machine_id.is_none());
+        }
+    }
+
+    #[test]
+    fn test_hash_to_device_id_produces_consistent_hash() {
+        let machine_id = "test-machine-id-12345";
+        let hash1 = hash_to_device_id(machine_id);
+        let hash2 = hash_to_device_id(machine_id);
+
+        assert_eq!(hash1, hash2, "Same input should produce same hash");
+        assert_eq!(hash1.len(), 32, "Hash should be 32 hex characters (16 bytes)");
+
+        // Verify it's valid hex
+        assert!(
+            hash1.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should only contain hex digits"
+        );
+    }
+
+    #[test]
+    fn test_hash_to_device_id_different_inputs_produce_different_hashes() {
+        let hash1 = hash_to_device_id("machine-id-1");
+        let hash2 = hash_to_device_id("machine-id-2");
+
+        assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
+    }
+
+    #[test]
+    fn test_get_device_id_is_deterministic() {
+        // Get device ID twice - should be the same
+        let device_id1 = get_device_id();
+        let device_id2 = get_device_id();
+
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            assert!(device_id1.is_some(), "Device ID should be available");
+            assert!(device_id2.is_some(), "Device ID should be available");
+            assert_eq!(
+                device_id1.unwrap(),
+                device_id2.unwrap(),
+                "Device ID should be deterministic"
+            );
+            println!("Device ID: {}", device_id1.unwrap());
+        }
+    }
+
+    #[test]
+    fn test_device_id_format() {
+        let device_id = get_device_id();
+
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            let id = device_id.expect("Device ID should be available");
+            assert_eq!(id.len(), 32, "Device ID should be 32 characters");
+            assert!(
+                id.chars().all(|c| c.is_ascii_hexdigit()),
+                "Device ID should only contain hex digits"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hash_includes_salt() {
+        // The hash function includes a salt "helix-device-id:"
+        // This ensures different apps using machine ID get different hashes
+        let machine_id = "same-machine-id";
+
+        // Direct SHA256 of machine_id without salt would be different
+        let mut hasher = Sha256::new();
+        hasher.update(machine_id.as_bytes());
+        let direct_hash = hex::encode(&hasher.finalize()[..16]);
+
+        let salted_hash = hash_to_device_id(machine_id);
+
+        assert_ne!(
+            direct_hash, salted_hash,
+            "Salted hash should differ from unsalted"
+        );
+    }
 }

@@ -213,6 +213,7 @@ fn create_raw_event(
             .expect("Failed to get system time")
             .as_secs(),
         email: None,
+        device_id: None,
     }
 }
 
@@ -602,7 +603,6 @@ mod tests {
 
             // Channel should have fewer or equal batches
             let _final_count = METRICS_STATE.events_rx.len();
-            
         }
     }
 
@@ -691,5 +691,4 @@ mod tests {
         assert!(json_str.starts_with('['));
         assert!(json_str.ends_with(']'));
     }
-
 }
