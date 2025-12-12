@@ -123,6 +123,10 @@ pub struct LocalInstanceConfig {
     pub build_mode: BuildMode,
     #[serde(flatten)]
     pub db_config: DbConfig,
+    #[serde(
+        default, skip_serializing_if = "Option::is_none"
+    )]
+    pub queries: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +140,10 @@ pub struct CloudInstanceConfig {
     pub env_vars: HashMap<String, String>,
     #[serde(flatten)]
     pub db_config: DbConfig,
+    #[serde(
+        default, skip_serializing_if = "Option::is_none"
+    )]
+    pub queries: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +348,23 @@ impl<'a> InstanceInfo<'a> {
 
         json
     }
+    ///
+    pub fn queries_path(&self, project_queries: &'a Path) -> &'a Path {
+        match self {
+            InstanceInfo::Local(config) => {
+                config.queries.as_deref().unwrap_or(project_queries)
+            }
+            InstanceInfo::Helix(config) => {
+                config.queries.as_deref().unwrap_or(project_queries)
+            }
+            InstanceInfo::FlyIo(config) => {
+                config.queries.as_deref().unwrap_or(project_queries)
+            }
+            InstanceInfo::Ecr(config) => {
+                config.queries.as_deref().unwrap_or(project_queries)
+            }
+        }
+    }
 }
 
 impl From<InstanceInfo<'_>> for CloudConfig {
@@ -445,6 +470,7 @@ impl HelixConfig {
                 port: Some(6969),
                 build_mode: BuildMode::Debug,
                 db_config: DbConfig::default(),
+                queries: None,
             },
         );
 

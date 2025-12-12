@@ -8,6 +8,7 @@ use crate::{
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Output};
+use std::path::PathBuf;
 use tokio::fs;
 
 const DEFAULT_ECR_REGION: &str = "us-east-1";
@@ -57,6 +58,10 @@ pub struct EcrConfig {
     pub build_mode: BuildMode,
     #[serde(flatten)]
     pub db_config: config::DbConfig,
+    #[serde(
+        default, skip_serializing_if = "Option::is_none"
+    )]
+    pub queries: Option<PathBuf>,
 }
 
 impl Default for EcrConfig {

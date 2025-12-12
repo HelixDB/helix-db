@@ -277,7 +277,8 @@ pub(crate) async fn compile_project(project: &ProjectContext, instance_name: &st
     print_status("CODEGEN", "Generating Rust code from Helix queries...");
 
     // Collect all .hx files for compilation
-    let hx_files = collect_hx_files(&project.root, &project.config.project.queries)?;
+    let queries_path = instance.queries_path(&project.config.project.queries);
+    let hx_files = collect_hx_files(&project.root, queries_path)?;
 
     // Generate content and compile using helix-db compilation logic
     let (analyzed_source, metrics_data) = compile_helix_files(&hx_files, &src_dir)?;

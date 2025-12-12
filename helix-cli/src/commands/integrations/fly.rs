@@ -8,7 +8,7 @@ use crate::{
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path,PathBuf};
 use std::process::{Command, Output, Stdio};
 use tokio::io::AsyncWriteExt;
 
@@ -136,6 +136,10 @@ pub struct FlyInstanceConfig {
     pub auth_type: FlyAuthType,
     #[serde(flatten)]
     pub db_config: config::DbConfig,
+    #[serde(
+        default, skip_serializing_if = "Option::is_none"
+    )]
+    pub queries: Option<PathBuf>,
 }
 
 impl<'a> FlyManager<'a> {
