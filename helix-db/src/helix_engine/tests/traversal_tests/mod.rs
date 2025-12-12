@@ -8,5 +8,6 @@ pub mod secondary_index_tests;
 pub mod shortest_path_tests;
 pub mod test_utils;
 pub mod update_tests;
+pub mod upsert_tests;
 pub mod util_tests;
 pub mod vector_traversal_tests;
