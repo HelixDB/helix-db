@@ -73,6 +73,7 @@ impl Default for EcrConfig {
             auth_type: EcrAuthType::default(),
             build_mode: default_release_build_mode(),
             db_config: config::DbConfig::default(),
+            queries: None,
         }
     }
 }
@@ -214,6 +215,7 @@ impl<'a> EcrManager<'a> {
             auth_type,
             build_mode: BuildMode::default(),
             db_config: config::DbConfig::default(),
+            queries: None,
         })
     }
 

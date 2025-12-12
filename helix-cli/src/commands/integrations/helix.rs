@@ -81,6 +81,7 @@ impl<'a> HelixManager<'a> {
             build_mode: BuildMode::Release,
             env_vars: HashMap::new(),
             db_config: DbConfig::default(),
+            queries: None,
         })
     }
 

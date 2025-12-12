@@ -338,6 +338,7 @@ impl<'a> FlyManager<'a> {
             private,
             auth_type,
             db_config: config::DbConfig::default(),
+            queries: None,
         }
     }
 

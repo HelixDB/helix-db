@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-pub async fn run(output_dir: Option<String>, path: Option<String>, instance_name: &str) -> Result<()> {
+pub async fn run(output_dir: Option<String>, path: Option<String>, instance_name: Option<&str>) -> Result<()> {
     println!("Checking Helix queries...");
     print_status("VALIDATE", "Parsing and validating Helix queries");
 
@@ -26,7 +26,7 @@ pub async fn run(output_dir: Option<String>, path: Option<String>, instance_name
     };
 
     // Collect all .hx files for validation from the queries directory
-    let instance = project.config.get_instance(instance_name)?;
+    let instance = project.config.get_instance(instance_name.expect("instances list should not be empty - already checked above"))?;
     let queries_path = instance.queries_path(&project.config.project.queries);
     let hx_files = collect_hx_files(&project.root, queries_path)?;
 
