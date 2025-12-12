@@ -26,7 +26,6 @@ pub async fn run(output_dir: Option<String>, path: Option<String>, instance_name
     };
 
     // Collect all .hx files for validation from the queries directory
-    let instance_name = project.instance_workspace(instance_name);
     let instance = project.config.get_instance(instance_name)?;
     let queries_path = instance.queries_path(&project.config.project.queries);
     let hx_files = collect_hx_files(&project.root, queries_path)?;
