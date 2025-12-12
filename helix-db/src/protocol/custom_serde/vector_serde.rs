@@ -1,13 +1,13 @@
 use crate::{
-    helix_engine::vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
+    helix_engine::vector_core::{HVector, distance::Cosine, node::Item},
     utils::properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
 };
 use serde::de::{DeserializeSeed, Visitor};
 use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
-struct OptionPropertiesMapDeSeed<'arena> {
-    arena: &'arena bumpalo::Bump,
+pub struct OptionPropertiesMapDeSeed<'arena> {
+    pub arena: &'arena bumpalo::Bump,
 }
 
 impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
@@ -94,17 +94,18 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
 
-                let data = HVector::cast_raw_vector_data(self.arena, self.raw_vector_data);
+                let data = HVector::raw_vector_data_to_vec(self.raw_vector_data, self.arena)
+                    .map_err(serde::de::Error::custom)?;
 
                 Ok(HVector {
                     id: self.id,
                     label,
                     deleted,
                     version,
-                    level: 0,
                     distance: None,
-                    data,
+                    data: Some(Item::<Cosine>::from_vec(data)),
                     properties,
+                    level: None,
                 })
             }
         }
@@ -128,7 +129,7 @@ pub struct VectoWithoutDataDeSeed<'arena> {
 }
 
 impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'arena> {
-    type Value = VectorWithoutData<'arena>;
+    type Value = HVector<'arena>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -140,7 +141,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
         }
 
         impl<'de, 'arena> serde::de::Visitor<'de> for VectorVisitor<'arena> {
-            type Value = VectorWithoutData<'arena>;
+            type Value = HVector<'arena>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("struct VectorWithoutData")
@@ -164,13 +165,15 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
 
-                Ok(VectorWithoutData {
+                Ok(HVector {
                     id: self.id,
                     label,
                     version,
                     deleted,
-                    level: 0,
                     properties,
+                    distance: None,
+                    level: None,
+                    data: None,
                 })
             }
         }

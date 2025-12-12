@@ -1,18 +1,20 @@
-use crate::helix_engine::vector_core::vector_distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL};
-
-use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::vector_core::{
+    HVector,
+    distance::{MAX_DISTANCE, MIN_DISTANCE, ORTHOGONAL},
+};
 use bumpalo::Bump;
 
-fn alloc_vector<'a>(arena: &'a Bump, data: &[f64]) -> HVector<'a> {
-    let slice = arena.alloc_slice_copy(data);
-    HVector::from_slice("vector", 0, slice)
+fn alloc_vector<'a>(arena: &'a Bump, data: &[f32]) -> HVector<'a> {
+    let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+    bump_vec.extend_from_slice(data);
+    HVector::from_vec("test_vector", bump_vec)
 }
 
 #[test]
 fn test_hvector_from_slice() {
     let arena = Bump::new();
     let vector = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
-    assert_eq!(vector.data, &[1.0, 2.0, 3.0]);
+    assert_eq!(vector.data_borrowed(), &[1.0, 2.0, 3.0]);
 }
 
 #[test]
@@ -30,7 +32,13 @@ fn test_hvector_distance_min() {
     let v1 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
     let v2 = alloc_vector(&arena, &[1.0, 2.0, 3.0]);
     let distance = v2.distance_to(&v1).unwrap();
-    assert_eq!(distance, MIN_DISTANCE);
+    println!("Distance {}", distance);
+    assert!(
+        (distance - MIN_DISTANCE).abs() < 1e-6,
+        "Distance {} is not close enough to MIN_DISTANCE ({})",
+        distance,
+        MIN_DISTANCE
+    );
 }
 
 #[test]
@@ -97,5 +105,5 @@ fn test_hvector_cosine_similarity() {
     let arena2 = Bump::new();
     let v2 = alloc_vector(&arena2, &[4.0, 5.0, 6.0]);
     let similarity = v1.distance_to(&v2).unwrap();
-    assert!((similarity - (1.0 - 0.9746318461970762)).abs() < 1e-9);
+    assert!((similarity - (1.0 - 0.974_631_85)).abs() < 1e-7);
 }

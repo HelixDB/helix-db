@@ -8,7 +8,7 @@ QUERY CogneeHasCollection (collection_name: String) =>
   RETURN {collection: collection}
 
 // Add multiple vectors to a collection with a given data points
-QUERY CogneeCreateDataPoints (collection_name: String, data_points: [{vector: [F64], dp_id: String, payload: String, content: String}]) =>
+QUERY CogneeCreateDataPoints (collection_name: String, data_points: [{vector: [F32], dp_id: String, payload: String, content: String}]) =>
 	FOR {vector, dp_id, payload, content} IN data_points {
 		AddV<CogneeVector>(vector, {collection_name: collection_name, data_point_id: dp_id, payload: payload, content: content})
 	}
@@ -20,7 +20,7 @@ QUERY CogneeRetrieve (collection_name: String, dp_ids: [String]) =>
 	RETURN {documents: documents}
 
 // Perform a search in the specified collection using a vector.
-QUERY CogneeSearch (collection_name: String, vector: [F64], limit: I64) =>
+QUERY CogneeSearch (collection_name: String, vector: [F32], limit: I64) =>
 	result <- SearchV<CogneeVector>(vector, limit)::WHERE(_::{collection_name}::EQ(collection_name))
 	RETURN {result: result}
 
@@ -133,7 +133,7 @@ QUERY CogneeDeleteGraph () =>
 // Get the target node and its entire neighborhood
 QUERY CogneeGetConnections (node_id: String) =>
 	main_node <- N<CogneeNode>({node_id: node_id})
-	
+
 	in_nodes <- main_node::In<CogneeEdge>
 	in_edges <- main_node::InE<CogneeEdge>
 

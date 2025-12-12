@@ -1,7 +1,7 @@
 N::Location {
     name: String,
-    traffic_factor: F64,
-    popularity: F64
+    traffic_factor: F32,
+    popularity: F32
 }
 
 E::Route {

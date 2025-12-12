@@ -158,7 +158,7 @@ pub(crate) fn build_field_lookups<'a>(src: &'a Source) -> SchemaVersionMap<'a> {
                                 prefix: FieldPrefix::Empty,
                                 defaults: None,
                                 name: "data".to_string(),
-                                field_type: FieldType::Array(Box::new(FieldType::F64)),
+                                field_type: FieldType::Array(Box::new(FieldType::F32)),
                                 loc: Loc::empty(),
                             }),
                         );
@@ -168,7 +168,7 @@ pub(crate) fn build_field_lookups<'a>(src: &'a Source) -> SchemaVersionMap<'a> {
                                 prefix: FieldPrefix::Empty,
                                 defaults: None,
                                 name: "score".to_string(),
-                                field_type: FieldType::F64,
+                                field_type: FieldType::F32,
                                 loc: Loc::empty(),
                             }),
                         );
@@ -292,7 +292,8 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
         }
         if let Some(v) = edge.properties.as_ref() {
             // Check for duplicate field names (case-insensitive)
-            let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut seen_fields: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for f in v {
                 let lower_name = f.name.to_lowercase();
                 if !seen_fields.insert(lower_name) {
@@ -722,7 +723,7 @@ mod tests {
             N::Person {
                 name: String,
                 age: U32,
-                score: F64,
+                score: F32,
                 active: Boolean,
                 user_id: ID,
                 created_at: Date
@@ -748,7 +749,7 @@ mod tests {
         let source = r#"
             N::Person {
                 tags: [String],
-                scores: [F64],
+                scores: [F32],
                 ids: [ID]
             }
 

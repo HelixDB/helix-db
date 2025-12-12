@@ -13,12 +13,13 @@ use crate::{
             utils::{gen_identifier_or_param, is_valid_identifier},
         },
         generator::{
-            math_functions::{generate_math_expr, ExpressionContext},
+            math_functions::{ExpressionContext, generate_math_expr},
             queries::Query as GeneratedQuery,
             traversal_steps::{
                 FromV as GeneratedFromV, In as GeneratedIn, InE as GeneratedInE,
                 Out as GeneratedOut, OutE as GeneratedOutE, SearchVectorStep,
-                ShortestPath as GeneratedShortestPath, ShortestPathAStar as GeneratedShortestPathAStar,
+                ShortestPath as GeneratedShortestPath,
+                ShortestPathAStar as GeneratedShortestPathAStar,
                 ShortestPathBFS as GeneratedShortestPathBFS,
                 ShortestPathDijkstras as GeneratedShortestPathDijkstras, ShouldCollect,
                 Step as GeneratedStep, ToV as GeneratedToV, Traversal as GeneratedTraversal,
@@ -388,7 +389,13 @@ pub(crate) fn apply_graph_step<'a>(
                             algorithm,
                         },
                         (None, None) => {
-                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPath");
+                            generate_error!(
+                                ctx,
+                                original_query,
+                                sp.loc.clone(),
+                                E627,
+                                "ShortestPath"
+                            );
                             return None;
                         }
                     },
@@ -407,9 +414,7 @@ pub(crate) fn apply_graph_step<'a>(
                 Some(WeightExpression::Expression(expr)) => {
                     // Generate Rust code for the math expression
                     match generate_math_expr(expr, ExpressionContext::WeightCalculation) {
-                        Ok(math_expr) => {
-                            WeightCalculation::Expression(format!("{}", math_expr))
-                        }
+                        Ok(math_expr) => WeightCalculation::Expression(format!("{}", math_expr)),
                         Err(e) => {
                             generate_error!(
                                 ctx,
@@ -424,9 +429,7 @@ pub(crate) fn apply_graph_step<'a>(
                         }
                     }
                 }
-                Some(WeightExpression::Default) | None => {
-                    WeightCalculation::Default
-                }
+                Some(WeightExpression::Default) | None => WeightCalculation::Default,
             };
 
             // Extract weight property for validation (if it's a simple property)
@@ -515,7 +518,13 @@ pub(crate) fn apply_graph_step<'a>(
                             weight_calculation: weight_calculation.clone(),
                         },
                         (None, None) => {
-                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPathDijkstras");
+                            generate_error!(
+                                ctx,
+                                original_query,
+                                sp.loc.clone(),
+                                E627,
+                                "ShortestPathDijkstras"
+                            );
                             return None;
                         }
                     },
@@ -546,7 +555,13 @@ pub(crate) fn apply_graph_step<'a>(
                             to: Some(GenRef::from(to)),
                         },
                         (None, None) => {
-                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPathBFS");
+                            generate_error!(
+                                ctx,
+                                original_query,
+                                sp.loc.clone(),
+                                E627,
+                                "ShortestPathBFS"
+                            );
                             return None;
                         }
                     },
@@ -564,9 +579,7 @@ pub(crate) fn apply_graph_step<'a>(
                 }
                 Some(WeightExpression::Expression(expr)) => {
                     match generate_math_expr(expr, ExpressionContext::WeightCalculation) {
-                        Ok(math_expr) => {
-                            WeightCalculation::Expression(format!("{}", math_expr))
-                        }
+                        Ok(math_expr) => WeightCalculation::Expression(format!("{}", math_expr)),
                         Err(e) => {
                             generate_error!(
                                 ctx,
@@ -588,35 +601,33 @@ pub(crate) fn apply_graph_step<'a>(
 
             traversal
                 .steps
-                .push(Separator::Period(GeneratedStep::ShortestPathAStar(
-                    match (sp.from.clone(), sp.to.clone()) {
-                        (Some(from), Some(to)) => GeneratedShortestPathAStar {
-                            label: type_arg,
-                            from: Some(GenRef::from(from)),
-                            to: Some(GenRef::from(to)),
-                            weight_calculation,
-                            heuristic_property,
-                        },
-                        (Some(from), None) => GeneratedShortestPathAStar {
-                            label: type_arg,
-                            from: Some(GenRef::from(from)),
-                            to: None,
-                            weight_calculation,
-                            heuristic_property,
-                        },
-                        (None, Some(to)) => GeneratedShortestPathAStar {
-                            label: type_arg,
-                            from: None,
-                            to: Some(GenRef::from(to)),
-                            weight_calculation,
-                            heuristic_property,
-                        },
-                        (None, None) => {
-                            generate_error!(ctx, original_query, sp.loc.clone(), E627, "ShortestPathAStar");
-                            return None;
-                        }
+                .push(Separator::Period(GeneratedStep::ShortestPathAStar(match (
+                    sp.from.clone(),
+                    sp.to.clone(),
+                ) {
+                    (Some(from), Some(to)) => GeneratedShortestPathAStar {
+                        label: type_arg,
+                        from: Some(GenRef::from(from)),
+                        to: Some(GenRef::from(to)),
+                        weight_calculation,
+                        heuristic_property,
                     },
-                )));
+                    (Some(from), None) => GeneratedShortestPathAStar {
+                        label: type_arg,
+                        from: Some(GenRef::from(from)),
+                        to: None,
+                        weight_calculation,
+                        heuristic_property,
+                    },
+                    (None, Some(to)) => GeneratedShortestPathAStar {
+                        label: type_arg,
+                        from: None,
+                        to: Some(GenRef::from(to)),
+                        weight_calculation,
+                        heuristic_property,
+                    },
+                    (None, None) => panic!("Invalid shortest path astar"),
+                })));
             traversal.should_collect = ShouldCollect::ToVec;
             Some(Type::Unknown)
         }

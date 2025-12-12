@@ -10,9 +10,6 @@
 ///
 /// NOTE: Loom tests are expensive - they explore all possible execution orderings.
 /// Keep the problem space small (few operations, few threads).
-
-
-
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicU64, Ordering};
 use loom::thread;
@@ -84,9 +81,7 @@ fn loom_entry_point_read_write_race() {
         });
 
         // Reader thread: Reads entry point (might see 0 or 12345)
-        let reader = thread::spawn(move || {
-            reader_entry.load(Ordering::SeqCst)
-        });
+        let reader = thread::spawn(move || reader_entry.load(Ordering::SeqCst));
 
         writer.join().unwrap();
         let read_value = reader.join().unwrap();
@@ -137,7 +132,7 @@ fn loom_neighbor_count_race() {
         // This test demonstrates the lost update problem
         // In real code, this should use fetch_add
         assert!(
-            final_count >= 1 && final_count <= 2,
+            (1..=2).contains(&final_count),
             "Expected 1 or 2, got {}",
             final_count
         );
@@ -176,7 +171,7 @@ fn loom_max_level_update_race() {
         // Should end up with max level of 3
         let final_max = max_level.load(Ordering::SeqCst);
         assert!(
-            final_max >= 2 && final_max <= 3,
+            (2..=3).contains(&final_max),
             "Expected 2 or 3, got {}",
             final_max
         );
@@ -295,9 +290,7 @@ fn loom_two_writers_one_reader() {
         });
 
         // Reader: Read value (should see 0, 1, or 2)
-        let reader = thread::spawn(move || {
-            r_value.load(Ordering::SeqCst)
-        });
+        let reader = thread::spawn(move || r_value.load(Ordering::SeqCst));
 
         w1.join().unwrap();
         w2.join().unwrap();

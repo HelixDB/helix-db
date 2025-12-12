@@ -261,8 +261,8 @@ fn test_dijkstra_custom_weight_function() {
             .as_ref()
             .and_then(|props| props.get("distance"))
             .and_then(|v| match v {
-                Value::F64(f) => Some(*f),
-                Value::F32(f) => Some(*f as f64),
+                Value::F64(f) => Some(*f as f32),
+                Value::F32(f) => Some(*f),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -399,8 +399,8 @@ fn test_dijkstra_multi_context_weight() {
             .as_ref()
             .and_then(|props| props.get("distance"))
             .and_then(|v| match v {
-                Value::F64(f) => Some(*f),
-                Value::F32(f) => Some(*f as f64),
+                Value::F64(f) => Some(*f as f32),
+                Value::F32(f) => Some(*f),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -414,8 +414,8 @@ fn test_dijkstra_multi_context_weight() {
             .as_ref()
             .and_then(|props| props.get("traffic_factor"))
             .and_then(|v| match v {
-                Value::F64(f) => Some(*f),
-                Value::F32(f) => Some(*f as f64),
+                Value::F64(f) => Some(*f as f32),
+                Value::F32(f) => Some(*f),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -837,7 +837,7 @@ fn test_astar_custom_weight_and_heuristic() {
     let start = G::new_mut(&storage, &arena, &mut txn)
         .add_n(
             "city",
-            props_option(&arena, props!("name" => "start", "h" => 10.0)),
+            props_option(&arena, props!("name" => "start", "h" => 10.0_f32)),
             None,
         )
         .collect::<Result<Vec<_>, _>>()
@@ -857,7 +857,10 @@ fn test_astar_custom_weight_and_heuristic() {
     G::new_mut(&storage, &arena, &mut txn)
         .add_edge(
             "road",
-            props_option(&arena, props!("distance" => 100.0, "traffic" => 0.5)),
+            props_option(
+                &arena,
+                props!("distance" => 100.0_f32, "traffic" => 0.5_f32),
+            ),
             start,
             end,
             false,
@@ -874,18 +877,18 @@ fn test_astar_custom_weight_and_heuristic() {
     let custom_weight = |edge: &crate::utils::items::Edge,
                          _src: &crate::utils::items::Node,
                          _dst: &crate::utils::items::Node| {
-        let distance = edge
-            .get_property("distance")
-            .ok_or(crate::helix_engine::types::GraphError::New(
-                "distance property not found".to_string(),
-            ))?
-            .as_f64();
+        let a =
+            edge.get_property("distance")
+                .ok_or(crate::helix_engine::types::GraphError::New(
+                    "distance property not found".to_string(),
+                ))?;
+        let distance = a.as_f32();
         let traffic = edge
             .get_property("traffic")
             .ok_or(crate::helix_engine::types::GraphError::New(
                 "traffic property not found".to_string(),
             ))?
-            .as_f64();
+            .as_f32();
         Ok(distance * traffic)
     };
 
