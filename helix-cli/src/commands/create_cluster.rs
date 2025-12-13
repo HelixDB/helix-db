@@ -146,6 +146,7 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
             build_mode: existing.build_mode,
             env_vars: existing.env_vars.clone(),
             db_config: existing.db_config.clone(),
+            queries: existing.queries.clone(),
         }
     } else {
         CloudInstanceConfig {
@@ -154,6 +155,7 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
             build_mode: crate::config::BuildMode::Release,
             env_vars: std::collections::HashMap::new(),
             db_config: DbConfig::default(),
+            queries: None,
         }
     };
 

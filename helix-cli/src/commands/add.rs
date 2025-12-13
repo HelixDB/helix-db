@@ -195,6 +195,7 @@ async fn run_add_inner(
                 port: None, // Let the system assign a port
                 build_mode: BuildMode::Debug,
                 db_config: DbConfig::default(),
+                queries: None,
             };
 
             project_context

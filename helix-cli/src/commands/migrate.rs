@@ -432,6 +432,7 @@ fn create_v2_config(ctx: &MigrationContext) -> Result<()> {
         port: Some(ctx.port),
         build_mode: BuildMode::Debug,
         db_config,
+        queries: None,
     };
 
     // Create local instances map

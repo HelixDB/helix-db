@@ -64,7 +64,7 @@ async fn test_compile_success() {
     let (_temp_dir, project_path) = setup_compile_project();
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(
         result.is_ok(),
         "Compile should succeed with valid project: {:?}",
@@ -87,7 +87,7 @@ async fn test_compile_with_custom_output_path() {
     let output_dir = project_path.join("custom_output");
     fs::create_dir_all(&output_dir).expect("Failed to create custom output dir");
 
-    let result = run(Some(output_dir.to_str().unwrap().to_string()), None).await;
+    let result = run(Some(output_dir.to_str().unwrap().to_string()), None, None).await;
     assert!(
         result.is_ok(),
         "Compile should succeed with custom output path: {:?}",
@@ -106,7 +106,7 @@ async fn test_compile_with_custom_output_path() {
 async fn test_compile_with_explicit_project_path() {
     let (_temp_dir, project_path) = setup_compile_project();
 
-    let result = run(None, Some(project_path.to_str().unwrap().to_string())).await;
+    let result = run(None, Some(project_path.to_str().unwrap().to_string()),None).await;
     assert!(
         result.is_ok(),
         "Compile should succeed with explicit project path: {:?}",
@@ -150,7 +150,7 @@ QUERY GetUser(user_id: ID) =>
 
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(result.is_err(), "Compile should fail without schema");
     let error_msg = format!("{:?}", result.err().unwrap());
     assert!(
@@ -197,7 +197,7 @@ QUERY InvalidQuery
 
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(result.is_err(), "Compile should fail with invalid syntax");
 }
 
@@ -207,7 +207,7 @@ async fn test_compile_fails_without_helix_toml() {
     let project_path = temp_dir.path().to_path_buf();
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(
         result.is_err(),
         "Compile should fail without helix.toml in project"
@@ -254,7 +254,7 @@ E::Follows {
 
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(
         result.is_ok(),
         "Compile should succeed with schema only (queries are optional): {:?}",
@@ -321,7 +321,7 @@ QUERY GetUser(id: ID) =>
 
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(
         result.is_ok(),
         "Compile should succeed with multiple .hx files: {:?}",
@@ -366,7 +366,7 @@ N::User {
 
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(
         result.is_ok(),
         "Compile should work with custom queries path: {:?}",
@@ -386,7 +386,7 @@ async fn test_compile_creates_all_required_files() {
     let (_temp_dir, project_path) = setup_compile_project();
     let _guard = std::env::set_current_dir(&project_path);
 
-    let result = run(None, None).await;
+    let result = run(None, None, None).await;
     assert!(result.is_ok(), "Compile should succeed");
 
     // Check for common generated files

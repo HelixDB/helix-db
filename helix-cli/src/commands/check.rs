@@ -46,7 +46,7 @@ async fn check_instance(
 
     // Step 1: Validate syntax first (quick check)
     print_status("SYNTAX", "Validating query syntax...");
-    validate_project_syntax(project)?;
+    validate_project_syntax(project, instance_name)?;
     print_success("Syntax validation passed");
 
     // Step 2: Ensure helix repo is cached (reuse from build.rs)
@@ -133,9 +133,11 @@ async fn check_all_instances(
 }
 
 /// Validate project syntax by parsing queries and schema (similar to build.rs but without generating files)
-fn validate_project_syntax(project: &ProjectContext) -> Result<()> {
+fn validate_project_syntax(project: &ProjectContext, instance_name: &str) -> Result<()> {
     // Collect all .hx files for validation
-    let hx_files = collect_hx_files(&project.root, &project.config.project.queries)?;
+    let instance = project.config.get_instance(instance_name)?;
+    let queries_path = instance.queries_path(&project.config.project.queries);
+    let hx_files = collect_hx_files(&project.root, queries_path)?;
 
     // Generate content and validate using helix-db parsing logic
     let content = generate_content(&hx_files)?;

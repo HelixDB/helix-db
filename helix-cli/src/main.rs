@@ -66,6 +66,8 @@ enum Commands {
 
     /// Compile project queries into the workspace
     Compile {
+        /// Instance to compile
+        instance: Option<String>,
         /// Directory containing helix.toml (defaults to current directory or project root)
         #[clap(short, long)]
         path: Option<String>,
@@ -218,7 +220,7 @@ async fn main() -> Result<()> {
             commands::create_cluster::run(&instance, region).await
         }
         Commands::Check { instance } => commands::check::run(instance, &metrics_sender).await,
-        Commands::Compile { output, path } => commands::compile::run(output, path).await,
+        Commands::Compile { output, path, instance } => commands::compile::run(output, path, instance.as_deref()).await,
         Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
             .await
             .map(|_| ()),

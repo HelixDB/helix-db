@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use eyre::Result;
+use eyre::{eyre, Result};
 
 use crate::{
     project::ProjectContext,
@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-pub async fn run(output_dir: Option<String>, path: Option<String>) -> Result<()> {
+pub async fn run(output_dir: Option<String>, path: Option<String>, instance_name: Option<&str>) -> Result<()> {
     println!("Checking Helix queries...");
     print_status("VALIDATE", "Parsing and validating Helix queries");
 
@@ -26,7 +26,24 @@ pub async fn run(output_dir: Option<String>, path: Option<String>) -> Result<()>
     };
 
     // Collect all .hx files for validation from the queries directory
-    let hx_files = collect_hx_files(&project.root, &project.config.project.queries)?;
+    let instance_name = match instance_name {
+        Some(name) => name,
+        None => {
+            let local_instances: Vec<_> = project.config.local.keys().collect();
+            if local_instances.is_empty() {
+                let cloud_instances: Vec<_> = project.config.cloud.keys().collect();
+                if cloud_instances.is_empty() {
+                    return Err(eyre!("No instances configured in helix.toml"));
+                }
+                cloud_instances[0]
+            } else {
+                local_instances[0]
+            }
+        }
+    };
+    let instance = project.config.get_instance(instance_name)?;
+    let queries_path = instance.queries_path(&project.config.project.queries);
+    let hx_files = collect_hx_files(&project.root, queries_path)?;
 
     // Generate content and validate using helix-db parsing logic
     let content = generate_content(&hx_files)?;
