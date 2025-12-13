@@ -1,0 +1,9 @@
+[project]
+name = "upsert_operations"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

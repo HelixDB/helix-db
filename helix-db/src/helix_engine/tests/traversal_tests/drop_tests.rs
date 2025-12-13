@@ -170,7 +170,8 @@ fn test_drop_node() {
     let edges = G::new(&storage, &txn, &arena)
         .n_from_id(&node2_id)
         .in_e("knows")
-        .collect::<Result<Vec<_>, _>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     println!("edges: {:?}", edges);
     assert!(edges.is_empty());
 }

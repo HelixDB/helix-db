@@ -115,7 +115,12 @@ async fn check_all_instances(
 ) -> Result<()> {
     print_status("CHECK", "Checking all instances");
 
-    let instances: Vec<String> = project.config.list_instances().into_iter().map(String::from).collect();
+    let instances: Vec<String> = project
+        .config
+        .list_instances()
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     if instances.is_empty() {
         return Err(eyre::eyre!(
@@ -193,7 +198,8 @@ fn handle_cargo_check_failure(
     print_warning("You can report this issue to help improve Helix.");
     println!();
 
-    let should_create = print_confirm("Would you like to create a GitHub issue with diagnostic information?")?;
+    let should_create =
+        print_confirm("Would you like to create a GitHub issue with diagnostic information?")?;
 
     if !should_create {
         return Ok(());

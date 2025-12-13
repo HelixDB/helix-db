@@ -25,8 +25,15 @@ pub enum DockerBuildError {
 impl fmt::Display for DockerBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DockerBuildError::RustCompilation { output, instance_name } => {
-                write!(f, "Rust compilation failed for instance '{}': {}", instance_name, output)
+            DockerBuildError::RustCompilation {
+                output,
+                instance_name,
+            } => {
+                write!(
+                    f,
+                    "Rust compilation failed for instance '{}': {}",
+                    instance_name, output
+                )
             }
         }
     }
