@@ -95,6 +95,7 @@ pub struct Traversal {
     pub excluded_fields: Vec<String>,
     pub nested_traversals: std::collections::HashMap<String, NestedTraversalInfo>,
     pub is_reused_variable: bool,
+    pub closure_param_name: Option<String>, // HQL closure parameter name (e.g., "e" from entries::|e|)
 }
 
 impl Display for Traversal {
@@ -177,6 +178,7 @@ impl Default for Traversal {
             excluded_fields: vec![],
             nested_traversals: std::collections::HashMap::new(),
             is_reused_variable: false,
+            closure_param_name: None,
         }
     }
 }
