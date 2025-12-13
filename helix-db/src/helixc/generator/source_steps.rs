@@ -154,15 +154,11 @@ pub struct UpsertN {
     /// Names of properties to index on
     pub secondary_indices: Option<Vec<String>>,
 }
+
 impl Display for UpsertN {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let properties = write_properties(&self.properties);
-        let secondary_indices = write_secondary_indices(&self.secondary_indices);
-        write!(
-            f,
-            "upsert_n({}, {}, {})",
-            self.label, properties, secondary_indices
-        )
+        write!(f, "upsert_n({}, {})", self.label, properties)
     }
 }
 
@@ -191,9 +187,9 @@ impl Display for UpsertE {
                     f,
                     "upsert_e({}, {}, {}, {})",
                     self.label,
-                    write_properties(&self.properties),
                     self.from,
-                    self.to
+                    self.to,
+                    write_properties(&self.properties),
                 )
             }
             (true, false) => {
@@ -246,7 +242,7 @@ impl Display for UpsertV {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "upsert_v::<fn(&HVector, &RoTxn) -> bool>({}, {}, {})",
+            "upsert_v({}, {}, {})",
             self.vec,
             self.label,
             write_properties(&self.properties)
