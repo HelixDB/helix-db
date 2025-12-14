@@ -1,0 +1,22 @@
+[package]
+name = "helix-lib"
+version = "0.1.0"
+edition = "2024"
+description = "Rust SDK for HelixDB - Direct access to HelixDB operations without HTTP"
+license = "AGPL-3.0"
+authors = ["HelixDB Team"]
+
+[dependencies]
+helix-db = { path = "../helix-db" }
+helix-macros = { path = "../helix-macros" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+axum = { version = "0.8", default-features = false }
+inventory = "0.3.16"
+heed3 = "0.22.0"
+
+[build-dependencies]
+walkdir = "2.0"
+regex = "1.0"

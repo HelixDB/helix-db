@@ -6,6 +6,7 @@ members = [
     "helix-cli",
     "hql-tests",
     "metrics",
+    "helix-lib",
 ]
 resolver = "2"
 

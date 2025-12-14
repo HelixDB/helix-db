@@ -1460,6 +1460,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "helix-lib"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "heed3",
+ "helix-db",
+ "helix-macros",
+ "inventory",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "helix-lib-example"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "helix-lib",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "helix-macros"
 version = "0.1.7"
 dependencies = [

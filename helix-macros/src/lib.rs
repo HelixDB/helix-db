@@ -5,11 +5,59 @@ extern crate syn;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream}, parse_macro_input, Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem
+    parse::{Parse, ParseStream}, parse_macro_input, Data, DeriveInput, Expr, FnArg, Ident, ItemFn, ItemStruct, ItemTrait, LitInt, Pat, Stmt, Token, TraitItem, LitStr
 };
 
+#[allow(dead_code)] // Fields are used by build script for metadata extraction
+struct HandlerArgs {
+    param_struct: Option<LitStr>,
+    return_type: Option<LitStr>,
+}
+
+impl Parse for HandlerArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut param_struct = None;
+        let mut return_type = None;
+        
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            let ident_str = ident.to_string();
+            
+            if ident_str == "params" {
+                input.parse::<Token![=]>()?;
+                let value: LitStr = input.parse()?;
+                param_struct = Some(value);
+            } else if ident_str == "returns" {
+                input.parse::<Token![=]>()?;
+                let value: LitStr = input.parse()?;
+                return_type = Some(value);
+            } else {
+                return Err(syn::Error::new(ident.span(), "Unknown attribute. Expected 'params' or 'returns'"));
+            }
+            
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        
+        Ok(HandlerArgs {
+            param_struct,
+            return_type,
+        })
+    }
+}
+
 #[proc_macro_attribute]
-pub fn handler(_args: TokenStream, item: TokenStream) -> TokenStream {
+pub fn handler(args: TokenStream, item: TokenStream) -> TokenStream {
+    let _handler_args = if args.is_empty() {
+        HandlerArgs {
+            param_struct: None,
+            return_type: None,
+        }
+    } else {
+        parse_macro_input!(args as HandlerArgs)
+    };
+    
     let input_fn = parse_macro_input!(item as ItemFn);
     let fn_name = &input_fn.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -27,8 +75,8 @@ pub fn handler(_args: TokenStream, item: TokenStream) -> TokenStream {
         #[used]
         static #static_name: () = {
             inventory::submit! {
-                ::helix_db::helix_gateway::router::router::HandlerSubmission(
-                    ::helix_db::helix_gateway::router::router::Handler::new(
+                ::helix_lib::HandlerSubmission(
+                    ::helix_lib::Handler::new(
                         #fn_name_str,
                         #fn_name
                     )
@@ -86,8 +134,8 @@ pub fn get_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[used]
         static #static_name: () = {
             inventory::submit! {
-                ::helix_db::helix_gateway::router::router::HandlerSubmission(
-                    ::helix_db::helix_gateway::router::router::Handler::new(
+                ::helix_lib::HandlerSubmission(
+                    ::helix_lib::Handler::new(
                         #fn_name_str,
                         #fn_name
                     )
@@ -407,4 +455,16 @@ pub fn traversable_derive(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[proc_macro_attribute]
+pub fn helix_main(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input_fn = parse_macro_input!(item as ItemFn);
+    
+    let expanded = quote! {
+        // User's original main function
+        #input_fn
+    };
+    
+    expanded.into()
 }
