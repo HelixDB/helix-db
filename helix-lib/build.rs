@@ -40,12 +40,8 @@ fn find_workspace_root(manifest_dir: &str) -> PathBuf {
     let mut current = PathBuf::from(manifest_dir);
     loop {
         let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(content) = fs::read_to_string(&cargo_toml) {
-                if content.contains("[workspace]") {
-                    return current;
-                }
-            }
+        if cargo_toml.exists() && let Ok(content) = fs::read_to_string(&cargo_toml) && content.contains("[workspace]") {
+            return current;
         }
         if !current.pop() {
             break;
@@ -78,70 +74,66 @@ fn scan_workspace_for_handlers(workspace_root: &Path) -> Vec<HandlerInfo> {
         };
         let path = entry.path();
         
-        if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if let Ok(content) = fs::read_to_string(path) {
-                let lines: Vec<&str> = content.lines().collect();
+        if path.extension().and_then(|s| s.to_str()) == Some("rs") && let Ok(content) = fs::read_to_string(path) {
+            let lines: Vec<&str> = content.lines().collect();
                 // Find all #[handler] attributes
                 for (line_num, line) in lines.iter().enumerate() {
                     if handler_regex.is_match(line) {
                         // Extract handler name from next few lines (function definition)
                         let mut found_fn = false;
                         for i in 1..=5 {
-                            if let Some(next_line) = lines.get(line_num + i) {
-                                if let Some(captures) = fn_regex.captures(next_line) {
-                                    if let Some(name_match) = captures.get(1) {
-                                        let name = name_match.as_str().to_string();
-                                        
-                                        let param_struct = params_regex
-                                            .captures(line)
-                                            .and_then(|c| c.get(1))
-                                            .map(|m| m.as_str().to_string());
-                                        
-                                        let return_type = returns_regex
-                                            .captures(line)
-                                            .and_then(|c| c.get(1))
-                                            .map(|m| m.as_str().to_string());
-                                        
-                                        handlers.push(HandlerInfo {
-                                            name,
-                                            param_struct,
-                                            return_type,
-                                            source_file: path.to_string_lossy().to_string(),
-                                        });
-                                        found_fn = true;
-                                        break;
-                                    }
-                                }
+                            if let Some(next_line) = lines.get(line_num + i)
+                                && let Some(captures) = fn_regex.captures(next_line)
+                                && let Some(name_match) = captures.get(1) {
+                                let name = name_match.as_str().to_string();
+                                
+                                let param_struct = params_regex
+                                    .captures(line)
+                                    .and_then(|c| c.get(1))
+                                    .map(|m| m.as_str().to_string());
+                                
+                                let return_type = returns_regex
+                                    .captures(line)
+                                    .and_then(|c| c.get(1))
+                                    .map(|m| m.as_str().to_string());
+                                
+                                handlers.push(HandlerInfo {
+                                    name,
+                                    param_struct,
+                                    return_type,
+                                    source_file: path.to_string_lossy().to_string(),
+                                });
+                                found_fn = true;
+                                break;
                             }
                         }
                         if !found_fn {
                             // Try to extract from the same line or nearby
-                            if let Some(captures) = fn_regex.captures(line) {
-                                if let Some(name_match) = captures.get(1) {
-                                    let name = name_match.as_str().to_string();
-                                    
-                                    let param_struct = params_regex
-                                        .captures(line)
-                                        .and_then(|c| c.get(1))
-                                        .map(|m| m.as_str().to_string());
-                                    
-                                    let return_type = returns_regex
-                                        .captures(line)
-                                        .and_then(|c| c.get(1))
-                                        .map(|m| m.as_str().to_string());
-                                    
-                                    handlers.push(HandlerInfo {
-                                        name,
-                                        param_struct,
-                                        return_type,
-                                        source_file: path.to_string_lossy().to_string(),
-                                    });
-                                }
+                            if let Some(captures) = fn_regex.captures(line)
+                                && let Some(name_match) = captures.get(1) {
+                                let name = name_match.as_str().to_string();
+                                
+                                let param_struct = params_regex
+                                    .captures(line)
+                                    .and_then(|c| c.get(1))
+                                    .map(|m| m.as_str().to_string());
+                                
+                                let return_type = returns_regex
+                                    .captures(line)
+                                    .and_then(|c| c.get(1))
+                                    .map(|m| m.as_str().to_string());
+                                
+                                handlers.push(HandlerInfo {
+                                    name,
+                                    param_struct,
+                                    return_type,
+                                    source_file: path.to_string_lossy().to_string(),
+                                });
                             }
                         }
                     }
                 }
-            }
+            
         }
     }
     
@@ -181,9 +173,9 @@ fn generate_metadata_code(handlers: &[HandlerInfo]) -> String {
 
 fn generate_methods_code(handlers: &[HandlerInfo]) -> String {
     let mut code = String::from("// Auto-generated handler methods by build.rs\n\n");
-    code.push_str("use crate::error::{HelixError, HelixResult};\n");
+    // Note: Imports are not needed here because this code is included in client.rs
+    // which already has the necessary imports
     code.push_str("use helix_db::protocol::{Request, Format, request::RequestType};\n");
-    code.push_str("use helix_db::helix_gateway::router::router::HandlerInput;\n");
     code.push_str("use serde_json;\n");
     code.push_str("use axum::body::Bytes;\n\n");
     
