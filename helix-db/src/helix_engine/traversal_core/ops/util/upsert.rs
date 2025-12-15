@@ -45,7 +45,7 @@ pub trait UpsertAdapter<'db, 'arena, 'txn>: Iterator {
 
     fn upsert_v(
         self,
-        query: Option<&'arena [f64]>,
+        query: &'arena [f64],
         label: &'arena str,
         props: &[(&'static str, Value)],
     ) -> RwTraversalIterator<
@@ -456,7 +456,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
     fn upsert_v(
         mut self,
-        query: Option<&'arena [f64]>,
+        query: &'arena [f64],
         label: &'arena str,
         props: &[(&'static str, Value)],
     ) -> RwTraversalIterator<
@@ -632,7 +632,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     deleted: false,
                     level: 1,
                     distance: None,
-                    data: query.unwrap_or(&[]),
+                    data: query,
                     properties,
                 };
 

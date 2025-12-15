@@ -495,7 +495,7 @@ fn test_upsert_v_creates_new_vector_when_none_exists() {
         &arena,
     )
     .upsert_v(
-        Some(&query),
+        &query,
         "embedding",
         &[("model", Value::from("bert")), ("version", Value::from(2))],
     )
@@ -526,7 +526,7 @@ fn test_upsert_v_creates_vector_with_default_data_when_none_provided() {
         std::iter::empty::<TraversalValue>(),
         &arena,
     )
-    .upsert_v(None, "placeholder", &[("status", Value::from("pending"))])
+    .upsert_v(&[], "placeholder", &[("status", Value::from("pending"))])
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
 
@@ -564,7 +564,7 @@ fn test_upsert_v_updates_existing_vector_with_no_properties() {
     // Upsert with new properties
     let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_vector), &arena)
         .upsert_v(
-            Some(&[0.8, 0.9, 1.0]),
+            &[0.8, 0.9, 1.0],
             "embedding",
             &[("source", Value::from("openai")), ("dim", Value::from(3))],
         )
@@ -612,7 +612,7 @@ fn test_upsert_v_updates_existing_vector_with_properties() {
     // Upsert with updated and new properties
     let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_vector), &arena)
         .upsert_v(
-            Some(&[0.4, 0.5, 0.6]),
+            &[0.4, 0.5, 0.6],
             "embedding",
             &[
                 ("model", Value::from("gpt4")),         // Update existing
@@ -654,7 +654,7 @@ fn test_upsert_v_ignores_non_vector_values() {
     // Upsert with node in iterator (should be ignored)
     let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(node), &arena)
         .upsert_v(
-            Some(&[0.7, 0.8, 0.9]),
+            &[0.7, 0.8, 0.9],
             "document_embedding",
             &[("type", Value::from("paragraph"))],
         )
@@ -928,7 +928,7 @@ fn test_upsert_v_with_bm25_indexing() {
         &arena,
     )
     .upsert_v(
-        Some(&[0.1, 0.2, 0.3]),
+        &[0.1, 0.2, 0.3],
         "document",
         &[(
             "content",

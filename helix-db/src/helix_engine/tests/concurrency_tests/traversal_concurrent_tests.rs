@@ -1,4 +1,5 @@
 use bumpalo::Bump;
+use serial_test::serial;
 /// Concurrent access tests for Traversal Operations
 ///
 /// This test suite validates thread safety and concurrent operation correctness
@@ -16,8 +17,6 @@ use bumpalo::Bump;
 /// - No race conditions in neighbor list updates
 use std::sync::{Arc, Barrier};
 use std::thread;
-use bumpalo::Bump;
-use serial_test::serial;
 use tempfile::TempDir;
 
 use crate::helix_engine::storage_core::HelixGraphStorage;
