@@ -5,9 +5,9 @@ pub mod storage_migration;
 pub mod version_info;
 
 #[cfg(test)]
-mod storage_migration_tests;
-#[cfg(test)]
 mod storage_concurrent_tests;
+#[cfg(test)]
+mod storage_migration_tests;
 
 use crate::{
     helix_engine::{
@@ -144,15 +144,26 @@ impl HelixGraphStorage {
         let mut secondary_indices = HashMap::new();
         if let Some(indexes) = config.get_graph_config().secondary_indices {
             for index in indexes {
-                secondary_indices.insert(
-                    index.clone(),
-                    graph_env
-                        .database_options()
-                        .types::<Bytes, U128<BE>>()
-                        .flags(DatabaseFlags::DUP_SORT) // DUP_SORT used to store all duplicated node keys under a single key. Saves on space and requires a single read to get all values.
-                        .name(&index)
-                        .create(&mut wtxn)?,
-                );
+                match index {
+                    super::types::SecondaryIndex::Unique(name) => secondary_indices.insert(
+                        name.clone(),
+                        graph_env
+                            .database_options()
+                            .types::<Bytes, U128<BE>>()
+                            .name(&name)
+                            .create(&mut wtxn)?,
+                    ),
+                    super::types::SecondaryIndex::Index(name) => secondary_indices.insert(
+                        name.clone(),
+                        graph_env
+                            .database_options()
+                            .types::<Bytes, U128<BE>>()
+                            .flags(DatabaseFlags::DUP_SORT) // DUP_SORT used to store all duplicated node keys under a single key. Saves on space and requires a single read to get all values.
+                            .name(&name)
+                            .create(&mut wtxn)?,
+                    ),
+                    super::types::SecondaryIndex::None => continue,
+                };
             }
         }
         let vector_config = config.get_vector_config();

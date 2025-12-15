@@ -1,8 +1,15 @@
-use crate::{helix_gateway::router::router::IoContFn, helixc::parser::errors::ParserError};
+use crate::{
+    helix_gateway::router::router::IoContFn,
+    helixc::parser::{
+        errors::ParserError,
+        types::{Field, FieldPrefix},
+    },
+};
 use core::fmt;
 use heed3::Error as HeedError;
+use serde::{Deserialize, Serialize};
 use sonic_rs::Error as SonicError;
-use std::{net::AddrParseError, str::Utf8Error, string::FromUtf8Error};
+use std::{fmt::Display, net::AddrParseError, str::Utf8Error, string::FromUtf8Error};
 
 #[derive(Debug)]
 pub enum GraphError {
@@ -30,8 +37,6 @@ pub enum GraphError {
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
     RerankerError(String),
-
- 
 }
 
 impl std::error::Error for GraphError {}
@@ -201,5 +206,33 @@ impl From<SonicError> for VectorError {
 impl From<bincode::Error> for VectorError {
     fn from(error: bincode::Error) -> Self {
         VectorError::ConversionError(format!("bincode error: {error}"))
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum SecondaryIndex {
+    Unique(String),
+    Index(String),
+    None,
+}
+
+impl Display for SecondaryIndex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Unique(name) => write!(f, "SecondaryIndex::Unique(\"{name}\".to_string())"),
+            Self::Index(name) => write!(f, "SecondaryIndex::Index(\"{name}\".to_string())"),
+            SecondaryIndex::None => write!(f, ""),
+        }
+    }
+}
+
+impl SecondaryIndex {
+    pub fn from_field(field: &Field) -> Self {
+        match field.prefix {
+            FieldPrefix::Index => Self::Index(field.name.clone()),
+            FieldPrefix::UniqueIndex => Self::Unique(field.name.clone()),
+            FieldPrefix::Empty => Self::None,
+            FieldPrefix::Optional => todo!(),
+        }
     }
 }

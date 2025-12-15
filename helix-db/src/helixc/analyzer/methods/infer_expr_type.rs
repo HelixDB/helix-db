@@ -364,8 +364,7 @@ pub(crate) fn infer_expr_type<'a>(
                                 .properties
                                 .iter()
                                 .filter_map(|p| {
-                                    matches!(p.is_index, FieldPrefix::Index)
-                                        .then_some(p.name.clone())
+                                    p.field_prefix.is_indexed().then_some(p.name.clone())
                                 })
                                 .collect::<Vec<_>>();
                             match secondary_indices.is_empty() {

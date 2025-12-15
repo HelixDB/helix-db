@@ -1,5 +1,8 @@
 use super::location::Loc;
-use crate::{helixc::parser::{errors::ParserError, HelixParser}, protocol::value::Value};
+use crate::{
+    helixc::parser::{HelixParser, errors::ParserError},
+    protocol::value::Value,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -168,6 +171,11 @@ pub struct Field {
 impl Field {
     pub fn is_indexed(&self) -> bool {
         self.prefix.is_indexed()
+    }
+}
+impl PartialEq for Field {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
     }
 }
 
@@ -477,7 +485,7 @@ pub enum MathFunction {
     Sqrt,
     Ln,
     Log10,
-    Log,    // Binary: LOG(x, base)
+    Log, // Binary: LOG(x, base)
     Exp,
     Ceil,
     Floor,
@@ -490,7 +498,7 @@ pub enum MathFunction {
     Asin,
     Acos,
     Atan,
-    Atan2,  // Binary: ATAN2(y, x)
+    Atan2, // Binary: ATAN2(y, x)
 
     // Constants (nullary)
     Pi,
@@ -509,16 +517,33 @@ impl MathFunction {
     pub fn arity(&self) -> usize {
         match self {
             MathFunction::Pi | MathFunction::E => 0,
-            MathFunction::Abs | MathFunction::Sqrt | MathFunction::Ln |
-            MathFunction::Log10 | MathFunction::Exp | MathFunction::Ceil |
-            MathFunction::Floor | MathFunction::Round | MathFunction::Sin |
-            MathFunction::Cos | MathFunction::Tan | MathFunction::Asin |
-            MathFunction::Acos | MathFunction::Atan | MathFunction::Min |
-            MathFunction::Max | MathFunction::Sum | MathFunction::Avg |
-            MathFunction::Count => 1,
-            MathFunction::Add | MathFunction::Sub | MathFunction::Mul |
-            MathFunction::Div | MathFunction::Pow | MathFunction::Mod |
-            MathFunction::Atan2 | MathFunction::Log => 2,
+            MathFunction::Abs
+            | MathFunction::Sqrt
+            | MathFunction::Ln
+            | MathFunction::Log10
+            | MathFunction::Exp
+            | MathFunction::Ceil
+            | MathFunction::Floor
+            | MathFunction::Round
+            | MathFunction::Sin
+            | MathFunction::Cos
+            | MathFunction::Tan
+            | MathFunction::Asin
+            | MathFunction::Acos
+            | MathFunction::Atan
+            | MathFunction::Min
+            | MathFunction::Max
+            | MathFunction::Sum
+            | MathFunction::Avg
+            | MathFunction::Count => 1,
+            MathFunction::Add
+            | MathFunction::Sub
+            | MathFunction::Mul
+            | MathFunction::Div
+            | MathFunction::Pow
+            | MathFunction::Mod
+            | MathFunction::Atan2
+            | MathFunction::Log => 2,
         }
     }
 
@@ -639,7 +664,9 @@ impl Display for ExpressionType {
             ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
             ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
             ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
-            ExpressionType::MathFunctionCall(mfc) => write!(f, "{}({:?})", mfc.function.name(), mfc.args),
+            ExpressionType::MathFunctionCall(mfc) => {
+                write!(f, "{}({:?})", mfc.function.name(), mfc.args)
+            }
             ExpressionType::Empty => write!(f, "Empty"),
         }
     }
@@ -701,13 +728,13 @@ pub struct OrderBy {
 #[derive(Debug, Clone)]
 pub struct Aggregate {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GroupBy {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
