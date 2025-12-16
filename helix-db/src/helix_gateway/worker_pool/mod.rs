@@ -49,7 +49,7 @@ impl WorkerPool {
             panic!("The number of workers should be a multiple of 2 for fairness.");
         }
 
-        let workers = iter::repeat_n(Arc::clone(&workers_core_setter), num_workers)
+        let workers = iter::repeat_n(workers_core_setter, num_workers)
             .enumerate()
             .map(|(i, setter)| {
                 Worker::start(
@@ -148,7 +148,9 @@ impl Worker {
                             Ok((ret_chan, cfn)) => {
                                 let result = cfn().map_err(Into::into);
                                 if ret_chan.send(result).is_err() {
-                                    trace!("Client disconnected before continuation response could be sent");
+                                    trace!(
+                                        "Client disconnected before continuation response could be sent"
+                                    );
                                 }
                             }
                             Err(flume::TryRecvError::Disconnected) => {
@@ -198,7 +200,9 @@ impl Worker {
                             Ok((ret_chan, cfn)) => {
                                 let result = cfn().map_err(Into::into);
                                 if ret_chan.send(result).is_err() {
-                                    trace!("Client disconnected before continuation response could be sent");
+                                    trace!(
+                                        "Client disconnected before continuation response could be sent"
+                                    );
                                 }
                             }
                             Err(flume::RecvError::Disconnected) => {
@@ -239,7 +243,9 @@ impl Worker {
                     Ok((ret_chan, cfn)) => {
                         let result = cfn().map_err(Into::into);
                         if ret_chan.send(result).is_err() {
-                            trace!("Client disconnected before continuation response could be sent");
+                            trace!(
+                                "Client disconnected before continuation response could be sent"
+                            );
                         }
                     }
                     Err(flume::TryRecvError::Disconnected) => {
