@@ -49,6 +49,7 @@ pub struct EdgeSchema {
     pub name: String,
     pub from: String,
     pub to: String,
+    pub is_unique: bool,
     pub properties: Vec<SchemaProperty>,
 }
 impl Display for EdgeSchema {
@@ -56,6 +57,7 @@ impl Display for EdgeSchema {
         writeln!(f, "pub struct {} {{", self.name)?;
         writeln!(f, "    pub from: {},", self.from)?;
         writeln!(f, "    pub to: {},", self.to)?;
+        writeln!(f, "    pub is_unique: {},", self.is_unique)?;
         for property in &self.properties {
             writeln!(f, "    pub {}: {},", property.name, property.field_type)?;
         }
@@ -246,6 +248,7 @@ mod tests {
                 default_value: None,
                 field_prefix: FieldPrefix::Empty,
             }],
+            is_unique: false,
         };
 
         let output = format!("{}", schema);
@@ -262,6 +265,7 @@ mod tests {
             from: "User".to_string(),
             to: "User".to_string(),
             properties: vec![],
+            is_unique: false,
         };
 
         let output = format!("{}", schema);
@@ -282,6 +286,7 @@ mod tests {
                 default_value: None,
                 field_prefix: FieldPrefix::Empty,
             }],
+            is_unique: false,
         };
 
         let output = schema.to_typescript();
@@ -297,6 +302,7 @@ mod tests {
             name: "Rated".to_string(),
             from: "User".to_string(),
             to: "Movie".to_string(),
+            is_unique: false,
             properties: vec![
                 SchemaProperty {
                     name: "rating".to_string(),

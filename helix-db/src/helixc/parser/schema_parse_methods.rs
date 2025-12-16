@@ -499,32 +499,56 @@ impl HelixParser {
         pair: Pair<Rule>,
         filepath: String,
     ) -> Result<EdgeSchema, ParserError> {
-        let mut pairs = pair.clone().into_inner();
-        let name = pairs.try_next()?.as_str().to_string();
-        let body = pairs.try_next()?;
-        let mut body_pairs = body.into_inner();
+        let edge_loc = pair.loc_with_filepath(filepath.clone());
+        let mut pairs = pair.into_inner();
+
+        let name_pair = pairs.try_next()?;
+        let name = name_pair.as_str().to_string();
+
+        let mut unique = false;
+        let next = pairs.try_next()?;
+
+        let body_pair = match next.as_rule() {
+            Rule::edge_modifier => {
+                // Currently only UNIQUE exists
+                unique = true;
+                pairs.try_next()?
+            }
+            Rule::edge_body => next,
+            _ => {
+                return Err(ParserError::ParseError(
+                    "edge_modifier or edge_body".to_string(),
+                ));
+            }
+        };
+
+        let mut body_pairs = body_pair.into_inner();
 
         let from = {
             let pair = body_pairs.try_next()?;
             (pair.loc(), pair.as_str().to_string())
         };
+
         let to = {
             let pair = body_pairs.try_next()?;
             (pair.loc(), pair.as_str().to_string())
         };
+
         let properties = match body_pairs.next() {
             Some(pair) => Some(self.parse_properties(pair, filepath.clone())?),
             None => None,
         };
 
         Ok(EdgeSchema {
-            name: (pair.loc_with_filepath(filepath.clone()), name),
+            name: (name_pair.loc_with_filepath(filepath), name),
+            loc: edge_loc,
+            unique,
             from,
             to,
             properties,
-            loc: pair.loc_with_filepath(filepath),
         })
     }
+
     pub(super) fn parse_properties(
         &self,
         pair: Pair<Rule>,

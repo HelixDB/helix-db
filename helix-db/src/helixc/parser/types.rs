@@ -99,6 +99,7 @@ pub struct EdgeSchema {
     pub to: (Loc, String),
     pub properties: Option<Vec<Field>>,
     pub loc: Loc,
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone)]

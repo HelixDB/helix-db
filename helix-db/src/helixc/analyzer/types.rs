@@ -47,6 +47,7 @@ impl From<EdgeSchema> for GeneratedEdgeSchema {
                     })
                     .collect()
             }),
+            is_unique: generated.unique,
         }
     }
 }
