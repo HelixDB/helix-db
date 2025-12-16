@@ -201,12 +201,13 @@ pub enum DefaultValue {
 #[derive(Debug, Clone)]
 pub enum FieldPrefix {
     Index,
+    UniqueIndex,
     Optional,
     Empty,
 }
 impl FieldPrefix {
     pub fn is_indexed(&self) -> bool {
-        matches!(self, FieldPrefix::Index)
+        matches!(self, FieldPrefix::Index | FieldPrefix::UniqueIndex)
     }
 }
 

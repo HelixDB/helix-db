@@ -128,7 +128,7 @@ pub struct SchemaProperty {
     pub field_type: GeneratedType,
     pub default_value: Option<GeneratedValue>,
     // pub is_optional: bool,
-    pub is_index: FieldPrefix,
+    pub field_prefix: FieldPrefix,
 }
 
 #[cfg(test)]
@@ -149,13 +149,13 @@ mod tests {
                     name: "name".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "age".to_string(),
                     field_type: GeneratedType::RustType(RustType::U32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -187,13 +187,13 @@ mod tests {
                     name: "email".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "active".to_string(),
                     field_type: GeneratedType::RustType(RustType::Bool),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -214,13 +214,13 @@ mod tests {
                     name: "count".to_string(),
                     field_type: GeneratedType::RustType(RustType::I32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "score".to_string(),
                     field_type: GeneratedType::RustType(RustType::F64),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -244,7 +244,7 @@ mod tests {
                 name: "since".to_string(),
                 field_type: GeneratedType::RustType(RustType::U32),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
         };
 
@@ -280,7 +280,7 @@ mod tests {
                 name: "role".to_string(),
                 field_type: GeneratedType::RustType(RustType::String),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
         };
 
@@ -302,13 +302,13 @@ mod tests {
                     name: "rating".to_string(),
                     field_type: GeneratedType::RustType(RustType::F32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "comment".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -330,7 +330,7 @@ mod tests {
                 name: "metadata".to_string(),
                 field_type: GeneratedType::RustType(RustType::String),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
         };
 
@@ -360,13 +360,13 @@ mod tests {
                     name: "source".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "chunk_index".to_string(),
                     field_type: GeneratedType::RustType(RustType::U32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -387,7 +387,7 @@ mod tests {
                 name: "is_normalized".to_string(),
                 field_type: GeneratedType::RustType(RustType::Bool),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
         };
 
