@@ -752,6 +752,7 @@ pub(crate) fn infer_expr_type<'a>(
                     properties,
                     from_is_plural,
                     to_is_plural,
+                    is_unique: edge_in_schema.is_unique,
                 };
                 // If either from or to is plural, use Standalone (no G::new_mut wrapper),
                 // Empty separator (no period before it), and No collection (already done in iteration)
@@ -1686,6 +1687,28 @@ mod tests {
                 edge <- AddE<Knows>::From(person1)::To(person2)
                 RETURN edge
         "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_add_edge_with_unique_index_valid() {
+        let source = r#"
+                N::Person { name: String }
+                E::Knows UNIQUE { From: Person, To: Person }
+
+                QUERY test(id1: ID, id2: ID) =>
+                    person1 <- N<Person>(id1)
+                    person2 <- N<Person>(id2)
+                    edge <- AddE<Knows>::From(person1)::To(person2)
+                    RETURN edge
+            "#;
 
         let content = write_to_temp_file(vec![source]);
         let parsed = HelixParser::parse_source(&content).unwrap();

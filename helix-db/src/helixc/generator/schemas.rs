@@ -57,7 +57,6 @@ impl Display for EdgeSchema {
         writeln!(f, "pub struct {} {{", self.name)?;
         writeln!(f, "    pub from: {},", self.from)?;
         writeln!(f, "    pub to: {},", self.to)?;
-        writeln!(f, "    pub is_unique: {},", self.is_unique)?;
         for property in &self.properties {
             writeln!(f, "    pub {}: {},", property.name, property.field_type)?;
         }
