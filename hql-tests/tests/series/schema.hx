@@ -191,6 +191,5 @@ E::LinkedinContent_to_CurrentCompany {
 }
 
 V::EmbeddedBio {
-    bio: [F64]
+    bio: [F32]
 }
-

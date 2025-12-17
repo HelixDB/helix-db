@@ -9,6 +9,7 @@ use crate::utils::helixc_utils::{
 };
 use crate::utils::{print_confirm, print_error, print_status, print_success, print_warning};
 use eyre::Result;
+use helix_db::helixc::parser::types::FieldType;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -48,6 +49,10 @@ async fn check_instance(
     print_status("SYNTAX", "Validating query syntax...");
     validate_project_syntax(project)?;
     print_success("Syntax validation passed");
+
+    // Step 1.5: Validate vector data types
+    print_status("VECTORS", "Validating vector data types...");
+    validate_vector_data_types(project)?;
 
     // Step 2: Ensure helix repo is cached (reuse from build.rs)
     build::ensure_helix_repo_cached().await?;
@@ -128,6 +133,10 @@ async fn check_all_instances(
         ));
     }
 
+    // Validate vector data types once for all instances
+    print_status("VECTORS", "Validating vector data types...");
+    validate_vector_data_types(project)?;
+
     // Check each instance
     for instance_name in &instances {
         check_instance(project, instance_name, metrics_sender).await?;
@@ -135,6 +144,63 @@ async fn check_all_instances(
 
     print_success("All instances checked successfully");
     Ok(())
+}
+
+/// Validate vector data types and warn about F64 usage
+fn validate_vector_data_types(project: &ProjectContext) -> Result<()> {
+    // Collect all .hx files for validation
+    let hx_files = collect_hx_files(&project.root, &project.config.project.queries)?;
+
+    // Generate content and parse
+    let content = generate_content(&hx_files)?;
+    let source = parse_content(&content)?;
+
+    let mut found_f64_vectors = false;
+    let mut f64_vector_names = Vec::new();
+
+    // Check all vector schemas for F64 usage
+    for schema in source.get_schemas_in_order() {
+        for vector_schema in &schema.vector_schemas {
+            for field in &vector_schema.fields {
+                if contains_f64_type(&field.field_type) {
+                    found_f64_vectors = true;
+                    f64_vector_names.push(format!("V::{}.{}", vector_schema.name, field.name));
+                }
+            }
+        }
+    }
+
+    if found_f64_vectors {
+        print_warning("Found F64 data types in vector fields");
+        println!();
+        println!("  Vector fields using F64:");
+        for vector_name in &f64_vector_names {
+            println!("    • {}", vector_name);
+        }
+        println!();
+        println!("  ⚠️  F64 vectors are deprecated.");
+        println!(
+            "     For vectors, use [F32] instead of [F64] for better performance and compatibility."
+        );
+        println!("     F32 provides sufficient precision for most vector similarity use cases.");
+        return Err(eyre::eyre!(
+            "Vectors with F64 data types are deprecated. Use F32 instead."
+        ));
+    } else {
+        print_success("Vector data types validation passed");
+    }
+
+    Ok(())
+}
+
+/// Recursively check if a FieldType contains F64
+fn contains_f64_type(field_type: &FieldType) -> bool {
+    match field_type {
+        FieldType::F64 => true,
+        FieldType::Array(inner) => contains_f64_type(inner),
+        FieldType::Object(obj) => obj.values().any(contains_f64_type),
+        _ => false,
+    }
 }
 
 /// Validate project syntax by parsing queries and schema (similar to build.rs but without generating files)
@@ -222,4 +288,139 @@ fn handle_cargo_check_failure(
     print_success("GitHub issue page opened in your browser");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ContainerRuntime, HelixConfig, ProjectConfig};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_validate_vector_data_types_with_f64() {
+        let temp_dir = tempdir().unwrap();
+        let project_root = temp_dir.path();
+
+        // Create a helix.toml config
+        let config = HelixConfig {
+            project: ProjectConfig {
+                name: "test_project".to_string(),
+                queries: std::path::PathBuf::from("./db/"),
+                container_runtime: ContainerRuntime::Docker,
+            },
+            local: std::collections::HashMap::new(),
+            cloud: std::collections::HashMap::new(),
+        };
+
+        // Create project context
+        let project = ProjectContext {
+            root: project_root.to_path_buf(),
+            config,
+            helix_dir: project_root.join(".helix"),
+        };
+
+        // Create db directory
+        let db_dir = project_root.join("db");
+        fs::create_dir_all(&db_dir).unwrap();
+
+        // Create a .hx file with F64 vector fields
+        let schema_content = r#"
+V::Document {
+    content: String,
+    embedding: [F64],
+    scores: [F64]
+}
+
+QUERY test() =>
+    d <- V<Document>
+    RETURN d
+"#;
+
+        fs::write(db_dir.join("schema.hx"), schema_content).unwrap();
+
+        // Test validation - should detect F64 usage
+        let result = validate_vector_data_types(&project);
+        assert!(
+            result.is_ok(),
+            "Validation should succeed but warn about F64"
+        );
+    }
+
+    #[test]
+    fn test_validate_vector_data_types_with_f32() {
+        let temp_dir = tempdir().unwrap();
+        let project_root = temp_dir.path();
+
+        // Create a helix.toml config
+        let config = HelixConfig {
+            project: ProjectConfig {
+                name: "test_project".to_string(),
+                queries: std::path::PathBuf::from("./db/"),
+                container_runtime: ContainerRuntime::Docker,
+            },
+            local: std::collections::HashMap::new(),
+            cloud: std::collections::HashMap::new(),
+        };
+
+        // Create project context
+        let project = ProjectContext {
+            root: project_root.to_path_buf(),
+            config,
+            helix_dir: project_root.join(".helix"),
+        };
+
+        // Create db directory
+        let db_dir = project_root.join("db");
+        fs::create_dir_all(&db_dir).unwrap();
+
+        // Create a .hx file with F32 vector fields (correct)
+        let schema_content = r#"
+V::Document {
+    content: String,
+    embedding: [F32],
+    scores: [F32]
+}
+
+QUERY test() =>
+    d <- V<Document>
+    RETURN d
+"#;
+
+        fs::write(db_dir.join("schema.hx"), schema_content).unwrap();
+
+        // Test validation - should pass without warnings
+        let result = validate_vector_data_types(&project);
+        assert!(result.is_ok(), "Validation should succeed with F32");
+    }
+
+    #[test]
+    fn test_contains_f64_type() {
+        use helix_db::helixc::parser::types::FieldType;
+
+        // Test direct F64
+        assert!(contains_f64_type(&FieldType::F64));
+
+        // Test F32 (should be false)
+        assert!(!contains_f64_type(&FieldType::F32));
+
+        // Test Array of F64
+        assert!(contains_f64_type(&FieldType::Array(Box::new(
+            FieldType::F64
+        ))));
+
+        // Test Array of F32 (should be false)
+        assert!(!contains_f64_type(&FieldType::Array(Box::new(
+            FieldType::F32
+        ))));
+
+        // Test nested object with F64
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("score".to_string(), FieldType::F64);
+        assert!(contains_f64_type(&FieldType::Object(obj)));
+
+        // Test other types
+        assert!(!contains_f64_type(&FieldType::String));
+        assert!(!contains_f64_type(&FieldType::Boolean));
+    }
 }

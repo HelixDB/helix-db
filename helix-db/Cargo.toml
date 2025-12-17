@@ -55,7 +55,7 @@ async-trait = "0.1.88"
 thiserror = "2.0.12"
 polars = { version = "0.46.0", features = ["parquet", "lazy", "json"], optional = true }
 subtle = "2.6.1"
-sha_256 = "=0.1.1"
+sha2 = "0.10"
 byteorder = "1.5.0"
 roaring = "0.11.2"
 tinyvec = "1.10.0"

@@ -16,5 +16,5 @@ E::Entity_to_Embedding {
 }
 
 V::Entity_Embedding {
-    name_embedding: [F64],
+    name_embedding: [F32],
 }
