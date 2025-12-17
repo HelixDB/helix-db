@@ -13,7 +13,7 @@ E::EdgeFile8 {
 }
 
 
-QUERY file8(vec: [F64]) =>
+QUERY file8(vec: [F32]) =>
     new_vec <- AddV<File8Vec>(vec)
     AddV<File8Vec>(vec)
     RETURN new_vec

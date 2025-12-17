@@ -77,7 +77,7 @@ E::Event_to_Embedding_Cluster1 {
 }
 
 V::EventEmbedding_Cluster1 {
-    embedding: [F64]
+    embedding: [F32]
 }
 
 

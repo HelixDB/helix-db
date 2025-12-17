@@ -1,4 +1,4 @@
-QUERY loaddocs_rag(chapters: [{ id: I64, subchapters: [{ title: String, content: String, chunks: [{chunk: String, vector: [F64]}]}] }]) =>
+QUERY loaddocs_rag(chapters: [{ id: I64, subchapters: [{ title: String, content: String, chunks: [{chunk: String, vector: [F32]}]}] }]) =>
     FOR {id, subchapters} IN chapters {
         chapter_node <- AddN<Chapter>({ chapter_index: id })
         FOR {title, content, chunks} IN subchapters {
@@ -12,11 +12,11 @@ QUERY loaddocs_rag(chapters: [{ id: I64, subchapters: [{ title: String, content:
     }
     RETURN "Success"
 
-QUERY searchdocs_rag(query: [F64], k: I32) =>
+QUERY searchdocs_rag(query: [F32], k: I32) =>
     vecs <- SearchV<Embedding>(query, k)
     subchapters <- vecs::In<EmbeddingOf>
     RETURN subchapters::{title, content}
 
-QUERY edge_node(id: ID) => 
+QUERY edge_node(id: ID) =>
     e <- N<Chapter>::OutE<Contains>
     RETURN e

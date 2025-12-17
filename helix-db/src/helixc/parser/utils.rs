@@ -26,13 +26,13 @@ impl HelixParser {
             ))),
         }
     }
-    pub(super) fn parse_vec_literal(&self, pair: Pair<Rule>) -> Result<Vec<f64>, ParserError> {
+    pub(super) fn parse_vec_literal(&self, pair: Pair<Rule>) -> Result<Vec<f32>, ParserError> {
         let pairs = pair.into_inner();
         let mut vec = Vec::new();
         for p in pairs {
             vec.push(
                 p.as_str()
-                    .parse::<f64>()
+                    .parse::<f32>()
                     .map_err(|_| ParserError::from("Invalid float value"))?,
             );
         }
@@ -72,10 +72,12 @@ impl HelixParser {
                 Rule::to => {
                     to_id = self.parse_id_args(p.into_inner().next().unwrap())?;
                 }
-                _ => return Err(ParserError::from(format!(
-                    "Unexpected rule in parse_to_from: {:?}",
-                    p.as_rule()
-                ))),
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in parse_to_from: {:?}",
+                        p.as_rule()
+                    )));
+                }
             }
         }
         Ok(EdgeConnection {

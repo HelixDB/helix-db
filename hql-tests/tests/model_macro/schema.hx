@@ -1,6 +1,6 @@
 schema::1 {
     V::ClinicalNote {
-        vector: [F64],
+        vector: [F32],
         text: String,
     }
 }

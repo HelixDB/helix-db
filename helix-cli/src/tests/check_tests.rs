@@ -53,8 +53,7 @@ E::Likes {
     To: Post,
 }
 "#;
-    fs::write(queries_dir.join("schema.hx"), schema_content)
-        .expect("Failed to write schema.hx");
+    fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
     // Create valid queries.hx
     let queries_content = r#"
@@ -66,8 +65,7 @@ QUERY GetUserPosts(user_id: ID) =>
     posts <- N<User>(user_id)::Out<Authored>
     RETURN posts
 "#;
-    fs::write(queries_dir.join("queries.hx"), queries_content)
-        .expect("Failed to write queries.hx");
+    fs::write(queries_dir.join("queries.hx"), queries_content).expect("Failed to write queries.hx");
 
     (temp_dir, project_path)
 }
@@ -97,8 +95,7 @@ QUERY GetUser(user_id: ID) =>
     user <- N<User>(user_id)
     RETURN user
 "#;
-    fs::write(queries_dir.join("queries.hx"), queries_content)
-        .expect("Failed to write queries.hx");
+    fs::write(queries_dir.join("queries.hx"), queries_content).expect("Failed to write queries.hx");
 
     (temp_dir, project_path)
 }
@@ -128,8 +125,7 @@ N::User {
     name: String,
 }
 "#;
-    fs::write(queries_dir.join("schema.hx"), schema_content)
-        .expect("Failed to write schema.hx");
+    fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
     // Create queries.hx with invalid syntax
     let invalid_queries = r#"
@@ -137,8 +133,7 @@ QUERY InvalidQuery {
     this is not valid helix syntax!!!
 }
 "#;
-    fs::write(queries_dir.join("queries.hx"), invalid_queries)
-        .expect("Failed to write queries.hx");
+    fs::write(queries_dir.join("queries.hx"), invalid_queries).expect("Failed to write queries.hx");
 
     (temp_dir, project_path)
 }
@@ -246,7 +241,6 @@ async fn test_check_with_multiple_instances() {
             port: Some(6970),
             build_mode: crate::config::BuildMode::Debug,
             db_config: DbConfig::default(),
-            
         },
     );
     config.local.insert(
@@ -255,7 +249,6 @@ async fn test_check_with_multiple_instances() {
             port: Some(6971),
             build_mode: crate::config::BuildMode::Debug,
             db_config: DbConfig::default(),
-            
         },
     );
     let config_path = project_path.join("helix.toml");
@@ -280,8 +273,7 @@ E::Follows {
     To: User,
 }
 "#;
-    fs::write(queries_dir.join("schema.hx"), schema_content)
-        .expect("Failed to write schema.hx");
+    fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
     let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
@@ -364,8 +356,7 @@ E::Follows {
     To: User,
 }
 "#;
-    fs::write(queries_dir.join("schema.hx"), schema_content)
-        .expect("Failed to write schema.hx");
+    fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
     let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
@@ -403,8 +394,7 @@ N::User {
     name: String,
 }
 "#;
-    fs::write(queries_dir.join("schema.hx"), schema_content)
-        .expect("Failed to write schema.hx");
+    fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
     // Create additional schema in another file
     let more_schema = r#"
@@ -464,8 +454,7 @@ N::User {
     name: String,
 }
 "#;
-    fs::write(queries_dir.join("schema.hx"), schema_content)
-        .expect("Failed to write schema.hx");
+    fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
     let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();

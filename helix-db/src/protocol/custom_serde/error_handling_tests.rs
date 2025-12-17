@@ -13,7 +13,7 @@
 #[cfg(test)]
 mod error_handling_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bumpalo::Bump;
@@ -204,7 +204,7 @@ mod error_handling_tests {
         let valid_data = vec![1.0, 2.0, 3.0];
         let data_bytes = create_vector_bytes(&valid_data);
 
-        let result = HVector::from_bincode_bytes(&arena, Some(empty_bytes), &data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena, Some(empty_bytes), &data_bytes, id, true);
         assert!(result.is_err(), "Should fail on empty property bytes");
     }
 
@@ -218,16 +218,16 @@ mod error_handling_tests {
         let empty_data: &[u8] = &[];
 
         let arena2 = Bump::new();
-        let _result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), empty_data, id);
-        // Should panic due to assertion in cast_raw_vector_data
+        let _result =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), empty_data, id, true).unwrap();
     }
 
     #[test]
-    #[should_panic(expected = "raw_vector_data.len() == 0")]
+    #[should_panic]
     fn test_vector_cast_empty_raw_data_panics() {
         let arena = Bump::new();
         let empty_data: &[u8] = &[];
-        HVector::cast_raw_vector_data(&arena, empty_data);
+        HVector::raw_vector_data_to_vec(empty_data, &arena).unwrap();
     }
 
     #[test]
@@ -235,14 +235,15 @@ mod error_handling_tests {
         let arena = Bump::new();
         let id = 666777u128;
         let props = vec![("key", Value::String("value".to_string()))];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, 0, &[1.0], props);
+        let vector = create_arena_vector(&arena, id, "test", 1, false, &[1.0], props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let truncated_props = &props_bytes[..props_bytes.len() / 2];
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(truncated_props), data_bytes, id);
+        let result =
+            HVector::from_bincode_bytes(&arena2, Some(truncated_props), data_bytes, id, true);
         assert!(result.is_err(), "Should fail on truncated properties");
     }
 
@@ -253,17 +254,17 @@ mod error_handling_tests {
         let garbage: Vec<u8> = vec![0xFF; 50];
         let data_bytes = create_vector_bytes(&[1.0, 2.0, 3.0]);
 
-        let result = HVector::from_bincode_bytes(&arena, Some(&garbage), &data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena, Some(&garbage), &data_bytes, id, true);
         assert!(result.is_err(), "Should fail on garbage property bytes");
     }
 
     #[test]
-    #[should_panic(expected = "is not a multiple of size_of::<f64>()")]
+    #[should_panic]
     fn test_vector_misaligned_data_bytes_panics() {
         let arena = Bump::new();
-        // 7 bytes is not a multiple of 8 (size of f64)
+        // 7 bytes is not a multiple of 4 (size of f32)
         let misaligned: &[u8] = &[0, 1, 2, 3, 4, 5, 6];
-        HVector::cast_raw_vector_data(&arena, misaligned);
+        HVector::raw_vector_data_to_vec(misaligned, &arena).unwrap();
     }
 
     #[test]
@@ -384,7 +385,8 @@ mod error_handling_tests {
         }
 
         let arena2 = Bump::new();
-        let _result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let _result =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         // Should fail on UTF-8 validation
     }
 
@@ -465,14 +467,14 @@ mod error_handling_tests {
     #[test]
     fn test_vector_extreme_version_value() {
         let arena = Bump::new();
-        let id = 012012u128;
+        let id = 12012u128;
 
-        let vector = create_arena_vector(&arena, id, "test", 255, false, 0, &[1.0], vec![]);
+        let vector = create_arena_vector(&arena, id, "test", 255, false, &[1.0], vec![]);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok(), "Should handle u8::MAX version");
         assert_eq!(result.unwrap().version, 255);
     }
@@ -519,7 +521,7 @@ mod error_handling_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok(), "Should handle u128::MAX ID");
         assert_eq!(result.unwrap().id, u128::MAX);
     }
@@ -582,14 +584,14 @@ mod error_handling_tests {
         let id = 987654u128;
 
         // Vector with NaN, infinity, and other special values
-        let data = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+        let data = vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0];
         let vector = create_simple_vector(&arena, id, "special", &data);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(
             result.is_ok(),
             "Should handle special float values in vector data"
