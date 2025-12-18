@@ -95,13 +95,17 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
                             if let Err(e) = {
                                 match secondary_index {
-                                    crate::helix_engine::types::SecondaryIndex::Unique(_) => {
-                                        db.put(self.txn, &serialized, &node.id)
-                                    }
+                                    crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                        .put_with_flags(
+                                            self.txn,
+                                            PutFlags::NO_OVERWRITE,
+                                            &serialized,
+                                            &node.id,
+                                        ),
                                     crate::helix_engine::types::SecondaryIndex::Index(_) => db
                                         .put_with_flags(
                                             self.txn,
-                                            PutFlags::NO_DUP_DATA,
+                                            PutFlags::APPEND_DUP,
                                             &serialized,
                                             &node.id,
                                         ),

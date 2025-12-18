@@ -73,7 +73,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                  crate::helix_engine::types::SecondaryIndex::Unique(_) => {
                                                      db.put_with_flags(
                                                          self.txn,
-                                                         PutFlags::NO_DUP_DATA,
+                                                         PutFlags::NO_OVERWRITE,
                                                          &v_serialized,
                                                          &node.id,
                                                      )
