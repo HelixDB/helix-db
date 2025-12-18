@@ -3,15 +3,6 @@
 //! This module provides functions to compile .hx schema and query files
 //! into Rust code during the build process.
 //!
-//! # Example build.rs
-//!
-//! ```no_run
-//! // build.rs in your project root
-//! fn main() {
-//!     helix_lib::build::compile_queries_default()
-//!         .expect("Failed to compile Helix queries");
-//! }
-//! ```
 
 use std::fs;
 use std::io::Write;
@@ -35,15 +26,7 @@ pub use crate::errors::{HelixError, Result};
 /// - Outputs to `./src/queries.rs`
 /// - Tells cargo to rerun if queries/ changes
 ///
-/// # Example
-///
-/// ```no_run
-/// // build.rs
-/// fn main() {
-///     helix_lib::build::compile_queries_default()
-///         .expect("Failed to compile Helix queries");
-/// }
-/// ```
+
 pub fn compile_queries_default() -> Result<()> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| HelixError::StorageError("CARGO_MANIFEST_DIR not set".to_string()))?;

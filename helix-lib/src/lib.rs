@@ -314,7 +314,7 @@ impl ResponseExt for Response {
             .ok_or_else(|| HelixError::MissingField(field.to_string()))?;
 
         // Deserialize the field value
-        sonic_rs::from_value(&field_value).map_err(|e| {
+        sonic_rs::from_value(field_value).map_err(|e| {
             HelixError::DeserializationError(format!(
                 "Failed to deserialize field '{}': {}",
                 field, e
