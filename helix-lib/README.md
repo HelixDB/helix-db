@@ -68,7 +68,7 @@ struct GetUsersResponse {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = queries::config()?;
+    let config = queries::config().expect("Failed to load config");
     let db = HelixDB::new("./data", config)?;
 
     let data: GetUsersResponse = db.execute("GetUsers", json!({}))?.deserialize()?;
