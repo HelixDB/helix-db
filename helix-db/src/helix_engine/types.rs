@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use core::fmt;
-use heed3::Error as HeedError;
+use heed3::{Error as HeedError, MdbError};
 use serde::{Deserialize, Serialize};
 use sonic_rs::Error as SonicError;
 use std::{fmt::Display, net::AddrParseError, str::Utf8Error, string::FromUtf8Error};
@@ -37,6 +37,7 @@ pub enum GraphError {
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
     RerankerError(String),
+    DuplicateKey(String),
 }
 
 impl std::error::Error for GraphError {}
@@ -74,13 +75,19 @@ impl fmt::Display for GraphError {
                 write!(f, "Asyncronous IO is needed to complete the DB operation")
             }
             GraphError::RerankerError(msg) => write!(f, "Reranker error: {msg}"),
+            GraphError::DuplicateKey(msg) => {
+                write!(f, "Duplicate key on unique index: {msg}")
+            }
         }
     }
 }
 
 impl From<HeedError> for GraphError {
     fn from(error: HeedError) -> Self {
-        GraphError::StorageError(error.to_string())
+        match error {
+            HeedError::Mdb(MdbError::KeyExist) => GraphError::DuplicateKey(error.to_string()),
+            _ => GraphError::StorageError(error.to_string()),
+        }
     }
 }
 
