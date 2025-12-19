@@ -129,6 +129,45 @@ fn test_parse_local_provider() {
 }
 
 #[test]
+fn test_parse_model2vec_provider() {
+    let result =
+        EmbeddingModelImpl::parse_provider_and_model(Some("model2vec:minishlab/potion-base-8M"));
+    assert!(result.is_ok());
+    let (provider, model) = result.unwrap();
+    match provider {
+        EmbeddingProvider::Model2Vec { model_name } => {
+            assert_eq!(model_name, "minishlab/potion-base-8M");
+        }
+        _ => panic!("Expected Model2Vec provider"),
+    }
+    assert_eq!(model, "minishlab/potion-base-8M");
+}
+
+#[test]
+fn test_parse_model2vec_default() {
+    let result = EmbeddingModelImpl::parse_provider_and_model(Some("model2vec:"));
+    assert!(result.is_ok());
+    let (provider, _model) = result.unwrap();
+    match provider {
+        EmbeddingProvider::Model2Vec { model_name } => {
+            assert_eq!(model_name, "minishlab/potion-base-32M");
+        }
+        _ => panic!("Expected Model2Vec provider"),
+    }
+}
+
+#[test]
+#[ignore]
+fn test_model2vec_embedding() {
+    let model =
+        get_embedding_model(None, Some("model2vec:minishlab/potion-base-2M"), None).unwrap();
+
+    let embedding = model.fetch_embedding("test").unwrap();
+    assert!(!embedding.is_empty());
+    assert!(embedding.iter().all(|&v| v.is_finite()));
+}
+
+#[test]
 fn test_parse_unknown_provider_defaults_to_openai() {
     let result = EmbeddingModelImpl::parse_provider_and_model(Some("unknown-provider"));
     assert!(result.is_ok());
