@@ -85,9 +85,14 @@ pub trait EmbeddingModel {
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
     OpenAI,
-    Gemini { task_type: String },
+    Gemini {
+        task_type: String,
+    },
     Local,
-    Model2Vec { model_name: String },
+    #[cfg(feature = "model2vec")]
+    Model2Vec {
+        model_name: String,
+    },
 }
 
 pub struct EmbeddingModelImpl {
@@ -123,6 +128,7 @@ impl EmbeddingModelImpl {
                 Some(key)
             }
             EmbeddingProvider::Local => None,
+            #[cfg(feature = "model2vec")]
             EmbeddingProvider::Model2Vec { .. } => None,
         };
 
@@ -217,6 +223,7 @@ impl EmbeddingModelImpl {
             // - minishlab/potion-base-8M (8MB, 256 dims)
             // - minishlab/potion-base-32M (32MB, 768 dims) [recommended]
             // - minishlab/potion-retrieval-32M (32MB, 768 dims)
+            #[cfg(feature = "model2vec")]
             Some(m) if m.starts_with("model2vec:") => {
                 let model_name = m
                     .strip_prefix("model2vec:")
@@ -394,12 +401,6 @@ impl EmbeddingModel for EmbeddingModelImpl {
 
                 Ok(embedding)
             }
-
-            #[cfg(not(feature = "model2vec"))]
-            EmbeddingProvider::Model2Vec { .. } => Err(GraphError::from(
-                "Model2Vec provider requires 'model2vec' feature. \
-                     Compile with --features model2vec",
-            )),
         }
     }
 }
