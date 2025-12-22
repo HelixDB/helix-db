@@ -9,8 +9,8 @@ mod tests {
     use heed3::RoTxn;
     use helix_db::{
         helix_engine::{
-            bm25::bm25::{HBM25Config, BM25},
-            storage_core::{storage_methods::StorageMethods, HelixGraphStorage},
+            bm25::bm25::{BM25, HBM25Config},
+            storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
             traversal_core::{
                 config::Config,
                 ops::{
@@ -48,15 +48,14 @@ mod tests {
         bm25.search(txn, query, limit, arena)
     }
 
-    fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
+    fn setup_test_db(temp_dir: &TempDir) -> Arc<HelixGraphStorage> {
         let db_path = temp_dir.path().to_str().unwrap();
 
         let mut config = Config::default();
         config.bm25 = Some(true);
 
         let storage = HelixGraphStorage::new(db_path, config, Default::default()).unwrap();
-        (Arc::new(storage), temp_dir)
+        Arc::new(storage)
     }
 
     // fn setup_db_with_nodes(count: usize) -> (Arc<HelixGraphStorage>, TempDir) {
@@ -90,7 +89,8 @@ mod tests {
     // }
     #[test]
     fn bench_node_connections_arena_vs_capacity() {
-        let (storage, _temp_dir) = setup_test_db();
+        let temp_dir = &TempDir::new().unwrap();
+        let storage = setup_test_db(&temp_dir);
         let mut txn = storage.graph_env.write_txn().unwrap();
         let arena_setup = bumpalo::Bump::new();
 
@@ -113,6 +113,7 @@ mod tests {
                     None,
                     hub_node.id(),
                     node.id(),
+                    false,
                     false,
                 )
                 .collect_to_obj()
@@ -294,7 +295,8 @@ mod tests {
     fn bench_nodes_by_label_with_excessive_limit() {
         use helix_db::utils::items::Node;
 
-        let (storage, _temp_dir) = setup_test_db();
+        let temp_dir = &TempDir::new().unwrap();
+        let storage = setup_test_db(&temp_dir);
         let mut txn = storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
@@ -376,7 +378,8 @@ mod tests {
 
     #[test]
     fn bench_bm25_search_before_and_after() {
-        let (storage, _temp_dir) = setup_test_db();
+        let temp_dir = &TempDir::new().unwrap();
+        let storage = setup_test_db(&temp_dir);
         let mut wtxn = storage.graph_env.write_txn().unwrap();
         let bm25 = storage.bm25.as_ref().unwrap();
 

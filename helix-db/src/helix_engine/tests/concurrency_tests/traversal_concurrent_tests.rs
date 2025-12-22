@@ -1,3 +1,5 @@
+use bumpalo::Bump;
+use serial_test::serial;
 /// Concurrent access tests for Traversal Operations
 ///
 /// This test suite validates thread safety and concurrent operation correctness
@@ -13,23 +15,18 @@
 /// - MVCC ensures readers see consistent graph snapshots
 /// - Edge creation/deletion doesn't corrupt graph topology
 /// - No race conditions in neighbor list updates
-
 use std::sync::{Arc, Barrier};
 use std::thread;
-use bumpalo::Bump;
-use serial_test::serial;
 use tempfile::TempDir;
 
 use crate::helix_engine::storage_core::HelixGraphStorage;
 use crate::helix_engine::traversal_core::config::Config;
 use crate::helix_engine::traversal_core::ops::g::G;
-use crate::helix_engine::traversal_core::ops::source::{
-    add_n::AddNAdapter,
-    add_e::AddEAdapter,
-    n_from_id::NFromIdAdapter,
-};
-use crate::helix_engine::traversal_core::ops::out::out::OutAdapter;
 use crate::helix_engine::traversal_core::ops::in_::in_::InAdapter;
+use crate::helix_engine::traversal_core::ops::out::out::OutAdapter;
+use crate::helix_engine::traversal_core::ops::source::{
+    add_e::AddEAdapter, add_n::AddNAdapter, n_from_id::NFromIdAdapter,
+};
 
 /// Setup storage for concurrent testing
 fn setup_concurrent_storage(temp_dir: &TempDir) -> Arc<HelixGraphStorage> {
@@ -71,7 +68,8 @@ fn test_concurrent_node_additions() {
                     let label = format!("person_t{}_n{}", thread_id, i);
                     G::new_mut(&storage, &arena, &mut wtxn)
                         .add_n(&label, None, None)
-                        .collect::<Result<Vec<_>,_>>().unwrap();
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
 
                     wtxn.commit().unwrap();
                 }
@@ -116,7 +114,8 @@ fn test_concurrent_edge_additions() {
                 let label = format!("node_{}", i);
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id()
             })
             .collect();
@@ -148,8 +147,16 @@ fn test_concurrent_edge_additions() {
 
                     let label = format!("knows_t{}_e{}", thread_id, i);
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .add_edge(&label, None, node_ids[source_idx], node_ids[target_idx], false)
-                        .collect_to_obj().unwrap();
+                        .add_edge(
+                            &label,
+                            None,
+                            node_ids[source_idx],
+                            node_ids[target_idx],
+                            false,
+                            false,
+                        )
+                        .collect_to_obj()
+                        .unwrap();
 
                     wtxn.commit().unwrap();
                 }
@@ -190,7 +197,8 @@ fn test_concurrent_reads_during_writes() {
 
         let root = G::new_mut(&storage, &arena, &mut wtxn)
             .add_n("root", None, None)
-            .collect::<Result<Vec<_>,_>>().unwrap()[0]
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()[0]
             .id();
 
         // Add initial neighbors
@@ -198,12 +206,14 @@ fn test_concurrent_reads_during_writes() {
             let label = format!("initial_{}", i);
             let neighbor_id = G::new_mut(&storage, &arena, &mut wtxn)
                 .add_n(&label, None, None)
-                .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()[0]
                 .id();
 
             G::new_mut(&storage, &arena, &mut wtxn)
-                .add_edge("connects", None, root, neighbor_id, false)
-                .collect_to_obj().unwrap();
+                .add_edge("connects", None, root, neighbor_id, false, false)
+                .collect_to_obj()
+                .unwrap();
         }
 
         wtxn.commit().unwrap();
@@ -234,7 +244,8 @@ fn test_concurrent_reads_during_writes() {
                 let neighbors = G::new(&storage, &rtxn, &arena)
                     .n_from_id(&root_id)
                     .out_node("connects")
-                    .collect::<Result<Vec<_>,_>>().unwrap();
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
 
                 // Should see at least initial neighbors
                 assert!(
@@ -267,12 +278,14 @@ fn test_concurrent_reads_during_writes() {
                 let label = format!("writer_{}_node_{}", writer_id, i);
                 let new_node_id = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("connects", None, root_id, new_node_id, false)
-                    .collect_to_obj().unwrap();
+                    .add_edge("connects", None, root_id, new_node_id, false, false)
+                    .collect_to_obj()
+                    .unwrap();
 
                 wtxn.commit().unwrap();
 
@@ -292,7 +305,8 @@ fn test_concurrent_reads_during_writes() {
     let final_neighbors = G::new(&storage, &rtxn, &arena)
         .n_from_id(&root_id)
         .out_node("connects")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     let expected_count = 5 + (num_writers * 10);
     assert_eq!(
@@ -321,19 +335,22 @@ fn test_traversal_snapshot_isolation() {
 
         let root = G::new_mut(&storage, &arena, &mut wtxn)
             .add_n("root", None, None)
-            .collect::<Result<Vec<_>,_>>().unwrap()[0]
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()[0]
             .id();
 
         for i in 0..5 {
             let label = format!("node_{}", i);
             let node_id = G::new_mut(&storage, &arena, &mut wtxn)
                 .add_n(&label, None, None)
-                .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()[0]
                 .id();
 
             G::new_mut(&storage, &arena, &mut wtxn)
-                .add_edge("links", None, root, node_id, false)
-                .collect_to_obj().unwrap();
+                .add_edge("links", None, root, node_id, false, false)
+                .collect_to_obj()
+                .unwrap();
         }
 
         wtxn.commit().unwrap();
@@ -346,7 +363,8 @@ fn test_traversal_snapshot_isolation() {
     let initial_neighbors = G::new(&storage, &rtxn, &arena)
         .n_from_id(&root_id)
         .out_node("links")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let initial_count = initial_neighbors.len();
     assert_eq!(initial_count, 5);
 
@@ -360,12 +378,14 @@ fn test_traversal_snapshot_isolation() {
             let label = format!("new_node_{}", i);
             let new_id = G::new_mut(&storage_clone, &arena, &mut wtxn)
                 .add_n(&label, None, None)
-                .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()[0]
                 .id();
 
             G::new_mut(&storage_clone, &arena, &mut wtxn)
-                .add_edge("links", None, root_id, new_id, false)
-                .collect_to_obj().unwrap();
+                .add_edge("links", None, root_id, new_id, false, false)
+                .collect_to_obj()
+                .unwrap();
 
             wtxn.commit().unwrap();
         }
@@ -378,7 +398,8 @@ fn test_traversal_snapshot_isolation() {
     let current_neighbors = G::new(&storage, &rtxn, &arena2)
         .n_from_id(&root_id)
         .out_node("links")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     assert_eq!(
         current_neighbors.len(),
@@ -396,7 +417,8 @@ fn test_traversal_snapshot_isolation() {
     let final_neighbors = G::new(&storage, &rtxn_new, &arena3)
         .n_from_id(&root_id)
         .out_node("links")
-        .collect::<Result<Vec<_>,_>>().unwrap();
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(final_neighbors.len(), 15);
 }
 
@@ -420,7 +442,8 @@ fn test_concurrent_bidirectional_traversals() {
                 let label = format!("source_{}", i);
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id()
             })
             .collect();
@@ -430,7 +453,8 @@ fn test_concurrent_bidirectional_traversals() {
                 let label = format!("target_{}", i);
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id()
             })
             .collect();
@@ -439,8 +463,9 @@ fn test_concurrent_bidirectional_traversals() {
         for source_id in &sources {
             for target_id in &targets {
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("points_to", None, *source_id, *target_id, false)
-                    .collect_to_obj().unwrap();
+                    .add_edge("points_to", None, *source_id, *target_id, false, false)
+                    .collect_to_obj()
+                    .unwrap();
             }
         }
 
@@ -473,7 +498,8 @@ fn test_concurrent_bidirectional_traversals() {
                             let neighbors = G::new(&storage, &rtxn, &arena)
                                 .n_from_id(source_id)
                                 .out_node("points_to")
-                                .collect::<Result<Vec<_>,_>>().unwrap();
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap();
                             assert_eq!(neighbors.len(), 5, "Source should have 5 outgoing edges");
                         }
                     } else {
@@ -482,7 +508,8 @@ fn test_concurrent_bidirectional_traversals() {
                             let neighbors = G::new(&storage, &rtxn, &arena)
                                 .n_from_id(target_id)
                                 .in_node("points_to")
-                                .collect::<Result<Vec<_>,_>>().unwrap();
+                                .collect::<Result<Vec<_>, _>>()
+                                .unwrap();
                             assert_eq!(neighbors.len(), 5, "Target should have 5 incoming edges");
                         }
                     }
@@ -515,7 +542,8 @@ fn test_concurrent_multi_hop_traversals() {
 
         let root = G::new_mut(&storage, &arena, &mut wtxn)
             .add_n("root", None, None)
-            .collect::<Result<Vec<_>,_>>().unwrap()[0]
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()[0]
             .id();
 
         // Create level 1 nodes
@@ -524,12 +552,14 @@ fn test_concurrent_multi_hop_traversals() {
                 let label = format!("level1_{}", i);
                 let id = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("to_l1", None, root, id, false)
-                    .collect_to_obj().unwrap();
+                    .add_edge("to_l1", None, root, id, false, false)
+                    .collect_to_obj()
+                    .unwrap();
 
                 id
             })
@@ -541,12 +571,14 @@ fn test_concurrent_multi_hop_traversals() {
                 let label = format!("level2_{}", i);
                 let l2_id = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("to_l2", None, l1_id, l2_id, false)
-                    .collect_to_obj().unwrap();
+                    .add_edge("to_l2", None, l1_id, l2_id, false, false)
+                    .collect_to_obj()
+                    .unwrap();
             }
         }
 
@@ -573,7 +605,8 @@ fn test_concurrent_multi_hop_traversals() {
                     let level1 = G::new(&storage, &rtxn, &arena)
                         .n_from_id(&root_id)
                         .out_node("to_l1")
-                        .collect::<Result<Vec<_>,_>>().unwrap();
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
                     assert_eq!(level1.len(), 3, "Should have 3 level1 nodes");
 
                     // For each level1, traverse to level2
@@ -582,7 +615,8 @@ fn test_concurrent_multi_hop_traversals() {
                         let level2 = G::new(&storage, &rtxn, &arena2)
                             .n_from_id(&l1_node.id())
                             .out_node("to_l2")
-                            .collect::<Result<Vec<_>,_>>().unwrap();
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
                         assert_eq!(level2.len(), 2, "Each level1 should have 2 level2 nodes");
                     }
 
@@ -629,17 +663,20 @@ fn test_concurrent_graph_topology_consistency() {
 
                     let node1_id = G::new_mut(&storage, &arena, &mut wtxn)
                         .add_n(&label1, None, None)
-                        .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap()[0]
                         .id();
 
                     let node2_id = G::new_mut(&storage, &arena, &mut wtxn)
                         .add_n(&label2, None, None)
-                        .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap()[0]
                         .id();
 
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .add_edge("connects", None, node1_id, node2_id, false)
-                        .collect_to_obj().unwrap();
+                        .add_edge("connects", None, node1_id, node2_id, false, false)
+                        .collect_to_obj()
+                        .unwrap();
 
                     wtxn.commit().unwrap();
                 }
@@ -668,17 +705,26 @@ fn test_concurrent_graph_topology_consistency() {
     // Verify all edges point to valid nodes
     for result in storage.edges_db.iter(&rtxn).unwrap() {
         let (edge_id, edge_bytes) = result.unwrap();
-        let edge = crate::utils::items::Edge::from_bincode_bytes(edge_id, &edge_bytes, &arena).unwrap();
+        let edge =
+            crate::utils::items::Edge::from_bincode_bytes(edge_id, &edge_bytes, &arena).unwrap();
 
         // Verify source exists
         assert!(
-            storage.nodes_db.get(&rtxn, &edge.from_node).unwrap().is_some(),
+            storage
+                .nodes_db
+                .get(&rtxn, &edge.from_node)
+                .unwrap()
+                .is_some(),
             "Edge source node not found"
         );
 
         // Verify target exists
         assert!(
-            storage.nodes_db.get(&rtxn, &edge.to_node).unwrap().is_some(),
+            storage
+                .nodes_db
+                .get(&rtxn, &edge.to_node)
+                .unwrap()
+                .is_some(),
             "Edge target node not found"
         );
     }
@@ -704,7 +750,8 @@ fn test_stress_concurrent_mixed_operations() {
                 let label = format!("root_{}", i);
                 G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id()
             })
             .collect();
@@ -733,13 +780,15 @@ fn test_stress_concurrent_mixed_operations() {
                 let label = format!("w{}_n{}", writer_id, write_count);
                 let new_id = G::new_mut(&storage, &arena, &mut wtxn)
                     .add_n(&label, None, None)
-                    .collect::<Result<Vec<_>,_>>().unwrap()[0]
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()[0]
                     .id();
 
                 let root_idx = write_count % root_ids.len();
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("links", None, root_ids[root_idx], new_id, false)
-                    .collect_to_obj().unwrap();
+                    .add_edge("links", None, root_ids[root_idx], new_id, false, false)
+                    .collect_to_obj()
+                    .unwrap();
 
                 wtxn.commit().unwrap();
                 write_count += 1;
@@ -763,7 +812,8 @@ fn test_stress_concurrent_mixed_operations() {
                     let _neighbors = G::new(&storage, &rtxn, &arena)
                         .n_from_id(root_id)
                         .out_node("links")
-                        .collect::<Result<Vec<_>,_>>().unwrap();
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
                     read_count += 1;
                 }
             }
@@ -786,9 +836,20 @@ fn test_stress_concurrent_mixed_operations() {
     let total_writes: usize = write_counts.iter().sum();
     let total_reads: usize = read_counts.iter().sum();
 
-    println!("Stress test: {} writes, {} reads in {:?}", total_writes, total_reads, duration);
+    println!(
+        "Stress test: {} writes, {} reads in {:?}",
+        total_writes, total_reads, duration
+    );
 
     // Should process many operations
-    assert!(total_writes > 50, "Should perform many writes, got {}", total_writes);
-    assert!(total_reads > 100, "Should perform many reads, got {}", total_reads);
+    assert!(
+        total_writes > 50,
+        "Should perform many writes, got {}",
+        total_writes
+    );
+    assert!(
+        total_reads > 100,
+        "Should perform many reads, got {}",
+        total_reads
+    );
 }

@@ -203,7 +203,6 @@ mod tests {
                 },
             },
         },
-        helixc::generator::traversal_steps::EdgeType,
         protocol::{Format, request::Request, request::RequestType},
     };
     use axum::body::Bytes;
@@ -293,6 +292,7 @@ mod tests {
                 node1.id(),
                 node2.id(),
                 false,
+                false,
             )
             .collect_to_obj()?;
 
@@ -356,6 +356,7 @@ mod tests {
                     None,
                     nodes[i].id(),
                     nodes[i + 1].id(),
+                    false,
                     false,
                 )
                 .collect_to_obj()?;

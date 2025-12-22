@@ -466,7 +466,7 @@ use helix_db::{
             },
             traversal_value::TraversalValue,
         },
-        types::GraphError,
+        types::{GraphError, SecondaryIndex},
         vector_core::vector::HVector,
     },
     helix_gateway::{
