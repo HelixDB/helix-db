@@ -55,7 +55,7 @@ pub async fn run(message: Option<String>) -> Result<()> {
             ));
         }
 
-        prompts::intro("helix feedback")?;
+        prompts::intro("helix feedback", Some("Submit feedback for Helix"))?;
         let feedback_type = prompts::select_feedback_type()?;
         let feedback_message = prompts::input_feedback_message()?;
 

@@ -1,4 +1,5 @@
 use bumpalo::Bump;
+use serial_test::serial;
 /// Concurrent access tests for Traversal Operations
 ///
 /// This test suite validates thread safety and concurrent operation correctness
@@ -40,6 +41,7 @@ fn setup_concurrent_storage() -> (TempDir, Arc<HelixGraphStorage>) {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_node_additions() {
     // Tests multiple threads adding nodes concurrently
     //
@@ -93,6 +95,7 @@ fn test_concurrent_node_additions() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_edge_additions() {
     // Tests multiple threads adding edges between nodes
     //
@@ -176,6 +179,7 @@ fn test_concurrent_edge_additions() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_reads_during_writes() {
     // Tests concurrent traversals while writes are happening
     //
@@ -312,6 +316,7 @@ fn test_concurrent_reads_during_writes() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_traversal_snapshot_isolation() {
     // Tests that long-lived read transaction sees consistent snapshot
     //
@@ -414,6 +419,7 @@ fn test_traversal_snapshot_isolation() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_bidirectional_traversals() {
     // Tests concurrent out() and in() traversals
     //
@@ -515,6 +521,7 @@ fn test_concurrent_bidirectional_traversals() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_multi_hop_traversals() {
     // Tests concurrent traversals across multiple hops
     //
@@ -619,6 +626,7 @@ fn test_concurrent_multi_hop_traversals() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_graph_topology_consistency() {
     // Tests that graph topology remains valid under concurrent operations
     //
@@ -716,6 +724,7 @@ fn test_concurrent_graph_topology_consistency() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_stress_concurrent_mixed_operations() {
     // Stress test: sustained mixed read/write operations
     //

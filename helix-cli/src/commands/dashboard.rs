@@ -1,7 +1,7 @@
 //! Dashboard management for Helix projects
 
 use crate::DashboardAction;
-use crate::commands::auth::Credentials;
+use crate::commands::auth::require_auth;
 use crate::commands::integrations::helix::CLOUD_AUTHORITY;
 use crate::config::{BuildMode, ContainerRuntime, InstanceInfo};
 use crate::docker::DockerManager;
@@ -164,7 +164,8 @@ async fn prepare_env_vars_from_context(
                 check_instance_running(&project, &instance_name).await?;
             }
 
-            let env_vars = prepare_environment_vars(&project, &instance_name, &instance_config)?;
+            let env_vars =
+                prepare_environment_vars(&project, &instance_name, &instance_config).await?;
 
             let (host, helix_port, mode) = if instance_config.is_local() {
                 let port = instance_config.port().unwrap_or(DEFAULT_HELIX_PORT);
@@ -375,10 +376,10 @@ async fn check_instance_running(project: &ProjectContext, instance_name: &str) -
     Ok(())
 }
 
-fn prepare_environment_vars(
+async fn prepare_environment_vars(
     project: &ProjectContext,
     instance_name: &str,
-    instance_config: &InstanceInfo,
+    instance_config: &InstanceInfo<'_>,
 ) -> Result<Vec<String>> {
     let mut env_vars = Vec::new();
 
@@ -397,7 +398,7 @@ fn prepare_environment_vars(
         env_vars.push(format!("HELIX_INSTANCE={instance_name}"));
     } else {
         // Cloud instance - use cloud URL and API key
-        let credentials = load_cloud_credentials()?;
+        let credentials = require_auth().await?;
 
         // Get cloud URL based on instance type
         let cloud_url = get_cloud_url(instance_config)?;
@@ -414,20 +415,6 @@ fn prepare_environment_vars(
     }
 
     Ok(env_vars)
-}
-
-fn load_cloud_credentials() -> Result<Credentials> {
-    let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
-    let credentials_path = home.join(".helix").join("credentials");
-
-    if !credentials_path.exists() {
-        return Err(eyre!(
-            "Not authenticated with Helix Cloud. Run 'helix auth login' first."
-        ));
-    }
-
-    Credentials::try_read_from_file(&credentials_path)
-        .ok_or_else(|| eyre!("Failed to read credentials. Try 'helix auth login' again."))
 }
 
 fn get_cloud_url(instance_config: &InstanceInfo) -> Result<String> {

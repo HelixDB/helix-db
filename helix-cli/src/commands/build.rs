@@ -51,13 +51,23 @@ pub async fn run(
         Some(name) => name,
         None if prompts::is_interactive() => {
             let instances = project.config.list_instances_with_types();
+            prompts::intro(
+                "helix build",
+                Some(
+                    "This will build your selected instance based on the configuration in helix.toml.",
+                ),
+            )?;
             prompts::select_instance(&instances)?
         }
         None => {
             let instances = project.config.list_instances();
             return Err(eyre::eyre!(
                 "No instance specified. Available instances: {}",
-                instances.into_iter().cloned().collect::<Vec<_>>().join(", ")
+                instances
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     };

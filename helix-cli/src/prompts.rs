@@ -3,9 +3,10 @@
 //! This module provides a consistent, user-friendly interactive experience
 //! for commands like `init` and `add` when flags are not provided.
 
+use crate::CloudDeploymentTypeCommand;
+use crate::commands::auth::require_auth;
 use crate::commands::feedback::FeedbackType;
 use crate::commands::integrations::fly::VmSize;
-use crate::CloudDeploymentTypeCommand;
 use eyre::Result;
 
 /// Deployment type options for interactive selection
@@ -38,8 +39,25 @@ impl Region {
 }
 
 /// Show the intro banner for interactive mode
-pub fn intro(title: &str) -> Result<()> {
-    cliclack::intro(title.to_string())?;
+pub fn intro(title: &str, subheader: Option<&str>) -> Result<()> {
+    match subheader {
+        Some(sub) => cliclack::note(title, sub)?,
+        None => cliclack::intro(title.to_string())?,
+    }
+    Ok(())
+}
+
+/// Show note banner
+#[allow(unused)]
+pub fn note(message: &str) -> Result<()> {
+    cliclack::log::remark(message)?;
+    Ok(())
+}
+
+/// Show warning banner
+#[allow(unused)]
+pub fn warning(message: &str) -> Result<()> {
+    cliclack::log::warning(message)?;
     Ok(())
 }
 
@@ -176,8 +194,15 @@ pub fn input_instance_name(default: &str) -> Result<String> {
 /// This is the main entry point for interactive mode for `helix add`.
 /// It prompts the user through all necessary options including instance name,
 /// and returns a fully configured command.
-pub fn build_deployment_command(default_name: &str) -> Result<Option<CloudDeploymentTypeCommand>> {
+pub async fn build_deployment_command(
+    default_name: &str,
+) -> Result<Option<CloudDeploymentTypeCommand>> {
     let deployment_type = select_deployment_type()?;
+
+    // Check auth early for Helix Cloud instances before prompting for more details
+    if matches!(deployment_type, DeploymentType::HelixCloud) {
+        require_auth().await?;
+    }
 
     // Prompt for instance name with project name as default
     let instance_name = input_instance_name(default_name)?;
@@ -187,6 +212,7 @@ pub fn build_deployment_command(default_name: &str) -> Result<Option<CloudDeploy
             name: Some(instance_name),
         })),
         DeploymentType::HelixCloud => {
+            // Check auth early for Helix Cloud instances
             let region = select_region()?;
             Ok(Some(CloudDeploymentTypeCommand::Helix {
                 region: Some(region),
@@ -214,8 +240,12 @@ pub fn build_deployment_command(default_name: &str) -> Result<Option<CloudDeploy
 
 /// Build a CloudDeploymentTypeCommand for the init command
 /// Returns None for local deployment (the default)
-pub fn build_init_deployment_command() -> Result<Option<CloudDeploymentTypeCommand>> {
+pub async fn build_init_deployment_command() -> Result<Option<CloudDeploymentTypeCommand>> {
     let deployment_type = select_deployment_type()?;
+
+    if matches!(deployment_type, DeploymentType::HelixCloud) {
+        require_auth().await?;
+    }
 
     match deployment_type {
         DeploymentType::Local => {

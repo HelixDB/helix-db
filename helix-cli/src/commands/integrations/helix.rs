@@ -1,10 +1,10 @@
-use crate::commands::auth::Credentials;
+use crate::commands::auth::require_auth;
 use crate::config::{BuildMode, CloudInstanceConfig, DbConfig, InstanceInfo};
 use crate::project::ProjectContext;
 use crate::sse_client::{SseEvent, SseProgressHandler};
 use crate::utils::helixc_utils::{collect_hx_files, generate_content};
-use crate::utils::{print_error, print_error_with_hint, print_status, print_success};
-use eyre::{OptionExt, Result, eyre};
+use crate::utils::{print_error, print_status, print_success};
+use eyre::{Result, eyre};
 use helix_db::helix_engine::traversal_core::config::Config;
 use reqwest_eventsource::RequestBuilderExt;
 use serde_json::json;
@@ -34,30 +34,6 @@ impl<'a> HelixManager<'a> {
         Self { project }
     }
 
-    fn credentials_path(&self) -> Result<PathBuf> {
-        // get home directory
-        let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
-        Ok(home.join(".helix").join("credentials"))
-    }
-
-    fn check_auth(&self) -> Result<()> {
-        let credentials_path = self.credentials_path()?;
-        if !credentials_path.exists() {
-            print_error_with_hint(
-                "Credentials file not found",
-                "Run 'helix auth login' to authenticate with Helix Cloud",
-            );
-            return Err(eyre!(""));
-        }
-
-        let credentials = Credentials::read_from_file(&credentials_path);
-        if !credentials.is_authenticated() {
-            return Err(eyre!("Credentials file is not authenticated"));
-        }
-
-        Ok(())
-    }
-
     pub async fn create_instance_config(
         &self,
         _instance_name: &str,
@@ -69,11 +45,6 @@ impl<'a> HelixManager<'a> {
 
         // Use provided region or default to us-east-1
         let region = region.or_else(|| Some("us-east-1".to_string()));
-
-        print_status(
-            "CONFIG",
-            &format!("Creating cloud configuration for cluster: {cluster_id}"),
-        );
 
         Ok(CloudInstanceConfig {
             cluster_id,
@@ -91,7 +62,7 @@ impl<'a> HelixManager<'a> {
         config: &CloudInstanceConfig,
     ) -> Result<()> {
         // Check authentication first
-        self.check_auth()?;
+        require_auth().await?;
 
         print_status(
             "CLOUD",
@@ -159,7 +130,7 @@ impl<'a> HelixManager<'a> {
         cluster_name: String,
         build_mode: BuildMode,
     ) -> Result<()> {
-        self.check_auth()?;
+        let credentials = require_auth().await?;
         let path = match get_path_or_cwd(path.as_ref()) {
             Ok(path) => path,
             Err(e) => {
@@ -175,9 +146,6 @@ impl<'a> HelixManager<'a> {
                 return Err(eyre!("Error: failed to generate content: {e}"));
             }
         };
-
-        // get credentials - already validated by check_auth()
-        let credentials = Credentials::read_from_file(&self.credentials_path()?);
 
         // Optionally load config from helix.toml or legacy config.hx.json
         let helix_toml_path = path.join("helix.toml");

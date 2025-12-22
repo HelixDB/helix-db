@@ -15,5 +15,5 @@ chrono = "0.4"
 uuid = { version = "1.18.0", features = ["v7", "fast-rng"] }
 tokio = { version = "1.39", features = ["full"] }
 async-trait = "0.1.88"
-flume = "0.11.1"
+flume = { version = "0.12.0", default-features = false, features = ["async", "select"] }
 num_cpus = "1.17.0"

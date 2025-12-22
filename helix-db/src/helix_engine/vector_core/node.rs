@@ -112,6 +112,14 @@ impl<'a, D: Distance> Item<'a, D> {
         let header = D::new_header(&vector);
         Self { header, vector }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.vector.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.vector.len()
+    }
 }
 
 #[derive(Clone, Debug)]

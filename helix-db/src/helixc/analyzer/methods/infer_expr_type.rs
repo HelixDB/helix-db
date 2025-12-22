@@ -1,6 +1,8 @@
 //! Semantic analyzer for Helix‑QL.
 use crate::helixc::analyzer::error_codes::ErrorCode;
-use crate::helixc::analyzer::utils::{DEFAULT_VAR_NAME, VariableInfo, is_in_scope, is_param};
+use crate::helixc::analyzer::utils::{
+    DEFAULT_VAR_NAME, VariableInfo, is_in_scope, is_param, validate_id_type,
+};
 use crate::helixc::generator::utils::EmbedData;
 use crate::{
     generate_error,
@@ -644,6 +646,14 @@ pub(crate) fn infer_expr_type<'a>(
                                     value.as_str()
                                 );
                             }
+                            // Validate that the identifier is of type ID
+                            validate_id_type(
+                                ctx,
+                                original_query,
+                                loc.clone(),
+                                scope,
+                                value.as_str(),
+                            );
                             // Check if this variable is plural
                             let is_plural = scope
                                 .get(value.as_str())
@@ -694,6 +704,14 @@ pub(crate) fn infer_expr_type<'a>(
                                     value.as_str()
                                 );
                             }
+                            // Validate that the identifier is of type ID
+                            validate_id_type(
+                                ctx,
+                                original_query,
+                                loc.clone(),
+                                scope,
+                                value.as_str(),
+                            );
                             // Check if this variable is plural
                             let is_plural = scope
                                 .get(value.as_str())
@@ -1554,7 +1572,13 @@ pub(crate) fn infer_expr_type<'a>(
                             bm25_search.loc.clone(),
                             i.as_str(),
                         );
-                        type_in_scope(ctx, original_query, bm25_search.loc.clone(), scope, i.as_str());
+                        type_in_scope(
+                            ctx,
+                            original_query,
+                            bm25_search.loc.clone(),
+                            scope,
+                            i.as_str(),
+                        );
                         gen_identifier_or_param(original_query, i, false, false)
                     }
                     _ => {

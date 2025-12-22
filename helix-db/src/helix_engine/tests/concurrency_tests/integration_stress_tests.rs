@@ -1,4 +1,5 @@
 use bumpalo::Bump;
+use serial_test::serial;
 use std::sync::atomic::{AtomicUsize, Ordering};
 /// Integration Stress Tests for HelixDB
 ///
@@ -43,6 +44,7 @@ fn setup_stress_storage() -> (Arc<HelixGraphStorage>, TempDir) {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_stress_mixed_read_write_operations() {
     // Stress test: Simultaneous graph reads and writes under high load
     //
@@ -137,6 +139,7 @@ fn test_stress_mixed_read_write_operations() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_stress_rapid_graph_growth() {
     // Stress test: Rapidly growing graph with immediate traversals
     //
@@ -269,6 +272,7 @@ fn test_stress_rapid_graph_growth() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_stress_transaction_contention() {
     // Stress test: High contention on write transactions
     //
@@ -342,6 +346,7 @@ fn test_stress_transaction_contention() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_stress_long_running_transactions() {
     // Stress test: Long-lived read transactions with concurrent writes
     //
@@ -436,6 +441,7 @@ fn test_stress_long_running_transactions() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_stress_memory_stability() {
     // Stress test: Verify no memory leaks under sustained load
     //

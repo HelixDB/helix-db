@@ -1,4 +1,5 @@
 use crate::{
+    commands::auth::require_auth,
     commands::integrations::helix::CLOUD_AUTHORITY,
     config::{CloudInstanceConfig, DbConfig},
     project::ProjectContext,
@@ -34,21 +35,8 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
         }
     }
 
-    // Get credentials
-    let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
-    let cred_path = home.join(".helix").join("credentials");
-
-    if !cred_path.exists() {
-        print_error("Not logged in. Please run 'helix auth login' first.");
-        return Err(eyre!("Not authenticated"));
-    }
-
-    let credentials = crate::commands::auth::Credentials::read_from_file(&cred_path);
-
-    if !credentials.is_authenticated() {
-        print_error("Invalid credentials. Please run 'helix auth login' again.");
-        return Err(eyre!("Invalid credentials"));
-    }
+    // Check authentication
+    let credentials = require_auth().await?;
 
     // Get or default region
     let region = region.unwrap_or_else(|| "us-east-1".to_string());

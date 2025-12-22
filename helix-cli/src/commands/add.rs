@@ -24,8 +24,13 @@ pub async fn run(deployment_type: Option<CloudDeploymentTypeCommand>) -> Result<
     let deployment_type = match deployment_type {
         Some(dt) => dt,
         None if prompts::is_interactive() => {
-            prompts::intro("helix add")?;
-            match prompts::build_deployment_command(project_name)? {
+            prompts::intro(
+                "helix add",
+                Some(
+                    "This will add a new instance to the Helix project.\nYou can configure the instance type, name and other settings below.\n",
+                ),
+            )?;
+            match prompts::build_deployment_command(project_name).await? {
                 Some(dt) => dt,
                 None => {
                     // User selected Local but didn't provide a name

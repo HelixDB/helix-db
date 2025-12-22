@@ -105,10 +105,11 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub(crate) fn is_authenticated(&self) -> bool {
+    pub fn is_authenticated(&self) -> bool {
         !self.user_id.is_empty() && !self.helix_admin_key.is_empty()
     }
 
+    #[allow(unused)]
     pub(crate) fn read_from_file(path: &PathBuf) -> Self {
         let content = fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Failed to read credentials file at {path:?}: {e}"));
@@ -165,6 +166,43 @@ impl Credentials {
                 .ok_or_eyre("Missing helix_user_key in credentials file")?,
         })
     }
+}
+
+/// Check that the user is authenticated with Helix Cloud.
+/// If not authenticated, prompts the user to login interactively.
+/// Returns credentials if authenticated (or after successful login).
+pub async fn require_auth() -> Result<Credentials> {
+    let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
+    let credentials_path = home.join(".helix").join("credentials");
+
+    // Check if we have valid credentials
+    if let Some(credentials) = Credentials::try_read_from_file(&credentials_path)
+        && credentials.is_authenticated()
+    {
+        return Ok(credentials);
+    }
+
+    // Not authenticated - prompt user to login
+    print_warning("Not authenticated with Helix Cloud");
+
+    if !crate::prompts::is_interactive() {
+        return Err(eyre!("Run 'helix auth login' first."));
+    }
+
+    let should_login = crate::prompts::confirm("Would you like to login now?")?;
+
+    if !should_login {
+        return Err(eyre!(
+            "Authentication required. Run 'helix auth login' to authenticate."
+        ));
+    }
+
+    // Run login flow
+    login().await?;
+
+    // Read the newly saved credentials
+    Credentials::try_read_from_file(&credentials_path)
+        .ok_or_else(|| eyre!("Login succeeded but failed to read credentials. Please try again."))
 }
 
 pub async fn github_login() -> Result<(String, String)> {

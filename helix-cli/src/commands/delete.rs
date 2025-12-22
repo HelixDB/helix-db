@@ -1,3 +1,4 @@
+use crate::commands::auth::require_auth;
 use crate::commands::integrations::ecr::EcrManager;
 use crate::commands::integrations::fly::FlyManager;
 use crate::config::InstanceInfo;
@@ -13,7 +14,12 @@ pub async fn run(instance_name: String) -> Result<()> {
     let project = ProjectContext::find_and_load(None)?;
 
     // Validate instance exists
-    let _instance_config = project.config.get_instance(&instance_name)?;
+    let instance_config = project.config.get_instance(&instance_name)?;
+
+    // Check auth early for Helix Cloud instances
+    if let InstanceInfo::Helix(_) = &instance_config {
+        require_auth().await?;
+    }
 
     print_warning(&format!(
         "This will permanently delete instance '{instance_name}' and ALL its data!"
@@ -64,7 +70,7 @@ pub async fn run(instance_name: String) -> Result<()> {
 
     // if cloud instance, delete the app
 
-    match _instance_config {
+    match instance_config {
         InstanceInfo::FlyIo(config) => {
             let fly = FlyManager::new(&project, config.auth_type.clone()).await?;
             fly.delete_app(&instance_name).await?;

@@ -98,8 +98,14 @@ async fn run_init_inner(
     // Initialize deployment type based on flags or interactive selection
     // If no deployment type provided and we're in an interactive terminal, prompt the user
     let deployment_type = if deployment_type.is_none() && prompts::is_interactive() {
-        prompts::intro("helix init")?;
-        prompts::build_init_deployment_command()?
+        prompts::intro(
+            "helix init",
+            Some(
+                "This will create a new Helix project in the current directory.\nYou can configure the project type, name and other settings below.",
+            ),
+        )?;
+
+        prompts::build_init_deployment_command().await?
     } else {
         deployment_type
     };

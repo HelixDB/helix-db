@@ -101,6 +101,57 @@ pub(super) fn gen_id_access_or_param(original_query: &Query, name: &str) -> Gene
     }
 }
 
+/// Validates that an identifier used in AddE From/To is of type ID.
+/// Returns true if valid, false if an error was generated.
+pub(super) fn validate_id_type(
+    ctx: &mut Ctx,
+    original_query: &Query,
+    loc: Loc,
+    scope: &HashMap<&str, VariableInfo>,
+    identifier_name: &str,
+) {
+    // Check if it's a parameter
+    if let Some(param) = is_param(original_query, identifier_name) {
+        if param.param_type.1 != FieldType::Uuid {
+            generate_error!(
+                ctx,
+                original_query,
+                loc,
+                E210,
+                identifier_name,
+                &param.param_type.1.to_string()
+            );
+        }
+        return;
+    }
+
+    // Check if it's a scope variable
+    if let Some(var_info) = scope.get(identifier_name) {
+        // Allow Node/Edge/Vector types (they have .id()) and Scalar(Uuid)
+        match &var_info.ty {
+            Type::Node(_)
+            | Type::Nodes(_)
+            | Type::Edge(_)
+            | Type::Edges(_)
+            | Type::Vector(_)
+            | Type::Vectors(_)
+            | Type::Scalar(FieldType::Uuid) => {
+                // Valid - these types can provide an ID
+            }
+            other => {
+                generate_error!(
+                    ctx,
+                    original_query,
+                    loc,
+                    E210,
+                    identifier_name,
+                    &other.to_string()
+                );
+            }
+        }
+    }
+}
+
 pub(super) fn is_in_scope(scope: &HashMap<&str, VariableInfo>, name: &str) -> bool {
     scope.contains_key(name)
 }
