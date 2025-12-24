@@ -36,7 +36,9 @@ mod property_based_tests {
             any::<i64>().prop_map(Value::I64),
             any::<u32>().prop_map(Value::U32),
             any::<u64>().prop_map(Value::U64),
-            any::<f64>().prop_filter("Not NaN", |f| !f.is_nan()).prop_map(Value::F64),
+            any::<f64>()
+                .prop_filter("Not NaN", |f| !f.is_nan())
+                .prop_map(Value::F64),
             any::<bool>().prop_map(Value::Boolean),
             arb_long_string().prop_map(Value::String),
             Just(Value::Empty),

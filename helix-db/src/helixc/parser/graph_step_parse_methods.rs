@@ -2,10 +2,10 @@ use crate::helixc::parser::{
     HelixParser, ParserError, Rule,
     location::HasLoc,
     types::{
-        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, ExpressionType, FieldAddition,
-        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, MMRDistance, Object, OrderBy,
-        OrderByType, RerankMMR, RerankRRF, ShortestPath, ShortestPathAStar, ShortestPathBFS,
-        ShortestPathDijkstras, Step, StepType, Update,
+        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, ExpressionType,
+        FieldAddition, FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType,
+        MMRDistance, Object, OrderBy, OrderByType, RerankMMR, RerankRRF, ShortestPath,
+        ShortestPathAStar, ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update,
     },
     utils::{PairTools, PairsTools},
 };
@@ -24,10 +24,12 @@ impl HelixParser {
         let order_by_type = match order_by_rule.as_rule() {
             Rule::asc => OrderByType::Asc,
             Rule::desc => OrderByType::Desc,
-            other => return Err(ParserError::from(format!(
-                "Unexpected rule in parse_order_by: {:?}",
-                other
-            ))),
+            other => {
+                return Err(ParserError::from(format!(
+                    "Unexpected rule in parse_order_by: {:?}",
+                    other
+                )));
+            }
         };
         let expression = self.parse_expression(inner.try_next()?)?;
         Ok(OrderBy {
@@ -308,6 +310,10 @@ impl HelixParser {
                 loc: step_pair.loc(),
                 step: StepType::AddEdge(self.parse_add_edge(step_pair, true)?),
             }),
+            Rule::UpsertE => Ok(Step {
+                loc: step_pair.loc(),
+                step: StepType::UpsertEdge(self.parse_upsert_edge(step_pair, true)?),
+            }),
             Rule::order_by => Ok(Step {
                 loc: step_pair.loc(),
                 step: StepType::OrderBy(self.parse_order_by(step_pair)?),
@@ -455,13 +461,8 @@ impl HelixParser {
                             Rule::math_expression => {
                                 // Parse the math_expression into an Expression
                                 let expr = self.parse_math_expression(p)?;
-                                Ok((
-                                    type_arg,
-                                    Some(expr),
-                                    from,
-                                    to,
-                                ))
-                            },
+                                Ok((type_arg, Some(expr), from, to))
+                            }
                             Rule::to_from => match p.into_inner().next() {
                                 Some(p) => match p.as_rule() {
                                     Rule::to => Ok((
@@ -486,9 +487,7 @@ impl HelixParser {
                             _ => Ok((type_arg, weight_expr, from, to)),
                         },
                     ) {
-                        Ok((type_arg, weight_expr, from, to)) => {
-                            (type_arg, weight_expr, from, to)
-                        }
+                        Ok((type_arg, weight_expr, from, to)) => (type_arg, weight_expr, from, to),
                         Err(e) => return Err(e),
                     };
 
@@ -499,18 +498,25 @@ impl HelixParser {
                         ExpressionType::Traversal(_trav) => {
                             // For now, keep the traversal and create a Property weight expression
                             // TODO: Extract property name from traversal for simple cases
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr.clone())))
+                            Some(crate::helixc::parser::types::WeightExpression::Expression(
+                                Box::new(expr.clone()),
+                            ))
                         }
                         ExpressionType::MathFunctionCall(_) => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr.clone())))
+                            Some(crate::helixc::parser::types::WeightExpression::Expression(
+                                Box::new(expr.clone()),
+                            ))
                         }
-                        _ => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr.clone())))
-                        }
+                        _ => Some(crate::helixc::parser::types::WeightExpression::Expression(
+                            Box::new(expr.clone()),
+                        )),
                     };
                     (None, weight_type)
                 } else {
-                    (None, Some(crate::helixc::parser::types::WeightExpression::Default))
+                    (
+                        None,
+                        Some(crate::helixc::parser::types::WeightExpression::Default),
+                    )
                 };
 
                 GraphStep {
@@ -592,7 +598,8 @@ impl HelixParser {
                 for inner_pair in pair.clone().into_inner() {
                     match inner_pair.as_rule() {
                         Rule::type_args => {
-                            type_arg = Some(inner_pair.into_inner().next().unwrap().as_str().to_string());
+                            type_arg =
+                                Some(inner_pair.into_inner().next().unwrap().as_str().to_string());
                         }
                         Rule::math_expression => {
                             weight_expression = Some(self.parse_expression(inner_pair)?);
@@ -603,15 +610,21 @@ impl HelixParser {
                             heuristic_property = Some(literal[1..literal.len() - 1].to_string());
                         }
                         Rule::to_from => {
-                            if let Some(p) = inner_pair.into_inner().next() { match p.as_rule() {
-                                Rule::to => {
-                                    to = Some(p.into_inner().next().unwrap().as_str().to_string());
+                            if let Some(p) = inner_pair.into_inner().next() {
+                                match p.as_rule() {
+                                    Rule::to => {
+                                        to = Some(
+                                            p.into_inner().next().unwrap().as_str().to_string(),
+                                        );
+                                    }
+                                    Rule::from => {
+                                        from = Some(
+                                            p.into_inner().next().unwrap().as_str().to_string(),
+                                        );
+                                    }
+                                    _ => {}
                                 }
-                                Rule::from => {
-                                    from = Some(p.into_inner().next().unwrap().as_str().to_string());
-                                }
-                                _ => {}
-                            } }
+                            }
                         }
                         _ => {}
                     }
@@ -621,18 +634,25 @@ impl HelixParser {
                 let (inner_traversal, weight_expr_typed) = if let Some(expr) = weight_expression {
                     let weight_type = match &expr.expr {
                         ExpressionType::Traversal(_trav) => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr.clone())))
+                            Some(crate::helixc::parser::types::WeightExpression::Expression(
+                                Box::new(expr.clone()),
+                            ))
                         }
                         ExpressionType::MathFunctionCall(_) => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr.clone())))
+                            Some(crate::helixc::parser::types::WeightExpression::Expression(
+                                Box::new(expr.clone()),
+                            ))
                         }
-                        _ => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr.clone())))
-                        }
+                        _ => Some(crate::helixc::parser::types::WeightExpression::Expression(
+                            Box::new(expr.clone()),
+                        )),
                     };
                     (None, weight_type)
                 } else {
-                    (None, Some(crate::helixc::parser::types::WeightExpression::Default))
+                    (
+                        None,
+                        Some(crate::helixc::parser::types::WeightExpression::Default),
+                    )
                 };
 
                 GraphStep {
@@ -730,8 +750,13 @@ impl HelixParser {
             });
         }
 
-        let lambda = lambda.ok_or_else(|| ParserError::from("lambda parameter required for RerankMMR"))?;
+        let lambda =
+            lambda.ok_or_else(|| ParserError::from("lambda parameter required for RerankMMR"))?;
 
-        Ok(RerankMMR { loc, lambda, distance })
+        Ok(RerankMMR {
+            loc,
+            lambda,
+            distance,
+        })
     }
 }

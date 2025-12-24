@@ -1,7 +1,6 @@
 use crate::helixc::parser::{
-    HelixParser, Rule,
+    HelixParser, ParserError, Rule,
     location::HasLoc,
-    ParserError,
     types::{BuiltInMacro, Parameter, Query, Statement, StatementType},
 };
 use pest::iterators::Pair;
@@ -20,14 +19,14 @@ impl HelixParser {
                 let built_in_macro = match pair.into_inner().next() {
                     Some(pair) => match pair.as_rule() {
                         Rule::mcp_macro => Some(BuiltInMacro::MCP),
-                        Rule::model_macro => {
-                            match pair.into_inner().next() {
-                                Some(model_name) => Some(BuiltInMacro::Model(
-                                    model_name.as_str().to_string(),
-                                )),
-                                None => return Err(ParserError::from("Model macro missing model name")),
+                        Rule::model_macro => match pair.into_inner().next() {
+                            Some(model_name) => {
+                                Some(BuiltInMacro::Model(model_name.as_str().to_string()))
                             }
-                        }
+                            None => {
+                                return Err(ParserError::from("Model macro missing model name"));
+                            }
+                        },
                         _ => None,
                     },
                     _ => None,
@@ -37,17 +36,24 @@ impl HelixParser {
             }
             _ => None,
         };
-        let name = pairs.next()
+        let name = pairs
+            .next()
             .ok_or_else(|| ParserError::from("Expected query name"))?
-            .as_str().to_string();
+            .as_str()
+            .to_string();
         let parameters = self.parse_parameters(
-            pairs.next().ok_or_else(|| ParserError::from("Expected parameters block"))?
+            pairs
+                .next()
+                .ok_or_else(|| ParserError::from("Expected parameters block"))?,
         )?;
-        let body = pairs.next()
+        let body = pairs
+            .next()
             .ok_or_else(|| ParserError::from("Expected query body"))?;
         let statements = self.parse_query_body(body)?;
         let return_values = self.parse_return_statement(
-            pairs.next().ok_or_else(|| ParserError::from("Expected return statement"))?
+            pairs
+                .next()
+                .ok_or_else(|| ParserError::from("Expected return statement"))?,
         )?;
 
         Ok(Query {
@@ -68,7 +74,8 @@ impl HelixParser {
             .map(|p: Pair<'_, Rule>| -> Result<Parameter, ParserError> {
                 let mut inner = p.into_inner();
                 let name = {
-                    let pair = inner.next()
+                    let pair = inner
+                        .next()
                         .ok_or_else(|| ParserError::from("Expected parameter name"))?;
                     (pair.loc(), pair.as_str().to_string())
                 };
@@ -136,7 +143,9 @@ impl HelixParser {
                 }),
 
                 Rule::drop => {
-                    let inner = p.into_inner().next()
+                    let inner = p
+                        .into_inner()
+                        .next()
                         .ok_or_else(|| ParserError::from("Drop statement missing expression"))?;
                     Ok(Statement {
                         loc: inner.loc(),
@@ -160,7 +169,7 @@ impl HelixParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Basic Query Parsing Tests

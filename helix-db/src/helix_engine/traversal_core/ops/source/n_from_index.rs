@@ -1,9 +1,13 @@
 use crate::{
     helix_engine::{
-        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue, LMDB_STRING_HEADER_LENGTH},
+        traversal_core::{
+            LMDB_STRING_HEADER_LENGTH, traversal_iter::RoTraversalIterator,
+            traversal_value::TraversalValue,
+        },
         types::GraphError,
     },
-    protocol::value::Value, utils::items::Node,
+    protocol::value::Value,
+    utils::items::Node,
 };
 use serde::Serialize;
 

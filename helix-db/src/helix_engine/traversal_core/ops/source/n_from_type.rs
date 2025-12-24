@@ -15,7 +15,7 @@ pub trait NFromTypeAdapter<'db, 'arena, 'txn, 's>:
     /// Returns an iterator containing the nodes with the given label.
     ///
     /// Note that the `label` cannot be empty and must be a valid, existing node label.'
-    /// 
+    ///
     /// The label is stored before the node properties in LMDB.
     /// Bincode assures that the fields of a struct are stored in the same order as they are defined in the struct (first to last).
     ///

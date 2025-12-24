@@ -9,17 +9,16 @@
 //! - Performance tests for large datasets
 
 use super::{
-    metadata::{StorageMetadata, VectorEndianness, NATIVE_VECTOR_ENDIANNESS},
+    HelixGraphStorage,
+    metadata::{NATIVE_VECTOR_ENDIANNESS, StorageMetadata, VectorEndianness},
     storage_migration::{
         convert_all_vector_properties, convert_old_vector_properties_to_new_format,
         convert_vector_endianness, migrate,
     },
-    HelixGraphStorage,
 };
 use crate::{
     helix_engine::{
-        storage_core::version_info::VersionInfo, traversal_core::config::Config,
-        types::GraphError,
+        storage_core::version_info::VersionInfo, traversal_core::config::Config, types::GraphError,
     },
     protocol::value::Value,
 };
@@ -95,10 +94,8 @@ fn populate_test_vectors(
 
     for i in 0..count {
         let id = i as u128;
-        let vector_data = create_test_vector_bytes(
-            &[i as f64, (i + 1) as f64, (i + 2) as f64],
-            endianness,
-        );
+        let vector_data =
+            create_test_vector_bytes(&[i as f64, (i + 1) as f64, (i + 2) as f64], endianness);
 
         storage
             .vectors
@@ -289,12 +286,9 @@ fn test_convert_vector_endianness_from_little_endian() {
     let values = vec![1.1, 2.2, 3.3];
     let little_endian_bytes = create_test_vector_bytes(&values, VectorEndianness::LittleEndian);
 
-    let result = convert_vector_endianness(
-        &little_endian_bytes,
-        VectorEndianness::LittleEndian,
-        &arena,
-    )
-    .unwrap();
+    let result =
+        convert_vector_endianness(&little_endian_bytes, VectorEndianness::LittleEndian, &arena)
+            .unwrap();
 
     let result_values: Vec<f64> = result
         .chunks_exact(8)
@@ -642,9 +636,16 @@ fn test_migrate_cognee_vector_string_dates_error() {
         assert!(stored_bytes.is_some());
 
         // Verify we can deserialize it as old format
-        let old_props: HashMap<String, Value> = bincode::deserialize(stored_bytes.unwrap()).unwrap();
-        assert_eq!(old_props.get("label").unwrap(), &Value::String("CogneeVector".to_string()));
-        assert_eq!(old_props.get("collection_name").unwrap(), &Value::String("test_collection".to_string()));
+        let old_props: HashMap<String, Value> =
+            bincode::deserialize(stored_bytes.unwrap()).unwrap();
+        assert_eq!(
+            old_props.get("label").unwrap(),
+            &Value::String("CogneeVector".to_string())
+        );
+        assert_eq!(
+            old_props.get("collection_name").unwrap(),
+            &Value::String("test_collection".to_string())
+        );
 
         // Verify dates are strings, not Date types
         match old_props.get("created_at").unwrap() {
@@ -676,7 +677,8 @@ fn test_migrate_cognee_vector_string_dates_error() {
             // Try to deserialize as VectorWithoutData (what v_from_type does)
             use crate::helix_engine::vector_core::vector_without_data::VectorWithoutData;
             let arena2 = bumpalo::Bump::new();
-            let deserialize_result = VectorWithoutData::from_bincode_bytes(&arena2, migrated_bytes, 123u128);
+            let deserialize_result =
+                VectorWithoutData::from_bincode_bytes(&arena2, migrated_bytes, 123u128);
 
             match deserialize_result {
                 Ok(vector) => {
