@@ -1622,4 +1622,258 @@ mod tests {
 
         wtxn.commit().unwrap();
     }
+
+    // ============================================================================
+    // Additional Edge Case Tests
+    // ============================================================================
+
+    #[test]
+    fn test_tokenize_empty_string() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let tokens = bm25.tokenize::<true>("");
+        assert_eq!(tokens.len(), 0);
+    }
+
+    #[test]
+    fn test_tokenize_whitespace_only() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let tokens = bm25.tokenize::<true>("   \t\n   ");
+        assert_eq!(tokens.len(), 0);
+    }
+
+    #[test]
+    fn test_tokenize_with_numbers() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let tokens = bm25.tokenize::<true>("test123 456abc");
+        assert!(tokens.contains(&"test123".to_string()));
+        assert!(tokens.contains(&"456abc".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_unicode() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let tokens = bm25.tokenize::<false>("日本語 русский français");
+        // Should handle unicode alphanumeric characters
+        assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn test_tokenize_mixed_case() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let tokens = bm25.tokenize::<false>("HELLO hello HeLLo");
+        // All should be lowercase
+        for token in &tokens {
+            assert_eq!(token, "hello");
+        }
+        assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn test_calculate_bm25_score_edge_case_zero_avgdl() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        // When avgdl is 0, should use doc_len as fallback
+        let score = bm25.calculate_bm25_score(1, 10, 5, 100, 0.0);
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_calculate_bm25_score_edge_case_zero_total_docs() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        // Edge case: 0 total docs (uses max(1))
+        let score = bm25.calculate_bm25_score(1, 10, 5, 0, 10.0);
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_calculate_bm25_score_edge_case_zero_df() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        // Edge case: 0 document frequency (uses max(1))
+        let score = bm25.calculate_bm25_score(1, 10, 0, 100, 10.0);
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_calculate_bm25_score_high_df_low_idf() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        // When df is very high relative to total_docs, IDF can be negative
+        let score = bm25.calculate_bm25_score(1, 10, 95, 100, 10.0);
+        // Score should still be finite (may be negative with high df)
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_calculate_bm25_score_very_short_document() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        // Very short document with doc_len = 1
+        let score = bm25.calculate_bm25_score(1, 1, 5, 100, 10.0);
+        assert!(score.is_finite());
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_calculate_bm25_score_very_long_document() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        // Very long document
+        let score = bm25.calculate_bm25_score(5, 10000, 5, 100, 100.0);
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_search_with_limit_zero() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let mut wtxn = bm25.graph_env.write_txn().unwrap();
+
+        bm25.insert_doc(&mut wtxn, 1u128, "test document content")
+            .unwrap();
+        wtxn.commit().unwrap();
+
+        let rtxn = bm25.graph_env.read_txn().unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "test", 0, &arena).unwrap();
+
+        // With limit 0, should return empty results
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_delete_last_document_avgdl_becomes_zero() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let mut wtxn = bm25.graph_env.write_txn().unwrap();
+
+        // Insert and then delete the only document
+        bm25.insert_doc(&mut wtxn, 1u128, "only document").unwrap();
+        bm25.delete_doc(&mut wtxn, 1u128).unwrap();
+
+        // Check metadata after deleting last document
+        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
+        let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
+
+        assert_eq!(metadata.total_docs, 0);
+        assert_eq!(metadata.avgdl, 0.0);
+
+        wtxn.commit().unwrap();
+    }
+
+    #[test]
+    fn test_insert_document_with_repeated_terms() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let mut wtxn = bm25.graph_env.write_txn().unwrap();
+
+        // Document with repeated terms
+        bm25.insert_doc(&mut wtxn, 1u128, "test test test unique word word")
+            .unwrap();
+
+        // Document length should count all tokens (including duplicates)
+        // "test", "test", "test", "unique", "word", "word" = 6 tokens
+        let doc_length = bm25.doc_lengths_db.get(&wtxn, &1u128).unwrap().unwrap();
+        assert_eq!(doc_length, 6);
+
+        wtxn.commit().unwrap();
+
+        // Search should still work
+        let rtxn = bm25.graph_env.read_txn().unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "test", 10, &arena).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_search_results_sorted_by_score() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let mut wtxn = bm25.graph_env.write_txn().unwrap();
+
+        // Insert documents with varying relevance to "machine learning"
+        let docs = vec![
+            (1u128, "machine learning machine learning machine learning"), // High relevance
+            (2u128, "machine learning"),                                    // Medium relevance
+            (3u128, "learning about machines"),                             // Lower relevance
+            (4u128, "machine"),                                             // Lowest
+        ];
+
+        for (doc_id, doc) in &docs {
+            bm25.insert_doc(&mut wtxn, *doc_id, doc).unwrap();
+        }
+        wtxn.commit().unwrap();
+
+        let rtxn = bm25.graph_env.read_txn().unwrap();
+        let arena = Bump::new();
+        let results = bm25.search(&rtxn, "machine learning", 10, &arena).unwrap();
+
+        // Results should be sorted by score (descending)
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].1 >= results[i].1,
+                "Results not sorted: {} < {}",
+                results[i - 1].1,
+                results[i].1
+            );
+        }
+    }
+
+    #[test]
+    fn test_insert_first_document_initializes_metadata() {
+        let (bm25, _temp_dir) = setup_bm25_config();
+        let mut wtxn = bm25.graph_env.write_txn().unwrap();
+
+        // Before inserting, metadata should not exist
+        let metadata_before = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap();
+        assert!(metadata_before.is_none());
+
+        // Insert first document
+        bm25.insert_doc(&mut wtxn, 1u128, "first document").unwrap();
+
+        // After inserting, metadata should exist
+        let metadata_bytes = bm25.metadata_db.get(&wtxn, METADATA_KEY).unwrap().unwrap();
+        let metadata: BM25Metadata = bincode::deserialize(metadata_bytes).unwrap();
+
+        assert_eq!(metadata.total_docs, 1);
+        assert!(metadata.avgdl > 0.0);
+
+        wtxn.commit().unwrap();
+    }
+
+    #[test]
+    fn test_bm25_temp_config() {
+        let (env, _temp_dir) = setup_test_env();
+        let mut wtxn = env.write_txn().unwrap();
+
+        // Create temp BM25 config with unique ID
+        let config = HBM25Config::new_temp(&env, &mut wtxn, "test_unique_id").unwrap();
+
+        // Should be able to insert and search
+        config.insert_doc(&mut wtxn, 1u128, "test document").unwrap();
+        wtxn.commit().unwrap();
+
+        let rtxn = env.read_txn().unwrap();
+        let arena = Bump::new();
+        let results = config.search(&rtxn, "test", 10, &arena).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_bm25_flatten_properties() {
+        let arena = Bump::new();
+
+        let props: HashMap<String, Value> = HashMap::from([
+            ("title".to_string(), Value::String("Test Document".to_string())),
+            ("content".to_string(), Value::String("This is content".to_string())),
+            ("count".to_string(), Value::I32(42)),
+        ]);
+
+        let props_map = ImmutablePropertiesMap::new(
+            props.len(),
+            props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            &arena,
+        );
+
+        let flattened = props_map.flatten_bm25();
+
+        // Should contain all keys and values
+        assert!(flattened.contains("title"));
+        assert!(flattened.contains("Test Document"));
+        assert!(flattened.contains("content"));
+        assert!(flattened.contains("This is content"));
+        assert!(flattened.contains("count"));
+        assert!(flattened.contains("42"));
+    }
 }

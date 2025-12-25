@@ -1,4 +1,4 @@
-name: Core Database Tests
+name: Core Database Tests In Production Mode
 
 on:
   pull_request:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   test:
-    name: Test helix_engine
+    name: Test helix_engine in production mode
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -31,8 +31,8 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') || 'fallback' }}
         restore-keys: |
           ${{ runner.os }}-cargo-
-          
-    - name: Run tests
-      run: | 
+
+    - name: Run production tests
+      run: |
         cd helix-db
-        cargo test --release --lib -- --skip concurrency_tests
+        cargo test --release --lib --features production -- --skip concurrency_tests

@@ -867,3 +867,80 @@ fn test_v_from_id_with_max_id() {
         result
     );
 }
+
+#[test]
+fn test_search_v_filters_by_type() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    // Insert vectors with type "type_a"
+    let v1_a = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[1.0, 0.0, 0.0], "type_a", None)
+        .collect_to_obj()
+        .unwrap();
+    let v2_a = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[0.9, 0.1, 0.0], "type_a", None)
+        .collect_to_obj()
+        .unwrap();
+
+    // Insert vectors with type "type_b"
+    let v1_b = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[0.0, 1.0, 0.0], "type_b", None)
+        .collect_to_obj()
+        .unwrap();
+    let v2_b = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[0.1, 0.9, 0.0], "type_b", None)
+        .collect_to_obj()
+        .unwrap();
+
+    // Insert vectors with type "type_c"
+    let v1_c = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[0.0, 0.0, 1.0], "type_c", None)
+        .collect_to_obj()
+        .unwrap();
+
+    txn.commit().unwrap();
+
+    // Search for vectors with type "type_b" using a query vector close to type_b vectors
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let results = G::new(&storage, &txn, &arena)
+        .search_v::<Filter, _>(&[0.0, 1.0, 0.0], 10, "type_b", None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    // Should only return the 2 vectors with type "type_b"
+    assert_eq!(results.len(), 2, "search_v should only return vectors of the specified type");
+
+    let result_ids: Vec<u128> = results.iter().map(|v| v.id()).collect();
+    assert!(result_ids.contains(&v1_b.id()), "Should contain v1_b");
+    assert!(result_ids.contains(&v2_b.id()), "Should contain v2_b");
+
+    // Verify type_a and type_c vectors are NOT in the results
+    assert!(!result_ids.contains(&v1_a.id()), "Should NOT contain v1_a (type_a)");
+    assert!(!result_ids.contains(&v2_a.id()), "Should NOT contain v2_a (type_a)");
+    assert!(!result_ids.contains(&v1_c.id()), "Should NOT contain v1_c (type_c)");
+
+    // Also verify by searching for type_a - should only get type_a vectors
+    let arena = Bump::new();
+    let results_a = G::new(&storage, &txn, &arena)
+        .search_v::<Filter, _>(&[1.0, 0.0, 0.0], 10, "type_a", None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(results_a.len(), 2, "search_v for type_a should return 2 vectors");
+    let result_a_ids: Vec<u128> = results_a.iter().map(|v| v.id()).collect();
+    assert!(result_a_ids.contains(&v1_a.id()));
+    assert!(result_a_ids.contains(&v2_a.id()));
+
+    // And search for type_c - should only get 1 vector
+    let arena = Bump::new();
+    let results_c = G::new(&storage, &txn, &arena)
+        .search_v::<Filter, _>(&[0.0, 0.0, 1.0], 10, "type_c", None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(results_c.len(), 1, "search_v for type_c should return 1 vector");
+    assert_eq!(results_c[0].id(), v1_c.id());
+}

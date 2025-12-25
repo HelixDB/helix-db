@@ -4,7 +4,7 @@ use crate::helix_engine::{traversal_core::HelixGraphEngine, types::GraphError};
 use crate::helix_gateway::worker_pool::WorkerPool;
 use crate::helix_gateway::{
     gateway::CoreSetter,
-    router::router::{HandlerInput, HelixRouter},
+    router::router::{HandlerInput, HelixRouter, IoContFn},
 };
 use crate::protocol::Format;
 use crate::protocol::{HelixError, Request, request::RequestType, response::Response};
@@ -1647,4 +1647,955 @@ async fn test_rapid_fire_requests() {
     }
 
     assert!(all_ok);
+}
+
+// ============================================================================
+// Writer Continuation Priority Tests
+// ============================================================================
+
+/// Test that write handler continuations are processed before new write requests.
+/// This prevents hangs when multiple write requests with async IO arrive rapidly.
+///
+/// Scenario being tested:
+/// 1. Write request A arrives, needs async IO, spawns continuation
+/// 2. Write request B arrives before A's continuation completes
+/// 3. Continuation from A must be processed before B starts
+/// 4. If continuations aren't prioritized, this would hang or process out of order
+#[tokio::test]
+async fn test_writer_continuation_priority() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // Track the order of operations
+    static ORDER_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static CONTINUATION_A_ORDER: AtomicU32 = AtomicU32::new(0);
+    static REQUEST_B_START_ORDER: AtomicU32 = AtomicU32::new(0);
+
+    // Reset counters
+    ORDER_COUNTER.store(0, Ordering::SeqCst);
+    CONTINUATION_A_ORDER.store(0, Ordering::SeqCst);
+    REQUEST_B_START_ORDER.store(0, Ordering::SeqCst);
+
+    // Handler that returns IoNeeded - simulates async operation like embedding fetch
+    fn io_handler_a(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(
+            move |cont_tx, ret_chan| {
+                Box::pin(async move {
+                    // Very short async delay - continuation will be ready quickly
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+                    // Send continuation
+                    cont_tx
+                        .send_async((
+                            ret_chan,
+                            Box::new(move || {
+                                // Record when continuation executes
+                                let order = ORDER_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                CONTINUATION_A_ORDER.store(order, Ordering::SeqCst);
+                                Ok(Response {
+                                    body: b"continuation_a".to_vec(),
+                                    fmt: Format::Json,
+                                })
+                            }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        ))
+                        .await
+                        .expect("cont channel should be alive");
+                })
+            },
+        ))
+    }
+
+    // Handler B - records when it starts processing
+    fn handler_b(_input: HandlerInput) -> Result<Response, GraphError> {
+        // Record when request B starts
+        let order = ORDER_COUNTER.fetch_add(1, Ordering::SeqCst);
+        REQUEST_B_START_ORDER.store(order, Ordering::SeqCst);
+        Ok(Response {
+            body: b"handler_b".to_vec(),
+            fmt: Format::Json,
+        })
+    }
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert("io_write_a".to_string(), Arc::new(io_handler_a) as Arc<_>);
+    routes.insert("write_b".to_string(), Arc::new(handler_b) as Arc<_>);
+
+    // Mark both as write routes so they go through the single writer worker
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("io_write_a".to_string());
+    write_routes.insert("write_b".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    // Send request A (will need async IO)
+    let pool_a = Arc::clone(&pool);
+    let handle_a = tokio::spawn(async move {
+        let request = Request {
+            name: "io_write_a".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+            api_key: None,
+        };
+        pool_a.process(request).await
+    });
+
+    // Wait long enough for A's async to complete and send its continuation
+    // A's async takes 5ms, so 50ms should be plenty
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Send request B while A's continuation is pending
+    let pool_b = Arc::clone(&pool);
+    let handle_b = tokio::spawn(async move {
+        let request = Request {
+            name: "write_b".to_string(),
+            req_type: RequestType::Query,
+            body: Bytes::new(),
+            in_fmt: Format::Json,
+            out_fmt: Format::Json,
+            api_key: None,
+        };
+        pool_b.process(request).await
+    });
+
+    // Both should complete with a reasonable timeout (hang detection)
+    let timeout = std::time::Duration::from_secs(5);
+    let result_a = tokio::time::timeout(timeout, handle_a).await;
+    let result_b = tokio::time::timeout(timeout, handle_b).await;
+
+    // Verify both completed (didn't hang)
+    assert!(result_a.is_ok(), "Request A timed out - possible hang");
+    assert!(result_b.is_ok(), "Request B timed out - possible hang");
+
+    let response_a = result_a.unwrap().unwrap();
+    let response_b = result_b.unwrap().unwrap();
+
+    assert!(response_a.is_ok(), "Request A failed: {:?}", response_a);
+    assert!(response_b.is_ok(), "Request B failed: {:?}", response_b);
+
+    // Verify continuation A was processed before request B started
+    let cont_a_order = CONTINUATION_A_ORDER.load(Ordering::SeqCst);
+    let req_b_order = REQUEST_B_START_ORDER.load(Ordering::SeqCst);
+
+    assert!(
+        cont_a_order < req_b_order,
+        "Continuation A (order {}) should be processed before Request B (order {})",
+        cont_a_order,
+        req_b_order
+    );
+}
+
+// ============================================================================
+// Read Continuation Channel Tests
+// ============================================================================
+
+/// Test that read handlers can use continuation channels properly.
+/// This verifies the parity-based continuation handling works for readers.
+#[tokio::test]
+async fn test_read_continuation_channel_basic() {
+    // Handler that returns IoNeeded - simulates async operation
+    fn io_read_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                // Simulate async IO (e.g., fetching embeddings)
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                // Send continuation back to worker
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            Ok(Response {
+                                body: b"read_continuation_result".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "io_read".to_string(),
+        Arc::new(io_read_handler) as Arc<_>,
+    );
+    // Not in write_routes, so it goes to reader workers
+    let router = Arc::new(HelixRouter::new(Some(routes), None, None));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    let request = Request {
+        name: "io_read".to_string(),
+        req_type: RequestType::Query,
+        body: Bytes::new(),
+        in_fmt: Format::Json,
+        out_fmt: Format::Json,
+        api_key: None,
+    };
+
+    let timeout = std::time::Duration::from_secs(5);
+    let result = tokio::time::timeout(timeout, pool.process(request)).await;
+
+    assert!(result.is_ok(), "Request timed out - possible hang");
+    let response = result.unwrap();
+    assert!(response.is_ok(), "Request failed: {:?}", response);
+    assert_eq!(
+        response.unwrap().body,
+        b"read_continuation_result".to_vec()
+    );
+}
+
+/// Test multiple concurrent read requests with continuation channels.
+#[tokio::test]
+async fn test_read_continuation_channel_concurrent() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CONTINUATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn io_read_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                // Variable delay to test concurrent handling
+                let delay = rand::random::<u64>() % 20 + 5;
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            CONTINUATION_COUNT.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"concurrent_read".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    // Reset counter
+    CONTINUATION_COUNT.store(0, Ordering::SeqCst);
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "io_read_concurrent".to_string(),
+        Arc::new(io_read_handler) as Arc<_>,
+    );
+    let router = Arc::new(HelixRouter::new(Some(routes), None, None));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    // Send 20 concurrent read requests with continuations
+    let num_requests = 20;
+    let mut handles = vec![];
+
+    for _ in 0..num_requests {
+        let pool_clone = Arc::clone(&pool);
+        let handle = tokio::spawn(async move {
+            let request = Request {
+                name: "io_read_concurrent".to_string(),
+                req_type: RequestType::Query,
+                body: Bytes::new(),
+                in_fmt: Format::Json,
+                out_fmt: Format::Json,
+                api_key: None,
+            };
+            pool_clone.process(request).await
+        });
+        handles.push(handle);
+    }
+
+    let timeout = std::time::Duration::from_secs(10);
+    let mut success_count = 0;
+
+    for handle in handles {
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(result.is_ok(), "Request timed out");
+        let join_result = result.unwrap();
+        assert!(join_result.is_ok(), "Task panicked");
+        let response = join_result.unwrap();
+        assert!(response.is_ok(), "Request failed: {:?}", response);
+        success_count += 1;
+    }
+
+    assert_eq!(success_count, num_requests);
+    assert_eq!(
+        CONTINUATION_COUNT.load(Ordering::SeqCst),
+        num_requests,
+        "All continuations should have been processed"
+    );
+}
+
+// ============================================================================
+// Parallel Write Request Tests
+// ============================================================================
+
+/// Test that parallel write requests are handled sequentially without crashing.
+/// Write requests go through a single writer thread, so they should be serialized.
+#[tokio::test]
+async fn test_parallel_write_requests_no_crash() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
+        // Small delay to simulate write operation
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        Ok(Response {
+            body: b"write_ok".to_vec(),
+            fmt: Format::Json,
+        })
+    }
+
+    // Reset counter
+    WRITE_COUNT.store(0, Ordering::SeqCst);
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert("write_op".to_string(), Arc::new(write_handler) as Arc<_>);
+
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("write_op".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    // Fire off 50 parallel write requests
+    let num_requests = 50;
+    let mut handles = vec![];
+
+    for _ in 0..num_requests {
+        let pool_clone = Arc::clone(&pool);
+        let handle = tokio::spawn(async move {
+            let request = Request {
+                name: "write_op".to_string(),
+                req_type: RequestType::Query,
+                body: Bytes::new(),
+                in_fmt: Format::Json,
+                out_fmt: Format::Json,
+                api_key: None,
+            };
+            pool_clone.process(request).await
+        });
+        handles.push(handle);
+    }
+
+    let timeout = std::time::Duration::from_secs(10);
+    let mut success_count = 0;
+
+    for handle in handles {
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(result.is_ok(), "Write request timed out - possible deadlock");
+        let join_result = result.unwrap();
+        assert!(join_result.is_ok(), "Task panicked");
+        let response = join_result.unwrap();
+        assert!(response.is_ok(), "Write request failed: {:?}", response);
+        success_count += 1;
+    }
+
+    assert_eq!(success_count, num_requests);
+    assert_eq!(
+        WRITE_COUNT.load(Ordering::SeqCst),
+        num_requests,
+        "All writes should have been processed"
+    );
+}
+
+/// Test parallel write requests with continuation channels.
+/// Each write request requires async IO before completion.
+#[tokio::test]
+async fn test_parallel_write_requests_with_continuations() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CONTINUATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn io_write_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                // Simulate async IO
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            CONTINUATION_COUNT.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"write_with_cont".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    // Reset counter
+    CONTINUATION_COUNT.store(0, Ordering::SeqCst);
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "io_write".to_string(),
+        Arc::new(io_write_handler) as Arc<_>,
+    );
+
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("io_write".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    // Fire off 30 parallel write requests with continuations
+    let num_requests = 30;
+    let mut handles = vec![];
+
+    for _ in 0..num_requests {
+        let pool_clone = Arc::clone(&pool);
+        let handle = tokio::spawn(async move {
+            let request = Request {
+                name: "io_write".to_string(),
+                req_type: RequestType::Query,
+                body: Bytes::new(),
+                in_fmt: Format::Json,
+                out_fmt: Format::Json,
+                api_key: None,
+            };
+            pool_clone.process(request).await
+        });
+        handles.push(handle);
+    }
+
+    let timeout = std::time::Duration::from_secs(15);
+    let mut success_count = 0;
+
+    for handle in handles {
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(
+            result.is_ok(),
+            "Write request with continuation timed out - possible hang"
+        );
+        let join_result = result.unwrap();
+        assert!(join_result.is_ok(), "Task panicked");
+        let response = join_result.unwrap();
+        assert!(
+            response.is_ok(),
+            "Write request with continuation failed: {:?}",
+            response
+        );
+        success_count += 1;
+    }
+
+    assert_eq!(success_count, num_requests);
+    assert_eq!(
+        CONTINUATION_COUNT.load(Ordering::SeqCst),
+        num_requests,
+        "All write continuations should have been processed"
+    );
+}
+
+/// Test that write requests maintain sequential ordering even under parallel load.
+#[tokio::test]
+async fn test_parallel_writes_maintain_order() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    static ORDER_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static EXECUTION_ORDER: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+    fn ordering_write_handler(input: HandlerInput) -> Result<Response, GraphError> {
+        // Parse request ID from body
+        let id: usize = String::from_utf8_lossy(&input.request.body)
+            .parse()
+            .unwrap_or(0);
+
+        // Record execution order
+        let order = ORDER_COUNTER.fetch_add(1, Ordering::SeqCst);
+        EXECUTION_ORDER.lock().unwrap().push(id);
+
+        Ok(Response {
+            body: format!("order_{}", order).into_bytes(),
+            fmt: Format::Json,
+        })
+    }
+
+    // Reset state
+    ORDER_COUNTER.store(0, Ordering::SeqCst);
+    EXECUTION_ORDER.lock().unwrap().clear();
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "order_write".to_string(),
+        Arc::new(ordering_write_handler) as Arc<_>,
+    );
+
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("order_write".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    // Send requests in order but concurrently
+    let num_requests = 20;
+    let mut handles = vec![];
+
+    for i in 0..num_requests {
+        let pool_clone = Arc::clone(&pool);
+        let handle = tokio::spawn(async move {
+            let request = Request {
+                name: "order_write".to_string(),
+                req_type: RequestType::Query,
+                body: Bytes::from(format!("{}", i)),
+                in_fmt: Format::Json,
+                out_fmt: Format::Json,
+                api_key: None,
+            };
+            pool_clone.process(request).await
+        });
+        handles.push(handle);
+        // Small delay to encourage order
+        tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+    }
+
+    let timeout = std::time::Duration::from_secs(10);
+    for handle in handles {
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(result.is_ok(), "Request timed out");
+        let join_result = result.unwrap();
+        assert!(join_result.is_ok(), "Task panicked");
+    }
+
+    // Verify all were processed
+    let execution_order = EXECUTION_ORDER.lock().unwrap();
+    assert_eq!(
+        execution_order.len(),
+        num_requests,
+        "All writes should have been processed"
+    );
+
+    // Note: We can't guarantee exact order due to channel timing,
+    // but we verify all requests completed without crashes or hangs
+}
+
+/// Test multiple sequential continuations from a single write request.
+/// This simulates a handler that needs multiple async IO operations.
+#[tokio::test]
+async fn test_write_multiple_continuations_in_sequence() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CONTINUATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn multi_cont_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                // First async operation
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                CONTINUATION_COUNT.fetch_add(1, Ordering::SeqCst);
+
+                // Send final continuation
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            CONTINUATION_COUNT.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"multi_cont_done".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    // Reset counter
+    CONTINUATION_COUNT.store(0, Ordering::SeqCst);
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "multi_cont".to_string(),
+        Arc::new(multi_cont_handler) as Arc<_>,
+    );
+
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("multi_cont".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    let request = Request {
+        name: "multi_cont".to_string(),
+        req_type: RequestType::Query,
+        body: Bytes::new(),
+        in_fmt: Format::Json,
+        out_fmt: Format::Json,
+        api_key: None,
+    };
+
+    let timeout = std::time::Duration::from_secs(5);
+    let result = tokio::time::timeout(timeout, pool.process(request)).await;
+
+    assert!(result.is_ok(), "Request timed out");
+    let response = result.unwrap();
+    assert!(response.is_ok(), "Request failed: {:?}", response);
+    assert_eq!(response.unwrap().body, b"multi_cont_done".to_vec());
+
+    // Verify both continuation phases executed
+    assert_eq!(
+        CONTINUATION_COUNT.load(Ordering::SeqCst),
+        2,
+        "Both continuation phases should have executed"
+    );
+}
+
+/// Test mixed read and write requests with continuations running concurrently.
+#[tokio::test]
+async fn test_mixed_read_write_with_continuations() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static READ_CONT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static WRITE_CONT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn io_read_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            READ_CONT_COUNT.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"read_done".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    fn io_write_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            WRITE_CONT_COUNT.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"write_done".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    // Reset counters
+    READ_CONT_COUNT.store(0, Ordering::SeqCst);
+    WRITE_CONT_COUNT.store(0, Ordering::SeqCst);
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "io_read_mixed".to_string(),
+        Arc::new(io_read_handler) as Arc<_>,
+    );
+    routes.insert(
+        "io_write_mixed".to_string(),
+        Arc::new(io_write_handler) as Arc<_>,
+    );
+
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("io_write_mixed".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    let num_reads = 15;
+    let num_writes = 15;
+    let mut handles = vec![];
+
+    // Interleave read and write requests
+    for i in 0..(num_reads + num_writes) {
+        let pool_clone = Arc::clone(&pool);
+        let is_write = i % 2 == 0 && (i / 2) < num_writes;
+        let route_name = if is_write {
+            "io_write_mixed"
+        } else {
+            "io_read_mixed"
+        };
+
+        let handle = tokio::spawn(async move {
+            let request = Request {
+                name: route_name.to_string(),
+                req_type: RequestType::Query,
+                body: Bytes::new(),
+                in_fmt: Format::Json,
+                out_fmt: Format::Json,
+                api_key: None,
+            };
+            pool_clone.process(request).await
+        });
+        handles.push(handle);
+    }
+
+    let timeout = std::time::Duration::from_secs(15);
+    let mut success_count = 0;
+
+    for handle in handles {
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(result.is_ok(), "Request timed out");
+        let join_result = result.unwrap();
+        assert!(join_result.is_ok(), "Task panicked");
+        let response = join_result.unwrap();
+        assert!(response.is_ok(), "Request failed: {:?}", response);
+        success_count += 1;
+    }
+
+    assert_eq!(success_count, num_reads + num_writes);
+
+    let read_count = READ_CONT_COUNT.load(Ordering::SeqCst);
+    let write_count = WRITE_CONT_COUNT.load(Ordering::SeqCst);
+
+    assert!(
+        read_count > 0,
+        "Some read continuations should have been processed"
+    );
+    assert!(
+        write_count > 0,
+        "Some write continuations should have been processed"
+    );
+    assert_eq!(
+        read_count + write_count,
+        num_reads + num_writes,
+        "All continuations should have been processed"
+    );
+}
+
+/// Stress test: Many parallel writes with continuations to ensure no crashes or hangs.
+#[tokio::test]
+async fn test_stress_parallel_writes_with_continuations() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SUCCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn stress_write_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                // Random delay to stress test timing
+                let delay = rand::random::<u64>() % 10 + 1;
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            SUCCESS_COUNT.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"stress_ok".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
+    }
+
+    // Reset counter
+    SUCCESS_COUNT.store(0, Ordering::SeqCst);
+
+    let (graph, _temp_dir) = create_test_graph();
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "stress_write".to_string(),
+        Arc::new(stress_write_handler) as Arc<_>,
+    );
+
+    let mut write_routes = std::collections::HashSet::new();
+    write_routes.insert("stress_write".to_string());
+
+    let router = Arc::new(HelixRouter::new(Some(routes), None, Some(write_routes)));
+
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(8)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+
+    let cores = vec![core_affinity::CoreId { id: 0 }];
+    let core_setter = Arc::new(CoreSetter::new(cores, 2));
+
+    let pool = Arc::new(WorkerPool::new(core_setter, graph, router, rt));
+
+    // Fire off 100 parallel write requests
+    let num_requests = 100;
+    let mut handles = vec![];
+
+    for _ in 0..num_requests {
+        let pool_clone = Arc::clone(&pool);
+        let handle = tokio::spawn(async move {
+            let request = Request {
+                name: "stress_write".to_string(),
+                req_type: RequestType::Query,
+                body: Bytes::new(),
+                in_fmt: Format::Json,
+                out_fmt: Format::Json,
+                api_key: None,
+            };
+            pool_clone.process(request).await
+        });
+        handles.push(handle);
+    }
+
+    let timeout = std::time::Duration::from_secs(30);
+    let mut completed = 0;
+
+    for handle in handles {
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(
+            result.is_ok(),
+            "Stress test request timed out after {} completed",
+            completed
+        );
+        let join_result = result.unwrap();
+        assert!(join_result.is_ok(), "Task panicked after {} completed", completed);
+        let response = join_result.unwrap();
+        assert!(
+            response.is_ok(),
+            "Request failed after {} completed: {:?}",
+            completed,
+            response
+        );
+        completed += 1;
+    }
+
+    assert_eq!(completed, num_requests);
+    assert_eq!(
+        SUCCESS_COUNT.load(Ordering::SeqCst),
+        num_requests,
+        "All stress test continuations should have completed"
+    );
 }

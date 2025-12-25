@@ -1,4 +1,5 @@
 pub mod embedding_providers;
+pub mod gateway_loom_tests;
 pub mod gateway_tests;
 pub mod introspect_schema_tests;
 pub mod mcp_tests;

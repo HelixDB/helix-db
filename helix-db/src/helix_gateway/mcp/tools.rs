@@ -540,3 +540,157 @@ where
 pub trait FilterValues {
     fn compare(&self, value: &Value, operator: Option<Operator>) -> bool;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // Operator::execute() Tests
+    // ============================================================================
+
+    #[test]
+    fn test_operator_eq() {
+        let op = Operator::Eq;
+
+        // Integers
+        assert!(op.execute(&Value::I32(5), &Value::I32(5)));
+        assert!(!op.execute(&Value::I32(5), &Value::I32(6)));
+
+        // Strings
+        assert!(op.execute(
+            &Value::String("hello".to_string()),
+            &Value::String("hello".to_string())
+        ));
+        assert!(!op.execute(
+            &Value::String("hello".to_string()),
+            &Value::String("world".to_string())
+        ));
+
+        // Booleans
+        assert!(op.execute(&Value::Boolean(true), &Value::Boolean(true)));
+        assert!(!op.execute(&Value::Boolean(true), &Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_operator_neq() {
+        let op = Operator::Neq;
+
+        assert!(op.execute(&Value::I32(5), &Value::I32(6)));
+        assert!(!op.execute(&Value::I32(5), &Value::I32(5)));
+
+        assert!(op.execute(
+            &Value::String("hello".to_string()),
+            &Value::String("world".to_string())
+        ));
+        assert!(!op.execute(
+            &Value::String("hello".to_string()),
+            &Value::String("hello".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_operator_lt() {
+        let op = Operator::Lt;
+
+        // Integers
+        assert!(op.execute(&Value::I32(3), &Value::I32(5)));
+        assert!(!op.execute(&Value::I32(5), &Value::I32(3)));
+        assert!(!op.execute(&Value::I32(5), &Value::I32(5))); // Equal is not less than
+
+        // Floats
+        assert!(op.execute(&Value::F64(1.5), &Value::F64(2.5)));
+        assert!(!op.execute(&Value::F64(2.5), &Value::F64(1.5)));
+    }
+
+    #[test]
+    fn test_operator_gt() {
+        let op = Operator::Gt;
+
+        // Integers
+        assert!(op.execute(&Value::I32(5), &Value::I32(3)));
+        assert!(!op.execute(&Value::I32(3), &Value::I32(5)));
+        assert!(!op.execute(&Value::I32(5), &Value::I32(5))); // Equal is not greater than
+
+        // Floats
+        assert!(op.execute(&Value::F64(2.5), &Value::F64(1.5)));
+        assert!(!op.execute(&Value::F64(1.5), &Value::F64(2.5)));
+    }
+
+    #[test]
+    fn test_operator_lte() {
+        let op = Operator::Lte;
+
+        // Less than
+        assert!(op.execute(&Value::I32(3), &Value::I32(5)));
+        // Equal
+        assert!(op.execute(&Value::I32(5), &Value::I32(5)));
+        // Greater than
+        assert!(!op.execute(&Value::I32(5), &Value::I32(3)));
+    }
+
+    #[test]
+    fn test_operator_gte() {
+        let op = Operator::Gte;
+
+        // Greater than
+        assert!(op.execute(&Value::I32(5), &Value::I32(3)));
+        // Equal
+        assert!(op.execute(&Value::I32(5), &Value::I32(5)));
+        // Less than
+        assert!(!op.execute(&Value::I32(3), &Value::I32(5)));
+    }
+
+    #[test]
+    fn test_operator_cross_type_numeric() {
+        // Value's PartialOrd and PartialEq handle cross-type numeric comparisons
+        let op_eq = Operator::Eq;
+        let op_gt = Operator::Gt;
+
+        // I32 vs F64 - equality works for matching values
+        assert!(op_eq.execute(&Value::I32(42), &Value::F64(42.0)));
+
+        // Different integer sizes work correctly
+        assert!(op_eq.execute(&Value::I32(100), &Value::I64(100)));
+        assert!(op_gt.execute(&Value::U64(1000), &Value::I32(500)));
+        assert!(op_gt.execute(&Value::I64(1000), &Value::I32(500)));
+    }
+
+    #[test]
+    fn test_operator_string_comparison() {
+        let op_lt = Operator::Lt;
+        let op_gt = Operator::Gt;
+
+        // Lexicographic ordering
+        assert!(op_lt.execute(
+            &Value::String("apple".to_string()),
+            &Value::String("banana".to_string())
+        ));
+        assert!(op_gt.execute(
+            &Value::String("zebra".to_string()),
+            &Value::String("apple".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_operator_empty_value() {
+        let op_eq = Operator::Eq;
+
+        // Empty equals empty
+        assert!(op_eq.execute(&Value::Empty, &Value::Empty));
+
+        // Empty doesn't equal non-empty
+        assert!(!op_eq.execute(&Value::Empty, &Value::I32(0)));
+        assert!(!op_eq.execute(&Value::I32(0), &Value::Empty));
+    }
+
+    #[test]
+    fn test_operator_boolean_values() {
+        let op_eq = Operator::Eq;
+        let op_neq = Operator::Neq;
+
+        assert!(op_eq.execute(&Value::Boolean(true), &Value::Boolean(true)));
+        assert!(op_eq.execute(&Value::Boolean(false), &Value::Boolean(false)));
+        assert!(op_neq.execute(&Value::Boolean(true), &Value::Boolean(false)));
+    }
+}

@@ -1817,6 +1817,9 @@ pub(crate) fn validate_traversal<'a>(
                 )
                 .ok()?;
 
+                // Tag the main traversal with the closure parameter name
+                gen_traversal.closure_param_name = Some(cl.identifier.clone());
+
                 // Tag all nested traversals with closure context
                 for (_field_name, nested_info) in gen_traversal.nested_traversals.iter_mut() {
                     nested_info.closure_param_name = Some(cl.identifier.clone());

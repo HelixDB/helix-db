@@ -2184,4 +2184,237 @@ mod tests {
         let result = casting::cast(val, casting::CastType::Empty);
         assert_eq!(result, Value::Empty);
     }
+
+    // ============================================================================
+    // Additional Edge Case Tests for inner_str()
+    // ============================================================================
+
+    #[test]
+    fn test_inner_str_string_returns_borrowed() {
+        let val = Value::String("test".to_string());
+        let cow = val.inner_str();
+        assert!(matches!(cow, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*cow, "test");
+    }
+
+    #[test]
+    fn test_inner_str_numeric_returns_owned() {
+        let val = Value::I32(42);
+        let cow = val.inner_str();
+        assert!(matches!(cow, std::borrow::Cow::Owned(_)));
+        assert_eq!(&*cow, "42");
+    }
+
+    #[test]
+    fn test_inner_str_boolean_returns_borrowed() {
+        let val_true = Value::Boolean(true);
+        let cow_true = val_true.inner_str();
+        assert!(matches!(cow_true, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*cow_true, "true");
+
+        let val_false = Value::Boolean(false);
+        let cow_false = val_false.inner_str();
+        assert!(matches!(cow_false, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*cow_false, "false");
+    }
+
+    #[test]
+    fn test_inner_str_all_numeric_types() {
+        assert_eq!(&*Value::I8(-42).inner_str(), "-42");
+        assert_eq!(&*Value::I16(-1000).inner_str(), "-1000");
+        assert_eq!(&*Value::I32(-100000).inner_str(), "-100000");
+        assert_eq!(&*Value::I64(-1000000000).inner_str(), "-1000000000");
+        assert_eq!(&*Value::U8(255).inner_str(), "255");
+        assert_eq!(&*Value::U16(65535).inner_str(), "65535");
+        assert_eq!(&*Value::U32(4294967295).inner_str(), "4294967295");
+        assert_eq!(&*Value::U64(18446744073709551615).inner_str(), "18446744073709551615");
+        assert_eq!(&*Value::U128(u128::MAX).inner_str(), u128::MAX.to_string());
+    }
+
+    #[test]
+    fn test_inner_str_float_precision() {
+        let val = Value::F64(3.141592653589793);
+        let cow = val.inner_str();
+        assert!(cow.starts_with("3.14159"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Not primitive")]
+    fn test_inner_str_empty_panics() {
+        Value::Empty.inner_str();
+    }
+
+    #[test]
+    #[should_panic(expected = "Not primitive")]
+    fn test_inner_str_array_panics() {
+        Value::Array(vec![Value::I32(1)]).inner_str();
+    }
+
+    // ============================================================================
+    // contains() Method Tests
+    // ============================================================================
+
+    #[test]
+    fn test_contains_string_with_substring() {
+        let val = Value::String("hello world".to_string());
+        assert!(val.contains("world"));
+        assert!(val.contains("hello"));
+        assert!(val.contains("o w"));
+        assert!(val.contains(""));
+    }
+
+    #[test]
+    fn test_contains_string_without_substring() {
+        let val = Value::String("hello world".to_string());
+        assert!(!val.contains("xyz"));
+        assert!(!val.contains("World")); // Case sensitive
+    }
+
+    #[test]
+    fn test_contains_numeric_converted_to_string() {
+        let val = Value::I32(12345);
+        assert!(val.contains("123"));
+        assert!(val.contains("345"));
+        assert!(val.contains("12345"));
+        assert!(!val.contains("999"));
+    }
+
+    #[test]
+    fn test_contains_boolean() {
+        let val_true = Value::Boolean(true);
+        assert!(val_true.contains("true"));
+        assert!(val_true.contains("ru"));
+        assert!(!val_true.contains("false"));
+
+        let val_false = Value::Boolean(false);
+        assert!(val_false.contains("false"));
+        assert!(val_false.contains("als"));
+    }
+
+    // ============================================================================
+    // to_variant_string() Complete Coverage
+    // ============================================================================
+
+    #[test]
+    fn test_to_variant_string_all_variants() {
+        assert_eq!(Value::String("".to_string()).to_variant_string(), "String");
+        assert_eq!(Value::F32(0.0).to_variant_string(), "F32");
+        assert_eq!(Value::F64(0.0).to_variant_string(), "F64");
+        assert_eq!(Value::I8(0).to_variant_string(), "I8");
+        assert_eq!(Value::I16(0).to_variant_string(), "I16");
+        assert_eq!(Value::I32(0).to_variant_string(), "I32");
+        assert_eq!(Value::I64(0).to_variant_string(), "I64");
+        assert_eq!(Value::U8(0).to_variant_string(), "U8");
+        assert_eq!(Value::U16(0).to_variant_string(), "U16");
+        assert_eq!(Value::U32(0).to_variant_string(), "U32");
+        assert_eq!(Value::U64(0).to_variant_string(), "U64");
+        assert_eq!(Value::U128(0).to_variant_string(), "U128");
+        assert_eq!(Value::Boolean(false).to_variant_string(), "Boolean");
+        assert_eq!(Value::Empty.to_variant_string(), "Empty");
+        assert_eq!(Value::Array(vec![]).to_variant_string(), "Array");
+        assert_eq!(Value::Object(HashMap::new()).to_variant_string(), "Object");
+    }
+
+    // ============================================================================
+    // Float Edge Cases (NaN, Infinity)
+    // ============================================================================
+
+    #[test]
+    fn test_float_nan_ordering() {
+        let nan = Value::F64(f64::NAN);
+        let num = Value::F64(1.0);
+        // NaN comparisons should return Equal as per the implementation
+        assert_eq!(nan.cmp(&num), Ordering::Equal);
+        assert_eq!(nan.cmp(&nan), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_float_infinity() {
+        let inf = Value::F64(f64::INFINITY);
+        let neg_inf = Value::F64(f64::NEG_INFINITY);
+        let num = Value::F64(1000.0);
+
+        assert!(inf > num);
+        assert!(neg_inf < num);
+        assert!(inf > neg_inf);
+    }
+
+    #[test]
+    fn test_float_negative_zero() {
+        let pos_zero = Value::F64(0.0);
+        let neg_zero = Value::F64(-0.0);
+        // IEEE 754: 0.0 == -0.0
+        assert_eq!(pos_zero, neg_zero);
+    }
+
+    // ============================================================================
+    // inner_stringify() Complete Coverage
+    // ============================================================================
+
+    #[test]
+    fn test_inner_stringify_all_numeric_types() {
+        assert_eq!(Value::I8(-128).inner_stringify(), "-128");
+        assert_eq!(Value::I8(127).inner_stringify(), "127");
+        assert_eq!(Value::I16(-32768).inner_stringify(), "-32768");
+        assert_eq!(Value::I32(i32::MIN).inner_stringify(), i32::MIN.to_string());
+        assert_eq!(Value::I64(i64::MAX).inner_stringify(), i64::MAX.to_string());
+        assert_eq!(Value::U8(0).inner_stringify(), "0");
+        assert_eq!(Value::U8(255).inner_stringify(), "255");
+        assert_eq!(Value::U16(65535).inner_stringify(), "65535");
+        assert_eq!(Value::U32(u32::MAX).inner_stringify(), u32::MAX.to_string());
+        assert_eq!(Value::U64(u64::MAX).inner_stringify(), u64::MAX.to_string());
+        assert_eq!(Value::U128(u128::MAX).inner_stringify(), u128::MAX.to_string());
+    }
+
+    // ============================================================================
+    // Numeric Cross-Type Comparison Edge Cases
+    // ============================================================================
+
+    #[test]
+    fn test_numeric_cross_type_ordering() {
+        // Compare different integer types
+        assert!(Value::I8(10) < Value::I64(100));
+        assert!(Value::U8(50) > Value::I8(25));
+        assert!(Value::U64(1000) > Value::I16(500));
+    }
+
+    #[test]
+    fn test_u128_greater_than_i128_max() {
+        let large = Value::U128((i128::MAX as u128) + 1);
+        let small = Value::U128(100);
+        // When one U128 exceeds i128::MAX, special handling applies
+        assert!(large > small);
+    }
+
+    #[test]
+    fn test_u128_comparison_both_large() {
+        let a = Value::U128(u128::MAX);
+        let b = Value::U128(u128::MAX - 1);
+        assert!(a > b);
+    }
+
+    // ============================================================================
+    // Default Trait
+    // ============================================================================
+
+    #[test]
+    fn test_value_default_is_empty() {
+        let val: Value = Default::default();
+        assert!(matches!(val, Value::Empty));
+    }
+
+    // ============================================================================
+    // Clone Trait
+    // ============================================================================
+
+    #[test]
+    fn test_value_clone() {
+        let original = Value::String("test".to_string());
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+
+        let arr_original = Value::Array(vec![Value::I32(1), Value::I32(2)]);
+        let arr_cloned = arr_original.clone();
+        assert_eq!(arr_original, arr_cloned);
+    }
 }

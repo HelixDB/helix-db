@@ -1,6 +1,6 @@
 [package]
 name = "helix-cli"
-version = "2.1.10"
+version = "2.1.11"
 edition = "2024"
 
 [dependencies]
@@ -21,7 +21,7 @@ iota = "0.2.3"
 self_update = "0.42.0"
 uuid = { version = "1.18.1", features = ["v4", "v6", "fast-rng"] }
 chrono = "0.4.42"
-flume = "0.11.1"
+flume = { version = "0.12.0",default-features = false,  features = ["async", "select"] }
 dotenvy = "0.15.7"
 tokio-tungstenite = "0.28.0"
 futures-util = "0.3.31"

@@ -1,35 +1,32 @@
-N::Post {
-    subreddit: String,
-    title: String,
-    content: String,
-    url: String,
-    score: I32,
+QUERY GetLexicalEntriesByLexiconSlug(lexiconSlug: String) =>
+    lexicon <- N<Lexicon>({ slug: lexiconSlug })
+    entries <- lexicon::Out<LexiconHasEntry>
+    RETURN entries::|e|{
+        entryID: e::ID,
+        senses: e::Out<EntryHasSense>::{
+            senseID: ID,
+            ..
+        },
+        ..
+    }
+
+
+N::Lexicon {
+    INDEX slug: String,
 }
 
-V::Content {
-    chunk: String
+N::Entry {
 }
 
-E::EmbeddingOf {
-    From: Post,
-    To: Content,
+N::Sense {
 }
 
-N::Comment {
-    content: String,
-    score: I32,
+E::LexiconHasEntry {
+    From: Lexicon,
+    To: Entry
 }
 
-E::CommentOf {
-    From: Post,
-    To: Comment,
+E::EntryHasSense {
+    From: Entry,
+    To: Sense
 }
-
-QUERY get_all_posts() =>
-    posts <- N<Post>
-    RETURN posts
-
-QUERY search_posts_vec(query: [F64], k: I32) =>
-    vecs <- SearchV<Content>(query, k)
-    posts <- vecs::In<EmbeddingOf>
-    RETURN posts::{subreddit, title, content, url}

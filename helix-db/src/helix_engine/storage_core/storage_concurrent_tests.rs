@@ -12,6 +12,7 @@
 /// - LMDB provides single-writer guarantee but needs validation
 /// - MVCC snapshot isolation needs verification
 
+use serial_test::serial;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
@@ -38,6 +39,7 @@ fn setup_concurrent_storage() -> (Arc<HelixGraphStorage>, TempDir) {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_node_creation() {
     // Tests concurrent node creation from multiple threads
     //
@@ -94,6 +96,7 @@ fn test_concurrent_node_creation() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_edge_creation() {
     // Tests concurrent edge creation between nodes
     //
@@ -188,6 +191,7 @@ fn test_concurrent_edge_creation() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_concurrent_node_reads() {
     // Tests concurrent reads while writes are happening
     //
@@ -293,6 +297,7 @@ fn test_concurrent_node_reads() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_transaction_isolation_storage() {
     // Tests MVCC snapshot isolation at storage layer
     //
@@ -362,6 +367,7 @@ fn test_transaction_isolation_storage() {
 }
 
 #[test]
+#[serial(lmdb_stress)]
 fn test_write_transaction_serialization() {
     // Tests that write transactions are properly serialized
     //

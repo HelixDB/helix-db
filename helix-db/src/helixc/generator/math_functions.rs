@@ -523,4 +523,194 @@ mod tests {
             "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64()) * (src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f64()))"
         );
     }
+
+    // ============================================================================
+    // Additional Math Function Tests
+    // ============================================================================
+
+    #[test]
+    fn test_mod_function() {
+        let modulo = MathFunctionCallGen {
+            function: MathFunction::Mod,
+            args: vec![
+                MathExpr::NumericLiteral(NumericLiteral { value: 17.0 }),
+                MathExpr::NumericLiteral(NumericLiteral { value: 5.0 }),
+            ],
+        };
+        assert_eq!(modulo.to_string(), "(17_f64) % (5_f64)");
+    }
+
+    #[test]
+    fn test_abs_function() {
+        let abs = MathFunctionCallGen {
+            function: MathFunction::Abs,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: -5.5 })],
+        };
+        assert_eq!(abs.to_string(), "(-5.5_f64).abs()");
+    }
+
+    #[test]
+    fn test_ln_function() {
+        let ln = MathFunctionCallGen {
+            function: MathFunction::Ln,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 2.71828 })],
+        };
+        assert_eq!(ln.to_string(), "(2.71828_f64).ln()");
+    }
+
+    #[test]
+    fn test_log10_function() {
+        let log10 = MathFunctionCallGen {
+            function: MathFunction::Log10,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 100.0 })],
+        };
+        assert_eq!(log10.to_string(), "(100_f64).log10()");
+    }
+
+    #[test]
+    fn test_log_function() {
+        let log = MathFunctionCallGen {
+            function: MathFunction::Log,
+            args: vec![
+                MathExpr::NumericLiteral(NumericLiteral { value: 8.0 }),
+                MathExpr::NumericLiteral(NumericLiteral { value: 2.0 }),
+            ],
+        };
+        assert_eq!(log.to_string(), "(8_f64).log(2_f64)");
+    }
+
+    #[test]
+    fn test_exp_function() {
+        let exp = MathFunctionCallGen {
+            function: MathFunction::Exp,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.0 })],
+        };
+        assert_eq!(exp.to_string(), "(1_f64).exp()");
+    }
+
+    #[test]
+    fn test_ceil_function() {
+        let ceil = MathFunctionCallGen {
+            function: MathFunction::Ceil,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.3 })],
+        };
+        assert_eq!(ceil.to_string(), "(4.3_f64).ceil()");
+    }
+
+    #[test]
+    fn test_floor_function() {
+        let floor = MathFunctionCallGen {
+            function: MathFunction::Floor,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.9 })],
+        };
+        assert_eq!(floor.to_string(), "(4.9_f64).floor()");
+    }
+
+    #[test]
+    fn test_round_function() {
+        let round = MathFunctionCallGen {
+            function: MathFunction::Round,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.5 })],
+        };
+        assert_eq!(round.to_string(), "(4.5_f64).round()");
+    }
+
+    #[test]
+    fn test_asin_function() {
+        let asin = MathFunctionCallGen {
+            function: MathFunction::Asin,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.5 })],
+        };
+        assert_eq!(asin.to_string(), "(0.5_f64).asin()");
+    }
+
+    #[test]
+    fn test_acos_function() {
+        let acos = MathFunctionCallGen {
+            function: MathFunction::Acos,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.5 })],
+        };
+        assert_eq!(acos.to_string(), "(0.5_f64).acos()");
+    }
+
+    #[test]
+    fn test_atan_function() {
+        let atan = MathFunctionCallGen {
+            function: MathFunction::Atan,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.0 })],
+        };
+        assert_eq!(atan.to_string(), "(1_f64).atan()");
+    }
+
+    #[test]
+    fn test_atan2_function() {
+        let atan2 = MathFunctionCallGen {
+            function: MathFunction::Atan2,
+            args: vec![
+                MathExpr::NumericLiteral(NumericLiteral { value: 1.0 }),
+                MathExpr::NumericLiteral(NumericLiteral { value: 1.0 }),
+            ],
+        };
+        assert_eq!(atan2.to_string(), "(1_f64).atan2(1_f64)");
+    }
+
+    #[test]
+    fn test_sub_function() {
+        let sub = MathFunctionCallGen {
+            function: MathFunction::Sub,
+            args: vec![
+                MathExpr::NumericLiteral(NumericLiteral { value: 10.0 }),
+                MathExpr::NumericLiteral(NumericLiteral { value: 3.0 }),
+            ],
+        };
+        assert_eq!(sub.to_string(), "(10_f64 - 3_f64)");
+    }
+
+    #[test]
+    fn test_div_function() {
+        let div = MathFunctionCallGen {
+            function: MathFunction::Div,
+            args: vec![
+                MathExpr::NumericLiteral(NumericLiteral { value: 20.0 }),
+                MathExpr::NumericLiteral(NumericLiteral { value: 4.0 }),
+            ],
+        };
+        assert_eq!(div.to_string(), "(20_f64 / 4_f64)");
+    }
+
+    #[test]
+    fn test_cos_function() {
+        let cos = MathFunctionCallGen {
+            function: MathFunction::Cos,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.0 })],
+        };
+        assert_eq!(cos.to_string(), "(0_f64).cos()");
+    }
+
+    #[test]
+    fn test_tan_function() {
+        let tan = MathFunctionCallGen {
+            function: MathFunction::Tan,
+            args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.785 })],
+        };
+        assert_eq!(tan.to_string(), "(0.785_f64).tan()");
+    }
+
+    #[test]
+    fn test_current_context_property_access() {
+        let current_prop = PropertyAccess {
+            context: PropertyContext::Current,
+            property: GenRef::Literal("score".to_string()),
+        };
+        assert_eq!(
+            current_prop.to_string(),
+            "(v.get_property(\"score\").ok_or(GraphError::Default)?.as_f64())"
+        );
+    }
+
+    #[test]
+    fn test_math_expr_identifier() {
+        let expr = MathExpr::Identifier("custom_var".to_string());
+        assert_eq!(expr.to_string(), "custom_var");
+    }
 }
