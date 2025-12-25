@@ -45,6 +45,7 @@ reqwest = { version = "0.12.15", features = [
     "blocking",
 ], optional = true }
 url = { version = "2.5", optional = true }
+model2vec-rs = { version = "0.1", optional = true }
 tokio-util = { version = "0.7.15", features = ["compat"] }
 axum = "0.8.4"
 tracing = "0.1.41"
@@ -79,6 +80,7 @@ api-key = []
 build = ["compiler"]
 vectors = ["cosine", "url"]
 server = ["build", "compiler", "vectors", "reqwest"]
+model2vec = ["model2vec-rs"]
 full = ["build", "compiler", "vectors"]
 bench = ["polars"]
 dev = ["debug-output", "server", "bench"]
