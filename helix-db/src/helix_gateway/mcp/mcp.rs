@@ -941,7 +941,7 @@ pub fn search_vector_text(input: &mut MCPToolInput) -> Result<Response, GraphErr
 
     // Get embedding model and convert query text to vector
     tracing::debug!("[VECTOR_SEARCH] Getting embedding model");
-    let embedding_model = get_embedding_model(None, None, None).map_err(|e| {
+    let embedding_model = get_embedding_model(None, storage.storage_config.embedding_model.as_deref(), None).map_err(|e| {
         tracing::error!("[VECTOR_SEARCH] Failed to get embedding model: {:?}", e);
         e
     })?;
