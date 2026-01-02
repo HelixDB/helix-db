@@ -150,6 +150,16 @@ impl<'a> DockerManager<'a> {
         format!("{project_name}_net")
     }
 
+    /// Format a Docker Compose volume spec, keeping Windows absolute paths safe.
+    fn compose_volume_spec(&self, volume_source: &str) -> String {
+        if cfg!(windows) && volume_source.contains(':') {
+            let normalized = volume_source.replace('\\', "/");
+            format!("\"{}:{}\"", normalized, HELIX_DATA_DIR)
+        } else {
+            format!("{}:{}", volume_source, HELIX_DATA_DIR)
+        }
+    }
+
     // === CENTRALIZED DOCKER/PODMAN COMMAND EXECUTION ===
 
     /// Run a docker/podman command with consistent error handling
@@ -544,6 +554,19 @@ CMD ["helix-container"]
         instance_config: InstanceInfo<'_>,
     ) -> Result<String> {
         let port = instance_config.port().unwrap_or(6969);
+        let default_volume = self.project.instance_volume(instance_name);
+        let volume_source = if instance_config.is_local() {
+            let data_dir = self.project.instance_data_dir(instance_name)?;
+            if data_dir == default_volume {
+                format!("../.volumes/{instance_name}")
+            } else {
+                data_dir.display().to_string()
+            }
+        } else {
+            format!("../.volumes/{instance_name}")
+        };
+
+        let volume_spec = self.compose_volume_spec(&volume_source);
 
         // Use centralized naming methods
         let service_name = Self::service_name();
@@ -570,7 +593,7 @@ services:
     ports:
       - "{port}:{port}"
     volumes:
-      - ../.volumes/{instance_name}:/data
+      - {volume_spec}
     environment:
 {env_section}
     restart: unless-stopped

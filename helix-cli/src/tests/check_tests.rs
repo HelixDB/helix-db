@@ -246,7 +246,7 @@ async fn test_check_with_multiple_instances() {
             port: Some(6970),
             build_mode: crate::config::BuildMode::Debug,
             db_config: DbConfig::default(),
-            
+            data_dir: None,
         },
     );
     config.local.insert(
@@ -255,7 +255,7 @@ async fn test_check_with_multiple_instances() {
             port: Some(6971),
             build_mode: crate::config::BuildMode::Debug,
             db_config: DbConfig::default(),
-            
+            data_dir: None,
         },
     );
     let config_path = project_path.join("helix.toml");

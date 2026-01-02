@@ -50,10 +50,10 @@ async fn check_instance(
     print_success("Syntax validation passed");
 
     // Step 2: Ensure helix repo is cached (reuse from build.rs)
-    build::ensure_helix_repo_cached().await?;
+    build::ensure_helix_repo_cached()?;
 
     // Step 3: Prepare instance workspace (reuse from build.rs)
-    build::prepare_instance_workspace(project, instance_name).await?;
+    build::prepare_instance_workspace(project, instance_name)?;
 
     // Step 4: Compile project - generate queries.rs (reuse from build.rs)
     let metrics_data = build::compile_project(project, instance_name).await?;
@@ -115,7 +115,12 @@ async fn check_all_instances(
 ) -> Result<()> {
     print_status("CHECK", "Checking all instances");
 
-    let instances: Vec<String> = project.config.list_instances().into_iter().map(String::from).collect();
+    let instances: Vec<String> = project
+        .config
+        .list_instances()
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     if instances.is_empty() {
         return Err(eyre::eyre!(
@@ -193,7 +198,8 @@ fn handle_cargo_check_failure(
     print_warning("You can report this issue to help improve Helix.");
     println!();
 
-    let should_create = print_confirm("Would you like to create a GitHub issue with diagnostic information?")?;
+    let should_create =
+        print_confirm("Would you like to create a GitHub issue with diagnostic information?")?;
 
     if !should_create {
         return Ok(());

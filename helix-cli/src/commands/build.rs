@@ -10,6 +10,8 @@ use crate::utils::{
     print_confirm, print_error, print_status, print_success, print_warning,
 };
 use eyre::Result;
+use fs2::FileExt;
+use std::fs::{File, OpenOptions};
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -28,11 +30,36 @@ use helix_db::{
         },
     },
 };
+use std::sync::{Mutex, OnceLock};
 use std::{fmt::Write, fs};
 
 // Development flag - set to true when working on V2 locally
 const DEV_MODE: bool = cfg!(debug_assertions);
 const HELIX_REPO_URL: &str = "https://github.com/helixdb/helix-db.git";
+
+static REPO_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn repo_cache_lock() -> std::sync::MutexGuard<'static, ()> {
+    REPO_CACHE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("repo cache lock poisoned")
+}
+
+fn repo_cache_file_lock(repo_cache: &std::path::Path) -> Result<File> {
+    let lock_path = repo_cache
+        .parent()
+        .ok_or_else(|| eyre::eyre!("Cannot determine repo cache parent"))?
+        .join("repo.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock_file.lock_exclusive()?;
+    Ok(lock_file)
+}
 
 // Get the cargo workspace root at compile time
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
@@ -78,10 +105,10 @@ pub async fn run(
     print_status("BUILD", &format!("Building instance '{instance_name}'"));
 
     // Ensure Helix repo is cached
-    ensure_helix_repo_cached().await?;
+    ensure_helix_repo_cached()?;
 
     // Prepare instance workspace
-    prepare_instance_workspace(&project, &instance_name).await?;
+    prepare_instance_workspace(&project, &instance_name)?;
 
     // Compile project queries into the workspace
     let compile_result = compile_project(&project, &instance_name).await;
@@ -147,15 +174,17 @@ pub async fn run(
     Ok(metrics_data.clone())
 }
 
-pub(crate) async fn ensure_helix_repo_cached() -> Result<()> {
+pub(crate) fn ensure_helix_repo_cached() -> Result<()> {
+    let _guard = repo_cache_lock();
     let repo_cache = get_helix_repo_cache()?;
+    let _file_lock = repo_cache_file_lock(&repo_cache)?;
 
     if needs_cache_recreation(&repo_cache)? {
-        recreate_helix_cache(&repo_cache).await?;
+        recreate_helix_cache(&repo_cache)?;
     } else if repo_cache.exists() {
-        update_helix_cache(&repo_cache).await?;
+        update_helix_cache(&repo_cache)?;
     } else {
-        create_helix_cache(&repo_cache).await?;
+        create_helix_cache(&repo_cache)?;
     }
 
     Ok(())
@@ -187,12 +216,12 @@ fn needs_cache_recreation(repo_cache: &std::path::Path) -> Result<bool> {
     }
 }
 
-async fn recreate_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
+fn recreate_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
     std::fs::remove_dir_all(repo_cache)?;
-    create_helix_cache(repo_cache).await
+    create_helix_cache(repo_cache)
 }
 
-async fn create_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
+fn create_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
     print_status("CACHE", "Caching Helix repository (first time setup)...");
 
     if DEV_MODE {
@@ -205,7 +234,7 @@ async fn create_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn update_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
+fn update_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
     print_status("UPDATE", "Updating Helix repository cache...");
 
     if DEV_MODE {
@@ -272,10 +301,11 @@ fn update_git_cache(repo_cache: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn prepare_instance_workspace(
+pub(crate) fn prepare_instance_workspace(
     project: &ProjectContext,
     instance_name: &str,
 ) -> Result<()> {
+    let _guard = repo_cache_lock();
     print_status(
         "PREPARE",
         &format!("Preparing workspace for '{instance_name}'"),
@@ -286,6 +316,7 @@ pub(crate) async fn prepare_instance_workspace(
 
     // Copy cached repo to instance workspace for Docker build context
     let repo_cache = get_helix_repo_cache()?;
+    let _file_lock = repo_cache_file_lock(&repo_cache)?;
     let instance_workspace = project.instance_workspace(instance_name);
     let repo_copy_path = instance_workspace.join("helix-repo-copy");
 

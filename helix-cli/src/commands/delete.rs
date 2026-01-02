@@ -62,7 +62,10 @@ pub async fn run(instance_name: String) -> Result<()> {
     }
 
     // Remove instance volumes (permanent data loss)
-    let volume = project.instance_volume(&instance_name);
+    let volume = match &instance_config {
+        InstanceInfo::Local(_) => project.instance_data_dir(&instance_name)?,
+        _ => project.instance_volume(&instance_name),
+    };
     if volume.exists() {
         std::fs::remove_dir_all(&volume)?;
         print_status("DELETE", "Removed persistent volumes");

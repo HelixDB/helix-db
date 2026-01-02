@@ -72,9 +72,10 @@ async fn start_local_instance(project: &ProjectContext, instance_name: &str) -> 
     println!("  Local URL: http://localhost:{port}");
     let project_name = &project.config.project.name;
     println!("  Container: helix_{project_name}_{instance_name}");
+    let data_dir = project.instance_data_dir(instance_name)?;
     println!(
         "  Data volume: {}",
-        project.instance_volume(instance_name).display()
+        data_dir.display()
     );
 
     Ok(())
