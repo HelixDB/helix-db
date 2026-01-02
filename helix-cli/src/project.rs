@@ -1,4 +1,4 @@
-use crate::config::HelixConfig;
+use crate::config::{HelixConfig, InstanceInfo};
 use eyre::{Result, eyre};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -46,6 +46,30 @@ impl ProjectContext {
         self.volumes_dir().join(instance_name)
     }
 
+    /// Get the data directory for a specific instance (respects custom data_dir for local instances)
+    pub fn instance_data_dir(&self, instance_name: &str) -> Result<PathBuf> {
+        let instance_config = self.config.get_instance(instance_name)?;
+        let data_dir = instance_config.data_dir().cloned();
+
+        let data_dir = match data_dir {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => self.root.join(path),
+            None => self.instance_volume(instance_name),
+        };
+
+        Ok(data_dir)
+    }
+
+    /// Get the LMDB user directory for a specific instance
+    pub fn instance_user_dir(&self, instance_name: &str) -> Result<PathBuf> {
+        Ok(self.instance_data_dir(instance_name)?.join("user"))
+    }
+
+    /// Get the LMDB data.mdb file path for a specific instance
+    pub fn instance_data_file(&self, instance_name: &str) -> Result<PathBuf> {
+        Ok(self.instance_user_dir(instance_name)?.join("data.mdb"))
+    }
+
     /// Get the docker-compose file path for an instance
     pub fn docker_compose_path(&self, instance_name: &str) -> PathBuf {
         self.instance_workspace(instance_name)
@@ -66,7 +90,16 @@ impl ProjectContext {
     /// Ensure all necessary directories exist for an instance
     pub fn ensure_instance_dirs(&self, instance_name: &str) -> Result<()> {
         let workspace = self.instance_workspace(instance_name);
-        let volume = self.instance_volume(instance_name);
+        let volume = self
+            .config
+            .get_instance(instance_name)
+            .ok()
+            .and_then(|instance| match instance {
+                InstanceInfo::Local(config) => config.data_dir.as_ref().cloned(),
+                _ => None,
+            })
+            .map(|path| if path.is_absolute() { path } else { self.root.join(path) })
+            .unwrap_or_else(|| self.instance_volume(instance_name));
         let container = self.container_dir(instance_name);
 
         std::fs::create_dir_all(&workspace)?;
@@ -110,8 +143,24 @@ fn find_project_root(start: &Path) -> Result<PathBuf> {
 }
 
 pub fn get_helix_cache_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
-    let helix_dir = home.join(".helix");
+    if let Ok(cache_dir) = env::var("HELIX_CACHE_DIR") {
+        let helix_dir = PathBuf::from(cache_dir);
+        std::fs::create_dir_all(&helix_dir)?;
+        return Ok(helix_dir);
+    }
+
+    let helix_dir = if cfg!(test) {
+        let thread_id = format!("{:?}", std::thread::current().id());
+        let pid = std::process::id();
+        std::env::temp_dir()
+            .join("helix-test-cache")
+            .join(pid.to_string())
+            .join(thread_id)
+            .join(".helix")
+    } else {
+        let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
+        home.join(".helix")
+    };
 
     // Check if this is a fresh installation (no .helix directory exists)
     let is_fresh_install = !helix_dir.exists();

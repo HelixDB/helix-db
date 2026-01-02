@@ -12,21 +12,20 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
     let project = ProjectContext::find_and_load(None)?;
 
     // Get instance config
-    let _instance_config = project.config.get_instance(&instance_name)?;
+    let instance_config = project.config.get_instance(&instance_name)?;
+
+    if !instance_config.is_local() {
+        return Err(eyre::eyre!(
+            "Backup is only supported for local instances"
+        ));
+    }
 
     print_status("BACKUP", &format!("Backing up instance '{instance_name}'"));
 
     // Get the instance volume
-    let volumes_dir = project
-        .root
-        .join(".helix")
-        .join(".volumes")
-        .join(&instance_name)
-        .join("user");
-
-    let data_file = volumes_dir.join("data.mdb");
-
-    let env_path = Path::new(&volumes_dir);
+    let env_path = project.instance_user_dir(&instance_name)?;
+    let data_file = project.instance_data_file(&instance_name)?;
+    let env_path = Path::new(&env_path);
 
     // Validate existence of environment
     if !env_path.exists() {

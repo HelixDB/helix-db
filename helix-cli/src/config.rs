@@ -40,6 +40,19 @@ where
     serializer.serialize_str(&path.to_string_lossy())
 }
 
+fn serialize_optional_path<S>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match path {
+        Some(path) => serializer.serialize_some(&path.to_string_lossy()),
+        None => serializer.serialize_none(),
+    }
+}
+
 fn deserialize_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -47,6 +60,14 @@ where
     let s = String::deserialize(deserializer)?;
     // Normalize path separators for cross-platform compatibility
     Ok(PathBuf::from(s.replace('\\', "/")))
+}
+
+fn deserialize_optional_path<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = Option::<String>::deserialize(deserializer)?;
+    Ok(s.map(|path| PathBuf::from(path.replace('\\', "/"))))
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -121,6 +142,13 @@ pub struct LocalInstanceConfig {
     pub port: Option<u16>,
     #[serde(default = "default_dev_build_mode")]
     pub build_mode: BuildMode,
+    #[serde(
+        default,
+        serialize_with = "serialize_optional_path",
+        deserialize_with = "deserialize_optional_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub data_dir: Option<PathBuf>,
     #[serde(flatten)]
     pub db_config: DbConfig,
 }
@@ -265,6 +293,15 @@ impl<'a> InstanceInfo<'a> {
     pub fn port(&self) -> Option<u16> {
         match self {
             InstanceInfo::Local(config) => config.port,
+            InstanceInfo::Helix(_) => None,
+            InstanceInfo::FlyIo(_) => None,
+            InstanceInfo::Ecr(_) => None,
+        }
+    }
+
+    pub fn data_dir(&self) -> Option<&PathBuf> {
+        match self {
+            InstanceInfo::Local(config) => config.data_dir.as_ref(),
             InstanceInfo::Helix(_) => None,
             InstanceInfo::FlyIo(_) => None,
             InstanceInfo::Ecr(_) => None,
@@ -467,6 +504,7 @@ impl HelixConfig {
             LocalInstanceConfig {
                 port: Some(6969),
                 build_mode: BuildMode::Debug,
+                data_dir: None,
                 db_config: DbConfig::default(),
             },
         );

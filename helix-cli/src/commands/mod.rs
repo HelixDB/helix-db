@@ -1,6 +1,7 @@
 pub mod add;
 pub mod auth;
 pub mod backup;
+pub mod branch;
 pub mod build;
 pub mod check;
 pub mod compile;
