@@ -607,7 +607,6 @@ networks:
             platform = instance_config
                 .docker_build_target()
                 .map_or("".to_string(), |p| format!("platforms:\n        - {p}")),
-            volume_source = volume_source,
         );
 
         Ok(compose)
