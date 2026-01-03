@@ -1,8 +1,15 @@
-use crate::{helix_gateway::router::router::IoContFn, helixc::parser::errors::ParserError};
+use crate::{
+    helix_gateway::router::router::IoContFn,
+    helixc::parser::{
+        errors::ParserError,
+        types::{Field, FieldPrefix},
+    },
+};
 use core::fmt;
-use heed3::Error as HeedError;
+use heed3::{Error as HeedError, MdbError};
+use serde::{Deserialize, Serialize};
 use sonic_rs::Error as SonicError;
-use std::{net::AddrParseError, str::Utf8Error, string::FromUtf8Error};
+use std::{fmt::Display, net::AddrParseError, str::Utf8Error, string::FromUtf8Error};
 
 #[derive(Debug)]
 pub enum GraphError {
@@ -30,8 +37,7 @@ pub enum GraphError {
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
     RerankerError(String),
-
- 
+    DuplicateKey(String),
 }
 
 impl std::error::Error for GraphError {}
@@ -69,13 +75,19 @@ impl fmt::Display for GraphError {
                 write!(f, "Asyncronous IO is needed to complete the DB operation")
             }
             GraphError::RerankerError(msg) => write!(f, "Reranker error: {msg}"),
+            GraphError::DuplicateKey(msg) => {
+                write!(f, "Duplicate key on unique index: {msg}")
+            }
         }
     }
 }
 
 impl From<HeedError> for GraphError {
     fn from(error: HeedError) -> Self {
-        GraphError::StorageError(error.to_string())
+        match error {
+            HeedError::Mdb(MdbError::KeyExist) => GraphError::DuplicateKey(error.to_string()),
+            _ => GraphError::StorageError(error.to_string()),
+        }
     }
 }
 
@@ -201,5 +213,32 @@ impl From<SonicError> for VectorError {
 impl From<bincode::Error> for VectorError {
     fn from(error: bincode::Error) -> Self {
         VectorError::ConversionError(format!("bincode error: {error}"))
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum SecondaryIndex {
+    Unique(String),
+    Index(String),
+    None,
+}
+
+impl Display for SecondaryIndex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Unique(name) => write!(f, "SecondaryIndex::Unique(\"{name}\".to_string())"),
+            Self::Index(name) => write!(f, "SecondaryIndex::Index(\"{name}\".to_string())"),
+            SecondaryIndex::None => write!(f, ""),
+        }
+    }
+}
+
+impl SecondaryIndex {
+    pub fn from_field(field: &Field) -> Self {
+        match field.prefix {
+            FieldPrefix::Index => Self::Index(field.name.clone()),
+            FieldPrefix::UniqueIndex => Self::Unique(field.name.clone()),
+            FieldPrefix::Optional | FieldPrefix::Empty => Self::None,
+        }
     }
 }

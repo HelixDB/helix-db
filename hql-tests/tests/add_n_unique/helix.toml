@@ -1,0 +1,13 @@
+[project]
+name = "add_n"
+queries = "."
+container_runtime = "docker"
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud.helix-production.helix]
+cluster_id = "1f0ca9da-5f56-6a04-873b-010203040506"
+region = "us-east-1"
+build_mode = "release"

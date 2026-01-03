@@ -1,10 +1,10 @@
 N::File1 {
-    INDEX name: String,
+    UNIQUE INDEX name: String,
     age: I32,
 }
 
 
-E::File1Edge {
+E::File1Edge UNIQUE {
     From: File1,
     To: File1,
 }

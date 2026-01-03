@@ -231,110 +231,110 @@ impl HelixParser {
                     let default_value = match pair.into_inner().next() {
                         Some(pair) => match pair.as_rule() {
                             Rule::string_literal => DefaultValue::String(pair.as_str().to_string()),
-                            Rule::float => {
-                                match field_type {
-                                    FieldType::F32 => DefaultValue::F32(
-                                        pair.as_str().parse::<f32>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid float value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::F64 => DefaultValue::F64(
-                                        pair.as_str().parse::<f64>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid float value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    other => return Err(ParserError::from(format!(
+                            Rule::float => match field_type {
+                                FieldType::F32 => DefaultValue::F32(
+                                    pair.as_str().parse::<f32>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid float value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::F64 => DefaultValue::F64(
+                                    pair.as_str().parse::<f64>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid float value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                other => {
+                                    return Err(ParserError::from(format!(
                                         "Float default value not valid for field type {:?}",
                                         other
-                                    ))),
+                                    )));
                                 }
-                            }
-                            Rule::integer => {
-                                match field_type {
-                                    FieldType::I8 => DefaultValue::I8(
-                                        pair.as_str().parse::<i8>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::I16 => DefaultValue::I16(
-                                        pair.as_str().parse::<i16>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::I32 => DefaultValue::I32(
-                                        pair.as_str().parse::<i32>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::I64 => DefaultValue::I64(
-                                        pair.as_str().parse::<i64>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::U8 => DefaultValue::U8(
-                                        pair.as_str().parse::<u8>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::U16 => DefaultValue::U16(
-                                        pair.as_str().parse::<u16>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::U32 => DefaultValue::U32(
-                                        pair.as_str().parse::<u32>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::U64 => DefaultValue::U64(
-                                        pair.as_str().parse::<u64>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    FieldType::U128 => DefaultValue::U128(
-                                        pair.as_str().parse::<u128>().map_err(|e| {
-                                            ParserError::from(format!(
-                                                "Invalid integer value '{}': {e}",
-                                                pair.as_str()
-                                            ))
-                                        })?,
-                                    ),
-                                    other => return Err(ParserError::from(format!(
+                            },
+                            Rule::integer => match field_type {
+                                FieldType::I8 => {
+                                    DefaultValue::I8(pair.as_str().parse::<i8>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?)
+                                }
+                                FieldType::I16 => DefaultValue::I16(
+                                    pair.as_str().parse::<i16>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::I32 => DefaultValue::I32(
+                                    pair.as_str().parse::<i32>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::I64 => DefaultValue::I64(
+                                    pair.as_str().parse::<i64>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::U8 => {
+                                    DefaultValue::U8(pair.as_str().parse::<u8>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?)
+                                }
+                                FieldType::U16 => DefaultValue::U16(
+                                    pair.as_str().parse::<u16>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::U32 => DefaultValue::U32(
+                                    pair.as_str().parse::<u32>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::U64 => DefaultValue::U64(
+                                    pair.as_str().parse::<u64>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                FieldType::U128 => DefaultValue::U128(
+                                    pair.as_str().parse::<u128>().map_err(|e| {
+                                        ParserError::from(format!(
+                                            "Invalid integer value '{}': {e}",
+                                            pair.as_str()
+                                        ))
+                                    })?,
+                                ),
+                                other => {
+                                    return Err(ParserError::from(format!(
                                         "Integer default value not valid for field type {:?}",
                                         other
-                                    ))),
+                                    )));
                                 }
-                            }
+                            },
                             Rule::now => DefaultValue::Now,
                             Rule::boolean => DefaultValue::Boolean(
                                 pair.as_str().parse::<bool>().map_err(|e| {
@@ -344,10 +344,12 @@ impl HelixParser {
                                     ))
                                 })?,
                             ),
-                            other => return Err(ParserError::from(format!(
-                                "Unexpected rule for default value: {:?}",
-                                other
-                            ))),
+                            other => {
+                                return Err(ParserError::from(format!(
+                                    "Unexpected rule for default value: {:?}",
+                                    other
+                                )));
+                            }
                         },
                         None => DefaultValue::Empty,
                     };
@@ -414,10 +416,7 @@ impl HelixParser {
                     "U32" => Ok(FieldType::U32),
                     "U64" => Ok(FieldType::U64),
                     "U128" => Ok(FieldType::U128),
-                    other => Err(ParserError::from(format!(
-                        "Unknown named type: {}",
-                        other
-                    ))),
+                    other => Err(ParserError::from(format!("Unknown named type: {}", other))),
                 }
             }
             Rule::array => {
@@ -460,17 +459,25 @@ impl HelixParser {
     ) -> Result<Field, ParserError> {
         let mut pairs = pair.clone().into_inner();
         // structure is index? ~ identifier ~ ":" ~ param_type
-        let prefix: FieldPrefix = match pairs.clone().try_next()?.as_rule() {
-            Rule::index => {
-                pairs.try_next()?;
-                FieldPrefix::Index
+        let prefix = match pairs.peek().map(|p| p.as_rule()) {
+            Some(Rule::index) => {
+                let index_pair = pairs.try_next()?; // consume index
+                let index_inner = index_pair.into_inner();
+
+                let is_unique = index_inner
+                    .peek()
+                    .map(|p| p.as_rule() == Rule::unique)
+                    .unwrap_or(false);
+
+                if is_unique {
+                    FieldPrefix::UniqueIndex
+                } else {
+                    FieldPrefix::Index
+                }
             }
-            // Rule::optional => {
-            //     pairs.next().unwrap();
-            //     FieldPrefix::Optional
-            // }
             _ => FieldPrefix::Empty,
         };
+
         let name = pairs.try_next()?.as_str().to_string();
 
         let field_type =
@@ -492,32 +499,56 @@ impl HelixParser {
         pair: Pair<Rule>,
         filepath: String,
     ) -> Result<EdgeSchema, ParserError> {
-        let mut pairs = pair.clone().into_inner();
-        let name = pairs.try_next()?.as_str().to_string();
-        let body = pairs.try_next()?;
-        let mut body_pairs = body.into_inner();
+        let edge_loc = pair.loc_with_filepath(filepath.clone());
+        let mut pairs = pair.into_inner();
+
+        let name_pair = pairs.try_next()?;
+        let name = name_pair.as_str().to_string();
+
+        let mut unique = false;
+        let next = pairs.try_next()?;
+
+        let body_pair = match next.as_rule() {
+            Rule::edge_modifier => {
+                // Currently only UNIQUE exists
+                unique = true;
+                pairs.try_next()?
+            }
+            Rule::edge_body => next,
+            _ => {
+                return Err(ParserError::ParseError(
+                    "edge_modifier or edge_body".to_string(),
+                ));
+            }
+        };
+
+        let mut body_pairs = body_pair.into_inner();
 
         let from = {
             let pair = body_pairs.try_next()?;
             (pair.loc(), pair.as_str().to_string())
         };
+
         let to = {
             let pair = body_pairs.try_next()?;
             (pair.loc(), pair.as_str().to_string())
         };
+
         let properties = match body_pairs.next() {
             Some(pair) => Some(self.parse_properties(pair, filepath.clone())?),
             None => None,
         };
 
         Ok(EdgeSchema {
-            name: (pair.loc_with_filepath(filepath.clone()), name),
+            name: (name_pair.loc_with_filepath(filepath), name),
+            loc: edge_loc,
+            unique,
             from,
             to,
             properties,
-            loc: pair.loc_with_filepath(filepath),
         })
     }
+
     pub(super) fn parse_properties(
         &self,
         pair: Pair<Rule>,
@@ -537,7 +568,7 @@ impl HelixParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Node Definition Tests
@@ -581,8 +612,14 @@ mod tests {
 
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
-        assert!(matches!(schema.node_schemas[0].fields[0].prefix, FieldPrefix::Index));
-        assert!(matches!(schema.node_schemas[0].fields[1].prefix, FieldPrefix::Empty));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].prefix,
+            FieldPrefix::Index
+        ));
+        assert!(matches!(
+            schema.node_schemas[0].fields[1].prefix,
+            FieldPrefix::Empty
+        ));
     }
 
     #[test]
@@ -654,8 +691,14 @@ mod tests {
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
         assert_eq!(schema.node_schemas[0].fields.len(), 2);
-        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Array(_)));
-        assert!(matches!(schema.node_schemas[0].fields[1].field_type, FieldType::Array(_)));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].field_type,
+            FieldType::Array(_)
+        ));
+        assert!(matches!(
+            schema.node_schemas[0].fields[1].field_type,
+            FieldType::Array(_)
+        ));
     }
 
     #[test]
@@ -673,7 +716,10 @@ mod tests {
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
         assert_eq!(schema.node_schemas[0].fields.len(), 1);
-        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Object(_)));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].field_type,
+            FieldType::Object(_)
+        ));
     }
 
     #[test]
@@ -980,7 +1026,10 @@ mod tests {
 
         let parsed = result.unwrap();
         let schema = parsed.schema.get(&1).unwrap();
-        assert!(matches!(schema.node_schemas[0].fields[0].field_type, FieldType::Array(_)));
+        assert!(matches!(
+            schema.node_schemas[0].fields[0].field_type,
+            FieldType::Array(_)
+        ));
     }
 
     #[test]

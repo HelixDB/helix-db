@@ -1,4 +1,7 @@
-use crate::{helix_engine::types::GraphError, helixc::analyzer::IntrospectionData};
+use crate::{
+    helix_engine::types::{GraphError, SecondaryIndex},
+    helixc::analyzer::IntrospectionData,
+};
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 
@@ -21,7 +24,7 @@ impl Default for VectorConfig {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GraphConfig {
-    pub secondary_indices: Option<Vec<String>>,
+    pub secondary_indices: Option<Vec<SecondaryIndex>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -93,7 +96,7 @@ impl Config {
 
         let config = std::fs::read_to_string(config_path)?;
         let mut config = sonic_rs::from_str::<Config>(&config)?;
-        
+
         // Schema will be populated from INTROSPECTION_DATA during code generation
         config.schema = None;
 
@@ -156,7 +159,7 @@ impl Config {
         &self,
         f: &mut fmt::Formatter,
         introspection_data: Option<&IntrospectionData>,
-        secondary_indices: &[String],
+        secondary_indices: &[SecondaryIndex],
     ) -> fmt::Result {
         writeln!(f, "pub fn config() -> Option<Config> {{")?;
         writeln!(f, "return Some(Config {{")?;
@@ -200,7 +203,7 @@ impl Config {
                     "Some(vec![{}])",
                     secondary_indices
                         .iter()
-                        .map(|i| format!("\"{i}\".to_string()"))
+                        .map(|i| format!("{i}"))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )

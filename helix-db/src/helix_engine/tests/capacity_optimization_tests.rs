@@ -29,19 +29,18 @@ use crate::{
     utils::{id::v6_uuid, properties::ImmutablePropertiesMap},
 };
 
-fn setup_test_db() -> (Arc<HelixGraphStorage>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
+fn setup_test_db(temp_dir: &TempDir) -> Arc<HelixGraphStorage> {
     let db_path = temp_dir.path().to_str().unwrap();
 
     let mut config = Config::default();
     config.bm25 = Some(true);
 
     let storage = HelixGraphStorage::new(db_path, config, Default::default()).unwrap();
-    (Arc::new(storage), temp_dir)
+    Arc::new(storage)
 }
 
-fn setup_test_db_with_nodes(count: usize) -> (Arc<HelixGraphStorage>, TempDir) {
-    let (storage, temp_dir) = setup_test_db();
+fn setup_test_db_with_nodes(count: usize, temp_dir: &TempDir) -> Arc<HelixGraphStorage> {
+    let storage = setup_test_db(temp_dir);
     let mut txn = storage.graph_env.write_txn().unwrap();
     let arena = Bump::new();
 
@@ -66,12 +65,13 @@ fn setup_test_db_with_nodes(count: usize) -> (Arc<HelixGraphStorage>, TempDir) {
     }
 
     txn.commit().unwrap();
-    (storage, temp_dir)
+    storage
 }
 
 #[test]
 fn test_aggregate_correctness_small() {
-    let (storage, _temp_dir) = setup_test_db_with_nodes(10);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db_with_nodes(10, &temp_dir);
     let txn = storage.graph_env.read_txn().unwrap();
     let arena = Bump::new();
 
@@ -96,7 +96,8 @@ fn test_aggregate_correctness_small() {
 #[test]
 fn test_aggregate_correctness_large() {
     // Test with larger dataset to stress-test capacity allocation
-    let (storage, _temp_dir) = setup_test_db_with_nodes(1000);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db_with_nodes(1000, &temp_dir);
     let txn = storage.graph_env.read_txn().unwrap();
     let arena = Bump::new();
 
@@ -111,7 +112,8 @@ fn test_aggregate_correctness_large() {
 
 #[test]
 fn test_group_by_correctness() {
-    let (storage, _temp_dir) = setup_test_db_with_nodes(100);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db_with_nodes(100, &temp_dir);
     let txn = storage.graph_env.read_txn().unwrap();
     let arena = Bump::new();
 
@@ -126,7 +128,8 @@ fn test_group_by_correctness() {
 
 #[test]
 fn test_update_operation_correctness() {
-    let (storage, _temp_dir) = setup_test_db_with_nodes(50);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db_with_nodes(50, &temp_dir);
     let read_arena = Bump::new();
 
     // Update all users' scores
@@ -153,7 +156,8 @@ fn test_update_operation_correctness() {
 
 #[test]
 fn test_bm25_search_correctness() {
-    let (storage, _temp_dir) = setup_test_db();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db(&temp_dir);
     let mut wtxn = storage.graph_env.write_txn().unwrap();
 
     let bm25 = storage.bm25.as_ref().expect("BM25 should be enabled");
@@ -185,7 +189,8 @@ fn test_bm25_search_correctness() {
 
 #[test]
 fn test_bm25_search_with_large_limit() {
-    let (storage, _temp_dir) = setup_test_db();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db(&temp_dir);
     let mut wtxn = storage.graph_env.write_txn().unwrap();
 
     let bm25 = storage.bm25.as_ref().expect("BM25 should be enabled");
@@ -212,7 +217,8 @@ fn test_bm25_search_with_large_limit() {
 /// Test that demonstrates capacity optimization doesn't break edge cases
 #[test]
 fn test_empty_result_sets() {
-    let (storage, _temp_dir) = setup_test_db();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db(&temp_dir);
     let txn = storage.graph_env.read_txn().unwrap();
     let arena = Bump::new();
 
@@ -228,7 +234,8 @@ fn test_empty_result_sets() {
 /// Test with properties of varying lengths
 #[test]
 fn test_aggregate_varying_property_counts() {
-    let (storage, _temp_dir) = setup_test_db_with_nodes(100);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = setup_test_db_with_nodes(100, &temp_dir);
     let txn = storage.graph_env.read_txn().unwrap();
     let arena = Bump::new();
 
@@ -264,7 +271,8 @@ mod performance_tests {
         let sizes = vec![100, 1000, 10000];
 
         for size in sizes {
-            let (storage, _temp_dir) = setup_test_db_with_nodes(size);
+            let temp_dir = TempDir::new().unwrap();
+            let storage = setup_test_db_with_nodes(size, &temp_dir);
             let txn = storage.graph_env.read_txn().unwrap();
             let arena = Bump::new();
 
@@ -291,7 +299,8 @@ mod performance_tests {
         let sizes = vec![10, 100, 1000];
 
         for size in sizes {
-            let (storage, _temp_dir) = setup_test_db_with_nodes(size);
+            let temp_dir = TempDir::new().unwrap();
+            let storage = setup_test_db_with_nodes(size, &temp_dir);
             let read_arena = Bump::new();
 
             // Get nodes to update
@@ -322,7 +331,8 @@ mod performance_tests {
     #[test]
     #[ignore]
     fn test_bm25_search_performance() {
-        let (storage, _temp_dir) = setup_test_db();
+        let temp_dir = TempDir::new().unwrap();
+        let storage = setup_test_db(&temp_dir);
         let mut wtxn = storage.graph_env.write_txn().unwrap();
 
         let bm25 = storage.bm25.as_ref().expect("BM25 should be enabled");

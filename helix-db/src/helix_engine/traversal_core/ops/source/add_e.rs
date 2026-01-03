@@ -37,6 +37,7 @@ pub trait AddEAdapter<'db, 'arena, 'txn, 's>:
         from_node: u128,
         to_node: u128,
         should_check: bool,
+        is_unique: bool,
     ) -> RwTraversalIterator<
         'db,
         'arena,
@@ -57,6 +58,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         from_node: u128,
         to_node: u128,
         should_check: bool,
+        is_unique: bool,
     ) -> RwTraversalIterator<
         'db,
         'arena,
@@ -93,7 +95,11 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
         match self.storage.out_edges_db.put_with_flags(
             self.txn,
-            PutFlags::APPEND_DUP,
+            if is_unique {
+                PutFlags::NO_OVERWRITE
+            } else {
+                PutFlags::APPEND_DUP
+            },
             &HelixGraphStorage::out_edge_key(&from_node, &label_hash),
             &HelixGraphStorage::pack_edge_data(&edge.id, &to_node),
         ) {
@@ -108,7 +114,11 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
         match self.storage.in_edges_db.put_with_flags(
             self.txn,
-            PutFlags::APPEND_DUP,
+            if is_unique {
+                PutFlags::NO_OVERWRITE
+            } else {
+                PutFlags::APPEND_DUP
+            },
             &HelixGraphStorage::in_edge_key(&to_node, &label_hash),
             &HelixGraphStorage::pack_edge_data(&edge.id, &from_node),
         ) {
