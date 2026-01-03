@@ -566,7 +566,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 5.0 }),
             ],
         };
-        assert_eq!(modulo.to_string(), "(17_f64) % (5_f64)");
+        assert_eq!(modulo.to_string(), "(17_f32) % (5_f32)");
     }
 
     #[test]
@@ -575,7 +575,7 @@ mod tests {
             function: MathFunction::Abs,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: -5.5 })],
         };
-        assert_eq!(abs.to_string(), "(-5.5_f64).abs()");
+        assert_eq!(abs.to_string(), "(-5.5_f32).abs()");
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
             function: MathFunction::Ln,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 2.71828 })],
         };
-        assert_eq!(ln.to_string(), "(2.71828_f64).ln()");
+        assert_eq!(ln.to_string(), "(2.71828_f32).ln()");
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
             function: MathFunction::Log10,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 100.0 })],
         };
-        assert_eq!(log10.to_string(), "(100_f64).log10()");
+        assert_eq!(log10.to_string(), "(100_f32).log10()");
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 2.0 }),
             ],
         };
-        assert_eq!(log.to_string(), "(8_f64).log(2_f64)");
+        assert_eq!(log.to_string(), "(8_f32).log(2_f32)");
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
             function: MathFunction::Exp,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.0 })],
         };
-        assert_eq!(exp.to_string(), "(1_f64).exp()");
+        assert_eq!(exp.to_string(), "(1_f32).exp()");
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
             function: MathFunction::Ceil,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.3 })],
         };
-        assert_eq!(ceil.to_string(), "(4.3_f64).ceil()");
+        assert_eq!(ceil.to_string(), "(4.3_f32).ceil()");
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
             function: MathFunction::Floor,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.9 })],
         };
-        assert_eq!(floor.to_string(), "(4.9_f64).floor()");
+        assert_eq!(floor.to_string(), "(4.9_f32).floor()");
     }
 
     #[test]
@@ -641,7 +641,7 @@ mod tests {
             function: MathFunction::Round,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.5 })],
         };
-        assert_eq!(round.to_string(), "(4.5_f64).round()");
+        assert_eq!(round.to_string(), "(4.5_f32).round()");
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
             function: MathFunction::Asin,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.5 })],
         };
-        assert_eq!(asin.to_string(), "(0.5_f64).asin()");
+        assert_eq!(asin.to_string(), "(0.5_f32).asin()");
     }
 
     #[test]
@@ -659,7 +659,7 @@ mod tests {
             function: MathFunction::Acos,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.5 })],
         };
-        assert_eq!(acos.to_string(), "(0.5_f64).acos()");
+        assert_eq!(acos.to_string(), "(0.5_f32).acos()");
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
             function: MathFunction::Atan,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.0 })],
         };
-        assert_eq!(atan.to_string(), "(1_f64).atan()");
+        assert_eq!(atan.to_string(), "(1_f32).atan()");
     }
 
     #[test]
@@ -680,7 +680,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 1.0 }),
             ],
         };
-        assert_eq!(atan2.to_string(), "(1_f64).atan2(1_f64)");
+        assert_eq!(atan2.to_string(), "(1_f32).atan2(1_f32)");
     }
 
     #[test]
@@ -692,7 +692,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 3.0 }),
             ],
         };
-        assert_eq!(sub.to_string(), "(10_f64 - 3_f64)");
+        assert_eq!(sub.to_string(), "(10_f32 - 3_f32)");
     }
 
     #[test]
@@ -704,7 +704,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 4.0 }),
             ],
         };
-        assert_eq!(div.to_string(), "(20_f64 / 4_f64)");
+        assert_eq!(div.to_string(), "(20_f32 / 4_f32)");
     }
 
     #[test]
@@ -713,7 +713,7 @@ mod tests {
             function: MathFunction::Cos,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.0 })],
         };
-        assert_eq!(cos.to_string(), "(0_f64).cos()");
+        assert_eq!(cos.to_string(), "(0_f32).cos()");
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
             function: MathFunction::Tan,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.785 })],
         };
-        assert_eq!(tan.to_string(), "(0.785_f64).tan()");
+        assert_eq!(tan.to_string(), "(0.785_f32).tan()");
     }
 
     #[test]
@@ -733,7 +733,7 @@ mod tests {
         };
         assert_eq!(
             current_prop.to_string(),
-            "(v.get_property(\"score\").ok_or(GraphError::Default)?.as_f64())"
+            "(v.get_property(\"score\").ok_or(GraphError::Default)?.as_f32())"
         );
     }
 
