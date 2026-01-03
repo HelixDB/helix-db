@@ -79,7 +79,7 @@ mod edge_case_tests {
             })
             .collect();
 
-        let vector = create_arena_vector(&arena, id, "many_props", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "many_props", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -240,7 +240,7 @@ mod edge_case_tests {
             ("Ключ", Value::String("Значение".to_string())),
         ];
 
-        let vector = create_arena_vector(&arena, id, "unicode", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "unicode", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -364,7 +364,7 @@ mod edge_case_tests {
         );
 
         let props = vec![("complex", Value::Object(map))];
-        let vector = create_arena_vector(&arena, id, "complex", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "complex", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -449,7 +449,7 @@ mod edge_case_tests {
         let data = vec![1.0];
 
         let props = vec![("empty_obj", Value::Object(HashMap::new()))];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "test", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -598,7 +598,7 @@ mod edge_case_tests {
             ("123", Value::String("one-two-three".to_string())),
         ];
 
-        let vector = create_arena_vector(&arena, id, "numeric_keys", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "numeric_keys", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -663,7 +663,7 @@ mod edge_case_tests {
         ]);
 
         let props = vec![("mixed", mixed_array)];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "test", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -796,7 +796,7 @@ mod edge_case_tests {
             })
             .collect();
 
-        let vector = create_arena_vector(&arena, id, &"Vec".repeat(200), 255, true, &data, props);
+        let vector = create_arena_vector(&arena, id, &"Vec".repeat(200), 255, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 

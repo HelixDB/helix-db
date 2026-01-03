@@ -77,7 +77,6 @@ pub struct HVector<'arena> {
     // TODO: String Interning. We do a lot of unnecessary string allocations
     // for the same set of labels.
     pub label: &'arena str,
-    pub deleted: bool,
     pub level: Option<usize>,
     pub version: u8,
     pub properties: Option<ImmutablePropertiesMap<'arena>>,
@@ -101,7 +100,6 @@ impl<'arena> serde::Serialize for HVector<'arena> {
             state.serialize_entry("id", uuid_str_from_buf(self.id, &mut buffer))?;
             state.serialize_entry("label", &self.label)?;
             state.serialize_entry("version", &self.version)?;
-            state.serialize_entry("deleted", &self.deleted)?;
             if let Some(properties) = &self.properties {
                 for (key, value) in properties.iter() {
                     state.serialize_entry(key, value)?;
@@ -113,7 +111,6 @@ impl<'arena> serde::Serialize for HVector<'arena> {
             let mut state = serializer.serialize_struct("HVector", 4)?;
             state.serialize_field("label", &self.label)?;
             state.serialize_field("version", &self.version)?;
-            state.serialize_field("deleted", &self.deleted)?;
             state.serialize_field("properties", &self.properties)?;
             state.end()
         }
@@ -133,7 +130,6 @@ impl<'arena> HVector<'arena> {
             data: Some(Item::<Cosine>::from_vec(data)),
             distance: None,
             properties: None,
-            deleted: false,
             level: None,
         }
     }
@@ -264,7 +260,6 @@ impl<'arena> HVector<'arena> {
             data: Some(Item::<Cosine>::from_raw_slice(raw_vector_data)),
             properties: None,
             distance: None,
-            deleted: false,
             level: Some(0),
             version: 1,
         })
@@ -575,7 +570,6 @@ impl VectorCore {
                     distance: Some(distance),
                     label,
                     properties,
-                    deleted: false,
                     level: None,
                     version: 0,
                     data: get_item(self.hsnw, index.id, txn, item_id)?
@@ -603,7 +597,6 @@ impl VectorCore {
                     id: global_id,
                     distance: Some(distance),
                     label,
-                    deleted: false,
                     version: 0,
                     properties,
                     level: None,
@@ -645,7 +638,6 @@ impl VectorCore {
             properties,
             distance: None,
             label: arena.alloc_str(label),
-            deleted: false,
             version: 0,
             level: None,
             data: get_item(self.hsnw, index.id, txn, *item_id)?.map(|i| i.clone_in(arena)),
@@ -679,7 +671,6 @@ impl VectorCore {
             properties,
             distance: None,
             label: arena.alloc_str(label.as_str()),
-            deleted: false,
             version: 0,
             level: None,
             data: None,
@@ -734,7 +725,6 @@ impl VectorCore {
                     id,
                     label,
                     distance: None,
-                    deleted: false,
                     level: Some(key.layer as usize),
                     version: 0,
                     properties,
@@ -763,7 +753,6 @@ impl VectorCore {
                     id,
                     label,
                     distance: None,
-                    deleted: false,
                     level: Some(key.layer as usize),
                     version: 0,
                     properties,
@@ -801,7 +790,6 @@ impl VectorCore {
                         id,
                         label: arena.alloc_str(label),
                         distance: None,
-                        deleted: false,
                         level: Some(key.layer as usize),
                         version: 0,
                         properties: None,
@@ -821,7 +809,6 @@ impl VectorCore {
                         id,
                         label: arena.alloc_str(label),
                         distance: None,
-                        deleted: false,
                         level: Some(key.layer as usize),
                         version: 0,
                         properties: None,

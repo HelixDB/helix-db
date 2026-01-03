@@ -258,23 +258,6 @@ mod compatibility_tests {
         assert_eq!(restored.id, id);
         assert_eq!(restored.label, "LegacyVector");
         assert_eq!(restored.version, 1);
-        assert!(!restored.deleted);
-    }
-
-    #[test]
-    fn test_old_vector_deleted_flag() {
-        let id = 111000u128;
-
-        let old_vector = create_old_vector(id, "DeletedVector", 1, true, vec![]);
-
-        let old_bytes = bincode::serialize(&old_vector).unwrap();
-        let data_bytes = create_vector_bytes(&[0.0]);
-
-        let arena = Bump::new();
-        let new_vector =
-            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true).unwrap();
-
-        assert!(new_vector.deleted);
     }
 
     #[test]
@@ -355,8 +338,8 @@ mod compatibility_tests {
         let data = vec![1.0, 2.0];
 
         // Different vector versions
-        let vec_v1 = create_arena_vector(&arena, id, "V1", 1, false, &data, vec![]);
-        let vec_v2 = create_arena_vector(&arena, id, "V2", 2, false, &data, vec![]);
+        let vec_v1 = create_arena_vector(&arena, id, "V1", 1, &data, vec![]);
+        let vec_v2 = create_arena_vector(&arena, id, "V2", 2, &data, vec![]);
 
         let props_v1 = bincode::serialize(&vec_v1).unwrap();
         let props_v2 = bincode::serialize(&vec_v2).unwrap();

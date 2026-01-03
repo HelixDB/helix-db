@@ -87,8 +87,6 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
 
                 let version: u8 = seq.next_element()?.unwrap_or(0);
 
-                let deleted: bool = seq.next_element()?.unwrap_or(false);
-
                 // Use our custom DeserializeSeed that handles the Option wrapper
                 let properties: Option<ImmutablePropertiesMap<'arena>> = seq
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
@@ -100,7 +98,6 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
                 Ok(HVector {
                     id: self.id,
                     label,
-                    deleted,
                     version,
                     distance: None,
                     data: Some(Item::<Cosine>::from_vec(data)),
@@ -158,8 +155,6 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
 
                 let version: u8 = seq.next_element()?.unwrap_or(0);
 
-                let deleted: bool = seq.next_element()?.unwrap_or(false);
-
                 // Use our custom DeserializeSeed that handles the Option wrapper
                 let properties: Option<ImmutablePropertiesMap<'arena>> = seq
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
@@ -169,7 +164,6 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
                     id: self.id,
                     label,
                     version,
-                    deleted,
                     properties,
                     distance: None,
                     level: None,

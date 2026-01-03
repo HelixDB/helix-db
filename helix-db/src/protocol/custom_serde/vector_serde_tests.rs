@@ -51,7 +51,7 @@ mod vector_serialization_tests {
         let data = vec![0.5, -0.5, 1.5, -1.5];
         let props = vec![("name", Value::String("test".to_string()))];
 
-        let vector = create_arena_vector(&arena, id, "labeled_vector", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "labeled_vector", 1, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -74,7 +74,7 @@ mod vector_serialization_tests {
             ("score", Value::F64(0.95)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "vector_label", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "vector_label", 1, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -93,7 +93,7 @@ mod vector_serialization_tests {
         let data = vec![0.0; 128]; // Standard embedding dimension
         let props = all_value_types_props();
 
-        let vector = create_arena_vector(&arena, id, "all_types", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "all_types", 1, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -112,7 +112,7 @@ mod vector_serialization_tests {
         let data = vec![1.0, 2.0, 3.0];
         let props = nested_value_props();
 
-        let vector = create_arena_vector(&arena, id, "nested", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "nested", 1, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -211,7 +211,6 @@ mod vector_serialization_tests {
         assert_eq!(vector.label, label);
         assert_eq!(vector.len(), 4);
         assert_eq!(vector.version, 1);
-        assert!(!vector.deleted);
         assert!(vector.properties.is_none());
     }
 
@@ -250,7 +249,7 @@ mod vector_serialization_tests {
             ("dimension", Value::I32(4)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "embedding", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "embedding", 1, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -295,7 +294,7 @@ mod vector_serialization_tests {
         let id = 123456u128;
         let data = vec![1.0, 2.0];
 
-        let vector = create_arena_vector(&arena, id, "versioned", 5, false, &data, vec![]);
+        let vector = create_arena_vector(&arena, id, "versioned", 5, &data, vec![]);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -305,42 +304,6 @@ mod vector_serialization_tests {
             HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
         assert_eq!(deserialized.version, 5);
-    }
-
-    #[test]
-    fn test_vector_deleted_flag_true() {
-        let arena = Bump::new();
-        let id = 654321u128;
-        let data = vec![0.0, 1.0];
-
-        let vector = create_arena_vector(&arena, id, "deleted", 1, true, &data, vec![]);
-
-        let props_bytes = bincode::serialize(&vector).unwrap();
-        let data_bytes = vector.vector_data_to_bytes().unwrap();
-
-        let arena2 = Bump::new();
-        let deserialized =
-            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
-
-        assert!(deserialized.deleted);
-    }
-
-    #[test]
-    fn test_vector_deleted_flag_false() {
-        let arena = Bump::new();
-        let id = 987654u128;
-        let data = vec![1.0, 0.0];
-
-        let vector = create_arena_vector(&arena, id, "active", 1, false, &data, vec![]);
-
-        let props_bytes = bincode::serialize(&vector).unwrap();
-        let data_bytes = vector.vector_data_to_bytes().unwrap();
-
-        let arena2 = Bump::new();
-        let deserialized =
-            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
-
-        assert!(!deserialized.deleted);
     }
 
     // ========================================================================
@@ -437,7 +400,7 @@ mod vector_serialization_tests {
             })
             .collect();
 
-        let vector = create_arena_vector(&arena, id, "many_props", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "many_props", 1, &data, props);
 
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -501,7 +464,7 @@ mod vector_serialization_tests {
         let data = vec![1.1, 2.2, 3.3];
         let props = vec![("test", Value::String("value".to_string()))];
 
-        let vector = create_arena_vector(&arena, id, "byte_test", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "byte_test", 1, &data, props);
 
         // First roundtrip
         let props_bytes1 = bincode::serialize(&vector).unwrap();

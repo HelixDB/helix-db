@@ -418,7 +418,6 @@ fn test_entry_point_consistency() {
             result
         {
             assert!(v.id > 0, "Result ID should be valid");
-            assert!(!v.deleted, "Results should not be deleted");
             assert!(
                 !v.data.as_ref().unwrap().is_empty(),
                 "Results should have data"

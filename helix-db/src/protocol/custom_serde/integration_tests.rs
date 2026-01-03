@@ -266,7 +266,7 @@ mod integration_tests {
             ("dimensions", Value::I32(3)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "doc_vector", 1, false, &data, props);
+        let vector = create_arena_vector(&arena, id, "doc_vector", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 

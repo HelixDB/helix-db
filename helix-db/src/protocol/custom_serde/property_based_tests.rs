@@ -310,7 +310,6 @@ mod property_based_tests {
             id in any::<u128>(),
             data in arb_vector_data(),
             props in arb_properties(),
-            deleted in any::<bool>(),
         ) {
             let arena = Bump::new();
 
@@ -318,7 +317,7 @@ mod property_based_tests {
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
 
-            let vector = create_arena_vector(&arena, id, &label, 1, deleted, &data, props_refs);
+            let vector = create_arena_vector(&arena, id, &label, 1, &data, props_refs);
 
             let props_bytes = bincode::serialize(&vector).unwrap();
             let data_bytes = vector.vector_data_to_bytes().unwrap();
@@ -332,7 +331,6 @@ mod property_based_tests {
                 true,
             ).unwrap();
 
-            prop_assert_eq!(deserialized.deleted, deleted);
             prop_assert_eq!(deserialized.len(), data.len());
         }
 

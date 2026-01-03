@@ -107,7 +107,7 @@ fn test_delete_existing_vector() {
     let read_arena = Bump::new();
     let txn = env.read_txn().unwrap();
     let props_result = index.get_vector_properties(&txn, inserted_id, &read_arena);
-    assert!(matches!(props_result, Err(VectorError::VectorDeleted)));
+    assert!(matches!(props_result, Err(VectorError::VectorNotFound(_))));
 }
 
 #[test]
@@ -186,11 +186,11 @@ fn test_delete_already_deleted_vector() {
     // Delete once - should succeed
     index.delete(&mut txn, inserted_id).unwrap();
 
-    // Delete again - should fail with VectorDeleted
-    // Note: get_vector_properties returns VectorDeleted for deleted vectors,
+    // Delete again - should fail with VectorNotFound
+    // Note: get_vector_properties returns VectorNotFound for deleted vectors,
     // which gets propagated before the VectorAlreadyDeleted check
     let result = index.delete(&mut txn, inserted_id);
-    assert!(matches!(result, Err(VectorError::VectorDeleted)));
+    assert!(matches!(result, Err(VectorError::VectorNotFound(_))));
 
     // Commit transaction to ensure proper cleanup
     txn.commit().unwrap();
@@ -221,7 +221,6 @@ fn test_get_vector_properties_existing() {
     assert!(props.is_some());
     let props = props.unwrap();
     assert_eq!(props.id, inserted.id);
-    assert!(!props.deleted);
 }
 
 #[test]
@@ -244,7 +243,7 @@ fn test_get_vector_properties_deleted() {
     // Getting properties of deleted vector should return error
     let txn = env.read_txn().unwrap();
     let result = index.get_vector_properties(&txn, inserted.id, &arena);
-    assert!(matches!(result, Err(VectorError::VectorDeleted)));
+    assert!(matches!(result, Err(VectorError::VectorNotFound(_))));
 }
 
 #[test]
@@ -264,7 +263,6 @@ fn test_get_full_vector_existing() {
     let txn = env.read_txn().unwrap();
     let full_vector = index.get_full_vector(&txn, inserted.id, &arena).unwrap();
     assert_eq!(full_vector.id, inserted.id);
-    assert!(!full_vector.deleted);
     // Verify vector data matches
     assert_eq!(full_vector.data.unwrap().len(), 4);
 }

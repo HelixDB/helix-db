@@ -226,7 +226,6 @@ pub fn create_arena_vector<'arena>(
     id: u128,
     label: &str,
     version: u8,
-    deleted: bool,
     data: &[f32],
     props: Vec<(&str, Value)>,
 ) -> HVector<'arena> {
@@ -240,7 +239,6 @@ pub fn create_arena_vector<'arena>(
             id,
             label: label_ref,
             version,
-            deleted,
             distance: None,
             data: Some(Item::<Cosine>::from_vec(bump_vec)),
             properties: None,
@@ -258,7 +256,6 @@ pub fn create_arena_vector<'arena>(
             id,
             label: label_ref,
             version,
-            deleted,
             distance: None,
             data: Some(Item::<Cosine>::from_vec(bump_vec)),
             properties: Some(props_map),
@@ -274,7 +271,7 @@ pub fn create_simple_vector<'arena>(
     label: &str,
     data: &[f32],
 ) -> HVector<'arena> {
-    create_arena_vector(arena, id, label, 1, false, data, vec![])
+    create_arena_vector(arena, id, label, 1, data, vec![])
 }
 
 /// Creates vector data as raw bytes
@@ -440,7 +437,6 @@ pub fn assert_vectors_semantically_equal(vec1: &HVector, vec2: &HVector) {
     assert_eq!(vec1.id, vec2.id, "Vector IDs differ");
     assert_eq!(vec1.label, vec2.label, "Vector labels differ");
     assert_eq!(vec1.version, vec2.version, "Vector versions differ");
-    assert_eq!(vec1.deleted, vec2.deleted, "Vector deleted flags differ");
     assert_eq!(vec1.len(), vec2.len(), "Vector dimensions differ");
 
     // Compare vector data with floating point tolerance

@@ -235,7 +235,7 @@ mod error_handling_tests {
         let arena = Bump::new();
         let id = 666777u128;
         let props = vec![("key", Value::String("value".to_string()))];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, &[1.0], props);
+        let vector = create_arena_vector(&arena, id, "test", 1, &[1.0], props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
@@ -469,7 +469,7 @@ mod error_handling_tests {
         let arena = Bump::new();
         let id = 12012u128;
 
-        let vector = create_arena_vector(&arena, id, "test", 255, false, &[1.0], vec![]);
+        let vector = create_arena_vector(&arena, id, "test", 255, &[1.0], vec![]);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 

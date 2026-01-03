@@ -47,13 +47,7 @@ where
                 .vectors
                 .get_full_vector(self.txn, *id, self.arena)
             {
-                Ok(vec) => {
-                    if vec.deleted {
-                        Err(GraphError::from(VectorError::VectorDeleted))
-                    } else {
-                        Ok(TraversalValue::Vector(vec))
-                    }
-                }
+                Ok(vec) => Ok(TraversalValue::Vector(vec)),
                 Err(e) => Err(GraphError::from(e)),
             }
         } else {
@@ -62,13 +56,7 @@ where
                 .vectors
                 .get_vector_properties(self.txn, *id, self.arena)
             {
-                Ok(Some(vec)) => {
-                    if vec.deleted {
-                        Err(GraphError::from(VectorError::VectorDeleted))
-                    } else {
-                        Ok(TraversalValue::Vector(vec))
-                    }
-                }
+                Ok(Some(vec)) => Ok(TraversalValue::Vector(vec)),
                 Ok(None) => Err(GraphError::from(VectorError::VectorNotFound(
                     id.to_string(),
                 ))),
