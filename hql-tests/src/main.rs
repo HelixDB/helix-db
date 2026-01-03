@@ -454,7 +454,9 @@ async fn main() -> Result<()> {
             );
         }
 
-        println!("[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully");
+        println!(
+            "[SUCCESS] Finished processing batch {current_batch}/{total_batches} successfully"
+        );
     } else {
         // Process all test directories in parallel (default behavior)
         println!(
@@ -524,7 +526,6 @@ async fn process_test_directory(
         // Skip non-existent directories silently in parallel mode
         return Ok(());
     }
-
 
     // Find the query file - could be queries.hx or file*.hx
     let mut query_file_path = None;
@@ -643,8 +644,9 @@ async fn process_test_directory(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         // For helix compilation, we'll show the raw output since it's not cargo format
-        let error_message =
-            format!("[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}");
+        let error_message = format!(
+            "[FAILED] HELIX COMPILE FAILED for {test_name}\nStderr: {stderr}\nStdout: {stdout}"
+        );
 
         // Create GitHub issue if configuration is available
         if let Some(config) = github_config {

@@ -39,12 +39,8 @@ pub fn normalize_scores(scores: &[f64], method: NormalizationMethod) -> Reranker
 
 /// Min-Max normalization: scales scores to [0, 1] range.
 fn normalize_minmax(scores: &[f64]) -> RerankerResult<Vec<f64>> {
-    let min = scores
-        .iter()
-        .fold(f64::INFINITY, |a, &b| a.min(b));
-    let max = scores
-        .iter()
-        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min = scores.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let max = scores.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     let range = max - min;
 
@@ -53,10 +49,7 @@ fn normalize_minmax(scores: &[f64]) -> RerankerResult<Vec<f64>> {
         return Ok(vec![0.5; scores.len()]);
     }
 
-    Ok(scores
-        .iter()
-        .map(|&score| (score - min) / range)
-        .collect())
+    Ok(scores.iter().map(|&score| (score - min) / range).collect())
 }
 
 /// Z-score normalization: centers scores around mean with unit variance.

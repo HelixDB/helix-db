@@ -12,12 +12,15 @@ use crate::helixc::{
         methods::{
             migration_validation::validate_migration,
             query_validation::validate_query,
-            schema_methods::{build_field_lookups, check_schema, SchemaVersionMap},
+            schema_methods::{SchemaVersionMap, build_field_lookups, check_schema},
         },
         types::Type,
     },
     generator::Source as GeneratedSource,
-    parser::{errors::ParserError, types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source}},
+    parser::{
+        errors::ParserError,
+        types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source},
+    },
 };
 use itertools::Itertools;
 use serde::Serialize;
@@ -42,7 +45,6 @@ pub mod methods;
 pub mod pretty;
 pub mod types;
 pub mod utils;
-
 
 /// Internal working context shared by all passes.
 pub(crate) struct Ctx<'a> {

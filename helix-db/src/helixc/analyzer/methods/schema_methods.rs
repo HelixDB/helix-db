@@ -331,7 +331,8 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
         }
         if let Some(v) = edge.properties.as_ref() {
             // Check for duplicate field names (case-insensitive)
-            let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut seen_fields: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for f in v {
                 let lower_name = f.name.to_lowercase();
                 if !seen_fields.insert(lower_name) {

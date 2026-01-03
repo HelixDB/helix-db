@@ -11,7 +11,7 @@ use helix_db::helix_gateway::{
 };
 use std::{collections::HashMap, sync::Arc};
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod queries;
 
