@@ -670,6 +670,7 @@ fn process_object_literal<'a>(
         field_infos: vec![],
         aggregate_properties: Vec::new(),
         is_count_aggregate: false,
+        closure_param_name: None,
     }
 }
 
@@ -1049,6 +1050,7 @@ fn analyze_return_expr<'a>(
                                         is_group_by,
                                         aggregate_properties,
                                         is_count_aggregate,
+                                        traversal.closure_param_name.clone(),
                                     ));
                             }
 
@@ -1117,6 +1119,7 @@ fn analyze_return_expr<'a>(
                                     is_group_by,
                                     aggregate_properties,
                                     is_count_aggregate,
+                                    traversal.closure_param_name.clone(),
                                 ));
 
                             // Generate map closure (direct return, no variable assignment to update)
@@ -1202,6 +1205,7 @@ fn analyze_return_expr<'a>(
                                 is_group_by,
                                 aggregate_properties,
                                 is_count_aggregate,
+                                traversal.closure_param_name.clone(),
                             ));
                     }
 

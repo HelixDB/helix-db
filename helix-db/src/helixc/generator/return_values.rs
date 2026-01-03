@@ -51,6 +51,7 @@ pub struct ReturnValueStruct {
     pub field_infos: Vec<ReturnFieldInfo>, // Original field info for nested struct generation
     pub aggregate_properties: Vec<String>, // Properties to group by (for closure-style aggregates)
     pub is_count_aggregate: bool,   // True for COUNT mode aggregates
+    pub closure_param_name: Option<String>, // HQL closure parameter name (e.g., "e" from entries::|e|)
 }
 
 impl ReturnValueStruct {
@@ -68,6 +69,7 @@ impl ReturnValueStruct {
             field_infos: Vec::new(),
             aggregate_properties: Vec::new(),
             is_count_aggregate: false,
+            closure_param_name: None,
         }
     }
 
@@ -192,6 +194,7 @@ impl ReturnValueStruct {
         is_group_by: bool,
         aggregate_properties: Vec<String>,
         is_count_aggregate: bool,
+        closure_param_name: Option<String>,
     ) -> Self {
         // First, recursively build nested structs to determine if they have lifetimes
         let mut nested_has_lifetime = std::collections::HashMap::new();
@@ -217,6 +220,7 @@ impl ReturnValueStruct {
                     false,      // Not group_by
                     Vec::new(), // No aggregate properties for nested structs
                     false,      // Not count aggregate
+                    None,       // Nested structs don't have their own closure param
                 );
                 nested_has_lifetime.insert(nested_name, nested_struct.has_lifetime);
             }
@@ -279,6 +283,7 @@ impl ReturnValueStruct {
         struct_def.field_infos = field_infos; // Store for nested generation
         struct_def.aggregate_properties = aggregate_properties;
         struct_def.is_count_aggregate = is_count_aggregate;
+        struct_def.closure_param_name = closure_param_name;
         struct_def
     }
 
@@ -309,6 +314,7 @@ impl ReturnValueStruct {
                     false,              // Not group_by
                     Vec::new(),         // No aggregate properties for nested structs
                     false,              // Not count aggregate
+                    None,               // Nested structs don't have their own closure param
                 );
                 // Recursively generate nested struct defs
                 output.push_str(&nested_struct.generate_all_struct_defs());

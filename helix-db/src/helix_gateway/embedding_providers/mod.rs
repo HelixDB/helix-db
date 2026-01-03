@@ -15,7 +15,13 @@ pub trait EmbeddingModel {
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
     OpenAI,
-    Gemini { task_type: String },
+    Gemini {
+        task_type: String,
+    },
+    AzureOpenAI {
+        resource_name: String,
+        deployment_id: String,
+    },
     Local,
 }
 
@@ -47,6 +53,13 @@ impl EmbeddingModelImpl {
                     .map(String::from)
                     .or_else(|| env::var("GEMINI_API_KEY").ok())
                     .ok_or_else(|| GraphError::from("GEMINI_API_KEY not set"))?;
+                Some(key)
+            }
+            EmbeddingProvider::AzureOpenAI { .. } => {
+                let key = api_key
+                    .map(String::from)
+                    .or_else(|| env::var("AZURE_OPENAI_API_KEY").ok())
+                    .ok_or_else(|| GraphError::from("AZURE_OPENAI_API_KEY not set"))?;
                 Some(key)
             }
             EmbeddingProvider::Local => None,
@@ -97,6 +110,30 @@ impl EmbeddingModelImpl {
                     .strip_prefix("openai:")
                     .unwrap_or("text-embedding-ada-002");
                 Ok((EmbeddingProvider::OpenAI, model_name.to_string()))
+            }
+            Some(m) if m.starts_with("azure_openai:") => {
+                let model_name = m
+                    .strip_prefix("azure_openai:")
+                    .unwrap_or("text-embedding-3-small");
+
+                // Get Azure-specific configuration from environment
+                let resource_name = env::var("AZURE_OPENAI_RESOURCE_NAME")
+                    .map_err(|_| GraphError::from("AZURE_OPENAI_RESOURCE_NAME not set"))?;
+
+                // deployment_id comes from the model_name
+                let deployment_id = if model_name.is_empty() {
+                    return Err(GraphError::from("Azure OpenAI deployment ID not specified"));
+                } else {
+                    model_name.to_string()
+                };
+
+                Ok((
+                    EmbeddingProvider::AzureOpenAI {
+                        resource_name,
+                        deployment_id,
+                    },
+                    model_name.to_string(),
+                ))
             }
             Some("local") => Ok((EmbeddingProvider::Local, "local".to_string())),
 
@@ -155,6 +192,54 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     })
                     .collect::<Result<Vec<f32>, GraphError>>()?;
 
+                Ok(embedding)
+            }
+            EmbeddingProvider::AzureOpenAI {
+                resource_name,
+                deployment_id,
+            } => {
+                let api_key = self
+                    .api_key
+                    .as_ref()
+                    .ok_or_else(|| GraphError::from("AzureOpenAI API key not set"))?;
+
+                let url = format!(
+                    "https://{}.openai.azure.com/openai/deployments/{}/embeddings?api-version=2024-10-21",
+                    resource_name, deployment_id
+                );
+                let response = self
+                    .client
+                    .post(&url)
+                    .header("api-key", api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "input": text
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| GraphError::from(format!("Failed to send request: {e}")))?;
+
+                let text_response = response
+                    .text()
+                    .await
+                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+
+                let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
+                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+
+                // Azure OpenAI uses the same response format as OpenAI
+                let embedding = response["data"][0]["embedding"]
+                    .as_array()
+                    .ok_or_else(|| {
+                        GraphError::from("Invalid embedding format from Azure OpenAI API")
+                    })?
+                    .iter()
+                    .map(|v| {
+                        v.as_f64()
+                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                            .map(|v| v as f32)
+                    })
+                    .collect::<Result<Vec<f32>, GraphError>>()?;
                 Ok(embedding)
             }
 

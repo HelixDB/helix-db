@@ -283,7 +283,9 @@ impl Query {
                     }
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code
-                    let singular_var = struct_def.source_variable.trim_end_matches('s');
+                    // Use HQL closure param name if available, otherwise fall back to singular form
+                    let singular_var = struct_def.closure_param_name.as_deref()
+                        .unwrap_or_else(|| struct_def.source_variable.trim_end_matches('s'));
                     // Check if any field is a nested traversal (needs Result handling)
                     let has_nested = struct_def.fields.iter().any(|f| f.is_nested_traversal);
 
@@ -316,29 +318,23 @@ impl Query {
                             // Handle scalar nested traversals with closure parameters (e.g., username: u::{name})
                             // or anonymous traversals (e.g., creatorID: _::In<Created>::ID)
                             if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                closure_source_var: Some(closure_var),
+                                closure_source_var: Some(_),
                                 accessed_field_name: accessed_field,
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" and "val" placeholders to actual iteration variable
-                                let resolved_var = if closure_var == "_" || closure_var == "val" {
-                                    singular_var
-                                } else {
-                                    closure_var.as_str()
-                                };
-
+                                // Use singular_var which is the actual closure parameter (e.g., "e" from entries::|e|)
                                 // This is a scalar field accessing a closure parameter or anonymous variable
                                 let field_to_access = accessed_field.as_ref()
                                     .map(|s| s.as_str())
                                     .unwrap_or(field.name.as_str());
 
                                 if field_to_access == "id" || field_to_access == "ID" {
-                                    format!("uuid_str({}.id(), &arena)", resolved_var)
+                                    format!("uuid_str({}.id(), &arena)", singular_var)
                                 } else if field_to_access == "label" || field_to_access == "Label" {
-                                    format!("{}.label()", resolved_var)
+                                    format!("{}.label()", singular_var)
                                 } else {
-                                    format!("{}.get_property(\"{}\")", resolved_var, field_to_access)
+                                    format!("{}.get_property(\"{}\")", singular_var, field_to_access)
                                 }
                             } else if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                 traversal_code: Some(trav_code),
@@ -414,7 +410,7 @@ impl Query {
                                         // This is a deeply nested traversal - generate nested traversal code
 
                                         // Extract the source variable for this deeply nested traversal
-                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                        let _inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
                                             use crate::helixc::generator::traversal_steps::TraversalType;
                                             match inner_trav_type {
                                                 TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
@@ -446,12 +442,12 @@ impl Query {
                                         } else {
                                             ".collect::<Vec<_>>()".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", closure_param, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
                                         let (access_var, accessed_field_name) = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                            closure_source_var: Some(closure_var),
+                                            closure_source_var: Some(_),
                                             accessed_field_name: accessed_field,
                                             ..
                                         } = &nested_field.source {
@@ -460,7 +456,7 @@ impl Query {
                                             let field_to_access = accessed_field.as_ref()
                                                 .map(|s| s.as_str())
                                                 .unwrap_or(nested_field.name.as_str());
-                                            (closure_var.as_str(), field_to_access)
+                                            (closure_param, field_to_access)
                                         } else {
                                             (closure_param, nested_field.name.as_str())
                                         };
@@ -545,29 +541,23 @@ impl Query {
                             // Handle scalar nested traversals with closure parameters (e.g., username: u::{name})
                             // or anonymous traversals (e.g., creatorID: _::In<Created>::ID)
                             if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                closure_source_var: Some(closure_var),
+                                closure_source_var: Some(_),
                                 accessed_field_name: accessed_field,
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" and "val" placeholders to actual iteration variable
-                                let resolved_var = if closure_var == "_" || closure_var == "val" {
-                                    singular_var
-                                } else {
-                                    closure_var.as_str()
-                                };
-
+                                // Use singular_var which is the actual closure parameter (e.g., "e" from entries::|e|)
                                 // This is a scalar field accessing a closure parameter or anonymous variable
                                 let field_to_access = accessed_field.as_ref()
                                     .map(|s| s.as_str())
                                     .unwrap_or(field.name.as_str());
 
                                 if field_to_access == "id" || field_to_access == "ID" {
-                                    format!("uuid_str({}.id(), &arena)", resolved_var)
+                                    format!("uuid_str({}.id(), &arena)", singular_var)
                                 } else if field_to_access == "label" || field_to_access == "Label" {
-                                    format!("{}.label()", resolved_var)
+                                    format!("{}.label()", singular_var)
                                 } else {
-                                    format!("{}.get_property(\"{}\")", resolved_var, field_to_access)
+                                    format!("{}.get_property(\"{}\")", singular_var, field_to_access)
                                 }
                             } else if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                 traversal_code: Some(trav_code),
@@ -625,7 +615,7 @@ impl Query {
                                         // This is a deeply nested traversal - generate nested traversal code
 
                                         // Extract the source variable for this deeply nested traversal
-                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                        let _inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
                                             use crate::helixc::generator::traversal_steps::TraversalType;
                                             match inner_trav_type {
                                                 TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
@@ -657,12 +647,12 @@ impl Query {
                                         } else {
                                             ".collect::<Vec<_>>()".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", closure_param, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
                                         let (access_var, accessed_field_name) = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                            closure_source_var: Some(closure_var),
+                                            closure_source_var: Some(_),
                                             accessed_field_name: accessed_field,
                                             ..
                                         } = &nested_field.source {
@@ -671,7 +661,7 @@ impl Query {
                                             let field_to_access = accessed_field.as_ref()
                                                 .map(|s| s.as_str())
                                                 .unwrap_or(nested_field.name.as_str());
-                                            (closure_var.as_str(), field_to_access)
+                                            (closure_param, field_to_access)
                                         } else {
                                             (closure_param, nested_field.name.as_str())
                                         };
@@ -898,7 +888,9 @@ impl Query {
                     )?;
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code
-                    let singular_var = struct_def.source_variable.trim_end_matches('s');
+                    // Use HQL closure param name if available, otherwise fall back to singular form
+                    let singular_var = struct_def.closure_param_name.as_deref()
+                        .unwrap_or_else(|| struct_def.source_variable.trim_end_matches('s'));
                     // Check if any field is a nested traversal (needs Result handling)
                     let has_nested = struct_def.fields.iter().any(|f| f.is_nested_traversal);
 
@@ -931,29 +923,23 @@ impl Query {
                             // Handle scalar nested traversals with closure parameters (e.g., username: u::{name})
                             // or anonymous traversals (e.g., creatorID: _::In<Created>::ID)
                             if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                closure_source_var: Some(closure_var),
+                                closure_source_var: Some(_),
                                 accessed_field_name: accessed_field,
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" and "val" placeholders to actual iteration variable
-                                let resolved_var = if closure_var == "_" || closure_var == "val" {
-                                    singular_var
-                                } else {
-                                    closure_var.as_str()
-                                };
-
+                                // Use singular_var which is the actual closure parameter (e.g., "e" from entries::|e|)
                                 // This is a scalar field accessing a closure parameter or anonymous variable
                                 let field_to_access = accessed_field.as_ref()
                                     .map(|s| s.as_str())
                                     .unwrap_or(field.name.as_str());
 
                                 if field_to_access == "id" || field_to_access == "ID" {
-                                    format!("uuid_str({}.id(), &arena)", resolved_var)
+                                    format!("uuid_str({}.id(), &arena)", singular_var)
                                 } else if field_to_access == "label" || field_to_access == "Label" {
-                                    format!("{}.label()", resolved_var)
+                                    format!("{}.label()", singular_var)
                                 } else {
-                                    format!("{}.get_property(\"{}\")", resolved_var, field_to_access)
+                                    format!("{}.get_property(\"{}\")", singular_var, field_to_access)
                                 }
                             } else if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                 traversal_code: Some(trav_code),
@@ -1029,7 +1015,7 @@ impl Query {
                                         // This is a deeply nested traversal - generate nested traversal code
 
                                         // Extract the source variable for this deeply nested traversal
-                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                        let _inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
                                             use crate::helixc::generator::traversal_steps::TraversalType;
                                             match inner_trav_type {
                                                 TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
@@ -1061,12 +1047,12 @@ impl Query {
                                         } else {
                                             ".collect::<Vec<_>>()".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", closure_param, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
                                         let (access_var, accessed_field_name) = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                            closure_source_var: Some(closure_var),
+                                            closure_source_var: Some(_),
                                             accessed_field_name: accessed_field,
                                             ..
                                         } = &nested_field.source {
@@ -1075,7 +1061,7 @@ impl Query {
                                             let field_to_access = accessed_field.as_ref()
                                                 .map(|s| s.as_str())
                                                 .unwrap_or(nested_field.name.as_str());
-                                            (closure_var.as_str(), field_to_access)
+                                            (closure_param, field_to_access)
                                         } else {
                                             (closure_param, nested_field.name.as_str())
                                         };
@@ -1160,29 +1146,23 @@ impl Query {
                             // Handle scalar nested traversals with closure parameters (e.g., username: u::{name})
                             // or anonymous traversals (e.g., creatorID: _::In<Created>::ID)
                             if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                closure_source_var: Some(closure_var),
+                                closure_source_var: Some(_),
                                 accessed_field_name: accessed_field,
                                 nested_struct_name: None,
                                 ..
                             } = &field_info.source {
-                                // Resolve "_" and "val" placeholders to actual iteration variable
-                                let resolved_var = if closure_var == "_" || closure_var == "val" {
-                                    singular_var
-                                } else {
-                                    closure_var.as_str()
-                                };
-
+                                // Use singular_var which is the actual closure parameter (e.g., "e" from entries::|e|)
                                 // This is a scalar field accessing a closure parameter or anonymous variable
                                 let field_to_access = accessed_field.as_ref()
                                     .map(|s| s.as_str())
                                     .unwrap_or(field.name.as_str());
 
                                 if field_to_access == "id" || field_to_access == "ID" {
-                                    format!("uuid_str({}.id(), &arena)", resolved_var)
+                                    format!("uuid_str({}.id(), &arena)", singular_var)
                                 } else if field_to_access == "label" || field_to_access == "Label" {
-                                    format!("{}.label()", resolved_var)
+                                    format!("{}.label()", singular_var)
                                 } else {
-                                    format!("{}.get_property(\"{}\")", resolved_var, field_to_access)
+                                    format!("{}.get_property(\"{}\")", singular_var, field_to_access)
                                 }
                             } else if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
                                 traversal_code: Some(trav_code),
@@ -1240,7 +1220,7 @@ impl Query {
                                         // This is a deeply nested traversal - generate nested traversal code
 
                                         // Extract the source variable for this deeply nested traversal
-                                        let inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
+                                        let _inner_source_var = if let Some(inner_trav_type) = inner_traversal_type {
                                             use crate::helixc::generator::traversal_steps::TraversalType;
                                             match inner_trav_type {
                                                 TraversalType::FromSingle(var) | TraversalType::FromIter(var) => {
@@ -1272,12 +1252,12 @@ impl Query {
                                         } else {
                                             ".collect::<Result<Vec<_>,_>>()?".to_string()
                                         };
-                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", inner_source_var, inner_trav_code, inner_fields_str)
+                                        format!("G::from_iter(&db, &txn, std::iter::once({}.clone()), &arena){}{}", closure_param, inner_trav_code, inner_fields_str)
                                     } else {
                                         // Check if this field itself is a nested traversal that accesses the closure parameter
                                         // Extract both the access variable and the actual field being accessed
                                         let (access_var, accessed_field_name) = if let crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
-                                            closure_source_var: Some(closure_var),
+                                            closure_source_var: Some(_),
                                             accessed_field_name: accessed_field,
                                             ..
                                         } = &nested_field.source {
@@ -1286,7 +1266,7 @@ impl Query {
                                             let field_to_access = accessed_field.as_ref()
                                                 .map(|s| s.as_str())
                                                 .unwrap_or(nested_field.name.as_str());
-                                            (closure_var.as_str(), field_to_access)
+                                            (closure_param, field_to_access)
                                         } else {
                                             (closure_param, nested_field.name.as_str())
                                         };
