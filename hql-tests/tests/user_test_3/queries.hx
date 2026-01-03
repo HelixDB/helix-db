@@ -28,7 +28,7 @@ QUERY add_chunk_with_metadata(
   edge <- AddE<HAS_CHUNK>::From(doc)::To(chunk)
   RETURN chunk
 
-QUERY add_embedding(chunk_element_id: String, vec: [F64]) =>
+QUERY add_embedding(chunk_element_id: String, vec: [F32]) =>
   chunk <- N<Chunk>({element_id: chunk_element_id})
   embedding <- AddV<ChunkEmbedding>(vec, {chunk_id: chunk_element_id})
   edge <- AddE<HAS_EMBEDDING>::From(chunk)::To(embedding)
@@ -43,7 +43,7 @@ QUERY get_document_chunks(doc_filename: String) =>
   chunks <- doc::Out<HAS_CHUNK>
   RETURN chunks
 
-QUERY search_similar_chunks(query_vec: [F64], limit: I64) =>
+QUERY search_similar_chunks(query_vec: [F32], limit: I64) =>
   embeddings <- SearchV<ChunkEmbedding>(query_vec, limit)
   chunks <- embeddings::In<HAS_EMBEDDING>
   RETURN chunks

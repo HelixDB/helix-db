@@ -268,7 +268,9 @@ impl Display for Step {
             Step::ToV(to_v) => write!(f, "{to_v}"),
             Step::PropertyFetch(property) => write!(f, "get_property({property})"),
             Step::ReservedPropertyAccess(prop) => match prop {
-                ReservedProp::Id => write!(f, "map(|item| Ok(Value::from(uuid_str(item.id, &arena))))"),
+                ReservedProp::Id => {
+                    write!(f, "map(|item| Ok(Value::from(uuid_str(item.id, &arena))))")
+                }
                 ReservedProp::Label => write!(f, "map(|item| Ok(Value::from(item.label())))"),
                 // ReservedProp::Version => write!(f, "map(|item| Ok(Value::from(item.version)))"),
                 // ReservedProp::FromNode => write!(f, "map(|item| Ok(Value::from(uuid_str(item.from_node, &arena))))"),
@@ -455,7 +457,9 @@ impl Display for WhereRef {
                         | Separator::Empty(Step::PropertyFetch(p)) => prop = Some(p),
                         Separator::Period(Step::ReservedPropertyAccess(rp))
                         | Separator::Newline(Step::ReservedPropertyAccess(rp))
-                        | Separator::Empty(Step::ReservedPropertyAccess(rp)) => reserved_prop = Some(rp),
+                        | Separator::Empty(Step::ReservedPropertyAccess(rp)) => {
+                            reserved_prop = Some(rp)
+                        }
                         Separator::Period(Step::BoolOp(op))
                         | Separator::Newline(Step::BoolOp(op))
                         | Separator::Empty(Step::BoolOp(op)) => bool_op = Some(op),
@@ -479,7 +483,9 @@ impl Display for WhereRef {
                         BoolOp::Contains(contains) => format!("{}{}", value_expr, contains),
                         BoolOp::IsIn(is_in) => format!("{}{}", value_expr, is_in),
                         BoolOp::PropertyEq(_) | BoolOp::PropertyNeq(_) => {
-                            unreachable!("PropertyEq/PropertyNeq should not be used with reserved properties")
+                            unreachable!(
+                                "PropertyEq/PropertyNeq should not be used with reserved properties"
+                            )
                         }
                     };
                     return write!(
@@ -727,19 +733,22 @@ impl Display for ShortestPathDijkstras {
             WeightCalculation::Property(prop) => {
                 write!(
                     f,
-                    "|edge, _src_node, _dst_node| -> Result<f64, GraphError> {{ Ok(edge.get_property({})?.as_f64()?) }}",
+                    "|edge, _src_node, _dst_node| -> Result<f32, GraphError> {{ Ok(edge.get_property({})?.as_f32()?) }}",
                     prop
                 )?;
             }
             WeightCalculation::Expression(expr) => {
                 write!(
                     f,
-                    "|edge, src_node, dst_node| -> Result<f64, GraphError> {{ Ok({}) }}",
+                    "|edge, src_node, dst_node| -> Result<f32, GraphError> {{ Ok({}) }}",
                     expr
                 )?;
             }
             WeightCalculation::Default => {
-                write!(f, "helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn")?;
+                write!(
+                    f,
+                    "helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn"
+                )?;
             }
         }
 
@@ -786,19 +795,22 @@ impl Display for ShortestPathAStar {
             WeightCalculation::Property(prop) => {
                 write!(
                     f,
-                    "|edge, _src_node, _dst_node| -> Result<f64, GraphError> {{ Ok(edge.get_property({})?.as_f64()?) }}, ",
+                    "|edge, _src_node, _dst_node| -> Result<f32, GraphError> {{ Ok(edge.get_property({})?.as_f32()?) }}, ",
                     prop
                 )?;
             }
             WeightCalculation::Expression(expr) => {
                 write!(
                     f,
-                    "|edge, src_node, dst_node| -> Result<f64, GraphError> {{ Ok({}) }}, ",
+                    "|edge, src_node, dst_node| -> Result<f32, GraphError> {{ Ok({}) }}, ",
                     expr
                 )?;
             }
             WeightCalculation::Default => {
-                write!(f, "helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn, ")?;
+                write!(
+                    f,
+                    "helix_db::helix_engine::traversal_core::ops::util::paths::default_weight_fn, "
+                )?;
             }
         }
 
@@ -831,7 +843,7 @@ pub struct RerankRRF {
 impl Display for RerankRRF {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.k {
-            Some(k) => write!(f, "rerank(RRFReranker::with_k({k} as f64).unwrap(), None)"),
+            Some(k) => write!(f, "rerank(RRFReranker::with_k({k} as f32).unwrap(), None)"),
             None => write!(f, "rerank(RRFReranker::new(), None)"),
         }
     }
@@ -850,7 +862,10 @@ impl Display for MMRDistanceMethod {
             MMRDistanceMethod::Cosine => write!(f, "DistanceMethod::Cosine"),
             MMRDistanceMethod::Euclidean => write!(f, "DistanceMethod::Euclidean"),
             MMRDistanceMethod::DotProduct => write!(f, "DistanceMethod::DotProduct"),
-            MMRDistanceMethod::Identifier(id) => write!(f, "match {id}.as_str() {{ \"cosine\" => DistanceMethod::Cosine, \"euclidean\" => DistanceMethod::Euclidean, \"dotproduct\" => DistanceMethod::DotProduct, _ => DistanceMethod::Cosine }}"),
+            MMRDistanceMethod::Identifier(id) => write!(
+                f,
+                "match {id}.as_str() {{ \"cosine\" => DistanceMethod::Cosine, \"euclidean\" => DistanceMethod::Euclidean, \"dotproduct\" => DistanceMethod::DotProduct, _ => DistanceMethod::Cosine }}"
+            ),
         }
     }
 }
@@ -862,9 +877,15 @@ pub struct RerankMMR {
 }
 impl Display for RerankMMR {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lambda = self.lambda.as_ref().map_or_else(|| "0.7".to_string(), |l| l.to_string());
+        let lambda = self
+            .lambda
+            .as_ref()
+            .map_or_else(|| "0.7".to_string(), |l| l.to_string());
         match &self.distance {
-            Some(dist) => write!(f, "rerank(MMRReranker::with_distance({lambda}, {dist}).unwrap(), None)"),
+            Some(dist) => write!(
+                f,
+                "rerank(MMRReranker::with_distance({lambda}, {dist}).unwrap(), None)"
+            ),
             None => write!(f, "rerank(MMRReranker::new({lambda}).unwrap(), None)"),
         }
     }

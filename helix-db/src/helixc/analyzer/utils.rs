@@ -428,8 +428,8 @@ impl FieldLookup for Type {
                 .map(|fields| match key {
                     "id" | "ID" => Some(FieldType::Uuid),
                     "label" => Some(FieldType::String),
-                    "data" => Some(FieldType::Array(Box::new(FieldType::F64))),
-                    "score" => Some(FieldType::F64),
+                    "data" => Some(FieldType::Array(Box::new(FieldType::F32))),
+                    "score" => Some(FieldType::F32),
                     _ => fields
                         .get(key)
                         .map(|field| Some(field.field_type.clone()))

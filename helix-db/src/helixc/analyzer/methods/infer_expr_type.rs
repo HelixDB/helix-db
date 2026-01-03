@@ -89,7 +89,7 @@ pub(crate) fn infer_expr_type<'a>(
             Some(GeneratedStatement::Literal(GenRef::Literal(i.to_string()))),
         ),
         FloatLiteral(f) => (
-            Type::Scalar(FieldType::F64),
+            Type::Scalar(FieldType::F32),
             Some(GeneratedStatement::Literal(GenRef::Literal(f.to_string()))),
         ),
         StringLiteral(s) => (
@@ -1486,7 +1486,7 @@ pub(crate) fn infer_expr_type<'a>(
             // Math function calls always return f64
             // TODO: Add proper type inference and validation for math function arguments
             (
-                Type::Scalar(FieldType::F64),
+                Type::Scalar(FieldType::F32),
                 None, // Will be handled by generator
             )
         }

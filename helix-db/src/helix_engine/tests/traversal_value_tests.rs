@@ -1,8 +1,8 @@
 //! Unit tests for TraversalValue enum and its methods.
 
 use crate::helix_engine::traversal_core::traversal_value::TraversalValue;
-use crate::helix_engine::vector_core::vector::HVector;
-use crate::helix_engine::vector_core::vector_without_data::VectorWithoutData;
+use crate::helix_engine::vector_core::HVector;
+use crate::helix_engine::vector_core::node::Item;
 use crate::protocol::value::Value;
 use crate::utils::items::{Edge, Node};
 use crate::utils::properties::ImmutablePropertiesMap;
@@ -86,15 +86,14 @@ fn create_test_edge_with_props<'a>(
     }
 }
 
-fn create_test_vector<'a>(arena: &'a Bump, id: u128, label: &str, data: &[f64]) -> HVector<'a> {
+fn create_test_vector<'a>(arena: &'a Bump, id: u128, label: &str, data: &'a [f32]) -> HVector<'a> {
     HVector {
         id,
         label: arena.alloc_str(label),
         version: 1,
-        deleted: false,
-        level: 0,
+        level: Some(0),
         distance: Some(0.5),
-        data: arena.alloc_slice_copy(data),
+        data: Some(Item::from_slice(data)),
         properties: None,
     }
 }
@@ -103,7 +102,7 @@ fn create_test_vector_with_props<'a>(
     arena: &'a Bump,
     id: u128,
     label: &str,
-    data: &[f64],
+    data: &'a [f32],
     props: Vec<(&str, Value)>,
 ) -> HVector<'a> {
     let properties = ImmutablePropertiesMap::new(
@@ -117,44 +116,9 @@ fn create_test_vector_with_props<'a>(
         id,
         label: arena.alloc_str(label),
         version: 1,
-        deleted: false,
-        level: 0,
+        level: Some(0),
         distance: Some(0.5),
-        data: arena.alloc_slice_copy(data),
-        properties: Some(properties),
-    }
-}
-
-fn create_test_vector_without_data<'a>(arena: &'a Bump, id: u128, label: &str) -> VectorWithoutData<'a> {
-    VectorWithoutData {
-        id,
-        label: arena.alloc_str(label),
-        version: 1,
-        deleted: false,
-        level: 0,
-        properties: None,
-    }
-}
-
-fn create_test_vector_without_data_with_props<'a>(
-    arena: &'a Bump,
-    id: u128,
-    label: &str,
-    props: Vec<(&str, Value)>,
-) -> VectorWithoutData<'a> {
-    let properties = ImmutablePropertiesMap::new(
-        props.len(),
-        props
-            .into_iter()
-            .map(|(k, v)| (arena.alloc_str(k) as &str, v)),
-        arena,
-    );
-    VectorWithoutData {
-        id,
-        label: arena.alloc_str(label),
-        version: 1,
-        deleted: false,
-        level: 0,
+        data: Some(Item::from_slice(data)),
         properties: Some(properties),
     }
 }
@@ -191,14 +155,6 @@ fn test_id_vector_returns_correct_id() {
     let vector = create_test_vector(&arena, 11111, "TestVector", &[1.0, 2.0, 3.0]);
     let tv = TraversalValue::Vector(vector);
     assert_eq!(tv.id(), 11111);
-}
-
-#[test]
-fn test_id_vector_without_data_returns_correct_id() {
-    let arena = Bump::new();
-    let vector = create_test_vector_without_data(&arena, 22222, "TestVector");
-    let tv = TraversalValue::VectorNodeWithoutVectorData(vector);
-    assert_eq!(tv.id(), 22222);
 }
 
 #[test]
@@ -252,14 +208,6 @@ fn test_label_vector_returns_correct_label() {
     let arena = Bump::new();
     let vector = create_test_vector(&arena, 1, "Embedding", &[1.0]);
     let tv = TraversalValue::Vector(vector);
-    assert_eq!(tv.label(), "Embedding");
-}
-
-#[test]
-fn test_label_vector_without_data_returns_correct_label() {
-    let arena = Bump::new();
-    let vector = create_test_vector_without_data(&arena, 1, "Embedding");
-    let tv = TraversalValue::VectorNodeWithoutVectorData(vector);
     assert_eq!(tv.label(), "Embedding");
 }
 
@@ -341,14 +289,6 @@ fn test_data_vector_returns_correct_slice() {
 }
 
 #[test]
-fn test_data_vector_without_data_returns_empty_slice() {
-    let arena = Bump::new();
-    let vector = create_test_vector_without_data(&arena, 1, "Vec");
-    let tv = TraversalValue::VectorNodeWithoutVectorData(vector);
-    assert_eq!(tv.data(), &[] as &[f64]);
-}
-
-#[test]
 #[should_panic(expected = "not implemented")]
 fn test_data_node_panics() {
     let arena = Bump::new();
@@ -367,15 +307,7 @@ fn test_score_vector_returns_distance() {
     let mut vector = create_test_vector(&arena, 1, "Vec", &[1.0]);
     vector.distance = Some(0.75);
     let tv = TraversalValue::Vector(vector);
-    assert!((tv.score() - 0.75).abs() < f64::EPSILON);
-}
-
-#[test]
-fn test_score_vector_without_data_returns_two() {
-    let arena = Bump::new();
-    let vector = create_test_vector_without_data(&arena, 1, "Vec");
-    let tv = TraversalValue::VectorNodeWithoutVectorData(vector);
-    assert!((tv.score() - 2.0).abs() < f64::EPSILON);
+    assert!((tv.score() - 0.75).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -386,7 +318,7 @@ fn test_score_node_with_score_returns_stored_score() {
         node,
         score: 0.123456,
     };
-    assert!((tv.score() - 0.123456).abs() < f64::EPSILON);
+    assert!((tv.score() - 0.123456).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -405,7 +337,12 @@ fn test_score_node_panics() {
 #[test]
 fn test_get_property_node_existing_property() {
     let arena = Bump::new();
-    let node = create_test_node_with_props(&arena, 1, "Person", vec![("name", Value::String("Alice".to_string()))]);
+    let node = create_test_node_with_props(
+        &arena,
+        1,
+        "Person",
+        vec![("name", Value::String("Alice".to_string()))],
+    );
     let tv = TraversalValue::Node(node);
     let prop = tv.get_property("name");
     assert!(prop.is_some());
@@ -415,7 +352,12 @@ fn test_get_property_node_existing_property() {
 #[test]
 fn test_get_property_node_nonexistent_property() {
     let arena = Bump::new();
-    let node = create_test_node_with_props(&arena, 1, "Person", vec![("name", Value::String("Alice".to_string()))]);
+    let node = create_test_node_with_props(
+        &arena,
+        1,
+        "Person",
+        vec![("name", Value::String("Alice".to_string()))],
+    );
     let tv = TraversalValue::Node(node);
     let prop = tv.get_property("age");
     assert!(prop.is_none());
@@ -424,7 +366,8 @@ fn test_get_property_node_nonexistent_property() {
 #[test]
 fn test_get_property_edge_existing_property() {
     let arena = Bump::new();
-    let edge = create_test_edge_with_props(&arena, 1, "KNOWS", 1, 2, vec![("since", Value::I32(2020))]);
+    let edge =
+        create_test_edge_with_props(&arena, 1, "KNOWS", 1, 2, vec![("since", Value::I32(2020))]);
     let tv = TraversalValue::Edge(edge);
     let prop = tv.get_property("since");
     assert!(prop.is_some());
@@ -434,7 +377,13 @@ fn test_get_property_edge_existing_property() {
 #[test]
 fn test_get_property_vector_existing_property() {
     let arena = Bump::new();
-    let vector = create_test_vector_with_props(&arena, 1, "Embedding", &[1.0], vec![("model", Value::String("gpt-4".to_string()))]);
+    let vector = create_test_vector_with_props(
+        &arena,
+        1,
+        "Embedding",
+        &[1.0],
+        vec![("model", Value::String("gpt-4".to_string()))],
+    );
     let tv = TraversalValue::Vector(vector);
     let prop = tv.get_property("model");
     assert!(prop.is_some());
@@ -442,19 +391,14 @@ fn test_get_property_vector_existing_property() {
 }
 
 #[test]
-fn test_get_property_vector_without_data_existing_property() {
-    let arena = Bump::new();
-    let vector = create_test_vector_without_data_with_props(&arena, 1, "Embedding", vec![("dim", Value::I32(768))]);
-    let tv = TraversalValue::VectorNodeWithoutVectorData(vector);
-    let prop = tv.get_property("dim");
-    assert!(prop.is_some());
-    assert_eq!(prop.unwrap(), &Value::I32(768));
-}
-
-#[test]
 fn test_get_property_node_with_score_existing_property() {
     let arena = Bump::new();
-    let node = create_test_node_with_props(&arena, 1, "Doc", vec![("title", Value::String("Report".to_string()))]);
+    let node = create_test_node_with_props(
+        &arena,
+        1,
+        "Doc",
+        vec![("title", Value::String("Report".to_string()))],
+    );
     let tv = TraversalValue::NodeWithScore { node, score: 0.9 };
     let prop = tv.get_property("title");
     assert!(prop.is_some());
@@ -575,16 +519,6 @@ fn test_eq_vector_same_id() {
 }
 
 #[test]
-fn test_eq_vector_and_vector_without_data_same_id() {
-    let arena = Bump::new();
-    let vec1 = create_test_vector(&arena, 400, "Vec", &[1.0, 2.0]);
-    let vec2 = create_test_vector_without_data(&arena, 400, "Vec");
-    let tv1 = TraversalValue::Vector(vec1);
-    let tv2 = TraversalValue::VectorNodeWithoutVectorData(vec2);
-    assert_eq!(tv1, tv2);
-}
-
-#[test]
 fn test_eq_node_with_score_same_id() {
     let arena = Bump::new();
     let node1 = create_test_node(&arena, 500, "Doc");
@@ -675,7 +609,7 @@ fn test_vector_with_empty_data() {
 #[test]
 fn test_vector_with_large_data() {
     let arena = Bump::new();
-    let large_data: Vec<f64> = (0..1024).map(|i| i as f64).collect();
+    let large_data: Vec<f32> = (0..1024).map(|i| i as f32).collect();
     let vector = create_test_vector(&arena, 1, "LargeVec", &large_data);
     let tv = TraversalValue::Vector(vector);
     assert_eq!(tv.data().len(), 1024);
@@ -686,7 +620,7 @@ fn test_node_with_score_zero_score() {
     let arena = Bump::new();
     let node = create_test_node(&arena, 1, "Test");
     let tv = TraversalValue::NodeWithScore { node, score: 0.0 };
-    assert!((tv.score() - 0.0).abs() < f64::EPSILON);
+    assert!((tv.score() - 0.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -694,7 +628,7 @@ fn test_node_with_score_negative_score() {
     let arena = Bump::new();
     let node = create_test_node(&arena, 1, "Test");
     let tv = TraversalValue::NodeWithScore { node, score: -1.5 };
-    assert!((tv.score() - (-1.5)).abs() < f64::EPSILON);
+    assert!((tv.score() - (-1.5)).abs() < f32::EPSILON);
 }
 
 #[test]

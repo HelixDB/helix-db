@@ -1,18 +1,12 @@
 use bumpalo::Bump;
-use heed3::{Env, EnvOpenOptions, RoTxn};
+use heed3::{Env, EnvOpenOptions};
 use rand::Rng;
 use tempfile::TempDir;
 
 use crate::helix_engine::{
     types::VectorError,
-    vector_core::{
-        hnsw::HNSW,
-        vector::HVector,
-        vector_core::{HNSWConfig, VectorCore},
-    },
+    vector_core::{HNSWConfig, VectorCore},
 };
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_env() -> (Env, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -97,16 +91,15 @@ fn test_delete_existing_vector() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let arena = Bump::new();
-    let vector: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4];
+    let vector: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
     let data = arena.alloc_slice_copy(&vector);
     let inserted = index
-        .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+        .insert(&mut txn, "vector", data, None, &arena)
         .unwrap();
     let inserted_id = inserted.id;
 
     // Delete the vector
-    let delete_arena = Bump::new();
-    let result = index.delete(&mut txn, inserted_id, &delete_arena);
+    let result = index.delete(&mut txn, inserted_id);
     assert!(result.is_ok());
     txn.commit().unwrap();
 
@@ -114,7 +107,7 @@ fn test_delete_existing_vector() {
     let read_arena = Bump::new();
     let txn = env.read_txn().unwrap();
     let props_result = index.get_vector_properties(&txn, inserted_id, &read_arena);
-    assert!(matches!(props_result, Err(VectorError::VectorDeleted)));
+    assert!(matches!(props_result, Err(VectorError::VectorNotFound(_))));
 }
 
 #[test]
@@ -124,33 +117,37 @@ fn test_deleted_vector_excluded_from_search() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let arena = Bump::new();
-    let target_vector: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0];
+    let target_vector: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
     let data = arena.alloc_slice_copy(&target_vector);
     let target = index
-        .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+        .insert(&mut txn, "vector", data, None, &arena)
         .unwrap();
 
     // Insert some other vectors
     for i in 0..5 {
         let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
+        let vector: Vec<f32> = vec![0.1 * i as f32, 0.2, 0.3, 0.4];
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", data, None, &arena)
             .unwrap();
     }
 
     // Delete the target vector
-    let delete_arena = Bump::new();
-    index.delete(&mut txn, target.id, &delete_arena).unwrap();
+    index.delete(&mut txn, target.id).unwrap();
     txn.commit().unwrap();
 
     // Search for the deleted vector's pattern - it should not appear in results
     let search_arena = Bump::new();
     let txn = env.read_txn().unwrap();
     let query = [1.0, 0.0, 0.0, 0.0];
+    let nns = index
+        .search(&txn, query.to_vec(), 10, "vector", &search_arena)
+        .unwrap()
+        .into_nns();
+
     let results = index
-        .search::<Filter>(&txn, &query, 10, "vector", None, false, &search_arena)
+        .nns_to_hvectors(&txn, nns, false, &search_arena)
         .unwrap();
 
     // Verify the deleted vector is not in results
@@ -165,10 +162,9 @@ fn test_delete_non_existent_vector() {
     let mut txn = env.write_txn().unwrap();
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
-    let arena = Bump::new();
     // Try to delete a vector that doesn't exist
     let fake_id: u128 = 12345678901234567890;
-    let result = index.delete(&mut txn, fake_id, &arena);
+    let result = index.delete(&mut txn, fake_id);
 
     assert!(matches!(result, Err(VectorError::VectorNotFound(_))));
 }
@@ -180,23 +176,21 @@ fn test_delete_already_deleted_vector() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let arena = Bump::new();
-    let vector: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4];
+    let vector: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
     let data = arena.alloc_slice_copy(&vector);
     let inserted = index
-        .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+        .insert(&mut txn, "vector", data, None, &arena)
         .unwrap();
     let inserted_id = inserted.id;
 
     // Delete once - should succeed
-    let delete_arena = Bump::new();
-    index.delete(&mut txn, inserted_id, &delete_arena).unwrap();
+    index.delete(&mut txn, inserted_id).unwrap();
 
-    // Delete again - should fail with VectorDeleted
-    // Note: get_vector_properties returns VectorDeleted for deleted vectors,
+    // Delete again - should fail with VectorNotFound
+    // Note: get_vector_properties returns VectorNotFound for deleted vectors,
     // which gets propagated before the VectorAlreadyDeleted check
-    let delete_arena2 = Bump::new();
-    let result = index.delete(&mut txn, inserted_id, &delete_arena2);
-    assert!(matches!(result, Err(VectorError::VectorDeleted)));
+    let result = index.delete(&mut txn, inserted_id);
+    assert!(matches!(result, Err(VectorError::VectorNotFound(_))));
 
     // Commit transaction to ensure proper cleanup
     txn.commit().unwrap();
@@ -213,10 +207,10 @@ fn test_get_vector_properties_existing() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let arena = Bump::new();
-    let vector: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4];
+    let vector: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
     let data = arena.alloc_slice_copy(&vector);
     let inserted = index
-        .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+        .insert(&mut txn, "vector", data, None, &arena)
         .unwrap();
     txn.commit().unwrap();
 
@@ -227,7 +221,6 @@ fn test_get_vector_properties_existing() {
     assert!(props.is_some());
     let props = props.unwrap();
     assert_eq!(props.id, inserted.id);
-    assert!(!props.deleted);
 }
 
 #[test]
@@ -237,20 +230,20 @@ fn test_get_vector_properties_deleted() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let arena = Bump::new();
-    let vector: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4];
+    let vector: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
     let data = arena.alloc_slice_copy(&vector);
     let inserted = index
-        .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+        .insert(&mut txn, "vector", data, None, &arena)
         .unwrap();
 
     // Delete the vector
-    index.delete(&mut txn, inserted.id, &arena).unwrap();
+    index.delete(&mut txn, inserted.id).unwrap();
     txn.commit().unwrap();
 
     // Getting properties of deleted vector should return error
     let txn = env.read_txn().unwrap();
     let result = index.get_vector_properties(&txn, inserted.id, &arena);
-    assert!(matches!(result, Err(VectorError::VectorDeleted)));
+    assert!(matches!(result, Err(VectorError::VectorNotFound(_))));
 }
 
 #[test]
@@ -260,19 +253,18 @@ fn test_get_full_vector_existing() {
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
     let arena = Bump::new();
-    let vector: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4];
+    let vector: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
     let data = arena.alloc_slice_copy(&vector);
     let inserted = index
-        .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+        .insert(&mut txn, "vector", data, None, &arena)
         .unwrap();
     txn.commit().unwrap();
 
     let txn = env.read_txn().unwrap();
     let full_vector = index.get_full_vector(&txn, inserted.id, &arena).unwrap();
     assert_eq!(full_vector.id, inserted.id);
-    assert!(!full_vector.deleted);
     // Verify vector data matches
-    assert_eq!(full_vector.data.len(), 4);
+    assert_eq!(full_vector.data.unwrap().len(), 4);
 }
 
 #[test]
@@ -289,35 +281,6 @@ fn test_get_full_vector_non_existent() {
     assert!(matches!(result, Err(VectorError::VectorNotFound(_))));
 }
 
-#[test]
-fn test_get_all_vectors_with_level_filter() {
-    let (env, _temp_dir) = setup_env();
-    let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
-
-    // Insert multiple vectors
-    for i in 0..10 {
-        let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
-        let data = arena.alloc_slice_copy(&vector);
-        let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
-            .unwrap();
-    }
-    txn.commit().unwrap();
-
-    let arena = Bump::new();
-    let txn = env.read_txn().unwrap();
-
-    // Get all vectors without level filter
-    let all_vectors = index.get_all_vectors(&txn, None, &arena).unwrap();
-    assert_eq!(all_vectors.len(), 10);
-
-    // Get vectors at level 0 (all vectors are stored at level 0)
-    let level_0_vectors = index.get_all_vectors(&txn, Some(0), &arena).unwrap();
-    assert_eq!(level_0_vectors.len(), 10);
-}
-
 // ============================================================================
 // Search Edge Case Tests
 // ============================================================================
@@ -331,10 +294,10 @@ fn test_search_k_zero() {
     // Insert some vectors
     for i in 0..5 {
         let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
+        let vector: Vec<f32> = vec![0.1 * i as f32, 0.2, 0.3, 0.4];
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", data, None, &arena)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -345,9 +308,10 @@ fn test_search_k_zero() {
 
     // Search with k=0 should return empty results
     let results = index
-        .search::<Filter>(&txn, &query, 0, "vector", None, false, &arena)
+        .search(&txn, query.to_vec(), 0, "vector", &arena)
         .unwrap();
-    assert!(results.is_empty());
+
+    assert!(results.nns.is_empty());
 }
 
 #[test]
@@ -359,24 +323,22 @@ fn test_search_k_exceeds_total() {
     // Insert exactly 5 vectors
     for i in 0..5 {
         let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
+        let vector: Vec<f32> = vec![0.1 * i as f32, 0.2, 0.3, 0.4];
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", data, None, &arena)
             .unwrap();
     }
     txn.commit().unwrap();
 
     let arena = Bump::new();
     let txn = env.read_txn().unwrap();
-    let query = [0.5, 0.5, 0.5, 0.5];
+    let query = vec![0.5, 0.5, 0.5, 0.5];
 
     // Search with k=100, more than total vectors
-    let results = index
-        .search::<Filter>(&txn, &query, 100, "vector", None, false, &arena)
-        .unwrap();
+    let results = index.search(&txn, query, 100, "vector", &arena).unwrap();
     // Should return at most 5 (all available vectors)
-    assert!(results.len() <= 5);
+    assert!(results.nns.len() <= 5);
 }
 
 #[test]
@@ -388,10 +350,10 @@ fn test_search_empty_index() {
 
     let arena = Bump::new();
     let txn = env.read_txn().unwrap();
-    let query = [0.5, 0.5, 0.5, 0.5];
+    let query = vec![0.5, 0.5, 0.5, 0.5];
 
     // Search on empty index should return EntryPointNotFound error
-    let result = index.search::<Filter>(&txn, &query, 5, "vector", None, false, &arena);
+    let result = index.search(&txn, query, 5, "vector", &arena);
     assert!(matches!(result, Err(VectorError::EntryPointNotFound)));
 }
 
@@ -406,29 +368,31 @@ fn test_search_after_deletions() {
     // Insert 10 vectors
     for i in 0..10 {
         let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
+        let vector: Vec<f32> = vec![0.1 * i as f32, 0.2, 0.3, 0.4];
         let data = arena.alloc_slice_copy(&vector);
         let inserted = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", data, None, &arena)
             .unwrap();
         inserted_ids.push(inserted.id);
     }
 
     // Delete first 5 vectors
     for i in 0..5 {
-        let arena = Bump::new();
-        index.delete(&mut txn, inserted_ids[i], &arena).unwrap();
+        index.delete(&mut txn, inserted_ids[i]).unwrap();
     }
     txn.commit().unwrap();
 
     let arena = Bump::new();
     let txn = env.read_txn().unwrap();
-    let query = [0.5, 0.5, 0.5, 0.5];
+    let query = vec![0.5, 0.5, 0.5, 0.5];
 
     // Search should only return non-deleted vectors
-    let results = index
-        .search::<Filter>(&txn, &query, 10, "vector", None, false, &arena)
-        .unwrap();
+    let nns = index
+        .search(&txn, query.to_vec(), 10, "vector", &arena)
+        .unwrap()
+        .into_nns();
+
+    let results = index.nns_to_hvectors(&txn, nns, false, &arena).unwrap();
 
     // Should only find up to 5 vectors (the non-deleted ones)
     assert!(results.len() <= 5);
@@ -442,42 +406,6 @@ fn test_search_after_deletions() {
 }
 
 #[test]
-fn test_search_with_filter_predicate() {
-    let (env, _temp_dir) = setup_env();
-    let mut txn = env.write_txn().unwrap();
-    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
-
-    // Insert vectors
-    for i in 0..10 {
-        let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
-        let data = arena.alloc_slice_copy(&vector);
-        let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
-            .unwrap();
-    }
-    txn.commit().unwrap();
-
-    let arena = Bump::new();
-    let txn = env.read_txn().unwrap();
-    let query = [0.5, 0.5, 0.5, 0.5];
-
-    // Filter that always returns false - should find no results
-    let filter: &[fn(&HVector, &RoTxn) -> bool] = &[|_, _| false];
-    let results = index
-        .search(&txn, &query, 10, "vector", Some(filter), false, &arena)
-        .unwrap();
-    assert!(results.is_empty());
-
-    // Filter that always returns true - should find results
-    let filter: &[fn(&HVector, &RoTxn) -> bool] = &[|_, _| true];
-    let results = index
-        .search(&txn, &query, 10, "vector", Some(filter), false, &arena)
-        .unwrap();
-    assert!(!results.is_empty());
-}
-
-#[test]
 fn test_search_label_filtering() {
     let (env, _temp_dir) = setup_env();
     let mut txn = env.write_txn().unwrap();
@@ -486,41 +414,48 @@ fn test_search_label_filtering() {
     // Insert vectors with label "vector_a"
     for i in 0..5 {
         let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.1 * i as f64, 0.2, 0.3, 0.4];
+        let vector: Vec<f32> = vec![0.1 * i as f32, 0.2, 0.3, 0.4];
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector_a", data, None, &arena)
+            .insert(&mut txn, "vector_a", data, None, &arena)
             .unwrap();
     }
 
     // Insert vectors with label "vector_b"
     for i in 0..5 {
         let arena = Bump::new();
-        let vector: Vec<f64> = vec![0.5 + 0.1 * i as f64, 0.2, 0.3, 0.4];
+        let vector: Vec<f32> = vec![0.5 + 0.1 * i as f32, 0.2, 0.3, 0.4];
         let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector_b", data, None, &arena)
+            .insert(&mut txn, "vector_b", data, None, &arena)
             .unwrap();
     }
     txn.commit().unwrap();
 
     let arena = Bump::new();
     let txn = env.read_txn().unwrap();
-    let query = [0.5, 0.5, 0.5, 0.5];
+    let query = vec![0.5, 0.5, 0.5, 0.5];
 
     // Search for label "vector_a"
-    let results = index
-        .search::<Filter>(&txn, &query, 10, "vector_a", None, false, &arena)
-        .unwrap();
+    let nns = index
+        .search(&txn, query.to_vec(), 10, "vector_a", &arena)
+        .unwrap()
+        .into_nns();
+
+    let results = index.nns_to_hvectors(&txn, nns, false, &arena).unwrap();
+
     // All results should have label "vector_a"
     for result in &results {
         assert_eq!(result.label, "vector_a");
     }
 
     // Search for label "vector_b"
-    let results = index
-        .search::<Filter>(&txn, &query, 10, "vector_b", None, false, &arena)
-        .unwrap();
+    let nns = index
+        .search(&txn, query.to_vec(), 10, "vector_b", &arena)
+        .unwrap()
+        .into_nns();
+    let results = index.nns_to_hvectors(&txn, nns, false, &arena).unwrap();
+
     // All results should have label "vector_b"
     for result in &results {
         assert_eq!(result.label, "vector_b");
@@ -537,18 +472,16 @@ fn test_hnsw_insert_and_count() {
     let mut txn = env.write_txn().unwrap();
     let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
 
-    let vector: Vec<f64> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
+    let vector: Vec<f32> = (0..4).map(|_| rand::rng().random_range(0.0..1.0)).collect();
     for _ in 0..10 {
         let arena = Bump::new();
-        let data = arena.alloc_slice_copy(&vector);
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", vector.as_slice(), None, &arena)
             .unwrap();
     }
 
     txn.commit().unwrap();
-    let txn = env.read_txn().unwrap();
-    assert!(index.num_inserted_vectors(&txn).unwrap() >= 10);
+    assert!(index.num_inserted_vectors() >= 10);
 }
 
 #[test]
@@ -560,10 +493,9 @@ fn test_hnsw_search_returns_results() {
     let mut rng = rand::rng();
     for _ in 0..128 {
         let arena = Bump::new();
-        let vector: Vec<f64> = (0..4).map(|_| rng.random_range(0.0..1.0)).collect();
-        let data = arena.alloc_slice_copy(&vector);
+        let vector: Vec<f32> = (0..4).map(|_| rng.random_range(0.0..1.0)).collect();
         let _ = index
-            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .insert(&mut txn, "vector", vector.as_slice(), None, &arena)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -572,7 +504,7 @@ fn test_hnsw_search_returns_results() {
     let txn = env.read_txn().unwrap();
     let query = [0.5, 0.5, 0.5, 0.5];
     let results = index
-        .search::<Filter>(&txn, &query, 5, "vector", None, false, &arena)
+        .search(&txn, query.to_vec(), 5, "vector", &arena)
         .unwrap();
-    assert!(!results.is_empty());
+    assert!(!results.nns.is_empty());
 }

@@ -1634,6 +1634,11 @@ impl Value {
     pub fn as_f64(&self) -> f64 {
         *self.into_primitive()
     }
+
+    #[inline(always)]
+    pub fn as_f32(&self) -> f32 {
+        *self.into_primitive()
+    }
 }
 
 #[cfg(test)]
@@ -1730,8 +1735,8 @@ mod tests {
         assert_eq!(Value::F64(1.0), Value::F64(1.0));
         assert_eq!(Value::I64(1), Value::U64(1));
         assert_eq!(Value::U64(1), Value::I64(1));
-        assert_eq!(Value::I32(1), 1 as i32);
-        assert_eq!(Value::U32(1), 1 as i32);
+        assert_eq!(Value::I32(1), 1_i32);
+        assert_eq!(Value::U32(1), 1_i32);
     }
 
     #[test]
@@ -1991,7 +1996,7 @@ mod tests {
 
         let val = Value::Boolean(true);
         let b: bool = val.into();
-        assert_eq!(b, true);
+        assert!(b);
 
         let val = Value::String("test".to_string());
         let s: String = val.into();
@@ -2068,7 +2073,7 @@ mod tests {
 
         let val = Value::Boolean(true);
         let b: &bool = val.into_primitive();
-        assert_eq!(*b, true);
+        assert!(*b);
 
         let val = Value::String("test".to_string());
         let s = val.as_str();

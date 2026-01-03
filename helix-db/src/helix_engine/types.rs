@@ -1,4 +1,8 @@
-use crate::{helix_gateway::router::router::IoContFn, helixc::parser::errors::ParserError};
+use crate::{
+    helix_engine::vector_core::{ItemId, LayerId, key::Key, node_id::NodeMode},
+    helix_gateway::router::router::IoContFn,
+    helixc::parser::errors::ParserError,
+};
 use core::fmt;
 use heed3::Error as HeedError;
 use sonic_rs::Error as SonicError;
@@ -30,8 +34,6 @@ pub enum GraphError {
     ParamNotFound(&'static str),
     IoNeeded(IoContFn),
     RerankerError(String),
-
- 
 }
 
 impl std::error::Error for GraphError {}
@@ -148,13 +150,37 @@ impl From<VectorError> for GraphError {
 #[derive(Debug)]
 pub enum VectorError {
     VectorNotFound(String),
-    VectorDeleted,
     InvalidVectorLength,
     InvalidVectorData,
     EntryPointNotFound,
     ConversionError(String),
     VectorCoreError(String),
     VectorAlreadyDeleted(String),
+    InvalidVecDimension {
+        expected: usize,
+        received: usize,
+    },
+    MissingKey {
+        /// The index that caused the error
+        index: u16,
+        /// The kind of item that was being queried
+        mode: &'static str,
+        /// The item ID queried
+        item: ItemId,
+        /// The item's layer
+        layer: LayerId,
+    },
+    Io(String),
+    NeedBuild(u16),
+    /// The user is trying to query a database with a distance that is not of the right type.
+    UnmatchingDistance {
+        /// The expected distance type.
+        expected: String,
+        /// The distance given by the user.
+        received: &'static str,
+    },
+    MissingMetadata(u16),
+    HasNoData,
 }
 
 impl std::error::Error for VectorError {}
@@ -163,13 +189,57 @@ impl fmt::Display for VectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VectorError::VectorNotFound(id) => write!(f, "Vector not found: {id}"),
-            VectorError::VectorDeleted => write!(f, "Vector deleted"),
+
             VectorError::InvalidVectorLength => write!(f, "Invalid vector length"),
             VectorError::InvalidVectorData => write!(f, "Invalid vector data"),
             VectorError::EntryPointNotFound => write!(f, "Entry point not found"),
             VectorError::ConversionError(msg) => write!(f, "Conversion error: {msg}"),
             VectorError::VectorCoreError(msg) => write!(f, "Vector core error: {msg}"),
             VectorError::VectorAlreadyDeleted(id) => write!(f, "Vector already deleted: {id}"),
+            VectorError::InvalidVecDimension { expected, received } => {
+                write!(
+                    f,
+                    "Invalid vector dimension: expected {expected}, received {received}"
+                )
+            }
+            VectorError::MissingKey {
+                index, mode, item, ..
+            } => write!(
+                f,
+                "Internal error: {mode}({item}) is missing in index `{index}`"
+            ),
+            VectorError::Io(error) => write!(f, "IO error: {error}"),
+            VectorError::NeedBuild(idx) => write!(
+                f,
+                "The graph has not been built after an update on index {idx}"
+            ),
+            VectorError::UnmatchingDistance { expected, received } => {
+                write!(
+                    f,
+                    "Invalid distance provided. Got {received} but expected {expected}"
+                )
+            }
+            VectorError::MissingMetadata(idx) => write!(
+                f,
+                "Metadata are missing on index {idx}, You must build your database before attempting to read it"
+            ),
+            VectorError::HasNoData => write!(f, "Trying to access data where there is none"),
+        }
+    }
+}
+
+impl VectorError {
+    pub(crate) fn missing_key(key: Key) -> Self {
+        Self::MissingKey {
+            index: key.index,
+            mode: match key.node.mode {
+                NodeMode::Item => "Item",
+                NodeMode::Links => "Links",
+                NodeMode::Metadata => "Metadata",
+                NodeMode::Updated => "Updated",
+            },
+            item: key.node.item,
+            layer: key.node.layer,
         }
     }
 }
@@ -201,5 +271,11 @@ impl From<SonicError> for VectorError {
 impl From<bincode::Error> for VectorError {
     fn from(error: bincode::Error) -> Self {
         VectorError::ConversionError(format!("bincode error: {error}"))
+    }
+}
+
+impl From<std::io::Error> for VectorError {
+    fn from(error: std::io::Error) -> Self {
+        VectorError::Io(format!("Io Error: {error}"))
     }
 }
