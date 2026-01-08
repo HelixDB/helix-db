@@ -18,25 +18,6 @@ pub enum DeploymentType {
     Fly,
 }
 
-/// AWS/Helix Cloud region options
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Region {
-    UsEast1,
-    UsWest2,
-    EuWest1,
-    ApSoutheast1,
-}
-
-impl Region {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Region::UsEast1 => "us-east-1",
-            Region::UsWest2 => "us-west-2",
-            Region::EuWest1 => "eu-west-1",
-            Region::ApSoutheast1 => "ap-southeast-1",
-        }
-    }
-}
 
 /// Show the intro banner for interactive mode
 pub fn intro(title: &str, subheader: Option<&str>) -> Result<()> {
@@ -94,26 +75,6 @@ pub fn select_deployment_type() -> Result<DeploymentType> {
         .interact()?;
 
     Ok(selected)
-}
-
-/// Prompt user to select a cloud region
-pub fn select_region() -> Result<String> {
-    let selected: Region = cliclack::select("Select a region")
-        .item(
-            Region::UsEast1,
-            "us-east-1",
-            "N. Virginia - Lowest latency for US East",
-        )
-        .item(Region::UsWest2, "us-west-2", "Oregon - US West Coast")
-        .item(Region::EuWest1, "eu-west-1", "Ireland - Europe")
-        .item(
-            Region::ApSoutheast1,
-            "ap-southeast-1",
-            "Singapore - Asia Pacific",
-        )
-        .interact()?;
-
-    Ok(selected.as_str().to_string())
 }
 
 /// Prompt user to select a Fly.io VM size
@@ -212,10 +173,7 @@ pub async fn build_deployment_command(
             name: Some(instance_name),
         })),
         DeploymentType::HelixCloud => {
-            // Check auth early for Helix Cloud instances
-            let region = select_region()?;
             Ok(Some(CloudDeploymentTypeCommand::Helix {
-                region: Some(region),
                 name: Some(instance_name),
             }))
         }
@@ -253,11 +211,7 @@ pub async fn build_init_deployment_command() -> Result<Option<CloudDeploymentTyp
             Ok(None)
         }
         DeploymentType::HelixCloud => {
-            let region = select_region()?;
-            Ok(Some(CloudDeploymentTypeCommand::Helix {
-                region: Some(region),
-                name: None,
-            }))
+            Ok(Some(CloudDeploymentTypeCommand::Helix { name: None }))
         }
         DeploymentType::Ecr => Ok(Some(CloudDeploymentTypeCommand::Ecr { name: None })),
         DeploymentType::Fly => {

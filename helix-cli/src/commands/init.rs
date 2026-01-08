@@ -113,7 +113,7 @@ async fn run_init_inner(
     match deployment_type {
         Some(deployment) => {
             match deployment {
-                CloudDeploymentTypeCommand::Helix { region, .. } => {
+                CloudDeploymentTypeCommand::Helix { .. } => {
                     // Initialize Helix deployment
                     let cwd = env::current_dir()?;
                     let project_context = ProjectContext::find_and_load(Some(&cwd))?;
@@ -123,7 +123,7 @@ async fn run_init_inner(
 
                     // Create cloud instance configuration (without cluster_id yet)
                     let cloud_config = helix_manager
-                        .create_instance_config(project_name, region.clone())
+                        .create_instance_config(project_name)
                         .await?;
 
                     // Insert into config first
@@ -158,7 +158,7 @@ async fn run_init_inner(
 
                     if should_create {
                         // Run create-cluster flow
-                        crate::commands::create_cluster::run(project_name, region).await?;
+                        crate::commands::create_cluster::run(project_name).await?;
                     } else {
                         println!();
                         print_status(

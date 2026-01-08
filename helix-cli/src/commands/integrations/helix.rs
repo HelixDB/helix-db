@@ -37,18 +37,14 @@ impl<'a> HelixManager<'a> {
     pub async fn create_instance_config(
         &self,
         _instance_name: &str,
-        region: Option<String>,
     ) -> Result<CloudInstanceConfig> {
         // Generate unique cluster ID
         // let cluster_id = format!("helix-{}-{}", instance_name, Uuid::new_v4());
         let cluster_id = "YOUR_CLUSTER_ID".to_string();
 
-        // Use provided region or default to us-east-1
-        let region = region.or_else(|| Some("us-east-1".to_string()));
-
         Ok(CloudInstanceConfig {
             cluster_id,
-            region,
+            region: None,
             build_mode: BuildMode::Release,
             env_vars: HashMap::new(),
             db_config: DbConfig::default(),

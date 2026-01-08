@@ -77,10 +77,6 @@ pub enum CloudDeploymentTypeCommand {
     /// Initialize Helix Cloud deployment
     #[clap(name = "cloud")]
     Helix {
-        /// Region for Helix cloud instance (default: us-east-1)
-        #[clap(long, default_value = "us-east-1")]
-        region: Option<String>,
-
         /// Instance name
         #[clap(short, long)]
         name: Option<String>,

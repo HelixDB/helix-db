@@ -9,7 +9,7 @@ use crate::{
 use eyre::{OptionExt, Result, eyre};
 
 /// Create a new cluster in Helix Cloud
-pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
+pub async fn run(instance_name: &str) -> Result<()> {
     print_status("CREATE", &format!("Creating cluster: {}", instance_name));
 
     // Load project context
@@ -37,9 +37,6 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
 
     // Check authentication
     let credentials = require_auth().await?;
-
-    // Get or default region
-    let region = region.unwrap_or_else(|| "us-east-1".to_string());
 
     // Connect to SSE stream for cluster creation
     // The server will send CheckoutRequired, PaymentConfirmed, CreatingProject, ProjectCreated events
@@ -130,7 +127,7 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
     {
         CloudInstanceConfig {
             cluster_id: cluster_id.clone(),
-            region: existing.region.clone().or(Some(region.clone())),
+            region: existing.region.clone(),
             build_mode: existing.build_mode,
             env_vars: existing.env_vars.clone(),
             db_config: existing.db_config.clone(),
@@ -138,7 +135,7 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
     } else {
         CloudInstanceConfig {
             cluster_id: cluster_id.clone(),
-            region: Some(region.clone()),
+            region: None,
             build_mode: crate::config::BuildMode::Release,
             env_vars: std::collections::HashMap::new(),
             db_config: DbConfig::default(),
@@ -160,7 +157,6 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
         "Cluster '{}' created successfully! (ID: {})",
         instance_name, cluster_id
     ));
-    print_info(&format!("Region: {}", region));
     print_info("Configuration saved to helix.toml");
     print_info(&format!(
         "You can now deploy with: helix push {}",

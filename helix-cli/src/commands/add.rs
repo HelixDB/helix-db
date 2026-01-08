@@ -96,13 +96,13 @@ async fn run_add_inner(
     // Determine instance type
 
     match deployment_type {
-        CloudDeploymentTypeCommand::Helix { region, .. } => {
+        CloudDeploymentTypeCommand::Helix { .. } => {
             // Add Helix cloud instance
             let helix_manager = HelixManager::new(&project_context);
 
             // Create cloud instance configuration (without cluster_id yet)
             let cloud_config = helix_manager
-                .create_instance_config(&instance_name, region.clone())
+                .create_instance_config(&instance_name)
                 .await?;
 
             // Insert into project configuration
@@ -136,7 +136,7 @@ async fn run_add_inner(
 
             if should_create {
                 // Run create-cluster flow
-                crate::commands::create_cluster::run(&instance_name, region).await?;
+                crate::commands::create_cluster::run(&instance_name).await?;
 
                 // create_cluster::run() already saved the updated config with the real cluster_id
                 // Return early to avoid overwriting it with the stale in-memory config
