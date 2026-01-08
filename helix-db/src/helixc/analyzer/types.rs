@@ -12,6 +12,14 @@ use crate::helixc::{
     parser::types::{DefaultValue, EdgeSchema, FieldType, NodeSchema, Parameter, VectorSchema},
 };
 
+fn capitalize_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().chain(c).collect(),
+    }
+}
+
 impl From<NodeSchema> for GeneratedNodeSchema {
     fn from(generated: NodeSchema) -> Self {
         GeneratedNodeSchema {
@@ -23,7 +31,7 @@ impl From<NodeSchema> for GeneratedNodeSchema {
                     name: f.name,
                     field_type: f.field_type.into(),
                     default_value: f.defaults.map(|d| d.into()),
-                    is_index: f.prefix,
+                    field_prefix: f.prefix,
                 })
                 .collect(),
         }
@@ -43,10 +51,11 @@ impl From<EdgeSchema> for GeneratedEdgeSchema {
                         name: f.name,
                         field_type: f.field_type.into(),
                         default_value: f.defaults.map(|d| d.into()),
-                        is_index: f.prefix,
+                        field_prefix: f.prefix,
                     })
                     .collect()
             }),
+            is_unique: generated.unique,
         }
     }
 }
@@ -62,7 +71,7 @@ impl From<VectorSchema> for GeneratedVectorSchema {
                     name: f.name,
                     field_type: f.field_type.into(),
                     default_value: f.defaults.map(|d| d.into()),
-                    is_index: f.prefix,
+                    field_prefix: f.prefix,
                 })
                 .collect(),
         }
@@ -71,6 +80,7 @@ impl From<VectorSchema> for GeneratedVectorSchema {
 
 impl GeneratedParameter {
     pub fn unwrap_param(
+        query_name: &str,
         param: Parameter,
         parameters: &mut Vec<GeneratedParameter>,
         sub_parameters: &mut Vec<(String, Vec<GeneratedParameter>)>,
@@ -85,11 +95,13 @@ impl GeneratedParameter {
             }
             FieldType::Array(inner) => match inner.as_ref() {
                 FieldType::Object(obj) => {
-                    unwrap_object(format!("{}Data", param.name.1), obj, sub_parameters);
+                    let struct_name =
+                        format!("{}{}Data", query_name, capitalize_first(&param.name.1));
+                    unwrap_object(query_name, struct_name.clone(), obj, sub_parameters);
                     parameters.push(GeneratedParameter {
                         name: param.name.1.clone(),
                         field_type: GeneratedType::Vec(Box::new(GeneratedType::Object(
-                            GenRef::Std(format!("{}Data", param.name.1)),
+                            GenRef::Std(struct_name),
                         ))),
                         is_optional: param.is_optional,
                     });
@@ -103,13 +115,12 @@ impl GeneratedParameter {
                 }
             },
             FieldType::Object(obj) => {
-                unwrap_object(format!("{}Data", param.name.1), &obj, sub_parameters);
+                let struct_name =
+                    format!("{}{}Data", query_name, capitalize_first(&param.name.1));
+                unwrap_object(query_name, struct_name.clone(), &obj, sub_parameters);
                 parameters.push(GeneratedParameter {
                     name: param.name.1.clone(),
-                    field_type: GeneratedType::Variable(GenRef::Std(format!(
-                        "{}Data",
-                        param.name.1
-                    ))),
+                    field_type: GeneratedType::Variable(GenRef::Std(struct_name)),
                     is_optional: param.is_optional,
                 });
             }
@@ -125,6 +136,7 @@ impl GeneratedParameter {
 }
 
 fn unwrap_object(
+    query_name: &str,
     name: String,
     obj: &HashMap<String, FieldType>,
     sub_parameters: &mut Vec<(String, Vec<GeneratedParameter>)>,
@@ -134,20 +146,24 @@ fn unwrap_object(
         obj.iter()
             .map(|(field_name, field_type)| match field_type {
                 FieldType::Object(obj) => {
-                    unwrap_object(format!("{field_name}Data"), obj, sub_parameters);
+                    let nested_name =
+                        format!("{}{}Data", query_name, capitalize_first(field_name));
+                    unwrap_object(query_name, nested_name.clone(), obj, sub_parameters);
                     GeneratedParameter {
                         name: field_name.clone(),
-                        field_type: GeneratedType::Object(GenRef::Std(format!("{field_name}Data"))),
+                        field_type: GeneratedType::Object(GenRef::Std(nested_name)),
                         is_optional: false,
                     }
                 }
                 FieldType::Array(inner) => match inner.as_ref() {
                     FieldType::Object(obj) => {
-                        unwrap_object(format!("{field_name}Data"), obj, sub_parameters);
+                        let nested_name =
+                            format!("{}{}Data", query_name, capitalize_first(field_name));
+                        unwrap_object(query_name, nested_name.clone(), obj, sub_parameters);
                         GeneratedParameter {
                             name: field_name.clone(),
                             field_type: GeneratedType::Vec(Box::new(GeneratedType::Object(
-                                GenRef::Std(format!("{field_name}Data")),
+                                GenRef::Std(nested_name),
                             ))),
                             is_optional: false,
                         }
@@ -227,12 +243,12 @@ impl From<DefaultValue> for GeneratedValue {
 }
 
 /// Metadata for GROUPBY and AGGREGATE_BY operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AggregateInfo {
-    pub source_type: Box<Type>,   // Original type being aggregated (Node, Edge, Vector)
-    pub properties: Vec<String>,  // Properties being grouped by
-    pub is_count: bool,           // true for COUNT mode
-    pub is_group_by: bool,        // true for GROUP_BY, false for AGGREGATE_BY
+    pub source_type: Box<Type>, // Original type being aggregated (Node, Edge, Vector)
+    pub properties: Vec<String>, // Properties being grouped by
+    pub is_count: bool,         // true for COUNT mode
+    pub is_group_by: bool,      // true for GROUP_BY, false for AGGREGATE_BY
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +306,12 @@ impl Type {
                 let field_names = fields.keys().cloned().collect::<Vec<_>>();
                 format!("object({})", field_names.join(", "))
             }
-            _ => unreachable!(),
+            Type::Node(None) => "node".to_string(),
+            Type::Nodes(None) => "nodes".to_string(),
+            Type::Edge(None) => "edge".to_string(),
+            Type::Edges(None) => "edges".to_string(),
+            Type::Vector(None) => "vector".to_string(),
+            Type::Vectors(None) => "vectors".to_string(),
         }
     }
 
@@ -383,7 +404,8 @@ impl PartialEq for Type {
             (Type::Vectors(name), Type::Vectors(other_name)) => name == other_name,
             (Type::Array(inner), Type::Array(other_inner)) => inner == other_inner,
             (Type::Vector(name), Type::Vectors(other_name)) => name == other_name,
-            _ => unreachable!(),
+            (Type::Aggregate(info), Type::Aggregate(other_info)) => info == other_info,
+            _ => false,
         }
     }
 }
@@ -408,7 +430,11 @@ impl From<&FieldType> for Type {
             String | Boolean | F32 | F64 | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | U128
             | Uuid | Date => Type::Scalar(ft.clone()),
             Array(inner_ft) => Type::Array(Box::new(Type::from(*inner_ft.clone()))),
-            Object(obj) => Type::Object(obj.iter().map(|(k, v)| (k.clone(), Type::from(v))).collect()),
+            Object(obj) => Type::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), Type::from(v)))
+                    .collect(),
+            ),
             Identifier(id) => Type::Scalar(FieldType::Identifier(id.clone())),
         }
     }

@@ -86,7 +86,7 @@ fn test_vector_edges_from_and_to_node() {
         .unwrap()
         .id();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_vector", None, node_id, vector_id, false)
+        .add_edge("has_vector", None, node_id, vector_id, false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();
@@ -127,7 +127,7 @@ fn test_brute_force_vector_search_orders_by_distance() {
             .unwrap()
             .id();
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("embedding", None, node.id(), vec_id, false)
+            .add_edge("embedding", None, node.id(), vec_id, false, false)
             .collect_to_obj()
             .unwrap();
         vector_ids.push(vec_id);
@@ -164,7 +164,7 @@ fn test_drop_vector_removes_edges() {
         .unwrap()
         .id();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_vector", None, node_id, vector_id, false)
+        .add_edge("has_vector", None, node_id, vector_id, false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();
@@ -515,11 +515,11 @@ fn test_v_from_type_with_edges_and_nodes() {
         .unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_embedding", None, node.id(), v1.id(), false)
+        .add_edge("has_embedding", None, node.id(), v1.id(), false, false)
         .collect_to_obj()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_embedding", None, node.id(), v2.id(), false)
+        .add_edge("has_embedding", None, node.id(), v2.id(), false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();

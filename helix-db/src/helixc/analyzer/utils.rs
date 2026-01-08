@@ -270,6 +270,7 @@ pub(super) struct VariableInfo {
     pub is_single: bool,            // true if ToObj, false if ToVec
     pub reference_count: usize,     // How many times this variable is referenced
     pub source_var: Option<String>, // For closure parameters, the actual variable they refer to
+    pub struct_name: Option<String>, // Track generated struct name for nested object types in FOR loops
 }
 
 impl VariableInfo {
@@ -279,6 +280,7 @@ impl VariableInfo {
             is_single,
             reference_count: 0,
             source_var: None,
+            struct_name: None,
         }
     }
 
@@ -288,6 +290,17 @@ impl VariableInfo {
             is_single,
             reference_count: 0,
             source_var: Some(source_var),
+            struct_name: None,
+        }
+    }
+
+    pub fn new_with_struct_name(ty: Type, is_single: bool, struct_name: String) -> Self {
+        Self {
+            ty,
+            is_single,
+            reference_count: 0,
+            source_var: None,
+            struct_name: Some(struct_name),
         }
     }
 

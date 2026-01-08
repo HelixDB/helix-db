@@ -268,8 +268,8 @@ impl Display for Step {
             Step::ToV(to_v) => write!(f, "{to_v}"),
             Step::PropertyFetch(property) => write!(f, "get_property({property})"),
             Step::ReservedPropertyAccess(prop) => match prop {
-                ReservedProp::Id => write!(f, "map(|item| Ok(Value::from(uuid_str(item.id, &arena))))"),
-                ReservedProp::Label => write!(f, "map(|item| Ok(Value::from(item.label())))"),
+                ReservedProp::Id => write!(f, "map(|item| item.map(|v| Value::from(uuid_str(v.id(), &arena))))"),
+                ReservedProp::Label => write!(f, "map(|item| item.map(|v| Value::from(v.label())))"),
                 // ReservedProp::Version => write!(f, "map(|item| Ok(Value::from(item.version)))"),
                 // ReservedProp::FromNode => write!(f, "map(|item| Ok(Value::from(uuid_str(item.from_node, &arena))))"),
                 // ReservedProp::ToNode => write!(f, "map(|item| Ok(Value::from(uuid_str(item.to_node, &arena))))"),

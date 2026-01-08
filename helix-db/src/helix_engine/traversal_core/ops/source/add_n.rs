@@ -83,7 +83,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
 
         for index in secondary_indices {
             match self.storage.secondary_indices.get(index) {
-                Some(db) => {
+                Some((db, secondary_index)) => {
                     let key = match node.get_property(index) {
                         Some(value) => value,
                         None => continue,
@@ -93,7 +93,27 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                         Ok(serialized) => {
                             // possibly append dup
 
-                            if let Err(e) = db.put(self.txn, &serialized, &node.id) {
+                            if let Err(e) = {
+                                match secondary_index {
+                                    crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                        .put_with_flags(
+                                            self.txn,
+                                            PutFlags::NO_OVERWRITE,
+                                            &serialized,
+                                            &node.id,
+                                        ),
+                                    crate::helix_engine::types::SecondaryIndex::Index(_) => db
+                                        .put_with_flags(
+                                            self.txn,
+                                            PutFlags::APPEND_DUP,
+                                            &serialized,
+                                            &node.id,
+                                        ),
+                                    crate::helix_engine::types::SecondaryIndex::None => {
+                                        unreachable!()
+                                    }
+                                }
+                            } {
                                 println!(
                                     "{} Error adding node to secondary index: {:?}",
                                     line!(),
