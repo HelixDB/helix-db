@@ -190,7 +190,7 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Branch a local instance database to a new directory
+    /// Branch a local instance database into a new local instance
     Branch {
         /// Instance name to branch
         instance: String,
@@ -199,15 +199,11 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Deploy the branched instance locally
-        #[arg(long)]
-        deploy: bool,
-
-        /// Name of the branched instance when deploying
+        /// Name of the branched instance
         #[arg(long)]
         name: Option<String>,
 
-        /// Port for the branched instance when deploying
+        /// Port for the branched instance
         #[arg(long)]
         port: Option<u16>,
     },
@@ -278,10 +274,9 @@ async fn main() -> Result<()> {
         Commands::Branch {
             instance,
             output,
-            deploy,
             name,
             port,
-        } => commands::branch::run(instance, output, deploy, name, port, &metrics_sender).await,
+        } => commands::branch::run(instance, output, name, port, &metrics_sender).await,
         Commands::Feedback { message } => commands::feedback::run(message).await,
     };
 

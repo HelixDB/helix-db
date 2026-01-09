@@ -18,7 +18,6 @@ pull
 branch
     - (<instance>)
     - (--output/--o)
-    - (--deploy)
     - (--name)
     - (--port)
 init

@@ -11,8 +11,39 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
     // Load project context
     let project = ProjectContext::find_and_load(None)?;
 
+    print_status("BACKUP", &format!("Backing up instance '{instance_name}'"));
+
+    // Get path to backup instance
+    let backup_dir = match output {
+        Some(path) => path,
+        None => {
+            let ts = chrono::Local::now()
+                .format("backup-%Y%m%d-%H%M%S")
+                .to_string();
+            project.root.join("backups").join(ts)
+        }
+    };
+
+    let completed = backup_instance_to_dir(&project, &instance_name, &backup_dir)?;
+    if !completed {
+        return Ok(());
+    }
+
+    print_success(&format!(
+        "Backup for '{instance_name}' created at {:?}",
+        backup_dir
+    ));
+
+    Ok(())
+}
+
+pub(crate) fn backup_instance_to_dir(
+    project: &ProjectContext,
+    instance_name: &str,
+    output_dir: &Path,
+) -> Result<bool> {
     // Get instance config
-    let instance_config = project.config.get_instance(&instance_name)?;
+    let instance_config = project.config.get_instance(instance_name)?;
 
     if !instance_config.is_local() {
         return Err(eyre::eyre!(
@@ -20,11 +51,9 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
         ));
     }
 
-    print_status("BACKUP", &format!("Backing up instance '{instance_name}'"));
-
     // Get the instance volume
-    let env_path = project.instance_user_dir(&instance_name)?;
-    let data_file = project.instance_data_file(&instance_name)?;
+    let env_path = project.instance_user_dir(instance_name)?;
+    let data_file = project.instance_data_file(instance_name)?;
     let env_path = Path::new(&env_path);
 
     // Validate existence of environment
@@ -43,18 +72,7 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
         ));
     }
 
-    // Get path to backup instance
-    let backup_dir = match output {
-        Some(path) => path,
-        None => {
-            let ts = chrono::Local::now()
-                .format("backup-%Y%m%d-%H%M%S")
-                .to_string();
-            project.root.join("backups").join(ts)
-        }
-    };
-
-    create_dir_all(&backup_dir)?;
+    create_dir_all(output_dir)?;
 
     // Get the size of the data
     let total_size = fs::metadata(&data_file)?.len();
@@ -62,7 +80,6 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
     const TEN_GB: u64 = 10 * 1024 * 1024 * 1024;
 
     // Check and warn if file is greater than 10 GB
-
     if total_size > TEN_GB {
         let size_gb = (total_size as f64) / (1024.0 * 1024.0 * 1024.0);
         print_warning(&format!(
@@ -72,7 +89,7 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
         let confirmed = print_confirm("Do you want to continue?");
         if !confirmed? {
             print_status("CANCEL", "Backup aborted by user");
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -85,15 +102,10 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
             .open(env_path)?
     };
 
-    println!("Copying {:?} → {:?}", &data_file, &backup_dir);
+    println!("Copying {:?} → {:?}", &data_file, &output_dir);
 
     // backup database to given database
-    env.copy_to_path(backup_dir.join("data.mdb"), CompactionOption::Disabled)?;
+    env.copy_to_path(output_dir.join("data.mdb"), CompactionOption::Disabled)?;
 
-    print_success(&format!(
-        "Backup for '{instance_name}' created at {:?}",
-        backup_dir
-    ));
-
-    Ok(())
+    Ok(true)
 }

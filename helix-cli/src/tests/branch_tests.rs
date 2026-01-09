@@ -26,34 +26,22 @@ fn setup_test_project() -> (TempDir, ProjectContext) {
 #[test]
 fn test_resolve_output_dir_defaults() {
     let (_temp_dir, project) = setup_test_project();
-    let timestamp = "20240101-000000";
+    let branch_name = "branch-1";
 
-    let deploy_output = resolve_output_dir(&project, None, true, "branch-1", timestamp);
-    assert_eq!(
-        deploy_output,
-        project.helix_dir.join(".volumes").join("branch-1")
-    );
-
-    let branch_output = resolve_output_dir(&project, None, false, "", timestamp);
+    let branch_output = resolve_output_dir(&project, None, branch_name);
     assert_eq!(
         branch_output,
-        project
-            .helix_dir
-            .join(".branches")
-            .join(format!("branch-{timestamp}"))
+        project.helix_dir.join(".volumes").join(branch_name)
     );
 }
 
 #[test]
 fn test_resolve_output_dir_relative_path() {
     let (_temp_dir, project) = setup_test_project();
-    let timestamp = "20240101-000000";
     let output = resolve_output_dir(
         &project,
         Some(PathBuf::from("custom-output")),
-        false,
-        "",
-        timestamp,
+        "branch-1",
     );
     assert_eq!(output, project.root.join("custom-output"));
 }

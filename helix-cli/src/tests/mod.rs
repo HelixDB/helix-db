@@ -7,6 +7,8 @@ pub mod check_tests;
 pub mod compile_tests;
 #[cfg(test)]
 pub mod branch_tests;
+#[cfg(test)]
+pub mod backup_tests;
 // #[cfg(test)]
 // pub mod build_tests;
 // #[cfg(test)]
