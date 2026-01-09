@@ -239,6 +239,7 @@ async fn run_add_inner(
             let local_config = LocalInstanceConfig {
                 port: None, // Let the system assign a port
                 build_mode: BuildMode::Debug,
+                data_dir: None,
                 db_config: DbConfig::default(),
             };
 

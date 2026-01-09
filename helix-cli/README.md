@@ -15,6 +15,11 @@ push
     - (--force/--f)
 pull
     - (<cluster_id|alias>)
+branch
+    - (<instance>)
+    - (--output/--o)
+    - (--name)
+    - (--port)
 init
     - (--template/--t): template to use e.g. ts, py, fli.io, docker etc.
     - (--alias/--a): name to call cluster

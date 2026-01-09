@@ -190,6 +190,24 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Branch a local instance database into a new local instance
+    Branch {
+        /// Instance name to branch
+        instance: String,
+
+        /// Output directory for the branch
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Name of the branched instance
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Port for the branched instance
+        #[arg(long)]
+        port: Option<u16>,
+    },
+
     /// Send feedback to the Helix team
     Feedback {
         /// Feedback message (opens interactive prompt if not provided)
@@ -229,7 +247,9 @@ async fn main() -> Result<()> {
         Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
             .await
             .map(|_| ()),
-        Commands::Push { instance, dev } => commands::push::run(instance, dev, &metrics_sender).await,
+        Commands::Push { instance, dev } => {
+            commands::push::run(instance, dev, &metrics_sender).await
+        }
         Commands::Pull { instance } => commands::pull::run(instance).await,
         Commands::Start { instance } => commands::start::run(instance).await,
         Commands::Stop { instance } => commands::stop::run(instance).await,
@@ -251,6 +271,12 @@ async fn main() -> Result<()> {
             commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await
         }
         Commands::Backup { instance, output } => commands::backup::run(output, instance).await,
+        Commands::Branch {
+            instance,
+            output,
+            name,
+            port,
+        } => commands::branch::run(instance, output, name, port, &metrics_sender).await,
         Commands::Feedback { message } => commands::feedback::run(message).await,
     };
 

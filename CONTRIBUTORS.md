@@ -197,6 +197,7 @@ helix-cli/
 - `helix add` - Add dependencies to project
 - `helix auth` - Authentication management (login/logout/create-key)
 - `helix build` - Build queries without deploying
+- `helix branch` - Branch a local instance database
 - `helix check` - Validate schema and query syntax
 - `helix compile` - Compile queries to Rust code
 - `helix delete` - Remove instance and data
