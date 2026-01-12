@@ -1,6 +1,6 @@
 use chrono::{Local, NaiveDate};
 use dirs::home_dir;
-use eyre::{eyre, OptionExt, Result};
+use eyre::{OptionExt, Result, eyre};
 use flume::{Receiver, Sender, unbounded};
 use helix_metrics::events::{
     CompileEvent, DeployCloudEvent, DeployLocalEvent, EventData, EventType, RawEvent,
@@ -13,7 +13,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::PathBuf,
-    process::Command,
 };
 use tokio::task::JoinHandle;
 
@@ -445,6 +444,7 @@ fn hash_to_device_id(machine_id: &str) -> String {
 #[cfg(target_os = "macos")]
 fn get_machine_id() -> Option<String> {
     // macOS: Use IOPlatformUUID from IOKit
+    use std::process::Command;
     Command::new("ioreg")
         .args(["-rd1", "-c", "IOPlatformExpertDevice"])
         .output()
@@ -454,11 +454,7 @@ fn get_machine_id() -> Option<String> {
             stdout
                 .lines()
                 .find(|line| line.contains("IOPlatformUUID"))
-                .and_then(|line| {
-                    line.split('"')
-                        .nth(3)
-                        .map(|s| s.to_string())
-                })
+                .and_then(|line| line.split('"').nth(3).map(|s| s.to_string()))
         })
 }
 
@@ -474,6 +470,7 @@ fn get_machine_id() -> Option<String> {
 #[cfg(target_os = "windows")]
 fn get_machine_id() -> Option<String> {
     // Windows: Read MachineGuid from registry
+    use std::process::Command;
     Command::new("reg")
         .args([
             "query",
@@ -532,7 +529,11 @@ mod tests {
         let hash2 = hash_to_device_id(machine_id);
 
         assert_eq!(hash1, hash2, "Same input should produce same hash");
-        assert_eq!(hash1.len(), 32, "Hash should be 32 hex characters (16 bytes)");
+        assert_eq!(
+            hash1.len(),
+            32,
+            "Hash should be 32 hex characters (16 bytes)"
+        );
 
         // Verify it's valid hex
         assert!(
@@ -546,7 +547,10 @@ mod tests {
         let hash1 = hash_to_device_id("machine-id-1");
         let hash2 = hash_to_device_id("machine-id-2");
 
-        assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different inputs should produce different hashes"
+        );
     }
 
     #[test]
