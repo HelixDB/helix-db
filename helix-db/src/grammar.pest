@@ -10,14 +10,17 @@ source = { SOI ~ (schema_def | migration_def | query_def)* ~ EOI }
 schema_def = {( schema_version ~ "{" ~ (vector_def | node_def | edge_def)* ~ "}") | (vector_def | node_def | edge_def) }
 vector_def = { "V::" ~ identifier_upper ~ node_body? }
 node_def   = { "N::" ~ identifier_upper ~ node_body? }
-edge_def   = { "E::" ~ identifier_upper ~ edge_body }
+
+edge_modifier = { "UNIQUE" }
+edge_def = { "E::" ~ identifier_upper ~ edge_modifier? ~ edge_body }
 
 node_body  = { "{" ~ field_defs ~ "}" }
 edge_body  = { "{" ~ "From:" ~ identifier_upper ~ "," ~ ("To:" ~ identifier_upper ~ "," ~ properties ~ "}" | "To:" ~ identifier_upper ~ ","? ~ "}") }
 field_defs = { (field_def ~ ",")* ~ (field_def ~ ","?)? }
 field_def  = { index? ~ identifier ~ ":" ~ param_type ~ (default)? }
-index= { "INDEX" }
-default = { "DEFAULT" ~  (now | float | integer | boolean | string_literal | none) } 
+unique = { "UNIQUE" }
+index = { unique? ~ "INDEX" }
+default = { "DEFAULT" ~  (now | float | integer | boolean | string_literal | none) }
 // optional = { "OPTIONAL" }
 properties = { "Properties" ~ ":" ~ "{" ~ field_defs? ~ "}" }
 schema_version = { "schema::" ~ integer }
@@ -62,9 +65,9 @@ get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
 traversal           = { (start_node | start_edge | search_vector | start_vector) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
 anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
-step                = { "::" ~ (graph_step | order_by| aggregate | group_by | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE | rerank_rrf | rerank_mmr) }
+step                = { "::" ~ (graph_step | order_by| aggregate | group_by | where_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE | UpsertE | rerank_rrf | rerank_mmr) }
 last_step           = { "::" ~ (bool_operations | update | first) }
-// change this for loop to be able to take traversals etc in the future. 
+// change this for loop to be able to take traversals etc in the future.
 for_loop            = { "FOR" ~ for_argument ~ "IN" ~ identifier ~ "{" ~ query_body ~ "}" }
 for_argument        = { object_access | object_destructuring | identifier }
 object_access       = { identifier ~ "." ~ identifier }
@@ -73,11 +76,14 @@ object_destructuring = { "{" ~ identifier ~ ("," ~ identifier)* ~ "}" }
 // ---------------------------------------------------------------------
 // Evaluation rules for different types
 // ---------------------------------------------------------------------
-creation_stmt = { 
+creation_stmt = {
   AddN
   | AddV
   | BatchAddV
   | AddE
+  | UpsertN
+  | UpsertE
+  | UpsertV
 }
 
 evaluates_to_anything = {
@@ -85,6 +91,9 @@ evaluates_to_anything = {
   | AddV
   | BatchAddV
   | AddE
+  | UpsertN
+  | UpsertE
+  | UpsertV
   | exists
   | none
   | traversal
@@ -145,6 +154,9 @@ vector_data = { vec_literal | embed_method | identifier }
 AddN          = { "AddN" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? }
 AddE          = { "AddE" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? ~ to_from }
 AddV          = { "AddV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~ ("," ~ create_field)* ~ ")") }
+UpsertN       = { "UpsertN" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? }
+UpsertE       = { "UpsertE" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ create_field? ~ ")")? ~ to_from }
+UpsertV       = { "UpsertV" ~ ("<" ~ identifier_upper ~ ">") ~ ("(" ~ vector_data ~ ("," ~ create_field)* ~ ")") }
 
 // ---------------------------------------------------------------------
 // Source steps
@@ -317,4 +329,3 @@ now              = { "NOW" }
 // ---------------------------------------------------------------------
 WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
 COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
-

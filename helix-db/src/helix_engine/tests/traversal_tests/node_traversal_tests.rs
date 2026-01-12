@@ -103,11 +103,11 @@ fn test_out() {
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person2.id(), false)
+        .add_edge("knows", None, person1.id(), person2.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person2.id(), person3.id(), false)
+        .add_edge("knows", None, person2.id(), person3.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
@@ -145,7 +145,7 @@ fn test_in() {
     let person2 = person2.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person2.id(), false)
+        .add_edge("knows", None, person1.id(), person2.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     txn.commit().unwrap();
@@ -191,15 +191,15 @@ fn test_complex_traversal() {
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person2.id(), false)
+        .add_edge("knows", None, person1.id(), person2.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("likes", None, person2.id(), person3.id(), false)
+        .add_edge("likes", None, person2.id(), person3.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("follows", None, person3.id(), person1.id(), false)
+        .add_edge("follows", None, person3.id(), person1.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     txn.commit().unwrap();
@@ -280,7 +280,7 @@ fn test_n_from_id_with_traversal() {
         .collect_to_obj()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person2.id(), true)
+        .add_edge("knows", None, person1.id(), person2.id(), true, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
@@ -334,11 +334,11 @@ fn test_n_from_id_chain_operations() {
         .unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person2.id(), false)
+        .add_edge("knows", None, person1.id(), person2.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("likes", None, person2.id(), person3.id(), false)
+        .add_edge("likes", None, person2.id(), person3.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
@@ -462,6 +462,7 @@ fn test_double_add_and_double_fetch() {
             None,
             node1.first().unwrap().id(),
             node2.first().unwrap().id(),
+            false,
             false,
         )
         .collect_to_obj()

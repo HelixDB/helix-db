@@ -97,11 +97,11 @@ fn test_count_mixed_steps() {
     let person3 = person3.first().unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person2.id(), false)
+        .add_edge("knows", None, person1.id(), person2.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, person1.id(), person3.id(), false)
+        .add_edge("knows", None, person1.id(), person3.id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     txn.commit().unwrap();
@@ -152,7 +152,7 @@ fn test_count_filter_ref() {
                 .collect_to_obj()
                 .unwrap();
             G::new_mut(&storage, &arena, &mut txn)
-                .add_edge("Country_to_City", None, node.id(), city.id(), false)
+                .add_edge("Country_to_City", None, node.id(), city.id(), false, false)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             // sleep for one microsecond

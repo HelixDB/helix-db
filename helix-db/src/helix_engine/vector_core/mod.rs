@@ -332,7 +332,6 @@ pub struct HnswIndex {
     pub num_vectors: AtomicUsize,
 }
 
-// TODO: Properties filters
 // TODO: Support different distances for each database
 pub struct VectorCore {
     pub hsnw: CoreDatabase<Cosine>,

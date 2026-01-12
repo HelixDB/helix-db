@@ -310,6 +310,10 @@ impl HelixParser {
                 loc: step_pair.loc(),
                 step: StepType::AddEdge(self.parse_add_edge(step_pair, true)?),
             }),
+            Rule::UpsertE => Ok(Step {
+                loc: step_pair.loc(),
+                step: StepType::UpsertEdge(self.parse_upsert_edge(step_pair, true)?),
+            }),
             Rule::order_by => Ok(Step {
                 loc: step_pair.loc(),
                 step: StepType::OrderBy(self.parse_order_by(step_pair)?),

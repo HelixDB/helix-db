@@ -87,7 +87,7 @@ fn test_vector_edges_from_and_to_node() {
         .unwrap()
         .id();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_vector", None, node_id, vector_id, false)
+        .add_edge("has_vector", None, node_id, vector_id, false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();
@@ -128,7 +128,7 @@ fn test_brute_force_vector_search_orders_by_distance() {
             .unwrap()
             .id();
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("embedding", None, node.id(), vec_id, false)
+            .add_edge("embedding", None, node.id(), vec_id, false, false)
             .collect_to_obj()
             .unwrap();
         vector_ids.push(vec_id);
@@ -165,7 +165,7 @@ fn test_drop_vector_removes_edges() {
         .unwrap()
         .id();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_vector", None, node_id, vector_id, false)
+        .add_edge("has_vector", None, node_id, vector_id, false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();
@@ -530,11 +530,11 @@ fn test_v_from_type_with_edges_and_nodes() {
         .unwrap();
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_embedding", None, node.id(), v1.id(), false)
+        .add_edge("has_embedding", None, node.id(), v1.id(), false, false)
         .collect_to_obj()
         .unwrap();
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("has_embedding", None, node.id(), v2.id(), false)
+        .add_edge("has_embedding", None, node.id(), v2.id(), false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();
@@ -562,6 +562,221 @@ fn test_v_from_type_with_edges_and_nodes() {
         .unwrap();
 
     assert_eq!(from_node.len(), 2);
+}
+
+#[test]
+fn test_v_from_type_after_migration() {
+    use crate::helix_engine::storage_core::storage_migration::migrate;
+    use crate::protocol::value::Value;
+    use std::collections::HashMap;
+
+    // Helper to create old-format vector properties (HashMap-based)
+    fn create_old_properties(
+        label: &str,
+        is_deleted: bool,
+        extra_props: HashMap<String, Value>,
+    ) -> Vec<u8> {
+        let mut props = HashMap::new();
+        props.insert("label".to_string(), Value::String(label.to_string()));
+        props.insert("is_deleted".to_string(), Value::Boolean(is_deleted));
+
+        for (k, v) in extra_props {
+            props.insert(k, v);
+        }
+
+        bincode::serialize(&props).unwrap()
+    }
+
+    // Helper to clear metadata (simulates PreMetadata state)
+    fn clear_metadata(
+        storage: &mut crate::helix_engine::storage_core::HelixGraphStorage,
+    ) -> Result<(), crate::helix_engine::types::GraphError> {
+        let mut txn = storage.graph_env.write_txn()?;
+        storage.metadata_db.clear(&mut txn)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    let (_temp_dir, storage) = setup_test_db();
+    let mut storage_mut = match Arc::try_unwrap(storage) {
+        Ok(s) => s,
+        Err(_) => panic!("Failed to unwrap Arc - there are multiple references"),
+    };
+
+    // Clear metadata to simulate PreMetadata state (before migration)
+    clear_metadata(&mut storage_mut).unwrap();
+
+    // Create old-format vectors with various properties
+    {
+        let mut txn = storage_mut.graph_env.write_txn().unwrap();
+
+        // Vector 1: Simple vector with test label
+        let mut props1 = HashMap::new();
+        props1.insert("name".to_string(), Value::String("vector1".to_string()));
+        props1.insert("count".to_string(), Value::I64(100));
+        let old_bytes1 = create_old_properties("test_migration", false, props1);
+        storage_mut
+            .vectors
+            .vector_properties_db
+            .put(&mut txn, &1u128, &old_bytes1)
+            .unwrap();
+
+        // Add actual vector data with proper key format
+        let vector_data1: Vec<f64> = vec![1.0, 2.0, 3.0];
+        let bytes1: Vec<u8> = vector_data1.iter().flat_map(|f| f.to_be_bytes()).collect();
+        let key1 = [
+            b"v:".as_slice(),
+            &1u128.to_be_bytes(),
+            &0usize.to_be_bytes(),
+        ]
+        .concat();
+        storage_mut
+            .vectors
+            .vectors_db
+            .put(&mut txn, &key1, &bytes1)
+            .unwrap();
+
+        // Vector 2: Another vector with same label
+        let mut props2 = HashMap::new();
+        props2.insert("name".to_string(), Value::String("vector2".to_string()));
+        props2.insert("score".to_string(), Value::F64(0.95));
+        let old_bytes2 = create_old_properties("test_migration", false, props2);
+        storage_mut
+            .vectors
+            .vector_properties_db
+            .put(&mut txn, &2u128, &old_bytes2)
+            .unwrap();
+
+        // Add actual vector data with proper key format
+        let vector_data2: Vec<f64> = vec![4.0, 5.0, 6.0];
+        let bytes2: Vec<u8> = vector_data2.iter().flat_map(|f| f.to_be_bytes()).collect();
+        let key2 = [
+            b"v:".as_slice(),
+            &2u128.to_be_bytes(),
+            &0usize.to_be_bytes(),
+        ]
+        .concat();
+        storage_mut
+            .vectors
+            .vectors_db
+            .put(&mut txn, &key2, &bytes2)
+            .unwrap();
+
+        // Vector 3: Different label
+        let mut props3 = HashMap::new();
+        props3.insert("name".to_string(), Value::String("vector3".to_string()));
+        let old_bytes3 = create_old_properties("other_label", false, props3);
+        storage_mut
+            .vectors
+            .vector_properties_db
+            .put(&mut txn, &3u128, &old_bytes3)
+            .unwrap();
+
+        // Add actual vector data with proper key format
+        let vector_data3: Vec<f64> = vec![7.0, 8.0, 9.0];
+        let bytes3: Vec<u8> = vector_data3.iter().flat_map(|f| f.to_be_bytes()).collect();
+        let key3 = [
+            b"v:".as_slice(),
+            &3u128.to_be_bytes(),
+            &0usize.to_be_bytes(),
+        ]
+        .concat();
+        storage_mut
+            .vectors
+            .vectors_db
+            .put(&mut txn, &key3, &bytes3)
+            .unwrap();
+
+        txn.commit().unwrap();
+    }
+
+    // Run migration
+    let result = migrate(&mut storage_mut);
+    assert!(result.is_ok(), "Migration should succeed");
+
+    // Now query using v_from_type on the migrated data
+    let storage = Arc::new(storage_mut);
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+
+    // Query for "test_migration" label - should find 2 vectors
+    let results_with_data = G::new(&storage, &txn, &arena)
+        .v_from_type("test_migration", true)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        results_with_data.len(),
+        2,
+        "Should find 2 vectors with test_migration label"
+    );
+
+    // Verify we got the right vectors
+    let ids: Vec<u128> = results_with_data.iter().map(|v| v.id()).collect();
+    assert!(ids.contains(&1u128), "Should contain vector 1");
+    assert!(ids.contains(&2u128), "Should contain vector 2");
+
+    // Verify vector data is accessible
+    if let crate::helix_engine::traversal_core::traversal_value::TraversalValue::Vector(v) =
+        &results_with_data[0]
+    {
+        assert_eq!(v.data.len(), 3, "Vector should have 3 dimensions");
+    } else {
+        panic!("Expected TraversalValue::Vector");
+    }
+
+    // Query without vector data to check properties
+    let arena2 = Bump::new();
+    let results_without_data = G::new(&storage, &txn, &arena2)
+        .v_from_type("test_migration", false)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(results_without_data.len(), 2, "Should still find 2 vectors");
+
+    // Verify properties are preserved after migration
+    for result in &results_without_data {
+        if let crate::helix_engine::traversal_core::traversal_value::TraversalValue::VectorNodeWithoutVectorData(v) = result {
+            assert_eq!(v.label(), "test_migration");
+
+            // Check that properties are accessible
+            let props = v.properties.as_ref().unwrap();
+            let name = props.get("name");
+            assert!(name.is_some(), "name property should exist");
+
+            // Verify it's a string
+            match name.unwrap() {
+                Value::String(s) => assert!(s == "vector1" || s == "vector2"),
+                _ => panic!("Expected name to be a string"),
+            }
+        }
+    }
+
+    // Query for "other_label" - should find 1 vector
+    let arena3 = Bump::new();
+    let other_results = G::new(&storage, &txn, &arena3)
+        .v_from_type("other_label", true)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        other_results.len(),
+        1,
+        "Should find 1 vector with other_label"
+    );
+    assert_eq!(other_results[0].id(), 3u128);
+
+    // Query for non-existent label after migration
+    let arena4 = Bump::new();
+    let empty_results = G::new(&storage, &txn, &arena4)
+        .v_from_type("nonexistent", true)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(
+        empty_results.is_empty(),
+        "Should find no vectors with nonexistent label"
+    );
 }
 
 // ============================================================================

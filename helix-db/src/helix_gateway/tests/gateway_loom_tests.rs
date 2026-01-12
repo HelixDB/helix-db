@@ -11,7 +11,6 @@
 ///
 /// NOTE: These tests model the synchronization patterns using loom primitives
 /// since the actual flume channels and tokio runtime cannot run under loom.
-
 use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use loom::sync::{Arc, Mutex};
 use loom::thread;

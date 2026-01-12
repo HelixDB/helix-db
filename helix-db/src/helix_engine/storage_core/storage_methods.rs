@@ -1,10 +1,10 @@
-use crate::helix_engine::types::GraphError;
+use crate::helix_engine::types::{GraphError, SecondaryIndex};
 use crate::utils::items::{Edge, Node};
 use heed3::{RoTxn, RwTxn};
 
 pub trait DBMethods {
     /// Creates a new database with a given name for a secondary index
-    fn create_secondary_index(&mut self, name: &str) -> Result<(), GraphError>;
+    fn create_secondary_index(&mut self, name: SecondaryIndex) -> Result<(), GraphError>;
 
     /// Opens a database with a given name for a secondary index
     fn drop_secondary_index(&mut self, name: &str) -> Result<(), GraphError>;

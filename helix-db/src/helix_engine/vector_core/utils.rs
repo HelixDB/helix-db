@@ -112,11 +112,11 @@ impl<'db, 'arena, 'txn, 'q> VectorFilter<'db, 'arena, 'txn, 'q>
                 let properties = match db.get(txn, &item.id)? {
                     Some(bytes) => {
                         // println!("decoding");
-                        let res = Some(VectorWithoutData::from_bincode_bytes(
-                            arena, bytes, item.id,
-                        )?);
+
                         // println!("decoded: {res:?}");
-                        res
+                        Some(VectorWithoutData::from_bincode_bytes(
+                            arena, bytes, item.id,
+                        )?)
                     }
                     None => None, // TODO: maybe should be an error?
                 };

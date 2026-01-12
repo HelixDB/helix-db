@@ -5,6 +5,8 @@ pub mod version_info;
 
 #[cfg(test)]
 mod storage_concurrent_tests;
+#[cfg(test)]
+mod storage_migration_tests;
 
 use crate::{
     helix_engine::{
@@ -14,7 +16,7 @@ use crate::{
             version_info::VersionInfo,
         },
         traversal_core::config::Config,
-        types::GraphError,
+        types::{GraphError, SecondaryIndex},
         vector_core::{HNSWConfig, VectorCore},
     },
     utils::{
@@ -52,7 +54,7 @@ pub struct HelixGraphStorage {
     pub edges_db: Database<U128<BE>, Bytes>,
     pub out_edges_db: Database<Bytes, Bytes>,
     pub in_edges_db: Database<Bytes, Bytes>,
-    pub secondary_indices: HashMap<String, Database<Bytes, U128<BE>>>,
+    pub secondary_indices: HashMap<String, (Database<Bytes, U128<BE>>, SecondaryIndex)>,
     pub vectors: VectorCore,
     pub bm25: Option<HBM25Config>,
     pub metadata_db: Database<Bytes, Bytes>,
@@ -138,15 +140,34 @@ impl HelixGraphStorage {
         let mut secondary_indices = HashMap::new();
         if let Some(indexes) = config.get_graph_config().secondary_indices {
             for index in indexes {
-                secondary_indices.insert(
-                    index.clone(),
-                    graph_env
-                        .database_options()
-                        .types::<Bytes, U128<BE>>()
-                        .flags(DatabaseFlags::DUP_SORT) // DUP_SORT used to store all duplicated node keys under a single key. Saves on space and requires a single read to get all values.
-                        .name(&index)
-                        .create(&mut wtxn)?,
-                );
+                match index {
+                    super::types::SecondaryIndex::Unique(name) => secondary_indices.insert(
+                        name.clone(),
+                        (
+                            graph_env
+                                .database_options()
+                                .types::<Bytes, U128<BE>>()
+                                .name(&name)
+                                .create(&mut wtxn)?,
+                            SecondaryIndex::Unique(name),
+                        ),
+                    ),
+                    super::types::SecondaryIndex::Index(name) => secondary_indices.insert(
+                        name.clone(),
+                        (
+                            graph_env
+                                .database_options()
+                                .types::<Bytes, U128<BE>>()
+                                // DUP_SORT used to store all duplicated node keys under a single key.
+                                //  Saves on space and requires a single read to get all values.
+                                .flags(DatabaseFlags::DUP_SORT)
+                                .name(&name)
+                                .create(&mut wtxn)?,
+                            SecondaryIndex::Index(name),
+                        ),
+                    ),
+                    super::types::SecondaryIndex::None => continue,
+                };
             }
         }
         let vector_config = config.get_vector_config();
@@ -285,18 +306,30 @@ impl StorageConfig {
 
 impl DBMethods for HelixGraphStorage {
     /// Creates a secondary index lmdb db (table) for a given index name
-    fn create_secondary_index(&mut self, name: &str) -> Result<(), GraphError> {
+    fn create_secondary_index(&mut self, index: SecondaryIndex) -> Result<(), GraphError> {
         let mut wtxn = self.graph_env.write_txn()?;
-        let db = self.graph_env.create_database(&mut wtxn, Some(name))?;
-        wtxn.commit()?;
-        self.secondary_indices.insert(name.to_string(), db);
+        match index {
+            SecondaryIndex::Unique(name) => {
+                let db = self.graph_env.create_database(&mut wtxn, Some(&name))?;
+                wtxn.commit()?;
+                self.secondary_indices
+                    .insert(name.clone(), (db, SecondaryIndex::Unique(name)));
+            }
+            SecondaryIndex::Index(name) => {
+                let db = self.graph_env.create_database(&mut wtxn, Some(&name))?;
+                wtxn.commit()?;
+                self.secondary_indices
+                    .insert(name.clone(), (db, SecondaryIndex::Index(name)));
+            }
+            SecondaryIndex::None => unreachable!(),
+        }
         Ok(())
     }
 
     /// Drops a secondary index lmdb db (table) for a given index name
     fn drop_secondary_index(&mut self, name: &str) -> Result<(), GraphError> {
         let mut wtxn = self.graph_env.write_txn()?;
-        let db = self
+        let (db, _) = self
             .secondary_indices
             .get(name)
             .ok_or(GraphError::New(format!("Secondary Index {name} not found")))?;
@@ -412,7 +445,7 @@ impl StorageMethods for HelixGraphStorage {
 
         // delete secondary indices
         let node = self.get_node(txn, id, &arena)?;
-        for (index_name, db) in &self.secondary_indices {
+        for (index_name, (db, _)) in &self.secondary_indices {
             // Use get_property like we do when adding, to handle id, label, and regular properties consistently
             match node.get_property(index_name) {
                 Some(value) => match bincode::serialize(value) {

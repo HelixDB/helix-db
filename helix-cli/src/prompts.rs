@@ -19,21 +19,16 @@ pub enum DeploymentType {
 }
 
 /// AWS/Helix Cloud region options
+/// More regions coming soon!
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     UsEast1,
-    UsWest2,
-    EuWest1,
-    ApSoutheast1,
 }
 
 impl Region {
     pub fn as_str(&self) -> &'static str {
         match self {
             Region::UsEast1 => "us-east-1",
-            Region::UsWest2 => "us-west-2",
-            Region::EuWest1 => "eu-west-1",
-            Region::ApSoutheast1 => "ap-southeast-1",
         }
     }
 }
@@ -98,19 +93,9 @@ pub fn select_deployment_type() -> Result<DeploymentType> {
 
 /// Prompt user to select a cloud region
 pub fn select_region() -> Result<String> {
+    // More regions coming soon!
     let selected: Region = cliclack::select("Select a region")
-        .item(
-            Region::UsEast1,
-            "us-east-1",
-            "N. Virginia - Lowest latency for US East",
-        )
-        .item(Region::UsWest2, "us-west-2", "Oregon - US West Coast")
-        .item(Region::EuWest1, "eu-west-1", "Ireland - Europe")
-        .item(
-            Region::ApSoutheast1,
-            "ap-southeast-1",
-            "Singapore - Asia Pacific",
-        )
+        .item(Region::UsEast1, "us-east-1", "More regions coming soon!")
         .interact()?;
 
     Ok(selected.as_str().to_string())

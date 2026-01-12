@@ -80,7 +80,7 @@ fn test_drop_edge() {
     );
     let edge_id = edge_id(
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, node1_id, node2_id, false)
+            .add_edge("knows", None, node1_id, node2_id, false, false)
             .collect_to_obj()
             .unwrap(),
     );
@@ -139,7 +139,7 @@ fn test_drop_node() {
             .unwrap(),
     );
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, node1_id, node2_id, false)
+        .add_edge("knows", None, node1_id, node2_id, false, false)
         .collect_to_obj()
         .unwrap();
     txn.commit().unwrap();
@@ -194,7 +194,7 @@ fn test_drop_traversal() {
                 .unwrap(),
         );
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, origin_id, neighbor_id, false)
+            .add_edge("knows", None, origin_id, neighbor_id, false, false)
             .collect_to_obj()
             .unwrap();
         neighbor_ids.push(neighbor_id);
@@ -259,15 +259,15 @@ fn test_node_deletion_in_existing_graph() {
     for &other in &others {
         let random = others[rand::rng().random_range(0..others.len())];
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, random, other, false)
+            .add_edge("knows", None, random, other, false, false)
             .collect_to_obj()
             .unwrap();
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, source_id, other, false)
+            .add_edge("knows", None, source_id, other, false, false)
             .collect_to_obj()
             .unwrap();
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, other, source_id, false)
+            .add_edge("knows", None, other, source_id, false, false)
             .collect_to_obj()
             .unwrap();
     }
@@ -337,13 +337,13 @@ fn test_edge_deletion_in_existing_graph() {
 
     let edge1_id = edge_id(
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, node1_id, node2_id, false)
+            .add_edge("knows", None, node1_id, node2_id, false, false)
             .collect_to_obj()
             .unwrap(),
     );
     let edge2_id = edge_id(
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, node2_id, node1_id, false)
+            .add_edge("knows", None, node2_id, node1_id, false, false)
             .collect_to_obj()
             .unwrap(),
     );
@@ -409,15 +409,15 @@ fn test_vector_deletion_in_existing_graph() {
     for &other in &vector_ids {
         let random = vector_ids[rand::rng().random_range(0..vector_ids.len())];
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, other, random, false)
+            .add_edge("knows", None, other, random, false, false)
             .collect_to_obj()
             .unwrap();
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, node_id, target_vector_id, false)
+            .add_edge("knows", None, node_id, target_vector_id, false, false)
             .collect_to_obj()
             .unwrap();
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, target_vector_id, node_id, false)
+            .add_edge("knows", None, target_vector_id, node_id, false, false)
             .collect_to_obj()
             .unwrap();
     }

@@ -1,0 +1,9 @@
+[project]
+name = "index_with_default"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "debug"
+
+[cloud]

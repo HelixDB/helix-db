@@ -263,6 +263,7 @@ mod tests {
                 node1.id(),
                 node2.id(),
                 false,
+                false,
             )
             .collect_to_obj()?;
 
@@ -315,6 +316,7 @@ mod tests {
                 None,
                 node1.id(),
                 node2.id(),
+                false,
                 false,
             )
             .collect_to_obj()?;

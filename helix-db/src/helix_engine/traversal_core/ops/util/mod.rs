@@ -11,3 +11,4 @@ pub mod order;
 pub mod paths;
 pub mod range;
 pub mod update;
+pub mod upsert;

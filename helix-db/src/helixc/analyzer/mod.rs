@@ -6,20 +6,23 @@
 //! The analyzer methods are broken up into separate files within /methods, grouped by general functionality.
 //! File names should be self-explanatory as to what is included in the file.
 
-use crate::helixc::{
-    analyzer::{
-        diagnostic::Diagnostic,
-        methods::{
-            migration_validation::validate_migration,
-            query_validation::validate_query,
-            schema_methods::{SchemaVersionMap, build_field_lookups, check_schema},
+use crate::{
+    helix_engine::types::SecondaryIndex,
+    helixc::{
+        analyzer::{
+            diagnostic::Diagnostic,
+            methods::{
+                migration_validation::validate_migration,
+                query_validation::validate_query,
+                schema_methods::{SchemaVersionMap, build_field_lookups, check_schema},
+            },
+            types::Type,
         },
-        types::Type,
-    },
-    generator::Source as GeneratedSource,
-    parser::{
-        errors::ParserError,
-        types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source},
+        generator::Source as GeneratedSource,
+        parser::{
+            errors::ParserError,
+            types::{EdgeSchema, ExpressionType, Field, Query, ReturnType, Source},
+        },
     },
 };
 use itertools::Itertools;
@@ -68,18 +71,13 @@ impl<'a> Ctx<'a> {
         let (node_fields, edge_fields, vector_fields) = all_schemas.get_latest();
 
         // Build secondary indices from indexed fields
-        let secondary_indices: Vec<String> = src
+        let secondary_indices: Vec<SecondaryIndex> = src
             .get_latest_schema()?
             .node_schemas
             .iter()
-            .flat_map(|schema| {
-                schema
-                    .fields
-                    .iter()
-                    .filter(|f| f.is_indexed())
-                    .map(|f| f.name.clone())
-            })
+            .flat_map(|schema| schema.fields.iter().filter(|f| f.is_indexed()))
             .dedup()
+            .map(SecondaryIndex::from_field)
             .collect();
 
         // Create the context first (without output populated)

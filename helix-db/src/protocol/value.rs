@@ -2232,7 +2232,10 @@ mod tests {
         assert_eq!(&*Value::U8(255).inner_str(), "255");
         assert_eq!(&*Value::U16(65535).inner_str(), "65535");
         assert_eq!(&*Value::U32(4294967295).inner_str(), "4294967295");
-        assert_eq!(&*Value::U64(18446744073709551615).inner_str(), "18446744073709551615");
+        assert_eq!(
+            &*Value::U64(18446744073709551615).inner_str(),
+            "18446744073709551615"
+        );
         assert_eq!(&*Value::U128(u128::MAX).inner_str(), u128::MAX.to_string());
     }
 
@@ -2368,7 +2371,10 @@ mod tests {
         assert_eq!(Value::U16(65535).inner_stringify(), "65535");
         assert_eq!(Value::U32(u32::MAX).inner_stringify(), u32::MAX.to_string());
         assert_eq!(Value::U64(u64::MAX).inner_stringify(), u64::MAX.to_string());
-        assert_eq!(Value::U128(u128::MAX).inner_stringify(), u128::MAX.to_string());
+        assert_eq!(
+            Value::U128(u128::MAX).inner_stringify(),
+            u128::MAX.to_string()
+        );
     }
 
     // ============================================================================

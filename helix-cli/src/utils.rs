@@ -580,12 +580,19 @@ mod tests {
         let env_path = dir.path().join(".env");
 
         // Create existing .env file with the key already present
-        fs::write(&env_path, "OTHER_VAR=foo\nHELIX_API_KEY=old-key\nANOTHER_VAR=bar\n").unwrap();
+        fs::write(
+            &env_path,
+            "OTHER_VAR=foo\nHELIX_API_KEY=old-key\nANOTHER_VAR=bar\n",
+        )
+        .unwrap();
 
         add_env_var_to_file(&env_path, "HELIX_API_KEY", "new-key-456").unwrap();
 
         let content = fs::read_to_string(&env_path).unwrap();
-        assert_eq!(content, "OTHER_VAR=foo\nHELIX_API_KEY=new-key-456\nANOTHER_VAR=bar\n");
+        assert_eq!(
+            content,
+            "OTHER_VAR=foo\nHELIX_API_KEY=new-key-456\nANOTHER_VAR=bar\n"
+        );
     }
 
     #[test]

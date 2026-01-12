@@ -229,7 +229,9 @@ async fn main() -> Result<()> {
         Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
             .await
             .map(|_| ()),
-        Commands::Push { instance, dev } => commands::push::run(instance, dev, &metrics_sender).await,
+        Commands::Push { instance, dev } => {
+            commands::push::run(instance, dev, &metrics_sender).await
+        }
         Commands::Pull { instance } => commands::pull::run(instance).await,
         Commands::Start { instance } => commands::start::run(instance).await,
         Commands::Stop { instance } => commands::stop::run(instance).await,

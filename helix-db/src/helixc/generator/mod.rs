@@ -6,7 +6,7 @@
 //! File names should be self-explanatory as to what is included in the file.
 
 use crate::{
-    helix_engine::traversal_core::config::Config,
+    helix_engine::{traversal_core::config::Config, types::SecondaryIndex},
     helixc::{
         analyzer::IntrospectionData,
         generator::{
@@ -50,7 +50,7 @@ pub struct Source {
     pub src: String,
     pub migrations: Vec<GeneratedMigration>,
     pub introspection_data: Option<IntrospectionData>,
-    pub secondary_indices: Vec<String>,
+    pub secondary_indices: Vec<SecondaryIndex>,
 }
 impl Default for Source {
     fn default() -> Self {

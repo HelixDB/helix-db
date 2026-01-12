@@ -21,7 +21,11 @@ pub async fn run(instance_name: Option<String>) -> Result<()> {
             let instances = project.config.list_instances();
             return Err(eyre::eyre!(
                 "No instance specified. Available instances: {}",
-                instances.into_iter().cloned().collect::<Vec<_>>().join(", ")
+                instances
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     };

@@ -21,6 +21,7 @@ use crate::{
             queries::Query as GeneratedQuery,
             source_steps::{
                 AddE, AddN, AddV, SearchBM25, SearchVector as GeneratedSearchVector, SourceStep,
+                UpsertE, UpsertN, UpsertV,
             },
             statements::Statement as GeneratedStatement,
             traversal_steps::{
@@ -129,7 +130,7 @@ pub(crate) fn infer_expr_type<'a>(
             });
             match result {
                 Ok(stmts) => (
-                    Type::Array(Box::new(inner_array_ty.unwrap())),
+                    Type::Array(Box::new(inner_array_ty.unwrap_or(Type::Unknown))),
                     Some(GeneratedStatement::Array(stmts)),
                 ),
                 Err(()) => (Type::Unknown, Some(GeneratedStatement::Empty)),
@@ -364,8 +365,7 @@ pub(crate) fn infer_expr_type<'a>(
                                 .properties
                                 .iter()
                                 .filter_map(|p| {
-                                    matches!(p.is_index, FieldPrefix::Index)
-                                        .then_some(p.name.clone())
+                                    p.field_prefix.is_indexed().then_some(p.name.clone())
                                 })
                                 .collect::<Vec<_>>();
                             match secondary_indices.is_empty() {
@@ -753,6 +753,7 @@ pub(crate) fn infer_expr_type<'a>(
                     properties,
                     from_is_plural,
                     to_is_plural,
+                    is_unique: edge_in_schema.is_unique,
                 };
                 // If either from or to is plural, use Standalone (no G::new_mut wrapper),
                 // Empty separator (no period before it), and No collection (already done in iteration)
@@ -1111,6 +1112,927 @@ pub(crate) fn infer_expr_type<'a>(
             );
             (Type::Vector(None), None)
         }
+        UpsertNode(upsert) => {
+            if let Some(ref ty) = upsert.node_type {
+                if !ctx.node_set.contains(ty.as_str()) {
+                    generate_error!(ctx, original_query, upsert.loc.clone(), E101, ty.as_str());
+                }
+                let label = GenRef::Literal(ty.clone());
+
+                let node_in_schema = match ctx.output.nodes.iter().find(|n| n.name == ty.as_str()) {
+                    Some(node) => node.clone(),
+                    None => {
+                        generate_error!(ctx, original_query, upsert.loc.clone(), E101, ty.as_str());
+                        return (Type::Node(None), None);
+                    }
+                };
+
+                let default_properties = node_in_schema
+                    .properties
+                    .iter()
+                    .filter_map(|p| p.default_value.clone().map(|v| (p.name.clone(), v)))
+                    .collect::<Vec<(String, GeneratedValue)>>();
+
+                // Validate fields of upsert node by traversing the fields
+                // checking they exist in the schema, then checking their types
+                let (properties, secondary_indices) = match &upsert.fields {
+                    Some(fields_to_upsert) => {
+                        let field_set_from_schema = ctx.node_fields.get(ty.as_str()).cloned();
+                        if let Some(field_set) = field_set_from_schema {
+                            for (field_name, field_value) in fields_to_upsert {
+                                if !field_set.contains_key(field_name.as_str()) {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        upsert.loc.clone(),
+                                        E202,
+                                        field_name.as_str(),
+                                        "node",
+                                        ty.as_str()
+                                    );
+                                }
+                                match field_value {
+                                    ValueType::Identifier { value, loc } => {
+                                        if is_valid_identifier(
+                                            ctx,
+                                            original_query,
+                                            loc.clone(),
+                                            value.as_str(),
+                                        ) && !scope.contains_key(value.as_str())
+                                        {
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                loc.clone(),
+                                                E301,
+                                                value.as_str()
+                                            );
+                                        } else {
+                                            // Variable is in scope, now validate field type
+                                            match scope.get(value.as_str()) {
+                                                Some(var_info) => {
+                                                    match field_set.get(field_name.as_str()) {
+                                                        Some(field) => {
+                                                            let variable_type = &var_info.ty;
+                                                            if variable_type
+                                                                != &Type::from(
+                                                                    field.field_type.clone(),
+                                                                )
+                                                            {
+                                                                generate_error!(
+                                                                    ctx,
+                                                                    original_query,
+                                                                    loc.clone(),
+                                                                    E205,
+                                                                    value.as_str(),
+                                                                    &variable_type.to_string(),
+                                                                    &field.field_type.to_string(),
+                                                                    "node",
+                                                                    ty.as_str()
+                                                                );
+                                                            }
+                                                        }
+                                                        None => {
+                                                            // Field doesn't exist - error already generated above
+                                                            // Skip further validation to prevent panic
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    // Variable not in scope - error already generated above
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ValueType::Literal { value, loc } => {
+                                        match ctx.node_fields.get(ty.as_str()) {
+                                            Some(fields) => match fields.get(field_name.as_str()) {
+                                                Some(field) => {
+                                                    let field_type = field.field_type.clone();
+                                                    if field_type != *value {
+                                                        generate_error!(
+                                                            ctx,
+                                                            original_query,
+                                                            loc.clone(),
+                                                            E205,
+                                                            &value.inner_stringify(),
+                                                            value.to_variant_string(),
+                                                            &field_type.to_string(),
+                                                            "node",
+                                                            ty.as_str()
+                                                        );
+                                                    }
+                                                }
+                                                None => {
+                                                    // Field doesn't exist - error already generated above
+                                                }
+                                            },
+                                            None => {
+                                                // Type doesn't exist - error already generated above
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        let mut properties = fields_to_upsert
+                            .iter()
+                            .map(|(field_name, value)| {
+                                (
+                                    field_name.clone(),
+                                    match value {
+                                        ValueType::Literal { value, loc } => {
+                                            match ctx.node_fields.get(ty.as_str()) {
+                                                Some(fields) => match fields
+                                                    .get(field_name.as_str())
+                                                {
+                                                    Some(field) => {
+                                                        match field.field_type == FieldType::Date {
+                                                            true => match Date::new(value) {
+                                                                Ok(date) => {
+                                                                    GeneratedValue::Literal(
+                                                                        GenRef::Literal(
+                                                                            date.to_rfc3339(),
+                                                                        ),
+                                                                    )
+                                                                }
+                                                                Err(_) => {
+                                                                    generate_error!(
+                                                                        ctx,
+                                                                        original_query,
+                                                                        loc.clone(),
+                                                                        E501,
+                                                                        value.as_str()
+                                                                    );
+                                                                    GeneratedValue::Unknown
+                                                                }
+                                                            },
+                                                            false => GeneratedValue::Literal(
+                                                                GenRef::from(value.clone()),
+                                                            ),
+                                                        }
+                                                    }
+                                                    None => {
+                                                        // Field doesn't exist - error already generated
+                                                        GeneratedValue::Unknown
+                                                    }
+                                                },
+                                                None => {
+                                                    // Type doesn't exist - error already generated
+                                                    GeneratedValue::Unknown
+                                                }
+                                            }
+                                        }
+                                        ValueType::Identifier { value, .. } => {
+                                            gen_identifier_or_param(
+                                                original_query,
+                                                value,
+                                                true,
+                                                false,
+                                            )
+                                        }
+                                        v => {
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                upsert.loc.clone(),
+                                                E206,
+                                                &v.to_string()
+                                            );
+                                            GeneratedValue::Unknown
+                                        }
+                                    },
+                                )
+                            })
+                            .collect::<HashMap<String, GeneratedValue>>();
+
+                        for (field_name, default_value) in default_properties {
+                            if !properties.contains_key(field_name.as_str()) {
+                                properties.insert(field_name, default_value);
+                            }
+                        }
+
+                        let secondary_indices = {
+                            let secondary_indices = node_in_schema
+                                .properties
+                                .iter()
+                                .filter_map(|p| {
+                                    matches!(p.field_prefix, FieldPrefix::Index)
+                                        .then_some(p.name.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            match secondary_indices.is_empty() {
+                                true => None,
+                                false => Some(secondary_indices),
+                            }
+                        };
+
+                        (properties, secondary_indices)
+                    }
+                    None => (
+                        default_properties.into_iter().fold(
+                            HashMap::new(),
+                            |mut acc, (field_name, default_value)| {
+                                acc.insert(field_name, default_value);
+                                acc
+                            },
+                        ),
+                        None,
+                    ),
+                };
+
+                let upsert_n = UpsertN {
+                    label,
+                    properties: Some(properties.into_iter().collect()),
+                    secondary_indices,
+                };
+
+                let stmt = GeneratedStatement::Traversal(GeneratedTraversal {
+                    source_step: Separator::Period(SourceStep::UpsertN(upsert_n)),
+                    steps: vec![],
+                    traversal_type: TraversalType::Mut,
+                    should_collect: ShouldCollect::ToObj,
+                    ..Default::default()
+                });
+                gen_query.is_mut = true;
+                return (Type::Node(Some(ty.to_string())), Some(stmt));
+            }
+            generate_error!(
+                ctx,
+                original_query,
+                upsert.loc.clone(),
+                E304,
+                ["node"],
+                ["node"]
+            );
+            (Type::Node(None), None)
+        }
+        UpsertEdge(upsert) => {
+            if let Some(ref ty) = upsert.edge_type {
+                if !ctx.edge_map.contains_key(ty.as_str()) {
+                    generate_error!(ctx, original_query, upsert.loc.clone(), E102, ty.as_str());
+                }
+                let label = GenRef::Literal(ty.clone());
+                let edge_in_schema = match ctx.output.edges.iter().find(|e| e.name == ty.as_str()) {
+                    Some(edge) => edge.clone(),
+                    None => {
+                        generate_error!(ctx, original_query, upsert.loc.clone(), E102, ty.as_str());
+                        return (Type::Edge(None), None);
+                    }
+                };
+
+                let default_properties = edge_in_schema
+                    .properties
+                    .iter()
+                    .filter_map(|p| p.default_value.clone().map(|v| (p.name.clone(), v)))
+                    .collect::<Vec<(String, GeneratedValue)>>();
+
+                let properties = match &upsert.fields {
+                    Some(fields) => {
+                        let field_set = ctx.edge_fields.get(ty.as_str()).cloned();
+                        if let Some(field_set) = field_set {
+                            for (field_name, value) in fields {
+                                if !field_set.contains_key(field_name.as_str()) {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        upsert.loc.clone(),
+                                        E202,
+                                        field_name.as_str(),
+                                        "edge",
+                                        ty.as_str()
+                                    );
+                                }
+
+                                match value {
+                                    ValueType::Identifier { value, loc } => {
+                                        if is_valid_identifier(
+                                            ctx,
+                                            original_query,
+                                            loc.clone(),
+                                            value.as_str(),
+                                        ) && !scope.contains_key(value.as_str())
+                                        {
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                loc.clone(),
+                                                E301,
+                                                value.as_str()
+                                            );
+                                        } else {
+                                            // Variable is in scope, now validate field type
+                                            match scope.get(value.as_str()) {
+                                                Some(var_info) => {
+                                                    match field_set.get(field_name.as_str()) {
+                                                        Some(field) => {
+                                                            let variable_type = &var_info.ty;
+                                                            if variable_type
+                                                                != &Type::from(
+                                                                    field.field_type.clone(),
+                                                                )
+                                                            {
+                                                                generate_error!(
+                                                                    ctx,
+                                                                    original_query,
+                                                                    loc.clone(),
+                                                                    E205,
+                                                                    value.as_str(),
+                                                                    &variable_type.to_string(),
+                                                                    &field.field_type.to_string(),
+                                                                    "edge",
+                                                                    ty.as_str()
+                                                                );
+                                                            }
+                                                        }
+                                                        None => {
+                                                            // Field doesn't exist - error already generated above
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    // Variable not in scope - error already generated above
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ValueType::Literal { value, loc } => {
+                                        // check against type
+                                        match ctx.edge_fields.get(ty.as_str()) {
+                                            Some(fields) => match fields.get(field_name.as_str()) {
+                                                Some(field) => {
+                                                    let field_type = field.field_type.clone();
+                                                    if field_type != *value {
+                                                        generate_error!(
+                                                            ctx,
+                                                            original_query,
+                                                            loc.clone(),
+                                                            E205,
+                                                            &value.inner_stringify(),
+                                                            value.to_variant_string(),
+                                                            &field_type.to_string(),
+                                                            "edge",
+                                                            ty.as_str()
+                                                        );
+                                                    }
+                                                }
+                                                None => {
+                                                    // Field doesn't exist - error already generated above
+                                                }
+                                            },
+                                            None => {
+                                                // Type doesn't exist - error already generated above
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        let mut properties = fields
+                            .iter()
+                            .map(|(field_name, value)| {
+                                (
+                                    field_name.clone(),
+                                    match value {
+                                        ValueType::Literal { value, loc } => {
+                                            match ctx.edge_fields.get(ty.as_str()) {
+                                                Some(fields) => match fields
+                                                    .get(field_name.as_str())
+                                                {
+                                                    Some(field) => {
+                                                        match field.field_type == FieldType::Date {
+                                                            true => match Date::new(value) {
+                                                                Ok(date) => {
+                                                                    GeneratedValue::Literal(
+                                                                        GenRef::Literal(
+                                                                            date.to_rfc3339(),
+                                                                        ),
+                                                                    )
+                                                                }
+                                                                Err(_) => {
+                                                                    generate_error!(
+                                                                        ctx,
+                                                                        original_query,
+                                                                        loc.clone(),
+                                                                        E501,
+                                                                        value.as_str()
+                                                                    );
+                                                                    GeneratedValue::Unknown
+                                                                }
+                                                            },
+                                                            false => GeneratedValue::Literal(
+                                                                GenRef::from(value.clone()),
+                                                            ),
+                                                        }
+                                                    }
+                                                    None => {
+                                                        // Field doesn't exist - error already generated
+                                                        GeneratedValue::Unknown
+                                                    }
+                                                },
+                                                None => {
+                                                    // Type doesn't exist - error already generated
+                                                    GeneratedValue::Unknown
+                                                }
+                                            }
+                                        }
+                                        ValueType::Identifier { value, loc } => {
+                                            is_valid_identifier(
+                                                ctx,
+                                                original_query,
+                                                loc.clone(),
+                                                value.as_str(),
+                                            );
+                                            gen_identifier_or_param(
+                                                original_query,
+                                                value.as_str(),
+                                                false,
+                                                true,
+                                            )
+                                        }
+                                        v => {
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                upsert.loc.clone(),
+                                                E206,
+                                                &v.to_string()
+                                            );
+                                            GeneratedValue::Unknown
+                                        }
+                                    },
+                                )
+                            })
+                            .collect::<HashMap<String, GeneratedValue>>();
+
+                        for (field_name, default_value) in default_properties.clone() {
+                            if !properties.contains_key(field_name.as_str()) {
+                                properties.insert(field_name, default_value);
+                            }
+                        }
+
+                        Some(properties.into_iter().collect())
+                    }
+                    None => match default_properties.is_empty() {
+                        true => None,
+                        false => Some(default_properties),
+                    },
+                };
+
+                let (from, from_is_plural) = match &upsert.connection.from_id {
+                    Some(id) => match id {
+                        IdType::Identifier { value, loc } => {
+                            is_valid_identifier(ctx, original_query, loc.clone(), value.as_str());
+                            // Validate that the identifier exists in scope or is a parameter
+                            if !scope.contains_key(value.as_str())
+                                && is_param(original_query, value.as_str()).is_none()
+                            {
+                                generate_error!(
+                                    ctx,
+                                    original_query,
+                                    loc.clone(),
+                                    E301,
+                                    value.as_str()
+                                );
+                            }
+                            // Check if this variable is plural
+                            let is_plural = scope
+                                .get(value.as_str())
+                                .map(|var_info| !var_info.is_single)
+                                .unwrap_or(false);
+                            let gen_value = if is_plural {
+                                // For plural variables, just use the variable name without .id()
+                                if let Some(param) = is_param(original_query, value.as_str()) {
+                                    GeneratedValue::Parameter(match param.is_optional {
+                                        true => GenRef::DeRef(format!(
+                                            "data.{}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{}\"))?",
+                                            value, value
+                                        )),
+                                        false => GenRef::DeRef(format!("data.{}", value)),
+                                    })
+                                } else {
+                                    GeneratedValue::Identifier(GenRef::Std(value.clone()))
+                                }
+                            } else {
+                                gen_id_access_or_param(original_query, value.as_str())
+                            };
+                            (gen_value, is_plural)
+                        }
+                        IdType::Literal { value, loc: _ } => (
+                            GeneratedValue::Literal(GenRef::Literal(value.clone())),
+                            false,
+                        ),
+                        _ => unreachable!(),
+                    },
+                    _ => {
+                        generate_error!(ctx, original_query, upsert.loc.clone(), E612);
+                        (GeneratedValue::Unknown, false)
+                    }
+                };
+
+                let (to, to_is_plural) = match &upsert.connection.to_id {
+                    Some(id) => match id {
+                        IdType::Identifier { value, loc } => {
+                            is_valid_identifier(ctx, original_query, loc.clone(), value.as_str());
+                            // Validate that the identifier exists in scope or is a parameter
+                            if !scope.contains_key(value.as_str())
+                                && is_param(original_query, value.as_str()).is_none()
+                            {
+                                generate_error!(
+                                    ctx,
+                                    original_query,
+                                    loc.clone(),
+                                    E301,
+                                    value.as_str()
+                                );
+                            }
+                            // Check if this variable is plural
+                            let is_plural = scope
+                                .get(value.as_str())
+                                .map(|var_info| !var_info.is_single)
+                                .unwrap_or(false);
+                            let gen_value = if is_plural {
+                                // For plural variables, just use the variable name without .id()
+                                if let Some(param) = is_param(original_query, value.as_str()) {
+                                    GeneratedValue::Parameter(match param.is_optional {
+                                        true => GenRef::DeRef(format!(
+                                            "data.{}.as_ref().ok_or_else(|| GraphError::ParamNotFound(\"{}\"))?",
+                                            value, value
+                                        )),
+                                        false => GenRef::DeRef(format!("data.{}", value)),
+                                    })
+                                } else {
+                                    GeneratedValue::Identifier(GenRef::Std(value.clone()))
+                                }
+                            } else {
+                                gen_id_access_or_param(original_query, value.as_str())
+                            };
+                            (gen_value, is_plural)
+                        }
+                        IdType::Literal { value, loc: _ } => (
+                            GeneratedValue::Literal(GenRef::Literal(value.clone())),
+                            false,
+                        ),
+                        _ => unreachable!(),
+                    },
+                    _ => {
+                        generate_error!(ctx, original_query, upsert.loc.clone(), E612);
+                        (GeneratedValue::Unknown, false)
+                    }
+                };
+                let upsert_e = UpsertE {
+                    to,
+                    from,
+                    label,
+                    properties,
+                    from_is_plural,
+                    to_is_plural,
+                };
+                // If either from or to is plural, use Standalone (no G::new_mut wrapper),
+                // Empty separator (no period before it), and No collection (already done in iteration)
+                let (final_traversal_result_type, traversal_type, separator, should_collect) =
+                    if from_is_plural || to_is_plural {
+                        (
+                            Type::Edges(Some(ty.to_string())),
+                            TraversalType::Standalone,
+                            Separator::Empty(SourceStep::UpsertE(upsert_e)),
+                            ShouldCollect::No,
+                        )
+                    } else {
+                        (
+                            Type::Edge(Some(ty.to_string())),
+                            TraversalType::Mut,
+                            Separator::Period(SourceStep::UpsertE(upsert_e)),
+                            ShouldCollect::ToObj,
+                        )
+                    };
+                let stmt = GeneratedStatement::Traversal(GeneratedTraversal {
+                    source_step: separator,
+                    steps: vec![],
+                    traversal_type,
+                    should_collect,
+                    ..Default::default()
+                });
+                gen_query.is_mut = true;
+                return (final_traversal_result_type, Some(stmt));
+            }
+            generate_error!(
+                ctx,
+                original_query,
+                upsert.loc.clone(),
+                E304,
+                ["edge"],
+                ["edge"]
+            );
+            (Type::Edge(None), None)
+        }
+        UpsertVector(upsert) => {
+            if let Some(ref ty) = upsert.vector_type {
+                if !ctx.vector_set.contains(ty.as_str()) {
+                    generate_error!(ctx, original_query, upsert.loc.clone(), E103, ty.as_str());
+                }
+                let label = GenRef::Literal(ty.clone());
+                let vector_in_schema = match ctx
+                    .output
+                    .vectors
+                    .iter()
+                    .find(|v| v.name == ty.as_str())
+                {
+                    Some(vector) => vector.clone(),
+                    None => {
+                        generate_error!(ctx, original_query, upsert.loc.clone(), E103, ty.as_str());
+                        return (Type::Vector(None), None);
+                    }
+                };
+
+                let default_properties = vector_in_schema
+                    .properties
+                    .iter()
+                    .filter_map(|p| p.default_value.clone().map(|v| (p.name.clone(), v)))
+                    .collect::<Vec<(String, GeneratedValue)>>();
+
+                let properties = match &upsert.fields {
+                    Some(fields) => {
+                        let field_set_from_schema = ctx.vector_fields.get(ty.as_str()).cloned();
+                        if let Some(field_set) = field_set_from_schema {
+                            for (field_name, value) in fields {
+                                if !field_set.contains_key(field_name.as_str()) {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        upsert.loc.clone(),
+                                        E202,
+                                        field_name.as_str(),
+                                        "vector",
+                                        ty.as_str()
+                                    );
+                                }
+                                match value {
+                                    ValueType::Identifier { value, loc } => {
+                                        if is_valid_identifier(
+                                            ctx,
+                                            original_query,
+                                            loc.clone(),
+                                            value.as_str(),
+                                        ) && !scope.contains_key(value.as_str())
+                                        {
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                loc.clone(),
+                                                E301,
+                                                value.as_str()
+                                            );
+                                        } else {
+                                            // Variable is in scope, now validate field type
+                                            match scope.get(value.as_str()) {
+                                                Some(var_info) => {
+                                                    match field_set.get(field_name.as_str()) {
+                                                        Some(field) => {
+                                                            let variable_type = &var_info.ty;
+                                                            if variable_type
+                                                                != &Type::from(
+                                                                    field.field_type.clone(),
+                                                                )
+                                                            {
+                                                                generate_error!(
+                                                                    ctx,
+                                                                    original_query,
+                                                                    loc.clone(),
+                                                                    E205,
+                                                                    value.as_str(),
+                                                                    &variable_type.to_string(),
+                                                                    &field.field_type.to_string(),
+                                                                    "vector",
+                                                                    ty.as_str()
+                                                                );
+                                                            }
+                                                        }
+                                                        None => {
+                                                            // Field doesn't exist - error already generated above
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    // Variable not in scope - error already generated above
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ValueType::Literal { value, loc } => {
+                                        match ctx.vector_fields.get(ty.as_str()) {
+                                            Some(fields) => match fields.get(field_name.as_str()) {
+                                                Some(field) => {
+                                                    let field_type = field.field_type.clone();
+                                                    if field_type != *value {
+                                                        generate_error!(
+                                                            ctx,
+                                                            original_query,
+                                                            loc.clone(),
+                                                            E205,
+                                                            &value.inner_stringify(),
+                                                            value.to_variant_string(),
+                                                            &field_type.to_string(),
+                                                            "vector",
+                                                            ty.as_str()
+                                                        );
+                                                    }
+                                                }
+                                                None => {
+                                                    // Field doesn't exist - error already generated above
+                                                }
+                                            },
+                                            None => {
+                                                // Type doesn't exist - error already generated above
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        let mut properties = fields
+                            .iter()
+                            .map(|(field_name, value)| {
+                                (
+                                    field_name.clone(),
+                                    match value {
+                                        ValueType::Literal { value, loc } => {
+                                            match ctx.vector_fields.get(ty.as_str()) {
+                                                Some(fields) => match fields
+                                                    .get(field_name.as_str())
+                                                {
+                                                    Some(field) => {
+                                                        match field.field_type == FieldType::Date {
+                                                            true => match Date::new(value) {
+                                                                Ok(date) => {
+                                                                    GeneratedValue::Literal(
+                                                                        GenRef::Literal(
+                                                                            date.to_rfc3339(),
+                                                                        ),
+                                                                    )
+                                                                }
+                                                                Err(_) => {
+                                                                    generate_error!(
+                                                                        ctx,
+                                                                        original_query,
+                                                                        loc.clone(),
+                                                                        E501,
+                                                                        value.as_str()
+                                                                    );
+                                                                    GeneratedValue::Unknown
+                                                                }
+                                                            },
+                                                            false => GeneratedValue::Literal(
+                                                                GenRef::from(value.clone()),
+                                                            ),
+                                                        }
+                                                    }
+                                                    None => {
+                                                        // Field doesn't exist - error already generated
+                                                        GeneratedValue::Unknown
+                                                    }
+                                                },
+                                                None => {
+                                                    // Type doesn't exist - error already generated
+                                                    GeneratedValue::Unknown
+                                                }
+                                            }
+                                        }
+                                        ValueType::Identifier { value, loc } => {
+                                            is_valid_identifier(
+                                                ctx,
+                                                original_query,
+                                                loc.clone(),
+                                                value.as_str(),
+                                            );
+                                            gen_identifier_or_param(
+                                                original_query,
+                                                value.as_str(),
+                                                false,
+                                                true,
+                                            )
+                                        }
+                                        v => {
+                                            generate_error!(
+                                                ctx,
+                                                original_query,
+                                                upsert.loc.clone(),
+                                                E206,
+                                                &v.to_string()
+                                            );
+                                            GeneratedValue::Unknown
+                                        }
+                                    },
+                                )
+                            })
+                            .collect::<HashMap<String, GeneratedValue>>();
+
+                        for (field_name, default_value) in default_properties.clone() {
+                            if !properties.contains_key(field_name.as_str()) {
+                                properties.insert(field_name, default_value);
+                            }
+                        }
+
+                        properties
+                    }
+                    None => default_properties.into_iter().fold(
+                        HashMap::new(),
+                        |mut acc, (field_name, default_value)| {
+                            acc.insert(field_name, default_value);
+                            acc
+                        },
+                    ),
+                };
+                if let Some(vec_data) = &upsert.data {
+                    let vec = match vec_data {
+                        VectorData::Vector(v) => {
+                            VecData::Standard(GeneratedValue::Literal(GenRef::Ref(format!(
+                                "[{}]",
+                                v.iter()
+                                    .map(|f| f.to_string())
+                                    .collect::<Vec<String>>()
+                                    .join(",")
+                            ))))
+                        }
+                        VectorData::Identifier(i) => {
+                            is_valid_identifier(
+                                ctx,
+                                original_query,
+                                upsert.loc.clone(),
+                                i.as_str(),
+                            );
+                            // Check that the identifier is of type [F64]
+                            if let Some(var_info) = scope.get(i.as_str()) {
+                                let expected_type =
+                                    Type::Array(Box::new(Type::Scalar(FieldType::F64)));
+                                if var_info.ty != expected_type {
+                                    generate_error!(
+                                        ctx,
+                                        original_query,
+                                        upsert.loc.clone(),
+                                        E205,
+                                        i.as_str(),
+                                        &var_info.ty.to_string(),
+                                        "[F64]",
+                                        "UpsertV",
+                                        ty.as_str()
+                                    );
+                                }
+                            }
+                            let id =
+                                gen_identifier_or_param(original_query, i.as_str(), true, false);
+                            VecData::Standard(id)
+                        }
+                        VectorData::Embed(e) => {
+                            let embed_data = match &e.value {
+                                EvaluatesToString::Identifier(i) => EmbedData {
+                                    data: gen_identifier_or_param(
+                                        original_query,
+                                        i.as_str(),
+                                        true,
+                                        false,
+                                    ),
+                                    model_name: gen_query.embedding_model_to_use.clone(),
+                                },
+                                EvaluatesToString::StringLiteral(s) => EmbedData {
+                                    data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                                    model_name: gen_query.embedding_model_to_use.clone(),
+                                },
+                            };
+
+                            VecData::Hoisted(gen_query.add_hoisted_embed(embed_data))
+                        }
+                    };
+                    let upsert_v = UpsertV {
+                        vec,
+                        label,
+                        properties: Some(properties.into_iter().collect()),
+                    };
+                    let stmt = GeneratedStatement::Traversal(GeneratedTraversal {
+                        source_step: Separator::Period(SourceStep::UpsertV(upsert_v)),
+                        steps: vec![],
+                        traversal_type: TraversalType::Mut,
+                        should_collect: ShouldCollect::ToObj,
+                        ..Default::default()
+                    });
+                    gen_query.is_mut = true;
+                    return (Type::Vector(Some(ty.to_string())), Some(stmt));
+                }
+            }
+            generate_error!(
+                ctx,
+                original_query,
+                upsert.loc.clone(),
+                E304,
+                ["vector"],
+                ["vector"]
+            );
+            (Type::Vector(None), None)
+        }
+
         // BatchAddVector(add) => {
         //     if let Some(ref ty) = add.vector_type {
         //         if !ctx.vector_set.contains(ty.as_str()) {
@@ -1317,7 +2239,7 @@ pub(crate) fn infer_expr_type<'a>(
                     should_collect: ShouldCollect::ToVec,
                     source_step: Separator::Period(SourceStep::SearchVector(
                         GeneratedSearchVector {
-                            label: GenRef::Literal(sv.vector_type.clone().unwrap()),
+                            label: GenRef::Literal(sv.vector_type.clone().unwrap_or_default()),
                             vec,
                             k,
                             pre_filter,
@@ -1340,7 +2262,10 @@ pub(crate) fn infer_expr_type<'a>(
                         gen_query,
                     );
 
-                    match stmt.unwrap() {
+                    let Some(stmt) = stmt else {
+                        return BoExp::Empty;
+                    };
+                    match stmt {
                         GeneratedStatement::BoExp(expr) => match expr {
                             BoExp::Exists(mut traversal) => {
                                 traversal.should_collect = ShouldCollect::No;
@@ -1388,7 +2313,10 @@ pub(crate) fn infer_expr_type<'a>(
                         gen_query,
                     );
 
-                    match stmt.unwrap() {
+                    let Some(stmt) = stmt else {
+                        return BoExp::Empty;
+                    };
+                    match stmt {
                         GeneratedStatement::BoExp(expr) => match expr {
                             BoExp::Exists(mut traversal) => {
                                 traversal.should_collect = ShouldCollect::No;
@@ -1427,7 +2355,10 @@ pub(crate) fn infer_expr_type<'a>(
             let (ty, stmt) =
                 infer_expr_type(ctx, expr, scope, original_query, parent_ty, gen_query);
 
-            match stmt.unwrap() {
+            let Some(stmt) = stmt else {
+                return (Type::Unknown, None);
+            };
+            match stmt {
                 GeneratedStatement::BoExp(expr) => (
                     Type::Boolean,
                     Some(GeneratedStatement::BoExp(BoExp::Not(Box::new(expr)))),
@@ -1606,7 +2537,7 @@ pub(crate) fn infer_expr_type<'a>(
             };
 
             let search_bm25 = SearchBM25 {
-                type_arg: GenRef::Literal(bm25_search.type_arg.clone().unwrap()),
+                type_arg: GenRef::Literal(bm25_search.type_arg.clone().unwrap_or_default()),
                 query: vec,
                 k,
             };
@@ -1687,6 +2618,28 @@ mod tests {
                 edge <- AddE<Knows>::From(person1)::To(person2)
                 RETURN edge
         "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_add_edge_with_unique_index_valid() {
+        let source = r#"
+                N::Person { name: String }
+                E::Knows UNIQUE { From: Person, To: Person }
+
+                QUERY test(id1: ID, id2: ID) =>
+                    person1 <- N<Person>(id1)
+                    person2 <- N<Person>(id2)
+                    edge <- AddE<Knows>::From(person1)::To(person2)
+                    RETURN edge
+            "#;
 
         let content = write_to_temp_file(vec![source]);
         let parsed = HelixParser::parse_source(&content).unwrap();

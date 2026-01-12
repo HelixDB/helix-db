@@ -1665,6 +1665,16 @@ pub(crate) fn validate_traversal<'a>(
                 excluded.clear();
             }
 
+            StepType::UpsertEdge(upsert) => {
+                if let Some(ref ty) = upsert.edge_type
+                    && !ctx.edge_map.contains_key(ty.as_str())
+                {
+                    generate_error!(ctx, original_query, upsert.loc.clone(), E102, ty);
+                }
+                cur_ty = Type::Edges(upsert.edge_type.clone());
+                excluded.clear();
+            }
+
             StepType::Range((start, end)) => {
                 let (start, end) = match (&start.expr, &end.expr) {
                     (ExpressionType::Identifier(i), ExpressionType::Identifier(j)) => {

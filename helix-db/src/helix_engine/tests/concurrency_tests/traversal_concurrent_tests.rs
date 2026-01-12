@@ -152,6 +152,7 @@ fn test_concurrent_edge_additions() {
                             node_ids[source_idx],
                             node_ids[target_idx],
                             false,
+                            false,
                         )
                         .collect_to_obj()
                         .unwrap();
@@ -208,7 +209,7 @@ fn test_concurrent_reads_during_writes() {
                 .id();
 
             G::new_mut(&storage, &arena, &mut wtxn)
-                .add_edge("connects", None, root, neighbor_id, false)
+                .add_edge("connects", None, root, neighbor_id, false, false)
                 .collect_to_obj()
                 .unwrap();
         }
@@ -280,7 +281,7 @@ fn test_concurrent_reads_during_writes() {
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("connects", None, root_id, new_node_id, false)
+                    .add_edge("connects", None, root_id, new_node_id, false, false)
                     .collect_to_obj()
                     .unwrap();
 
@@ -344,7 +345,7 @@ fn test_traversal_snapshot_isolation() {
                 .id();
 
             G::new_mut(&storage, &arena, &mut wtxn)
-                .add_edge("links", None, root, node_id, false)
+                .add_edge("links", None, root, node_id, false, false)
                 .collect_to_obj()
                 .unwrap();
         }
@@ -379,7 +380,7 @@ fn test_traversal_snapshot_isolation() {
                 .id();
 
             G::new_mut(&storage_clone, &arena, &mut wtxn)
-                .add_edge("links", None, root_id, new_id, false)
+                .add_edge("links", None, root_id, new_id, false, false)
                 .collect_to_obj()
                 .unwrap();
 
@@ -458,7 +459,7 @@ fn test_concurrent_bidirectional_traversals() {
         for source_id in &sources {
             for target_id in &targets {
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("points_to", None, *source_id, *target_id, false)
+                    .add_edge("points_to", None, *source_id, *target_id, false, false)
                     .collect_to_obj()
                     .unwrap();
             }
@@ -551,7 +552,7 @@ fn test_concurrent_multi_hop_traversals() {
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("to_l1", None, root, id, false)
+                    .add_edge("to_l1", None, root, id, false, false)
                     .collect_to_obj()
                     .unwrap();
 
@@ -570,7 +571,7 @@ fn test_concurrent_multi_hop_traversals() {
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("to_l2", None, l1_id, l2_id, false)
+                    .add_edge("to_l2", None, l1_id, l2_id, false, false)
                     .collect_to_obj()
                     .unwrap();
             }
@@ -667,7 +668,7 @@ fn test_concurrent_graph_topology_consistency() {
                         .id();
 
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .add_edge("connects", None, node1_id, node2_id, false)
+                        .add_edge("connects", None, node1_id, node2_id, false, false)
                         .collect_to_obj()
                         .unwrap();
 
@@ -699,7 +700,7 @@ fn test_concurrent_graph_topology_consistency() {
     for result in storage.edges_db.iter(&rtxn).unwrap() {
         let (edge_id, edge_bytes) = result.unwrap();
         let edge =
-            crate::utils::items::Edge::from_bincode_bytes(edge_id, edge_bytes, &arena).unwrap();
+            crate::utils::items::Edge::from_bincode_bytes(edge_id, &edge_bytes, &arena).unwrap();
 
         // Verify source exists
         assert!(
@@ -778,7 +779,7 @@ fn test_stress_concurrent_mixed_operations() {
 
                 let root_idx = write_count % root_ids.len();
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("links", None, root_ids[root_idx], new_id, false)
+                    .add_edge("links", None, root_ids[root_idx], new_id, false, false)
                     .collect_to_obj()
                     .unwrap();
 

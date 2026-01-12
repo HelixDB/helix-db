@@ -131,6 +131,18 @@ impl HelixParser {
                 loc: pair.loc(),
                 expr: ExpressionType::AddEdge(self.parse_add_edge(pair, false)?),
             }),
+            Rule::UpsertN => Ok(Expression {
+                loc: pair.loc(),
+                expr: ExpressionType::UpsertNode(self.parse_upsert_node(pair)?),
+            }),
+            Rule::UpsertV => Ok(Expression {
+                loc: pair.loc(),
+                expr: ExpressionType::UpsertVector(self.parse_upsert_vector(pair)?),
+            }),
+            Rule::UpsertE => Ok(Expression {
+                loc: pair.loc(),
+                expr: ExpressionType::UpsertEdge(self.parse_upsert_edge(pair, false)?),
+            }),
             Rule::search_vector => Ok(Expression {
                 loc: pair.loc(),
                 expr: ExpressionType::SearchVector(self.parse_search_vector(pair)?),

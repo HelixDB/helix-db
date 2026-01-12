@@ -1,3 +1,4 @@
+use loom::sync::Arc;
 /// Loom-based concurrency tests for Traversal Operations
 ///
 /// Loom is a model checker that exhaustively tests all possible thread interleavings
@@ -11,9 +12,7 @@
 ///
 /// NOTE: These tests model the synchronization patterns abstractly since LMDB
 /// (a C library) cannot run under loom. We verify the logical properties.
-
 use loom::sync::atomic::{AtomicU64, Ordering};
-use loom::sync::Arc;
 use loom::thread;
 
 /// Models concurrent read access to shared traversal state
@@ -43,10 +42,7 @@ fn loom_traversal_concurrent_read_access() {
                 // Verify: within a snapshot, data is consistent with version
                 // Version 1 = 10 nodes, higher versions may have more
                 if snapshot_version == 1 {
-                    assert_eq!(
-                        snapshot_count, 10,
-                        "Version 1 should have exactly 10 nodes"
-                    );
+                    assert_eq!(snapshot_count, 10, "Version 1 should have exactly 10 nodes");
                 }
 
                 (snapshot_version, snapshot_count)
@@ -229,10 +225,7 @@ fn loom_traversal_transaction_ordering() {
 
         // If version is 1, data must be 42 (commit ordering)
         if observed_ver == 1 {
-            assert_eq!(
-                observed_data, 42,
-                "If version is 1, data must be committed"
-            );
+            assert_eq!(observed_data, 42, "If version is 1, data must be committed");
         }
 
         // Final state should be consistent

@@ -48,7 +48,15 @@ fn test_gateway_new_with_routes() {
 fn test_gateway_new_with_mcp_routes() {
     let (graph, _temp_dir) = create_test_graph();
     let mcp_routes = HashMap::new();
-    let gateway = HelixGateway::new("127.0.0.1:8080", graph, 8, None, Some(mcp_routes), None, None);
+    let gateway = HelixGateway::new(
+        "127.0.0.1:8080",
+        graph,
+        8,
+        None,
+        Some(mcp_routes),
+        None,
+        None,
+    );
 
     assert_eq!(gateway.address, "127.0.0.1:8080");
     assert!(gateway.router.mcp_routes.is_empty());

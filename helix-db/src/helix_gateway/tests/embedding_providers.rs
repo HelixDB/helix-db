@@ -17,7 +17,8 @@ fn test_openai_embedding_success() {
 #[ignore] // Requires API key and network
 fn test_azure_openai_embedding_success() {
     // Requires AZURE_OPENAI_API_KEY and AZURE_OPENAI_RESOURCE_NAME env vars
-    let model = get_embedding_model(None, Some("azure_openai:text-embedding-3-small"), None).unwrap();
+    let model =
+        get_embedding_model(None, Some("azure_openai:text-embedding-3-small"), None).unwrap();
     let result = model.fetch_embedding("test text");
     assert!(result.is_ok());
     let embedding = result.unwrap();
@@ -91,11 +92,15 @@ fn test_parse_azure_openai_provider_with_deployment() {
     unsafe {
         std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "test-resource");
     }
-    let result = EmbeddingModelImpl::parse_provider_and_model(Some("azure_openai:text-embedding-3-small"));
+    let result =
+        EmbeddingModelImpl::parse_provider_and_model(Some("azure_openai:text-embedding-3-small"));
     assert!(result.is_ok());
     let (provider, model) = result.unwrap();
     match provider {
-        EmbeddingProvider::AzureOpenAI { resource_name, deployment_id } => {
+        EmbeddingProvider::AzureOpenAI {
+            resource_name,
+            deployment_id,
+        } => {
             assert_eq!(resource_name, "test-resource");
             assert_eq!(deployment_id, "text-embedding-3-small");
         }

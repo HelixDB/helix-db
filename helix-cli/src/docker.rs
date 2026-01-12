@@ -25,8 +25,15 @@ pub enum DockerBuildError {
 impl fmt::Display for DockerBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DockerBuildError::RustCompilation { output, instance_name } => {
-                write!(f, "Rust compilation failed for instance '{}': {}", instance_name, output)
+            DockerBuildError::RustCompilation {
+                output,
+                instance_name,
+            } => {
+                write!(
+                    f,
+                    "Rust compilation failed for instance '{}': {}",
+                    instance_name, output
+                )
             }
         }
     }
@@ -91,10 +98,7 @@ impl<'a> DockerManager<'a> {
         let root_env = self.project.root.join(".env");
         if root_env.exists() {
             let _ = dotenvy::from_path(&root_env);
-            print_info(&format!(
-                "Loading environment from {}",
-                root_env.display()
-            ));
+            print_info(&format!("Loading environment from {}", root_env.display()));
         }
 
         // Load .env from db/queries directory (overrides project root)
@@ -102,10 +106,7 @@ impl<'a> DockerManager<'a> {
         let db_env = queries_dir.join(".env");
         if db_env.exists() {
             let _ = dotenvy::from_path_override(&db_env);
-            print_info(&format!(
-                "Overriding environment from {}",
-                db_env.display()
-            ));
+            print_info(&format!("Overriding environment from {}", db_env.display()));
         }
 
         let mut env_vars = vec![

@@ -3,6 +3,7 @@ use crate::helix_engine::{
         HelixGraphStorage, StorageConfig, storage_methods::DBMethods, version_info::VersionInfo,
     },
     traversal_core::config::Config,
+    types::SecondaryIndex,
 };
 use tempfile::TempDir;
 
@@ -185,7 +186,7 @@ fn test_unpack_adj_edge_data_invalid_length() {
 fn test_create_secondary_index() {
     let (mut storage, _temp_dir) = setup_test_storage();
 
-    let result = storage.create_secondary_index("test_index");
+    let result = storage.create_secondary_index(SecondaryIndex::Index("test_index".to_string()));
     assert!(result.is_ok());
 
     // Verify index was added to secondary_indices map
@@ -197,7 +198,9 @@ fn test_drop_secondary_index() {
     let (mut storage, _temp_dir) = setup_test_storage();
 
     // Create an index first
-    storage.create_secondary_index("test_index").unwrap();
+    storage
+        .create_secondary_index(SecondaryIndex::Index("test_index".to_string()))
+        .unwrap();
     assert!(storage.secondary_indices.contains_key("test_index"));
 
     // Drop the index
@@ -220,9 +223,15 @@ fn test_drop_nonexistent_secondary_index() {
 fn test_multiple_secondary_indices() {
     let (mut storage, _temp_dir) = setup_test_storage();
 
-    storage.create_secondary_index("index1").unwrap();
-    storage.create_secondary_index("index2").unwrap();
-    storage.create_secondary_index("index3").unwrap();
+    storage
+        .create_secondary_index(SecondaryIndex::Index("index1".to_string()))
+        .unwrap();
+    storage
+        .create_secondary_index(SecondaryIndex::Index("index2".to_string()))
+        .unwrap();
+    storage
+        .create_secondary_index(SecondaryIndex::Index("index3".to_string()))
+        .unwrap();
 
     assert_eq!(storage.secondary_indices.len(), 3);
     assert!(storage.secondary_indices.contains_key("index1"));
@@ -467,7 +476,10 @@ fn test_out_edge_key_preserves_node_id_byte_order() {
 // ============================================================================
 
 use crate::helix_engine::storage_core::storage_methods::StorageMethods;
-use crate::utils::{items::{Node, Edge}, label_hash::hash_label};
+use crate::utils::{
+    items::{Edge, Node},
+    label_hash::hash_label,
+};
 use bumpalo::Bump;
 
 fn create_test_node<'a>(arena: &'a Bump, id: u128, label: &str) -> Node<'a> {
@@ -518,12 +530,18 @@ fn insert_edge(storage: &HelixGraphStorage, edge: &Edge) {
     let label_hash = hash_label(edge.label, None);
     let out_key = HelixGraphStorage::out_edge_key(&edge.from_node, &label_hash);
     let edge_data = HelixGraphStorage::pack_edge_data(&edge.id, &edge.to_node);
-    storage.out_edges_db.put(&mut txn, &out_key, &edge_data).unwrap();
+    storage
+        .out_edges_db
+        .put(&mut txn, &out_key, &edge_data)
+        .unwrap();
 
     // Insert into in_edges_db
     let in_key = HelixGraphStorage::in_edge_key(&edge.to_node, &label_hash);
     let in_edge_data = HelixGraphStorage::pack_edge_data(&edge.id, &edge.from_node);
-    storage.in_edges_db.put(&mut txn, &in_key, &in_edge_data).unwrap();
+    storage
+        .in_edges_db
+        .put(&mut txn, &in_key, &in_edge_data)
+        .unwrap();
 
     txn.commit().unwrap();
 }

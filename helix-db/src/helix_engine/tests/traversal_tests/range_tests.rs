@@ -78,13 +78,20 @@ fn test_range_chaining() {
     // Create edges connecting nodes sequentially
     for i in 0..4 {
         G::new_mut(&storage, &arena, &mut txn)
-            .add_edge("knows", None, nodes[i].id(), nodes[i + 1].id(), false)
+            .add_edge(
+                "knows",
+                None,
+                nodes[i].id(),
+                nodes[i + 1].id(),
+                false,
+                false,
+            )
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
     }
 
     G::new_mut(&storage, &arena, &mut txn)
-        .add_edge("knows", None, nodes[4].id(), nodes[0].id(), false)
+        .add_edge("knows", None, nodes[4].id(), nodes[0].id(), false, false)
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     txn.commit().unwrap();

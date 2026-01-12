@@ -284,7 +284,9 @@ impl Query {
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code
                     // Use HQL closure param name if available, otherwise fall back to singular form
-                    let singular_var = struct_def.closure_param_name.as_deref()
+                    let singular_var = struct_def
+                        .closure_param_name
+                        .as_deref()
                         .unwrap_or_else(|| struct_def.source_variable.trim_end_matches('s'));
                     // Check if any field is a nested traversal (needs Result handling)
                     let has_nested = struct_def.fields.iter().any(|f| f.is_nested_traversal);
@@ -889,7 +891,9 @@ impl Query {
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code
                     // Use HQL closure param name if available, otherwise fall back to singular form
-                    let singular_var = struct_def.closure_param_name.as_deref()
+                    let singular_var = struct_def
+                        .closure_param_name
+                        .as_deref()
                         .unwrap_or_else(|| struct_def.source_variable.trim_end_matches('s'));
                     // Check if any field is a nested traversal (needs Result handling)
                     let has_nested = struct_def.fields.iter().any(|f| f.is_nested_traversal);

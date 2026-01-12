@@ -1,7 +1,10 @@
 use crate::helixc::parser::{
     HelixParser, ParserError, Rule,
     location::HasLoc,
-    types::{AddEdge, AddNode, AddVector, Embed, EvaluatesToString, VectorData},
+    types::{
+        AddEdge, AddNode, AddVector, Embed, EvaluatesToString, UpsertEdge, UpsertNode,
+        UpsertVector, VectorData,
+    },
     utils::PairTools,
 };
 use pest::iterators::Pair;
@@ -141,6 +144,151 @@ impl HelixParser {
             return Err(ParserError::from("Missing edge connection"));
         }
         Ok(AddEdge {
+            edge_type,
+            fields,
+            connection: connection.ok_or_else(|| ParserError::from("Missing edge connection"))?,
+            from_identifier,
+            loc: pair.loc(),
+        })
+    }
+
+    pub(super) fn parse_upsert_vector(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<UpsertVector, ParserError> {
+        let mut vector_type = None;
+        let mut data = None;
+        let mut fields = None;
+
+        for p in pair.clone().into_inner() {
+            match p.as_rule() {
+                Rule::identifier_upper => {
+                    vector_type = Some(p.as_str().to_string());
+                }
+                Rule::vector_data => {
+                    let vector_data = p.clone().try_inner_next()?;
+                    match vector_data.as_rule() {
+                        Rule::identifier => {
+                            data = Some(VectorData::Identifier(p.as_str().to_string()));
+                        }
+                        Rule::vec_literal => {
+                            data = Some(VectorData::Vector(self.parse_vec_literal(p)?));
+                        }
+                        Rule::embed_method => {
+                            let inner = vector_data.clone().try_inner_next()?;
+                            data = Some(VectorData::Embed(Embed {
+                                loc: vector_data.loc(),
+                                value: match inner.as_rule() {
+                                    Rule::identifier => {
+                                        EvaluatesToString::Identifier(inner.as_str().to_string())
+                                    }
+                                    Rule::string_literal => {
+                                        EvaluatesToString::StringLiteral(inner.as_str().to_string())
+                                    }
+                                    _ => {
+                                        return Err(ParserError::from(format!(
+                                            "Unexpected rule in UpsertV: {:?} => {:?}",
+                                            inner.as_rule(),
+                                            inner,
+                                        )));
+                                    }
+                                },
+                            }));
+                        }
+                        _ => {
+                            return Err(ParserError::from(format!(
+                                "Unexpected rule in UpsertV: {:?} => {:?}",
+                                vector_data.as_rule(),
+                                vector_data,
+                            )));
+                        }
+                    }
+                }
+                Rule::create_field => {
+                    fields = Some(self.parse_property_assignments(p)?);
+                }
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in UpsertV: {:?} => {:?}",
+                        p.as_rule(),
+                        p,
+                    )));
+                }
+            }
+        }
+
+        Ok(UpsertVector {
+            vector_type,
+            data,
+            fields,
+            loc: pair.loc(),
+        })
+    }
+
+    pub(super) fn parse_upsert_node(&self, pair: Pair<Rule>) -> Result<UpsertNode, ParserError> {
+        let mut node_type = None;
+        let mut fields = None;
+
+        for p in pair.clone().into_inner() {
+            match p.as_rule() {
+                Rule::identifier_upper => {
+                    node_type = Some(p.as_str().to_string());
+                }
+                Rule::create_field => {
+                    fields = Some(self.parse_property_assignments(p)?);
+                }
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in UpsertN: {:?} => {:?}",
+                        p.as_rule(),
+                        p,
+                    )));
+                }
+            }
+        }
+
+        Ok(UpsertNode {
+            node_type,
+            fields,
+            loc: pair.loc(),
+        })
+    }
+
+    pub(super) fn parse_upsert_edge(
+        &self,
+        pair: Pair<Rule>,
+        from_identifier: bool,
+    ) -> Result<UpsertEdge, ParserError> {
+        let mut edge_type = None;
+        let mut fields = None;
+        let mut connection = None;
+
+        for p in pair.clone().into_inner() {
+            match p.as_rule() {
+                Rule::identifier_upper => {
+                    edge_type = Some(p.as_str().to_string());
+                }
+                Rule::create_field => {
+                    fields = Some(self.parse_property_assignments(p)?);
+                }
+                Rule::to_from => {
+                    connection = Some(self.parse_to_from(p)?);
+                }
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in UpsertE: {:?}",
+                        p.as_rule()
+                    )));
+                }
+            }
+        }
+        if edge_type.is_none() {
+            return Err(ParserError::from("Missing edge type"));
+        }
+        if connection.is_none() {
+            return Err(ParserError::from("Missing edge connection"));
+        }
+        Ok(UpsertEdge {
             edge_type,
             fields,
             connection: connection.ok_or_else(|| ParserError::from("Missing edge connection"))?,
@@ -455,6 +603,129 @@ mod tests {
 
             QUERY addDoc(vec: [F32]) =>
                 doc <- AddV<Document>(vec)
+                RETURN doc
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // UpsertNode Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_upsert_node_basic() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY upsertPerson(name: String) =>
+                person <- UpsertN<Person>({name: name})
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_upsert_node_empty_fields() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY upsertPerson() =>
+                person <- UpsertN<Person>()
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_upsert_node_multiple_fields() {
+        let source = r#"
+            N::Person { name: String, age: U32, email: String }
+
+            QUERY upsertPerson(name: String, age: U32, email: String) =>
+                person <- UpsertN<Person>({name: name, age: age, email: email})
+                RETURN person
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // UpsertEdge Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_upsert_edge_basic() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY upsertFriendship(id1: ID, id2: ID) =>
+                person1 <- N<Person>(id1)
+                person2 <- N<Person>(id2)
+                UpsertE<Knows>::From(person1)::To(person2)
+                RETURN "done"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_upsert_edge_with_properties() {
+        let source = r#"
+            N::Person { name: String }
+            E::Knows { From: Person, To: Person, Properties: { since: String } }
+
+            QUERY upsertFriendship(id1: ID, id2: ID, since: String) =>
+                person1 <- N<Person>(id1)
+                person2 <- N<Person>(id2)
+                UpsertE<Knows>({since: since})::From(person1)::To(person2)
+                RETURN "done"
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================================
+    // UpsertVector Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_upsert_vector_with_identifier() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY upsertDoc(vector: [F32], content: String) =>
+                doc <- UpsertV<Document>(vector, {content: content})
+                RETURN doc
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_upsert_vector_with_embed() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY upsertDoc(text: String) =>
+                doc <- UpsertV<Document>(Embed(text), {content: text})
                 RETURN doc
         "#;
 

@@ -1677,31 +1677,30 @@ async fn test_writer_continuation_priority() {
 
     // Handler that returns IoNeeded - simulates async operation like embedding fetch
     fn io_handler_a(_input: HandlerInput) -> Result<Response, GraphError> {
-        Err(IoContFn::create_err(
-            move |cont_tx, ret_chan| {
-                Box::pin(async move {
-                    // Very short async delay - continuation will be ready quickly
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        Err(IoContFn::create_err(move |cont_tx, ret_chan| {
+            Box::pin(async move {
+                // Very short async delay - continuation will be ready quickly
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-                    // Send continuation
-                    cont_tx
-                        .send_async((
-                            ret_chan,
-                            Box::new(move || {
-                                // Record when continuation executes
-                                let order = ORDER_COUNTER.fetch_add(1, Ordering::SeqCst);
-                                CONTINUATION_A_ORDER.store(order, Ordering::SeqCst);
-                                Ok(Response {
-                                    body: b"continuation_a".to_vec(),
-                                    fmt: Format::Json,
-                                })
-                            }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
-                        ))
-                        .await
-                        .expect("cont channel should be alive");
-                })
-            },
-        ))
+                // Send continuation
+                cont_tx
+                    .send_async((
+                        ret_chan,
+                        Box::new(move || {
+                            // Record when continuation executes
+                            let order = ORDER_COUNTER.fetch_add(1, Ordering::SeqCst);
+                            CONTINUATION_A_ORDER.store(order, Ordering::SeqCst);
+                            Ok(Response {
+                                body: b"continuation_a".to_vec(),
+                                fmt: Format::Json,
+                            })
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                    ))
+                    .await
+                    .expect("cont channel should be alive");
+            })
+        }))
     }
 
     // Handler B - records when it starts processing
@@ -1823,7 +1822,8 @@ async fn test_read_continuation_channel_basic() {
                                 body: b"read_continuation_result".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -1833,10 +1833,7 @@ async fn test_read_continuation_channel_basic() {
 
     let (graph, _temp_dir) = create_test_graph();
     let mut routes = std::collections::HashMap::new();
-    routes.insert(
-        "io_read".to_string(),
-        Arc::new(io_read_handler) as Arc<_>,
-    );
+    routes.insert("io_read".to_string(), Arc::new(io_read_handler) as Arc<_>);
     // Not in write_routes, so it goes to reader workers
     let router = Arc::new(HelixRouter::new(Some(routes), None, None));
 
@@ -1868,10 +1865,7 @@ async fn test_read_continuation_channel_basic() {
     assert!(result.is_ok(), "Request timed out - possible hang");
     let response = result.unwrap();
     assert!(response.is_ok(), "Request failed: {:?}", response);
-    assert_eq!(
-        response.unwrap().body,
-        b"read_continuation_result".to_vec()
-    );
+    assert_eq!(response.unwrap().body, b"read_continuation_result".to_vec());
 }
 
 /// Test multiple concurrent read requests with continuation channels.
@@ -1897,7 +1891,8 @@ async fn test_read_continuation_channel_concurrent() {
                                 body: b"concurrent_read".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -2042,7 +2037,10 @@ async fn test_parallel_write_requests_no_crash() {
 
     for handle in handles {
         let result = tokio::time::timeout(timeout, handle).await;
-        assert!(result.is_ok(), "Write request timed out - possible deadlock");
+        assert!(
+            result.is_ok(),
+            "Write request timed out - possible deadlock"
+        );
         let join_result = result.unwrap();
         assert!(join_result.is_ok(), "Task panicked");
         let response = join_result.unwrap();
@@ -2081,7 +2079,8 @@ async fn test_parallel_write_requests_with_continuations() {
                                 body: b"write_with_cont".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -2094,10 +2093,7 @@ async fn test_parallel_write_requests_with_continuations() {
 
     let (graph, _temp_dir) = create_test_graph();
     let mut routes = std::collections::HashMap::new();
-    routes.insert(
-        "io_write".to_string(),
-        Arc::new(io_write_handler) as Arc<_>,
-    );
+    routes.insert("io_write".to_string(), Arc::new(io_write_handler) as Arc<_>);
 
     let mut write_routes = std::collections::HashSet::new();
     write_routes.insert("io_write".to_string());
@@ -2168,8 +2164,8 @@ async fn test_parallel_write_requests_with_continuations() {
 /// Test that write requests maintain sequential ordering even under parallel load.
 #[tokio::test]
 async fn test_parallel_writes_maintain_order() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     static ORDER_COUNTER: AtomicUsize = AtomicUsize::new(0);
     static EXECUTION_ORDER: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -2286,7 +2282,8 @@ async fn test_write_multiple_continuations_in_sequence() {
                                 body: b"multi_cont_done".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -2368,7 +2365,8 @@ async fn test_mixed_read_write_with_continuations() {
                                 body: b"read_done".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -2389,7 +2387,8 @@ async fn test_mixed_read_write_with_continuations() {
                                 body: b"write_done".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -2514,7 +2513,8 @@ async fn test_stress_parallel_writes_with_continuations() {
                                 body: b"stress_ok".to_vec(),
                                 fmt: Format::Json,
                             })
-                        }) as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
+                        })
+                            as Box<dyn FnOnce() -> Result<Response, GraphError> + Send + Sync>,
                     ))
                     .await
                     .expect("cont channel should be alive");
@@ -2581,7 +2581,11 @@ async fn test_stress_parallel_writes_with_continuations() {
             completed
         );
         let join_result = result.unwrap();
-        assert!(join_result.is_ok(), "Task panicked after {} completed", completed);
+        assert!(
+            join_result.is_ok(),
+            "Task panicked after {} completed",
+            completed
+        );
         let response = join_result.unwrap();
         assert!(
             response.is_ok(),

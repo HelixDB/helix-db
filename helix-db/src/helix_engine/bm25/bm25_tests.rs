@@ -1783,9 +1783,9 @@ mod tests {
         // Insert documents with varying relevance to "machine learning"
         let docs = vec![
             (1u128, "machine learning machine learning machine learning"), // High relevance
-            (2u128, "machine learning"),                                    // Medium relevance
-            (3u128, "learning about machines"),                             // Lower relevance
-            (4u128, "machine"),                                             // Lowest
+            (2u128, "machine learning"),                                   // Medium relevance
+            (3u128, "learning about machines"),                            // Lower relevance
+            (4u128, "machine"),                                            // Lowest
         ];
 
         for (doc_id, doc) in &docs {
@@ -1839,7 +1839,9 @@ mod tests {
         let config = HBM25Config::new_temp(&env, &mut wtxn, "test_unique_id").unwrap();
 
         // Should be able to insert and search
-        config.insert_doc(&mut wtxn, 1u128, "test document").unwrap();
+        config
+            .insert_doc(&mut wtxn, 1u128, "test document")
+            .unwrap();
         wtxn.commit().unwrap();
 
         let rtxn = env.read_txn().unwrap();
@@ -1853,14 +1855,22 @@ mod tests {
         let arena = Bump::new();
 
         let props: HashMap<String, Value> = HashMap::from([
-            ("title".to_string(), Value::String("Test Document".to_string())),
-            ("content".to_string(), Value::String("This is content".to_string())),
+            (
+                "title".to_string(),
+                Value::String("Test Document".to_string()),
+            ),
+            (
+                "content".to_string(),
+                Value::String("This is content".to_string()),
+            ),
             ("count".to_string(), Value::I32(42)),
         ]);
 
         let props_map = ImmutablePropertiesMap::new(
             props.len(),
-            props.iter().map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+            props
+                .iter()
+                .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
             &arena,
         );
 

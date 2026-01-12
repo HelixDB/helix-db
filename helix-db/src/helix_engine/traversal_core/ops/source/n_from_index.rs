@@ -62,7 +62,7 @@ impl<
     where
         K: Into<Value> + Serialize + Clone,
     {
-        let db = self
+        let (db, _) = self
             .storage
             .secondary_indices
             .get(index)

@@ -17,7 +17,7 @@ use crate::{
             },
             traversal_value::TraversalValue,
         },
-        types::GraphError,
+        types::{GraphError, SecondaryIndex},
     },
     props,
     protocol::value::Value,
@@ -27,7 +27,8 @@ fn setup_indexed_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().to_str().unwrap();
     let mut config = crate::helix_engine::traversal_core::config::Config::default();
-    config.graph_config.as_mut().unwrap().secondary_indices = Some(vec!["name".to_string()]);
+    config.graph_config.as_mut().unwrap().secondary_indices =
+        Some(vec![SecondaryIndex::Index("name".to_string())]);
     let storage = HelixGraphStorage::new(db_path, config, Default::default()).unwrap();
     (temp_dir, Arc::new(storage))
 }
