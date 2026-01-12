@@ -218,15 +218,21 @@ impl<'arena> HVector<'arena> {
     }
 
     pub fn get_distance(&self) -> f32 {
-        self.distance.unwrap()
+        self.distance.unwrap_or(0_f32)
     }
 
     pub fn len(&self) -> usize {
-        self.data.as_ref().unwrap().vector.len()
+        match self.data.as_ref() {
+            Some(vec) => vec.len(),
+            None => 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data.as_ref().unwrap().vector.is_empty()
+        match self.data.as_ref() {
+            Some(vec) => vec.is_empty(),
+            None => true,
+        }
     }
 
     #[inline(always)]
@@ -406,7 +412,7 @@ impl VectorCore {
                 let reader = Reader::open(txn, index.id, self.hsnw)?;
                 reader.nns(k).by_vector(txn, query.as_slice(), arena)
             }
-            None => Ok(Searched::new(bumpalo::vec![in &arena])),
+            None => Err(VectorError::EntryPointNotFound),
         }
     }
 

@@ -87,7 +87,7 @@ fn test_stress_mixed_read_write_operations() {
                     .id();
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .add_edge("connects", None, id1, id2, false)
+                    .add_edge("connects", None, id1, id2, false, false)
                     .collect_to_obj()
                     .unwrap();
 

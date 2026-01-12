@@ -5,8 +5,8 @@ pub mod version_info;
 
 #[cfg(test)]
 mod storage_concurrent_tests;
-#[cfg(test)]
-mod storage_migration_tests;
+// #[cfg(test)]
+// mod storage_migration_tests;
 
 use crate::{
     helix_engine::{

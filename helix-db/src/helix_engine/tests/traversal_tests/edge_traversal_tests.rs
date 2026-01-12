@@ -278,7 +278,7 @@ fn test_vector_edges_roundtrip() {
         .unwrap()[0]
         .id();
     let vector_id = match G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<Filter>(&[1.0, 0.0, 0.0], "embedding", None)
+        .insert_v(&[1.0, 0.0, 0.0], "embedding", None)
         .collect_to_obj()
         .unwrap()
     {
