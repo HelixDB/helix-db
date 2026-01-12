@@ -268,13 +268,10 @@ impl Display for Step {
             Step::ToV(to_v) => write!(f, "{to_v}"),
             Step::PropertyFetch(property) => write!(f, "get_property({property})"),
             Step::ReservedPropertyAccess(prop) => match prop {
-                ReservedProp::Id => write!(
-                    f,
-                    "map(|item| item.map(|v| Value::from(uuid_str(v.id(), &arena))))"
-                ),
-                ReservedProp::Label => {
-                    write!(f, "map(|item| item.map(|v| Value::from(v.label())))")
+                ReservedProp::Id => {
+                    write!(f, "map(|item| Ok(Value::from(uuid_str(item.id, &arena))))")
                 }
+                ReservedProp::Label => write!(f, "map(|item| Ok(Value::from(item.label())))"),
                 // ReservedProp::Version => write!(f, "map(|item| Ok(Value::from(item.version)))"),
                 // ReservedProp::FromNode => write!(f, "map(|item| Ok(Value::from(uuid_str(item.from_node, &arena))))"),
                 // ReservedProp::ToNode => write!(f, "map(|item| Ok(Value::from(uuid_str(item.to_node, &arena))))"),
@@ -736,14 +733,14 @@ impl Display for ShortestPathDijkstras {
             WeightCalculation::Property(prop) => {
                 write!(
                     f,
-                    "|edge, _src_node, _dst_node| -> Result<f64, GraphError> {{ Ok(edge.get_property({})?.as_f64()?) }}",
+                    "|edge, _src_node, _dst_node| -> Result<f32, GraphError> {{ Ok(edge.get_property({})?.as_f32()?) }}",
                     prop
                 )?;
             }
             WeightCalculation::Expression(expr) => {
                 write!(
                     f,
-                    "|edge, src_node, dst_node| -> Result<f64, GraphError> {{ Ok({}) }}",
+                    "|edge, src_node, dst_node| -> Result<f32, GraphError> {{ Ok({}) }}",
                     expr
                 )?;
             }
@@ -798,14 +795,14 @@ impl Display for ShortestPathAStar {
             WeightCalculation::Property(prop) => {
                 write!(
                     f,
-                    "|edge, _src_node, _dst_node| -> Result<f64, GraphError> {{ Ok(edge.get_property({})?.as_f64()?) }}, ",
+                    "|edge, _src_node, _dst_node| -> Result<f32, GraphError> {{ Ok(edge.get_property({})?.as_f32()?) }}, ",
                     prop
                 )?;
             }
             WeightCalculation::Expression(expr) => {
                 write!(
                     f,
-                    "|edge, src_node, dst_node| -> Result<f64, GraphError> {{ Ok({}) }}, ",
+                    "|edge, src_node, dst_node| -> Result<f32, GraphError> {{ Ok({}) }}, ",
                     expr
                 )?;
             }
@@ -846,7 +843,7 @@ pub struct RerankRRF {
 impl Display for RerankRRF {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.k {
-            Some(k) => write!(f, "rerank(RRFReranker::with_k({k} as f64).unwrap(), None)"),
+            Some(k) => write!(f, "rerank(RRFReranker::with_k({k} as f32).unwrap(), None)"),
             None => write!(f, "rerank(RRFReranker::new(), None)"),
         }
     }

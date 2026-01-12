@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod integration_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bincode::Options;
@@ -250,7 +250,7 @@ mod integration_tests {
 
         let arena2 = Bump::new();
         let deserialized =
-            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id).unwrap();
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
         assert_vectors_semantically_equal(&vector, &deserialized);
     }
@@ -266,13 +266,13 @@ mod integration_tests {
             ("dimensions", Value::I32(3)),
         ];
 
-        let vector = create_arena_vector(&arena, id, "doc_vector", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "doc_vector", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
         let deserialized =
-            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id).unwrap();
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true).unwrap();
 
         assert_vectors_semantically_equal(&vector, &deserialized);
     }
@@ -305,14 +305,16 @@ mod integration_tests {
         let data_bytes1 = vector.vector_data_to_bytes().unwrap();
         let arena2 = Bump::new();
         let vector2 =
-            HVector::from_bincode_bytes(&arena2, Some(&props_bytes1), data_bytes1, id).unwrap();
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes1), data_bytes1, id, true)
+                .unwrap();
 
         // Second roundtrip
         let props_bytes2 = bincode::serialize(&vector2).unwrap();
         let data_bytes2 = vector2.vector_data_to_bytes().unwrap();
         let arena3 = Bump::new();
         let vector3 =
-            HVector::from_bincode_bytes(&arena3, Some(&props_bytes2), data_bytes2, id).unwrap();
+            HVector::from_bincode_bytes(&arena3, Some(&props_bytes2), data_bytes2, id, true)
+                .unwrap();
 
         assert_vectors_semantically_equal(&vector, &vector2);
         assert_vectors_semantically_equal(&vector2, &vector3);
@@ -326,7 +328,7 @@ mod integration_tests {
 
         let vectors: Vec<HVector> = (0..15)
             .map(|i| {
-                let data = vec![i as f64, (i + 1) as f64, (i + 2) as f64];
+                let data = vec![i as f32, (i + 1) as f32, (i + 2) as f32];
                 create_simple_vector(&arena, i as u128, &format!("vec_{}", i), &data)
             })
             .collect();
@@ -344,8 +346,13 @@ mod integration_tests {
         // Deserialize all
         let arena2 = Bump::new();
         for (i, (props_bytes, data_bytes)) in serialized.iter().enumerate() {
-            let result =
-                HVector::from_bincode_bytes(&arena2, Some(props_bytes), data_bytes, i as u128);
+            let result = HVector::from_bincode_bytes(
+                &arena2,
+                Some(props_bytes),
+                data_bytes,
+                i as u128,
+                true,
+            );
             assert!(result.is_ok());
         }
     }
@@ -401,8 +408,13 @@ mod integration_tests {
         let arena2 = Bump::new();
         let node_restored = Node::from_bincode_bytes(1, &node_bytes, &arena2);
         let edge_restored = Edge::from_bincode_bytes(2, &edge_bytes, &arena2);
-        let vector_restored =
-            HVector::from_bincode_bytes(&arena2, Some(&vector_props_bytes), vector_data_bytes, 3);
+        let vector_restored = HVector::from_bincode_bytes(
+            &arena2,
+            Some(&vector_props_bytes),
+            vector_data_bytes,
+            3,
+            true,
+        );
 
         assert!(node_restored.is_ok());
         assert!(edge_restored.is_ok());
@@ -623,7 +635,7 @@ mod integration_tests {
         let vector = create_simple_vector(&arena, id, "test", &data);
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
-        // Should be exactly 128 * 8 bytes (128 f64 values)
-        assert_eq!(data_bytes.len(), 128 * 8);
+        // Should be exactly 128 * 8 bytes (128 f32 values)
+        assert_eq!(data_bytes.len(), 128 * 4);
     }
 }

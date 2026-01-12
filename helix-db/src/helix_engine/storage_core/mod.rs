@@ -1,13 +1,12 @@
 pub mod graph_visualization;
 pub mod metadata;
 pub mod storage_methods;
-pub mod storage_migration;
 pub mod version_info;
 
 #[cfg(test)]
 mod storage_concurrent_tests;
-#[cfg(test)]
-mod storage_migration_tests;
+// #[cfg(test)]
+// mod storage_migration_tests;
 
 use crate::{
     helix_engine::{
@@ -18,10 +17,7 @@ use crate::{
         },
         traversal_core::config::Config,
         types::{GraphError, SecondaryIndex},
-        vector_core::{
-            hnsw::HNSW,
-            vector_core::{HNSWConfig, VectorCore},
-        },
+        vector_core::{HNSWConfig, VectorCore},
     },
     utils::{
         items::{Edge, Node},
@@ -175,7 +171,9 @@ impl HelixGraphStorage {
             }
         }
         let vector_config = config.get_vector_config();
-        let vectors = VectorCore::new(
+
+        // Initialize vector core with automatic migration support
+        let vectors = VectorCore::new_with_migration(
             &graph_env,
             &mut wtxn,
             HNSWConfig::new(
@@ -198,7 +196,7 @@ impl HelixGraphStorage {
 
         wtxn.commit()?;
 
-        let mut storage = Self {
+        let storage = Self {
             graph_env,
             nodes_db,
             edges_db,
@@ -211,8 +209,6 @@ impl HelixGraphStorage {
             storage_config,
             version_info,
         };
-
-        storage_migration::migrate(&mut storage)?;
 
         Ok(storage)
     }
@@ -501,7 +497,6 @@ impl StorageMethods for HelixGraphStorage {
     }
 
     fn drop_vector(&self, txn: &mut RwTxn, id: &u128) -> Result<(), GraphError> {
-        let arena = bumpalo::Bump::new();
         let mut edges = HashSet::new();
         let mut out_edges = HashSet::new();
         let mut in_edges = HashSet::new();
@@ -538,9 +533,6 @@ impl StorageMethods for HelixGraphStorage {
             other_out_edges.push((from_node_id, label, edge_id));
         }
 
-        // println!("In edges: {}", in_edges.len());
-
-        // println!("Deleting edges: {}", );
         // Delete all related data
         for edge in edges {
             self.edges_db.delete(txn, Self::edge_key(&edge))?;
@@ -570,8 +562,89 @@ impl StorageMethods for HelixGraphStorage {
         }
 
         // Delete vector data
-        self.vectors.delete(txn, *id, &arena)?;
+        self.vectors.delete(txn, *id)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod startup_migration_tests {
+    use super::*;
+    use crate::helix_engine::storage_core::version_info::VersionInfo;
+    use crate::helix_engine::traversal_core::config::Config;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_startup_with_migration() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+
+        // Create a basic config
+        let config = Config::default();
+        let version_info = VersionInfo::default();
+
+        // First startup - should work without migration
+        let storage = HelixGraphStorage::new(db_path, config.clone(), version_info.clone());
+        assert!(storage.is_ok());
+
+        let storage = storage.unwrap();
+        assert_eq!(storage.vectors.num_inserted_vectors(), 0);
+    }
+
+    #[test]
+    fn test_startup_with_old_vector_database() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+
+        // Create database directory
+        std::fs::create_dir_all(db_path).unwrap();
+
+        // Create environment and old database structure
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(1024 * 1024 * 1024)
+                .max_dbs(200)
+                .open(Path::new(db_path))
+                .unwrap()
+        };
+
+        let mut wtxn = env.write_txn().unwrap();
+
+        // Create old vector database structure (empty but with correct names)
+        let _old_vectors = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name("vectors")
+            .create(&mut wtxn)
+            .unwrap();
+
+        let _old_data = env
+            .database_options()
+            .types::<U128<BE>, Bytes>()
+            .name("vector_data")
+            .create(&mut wtxn)
+            .unwrap();
+
+        let _old_edges = env
+            .database_options()
+            .types::<Bytes, Unit>()
+            .name("hnsw_out_nodes")
+            .create(&mut wtxn)
+            .unwrap();
+
+        wtxn.commit().unwrap();
+        drop(env); // Close environment
+
+        // Now try to create HelixGraphStorage - should detect and migrate
+        let config = Config::default();
+        let version_info = VersionInfo::default();
+
+        let storage = HelixGraphStorage::new(db_path, config, version_info);
+        assert!(storage.is_ok());
+
+        let storage = storage.unwrap();
+        // After migration, vector count should be 0 (empty old database)
+        assert_eq!(storage.vectors.num_inserted_vectors(), 0);
     }
 }

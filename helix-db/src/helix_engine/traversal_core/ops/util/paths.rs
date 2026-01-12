@@ -22,23 +22,23 @@ pub fn default_weight_fn<'arena>(
     edge: &Edge<'arena>,
     _src_node: &Node<'arena>,
     _dst_node: &Node<'arena>,
-) -> Result<f64, GraphError> {
+) -> Result<f32, GraphError> {
     Ok(edge
         .properties
         .as_ref()
         .and_then(|props| props.get("weight"))
         .and_then(|w| match w {
-            Value::F32(f) => Some(*f as f64),
-            Value::F64(f) => Some(*f),
-            Value::I8(i) => Some(*i as f64),
-            Value::I16(i) => Some(*i as f64),
-            Value::I32(i) => Some(*i as f64),
-            Value::I64(i) => Some(*i as f64),
-            Value::U8(i) => Some(*i as f64),
-            Value::U16(i) => Some(*i as f64),
-            Value::U32(i) => Some(*i as f64),
-            Value::U64(i) => Some(*i as f64),
-            Value::U128(i) => Some(*i as f64),
+            Value::F32(f) => Some(*f),
+            Value::F64(f) => Some(*f as f32),
+            Value::I8(i) => Some(*i as f32),
+            Value::I16(i) => Some(*i as f32),
+            Value::I32(i) => Some(*i as f32),
+            Value::I64(i) => Some(*i as f32),
+            Value::U8(i) => Some(*i as f32),
+            Value::U16(i) => Some(*i as f32),
+            Value::U32(i) => Some(*i as f32),
+            Value::U64(i) => Some(*i as f32),
+            Value::U128(i) => Some(*i as f32),
             _ => None,
         })
         .unwrap_or(1.0))
@@ -49,22 +49,22 @@ pub fn default_weight_fn<'arena>(
 pub fn property_heuristic<'arena>(
     node: &Node<'arena>,
     property_name: &str,
-) -> Result<f64, GraphError> {
+) -> Result<f32, GraphError> {
     node.properties
         .as_ref()
         .and_then(|props| props.get(property_name))
         .and_then(|v| match v {
-            Value::F64(f) => Some(*f),
-            Value::F32(f) => Some(*f as f64),
-            Value::I64(i) => Some(*i as f64),
-            Value::I32(i) => Some(*i as f64),
-            Value::I16(i) => Some(*i as f64),
-            Value::I8(i) => Some(*i as f64),
-            Value::U128(i) => Some(*i as f64),
-            Value::U64(i) => Some(*i as f64),
-            Value::U32(i) => Some(*i as f64),
-            Value::U16(i) => Some(*i as f64),
-            Value::U8(i) => Some(*i as f64),
+            Value::F32(f) => Some(*f),
+            Value::F64(f) => Some(*f as f32),
+            Value::I64(i) => Some(*i as f32),
+            Value::I32(i) => Some(*i as f32),
+            Value::I16(i) => Some(*i as f32),
+            Value::I8(i) => Some(*i as f32),
+            Value::U128(i) => Some(*i as f32),
+            Value::U64(i) => Some(*i as f32),
+            Value::U32(i) => Some(*i as f32),
+            Value::U16(i) => Some(*i as f32),
+            Value::U8(i) => Some(*i as f32),
             _ => None,
         })
         .ok_or_else(|| {
@@ -94,12 +94,12 @@ pub struct ShortestPathIterator<
     'txn,
     I,
     F,
-    H = fn(&Node<'arena>) -> Result<f64, GraphError>,
+    H = fn(&Node<'arena>) -> Result<f32, GraphError>,
 > where
     'db: 'arena,
     'arena: 'txn,
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
+    H: Fn(&Node<'arena>) -> Result<f32, GraphError>,
 {
     pub arena: &'arena bumpalo::Bump,
     pub iter: I,
@@ -115,7 +115,7 @@ pub struct ShortestPathIterator<
 #[derive(Debug, Clone)]
 struct DijkstraState {
     node_id: u128,
-    distance: f64,
+    distance: f32,
 }
 
 impl Eq for DijkstraState {}
@@ -145,8 +145,8 @@ impl PartialOrd for DijkstraState {
 #[derive(Debug, Clone)]
 struct AStarState {
     node_id: u128,
-    g_score: f64,
-    f_score: f64,
+    g_score: f32,
+    f_score: f32,
 }
 
 impl Eq for AStarState {}
@@ -179,8 +179,8 @@ impl<
     'arena: 'txn,
     'txn,
     I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
+    H: Fn(&Node<'arena>) -> Result<f32, GraphError>,
 > Iterator for ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
 {
     type Item = Result<TraversalValue<'arena>, GraphError>;
@@ -208,8 +208,8 @@ impl<
 
 impl<'db, 'arena, 'txn, I, F, H> ShortestPathIterator<'db, 'arena, 'txn, I, F, H>
 where
-    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-    H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+    F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
+    H: Fn(&Node<'arena>) -> Result<f32, GraphError>,
 {
     fn reconstruct_path(
         &self,
@@ -405,7 +405,7 @@ where
         };
 
         let mut heap = BinaryHeap::new();
-        let mut g_scores: HashMap<u128, f64> = HashMap::with_capacity(64);
+        let mut g_scores: HashMap<u128, f32> = HashMap::with_capacity(64);
         let mut parent: HashMap<u128, (u128, u128)> = HashMap::with_capacity(32);
 
         // Calculate initial heuristic for start node
@@ -550,7 +550,7 @@ pub trait ShortestPathAdapter<'db, 'arena, 'txn, 's, I>:
             'arena,
             'txn,
             I,
-            fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+            fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
         >,
     >;
 
@@ -563,7 +563,7 @@ pub trait ShortestPathAdapter<'db, 'arena, 'txn, 's, I>:
         weight_fn: F,
     ) -> RoTraversalIterator<'db, 'arena, 'txn, ShortestPathIterator<'db, 'arena, 'txn, I, F>>
     where
-        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>;
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>;
 
     fn shortest_path_astar<F, H>(
         self,
@@ -574,8 +574,8 @@ pub trait ShortestPathAdapter<'db, 'arena, 'txn, 's, I>:
         heuristic_fn: H,
     ) -> RoTraversalIterator<'db, 'arena, 'txn, ShortestPathIterator<'db, 'arena, 'txn, I, F, H>>
     where
-        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-        H: Fn(&Node<'arena>) -> Result<f64, GraphError>;
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
+        H: Fn(&Node<'arena>) -> Result<f32, GraphError>;
 }
 
 impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
@@ -596,7 +596,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             'arena,
             'txn,
             I,
-            fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+            fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
         >,
     > {
         self.shortest_path_with_algorithm(
@@ -618,7 +618,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         weight_fn: F,
     ) -> RoTraversalIterator<'db, 'arena, 'txn, ShortestPathIterator<'db, 'arena, 'txn, I, F>>
     where
-        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
     {
         RoTraversalIterator {
             arena: self.arena,
@@ -652,8 +652,8 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         heuristic_fn: H,
     ) -> RoTraversalIterator<'db, 'arena, 'txn, ShortestPathIterator<'db, 'arena, 'txn, I, F, H>>
     where
-        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f64, GraphError>,
-        H: Fn(&Node<'arena>) -> Result<f64, GraphError>,
+        F: Fn(&Edge<'arena>, &Node<'arena>, &Node<'arena>) -> Result<f32, GraphError>,
+        H: Fn(&Node<'arena>) -> Result<f32, GraphError>,
     {
         RoTraversalIterator {
             arena: self.arena,

@@ -90,7 +90,7 @@ impl Query {
 
             for (i, _) in self.hoisted_embedding_calls.iter().enumerate() {
                 let name = EmbedData::name_from_index(i);
-                writeln!(f, "let {name}: Vec<f64> = {name}?;")?;
+                writeln!(f, "let {name}: Vec<f32> = {name}?;")?;
             }
         }
         Ok(())

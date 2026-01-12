@@ -26,7 +26,7 @@ use crate::helix_engine::traversal_core::config::Config;
 use crate::helix_engine::traversal_core::ops::g::G;
 use crate::helix_engine::traversal_core::ops::vectors::insert::InsertVAdapter;
 use crate::helix_engine::traversal_core::ops::vectors::search::SearchVAdapter;
-use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::vector_core::HVector;
 
 type Filter = fn(&HVector, &RoTxn) -> bool;
 
@@ -45,7 +45,7 @@ fn setup_concurrent_storage() -> (Arc<HelixGraphStorage>, TempDir) {
 }
 
 /// Generate a random vector of given dimensionality
-fn random_vector(dim: usize) -> Vec<f64> {
+fn random_vector(dim: usize) -> Vec<f32> {
     (0..dim)
         .map(|_| rand::rng().random_range(0.0..1.0))
         .collect()
@@ -84,7 +84,7 @@ fn test_concurrent_inserts_single_label() {
 
                     // Insert using G::new_mut
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .insert_v::<Filter>(data, "concurrent_test", None)
+                        .insert_v(data, "concurrent_test", None)
                         .collect::<Result<Vec<_>, _>>()
                         .expect("Insert should succeed");
                     wtxn.commit().expect("Commit should succeed");
@@ -100,10 +100,10 @@ fn test_concurrent_inserts_single_label() {
 
     // Verify: All vectors should be inserted and graph should be consistent
     let rtxn = storage.graph_env.read_txn().unwrap();
-    let count = storage.vectors.num_inserted_vectors(&rtxn).unwrap();
+    let count = storage.vectors.num_inserted_vectors();
 
     // Note: count includes entry point (+1), so actual vectors inserted = count - 1
-    let expected_inserted = (num_threads * vectors_per_thread) as u64;
+    let expected_inserted = num_threads * vectors_per_thread;
     assert!(
         count == expected_inserted || count == expected_inserted + 1,
         "Expected {} or {} vectors (with entry point), found {}",
@@ -144,7 +144,7 @@ fn test_concurrent_searches_during_inserts() {
             let vector = random_vector(128);
             let data = arena.alloc_slice_copy(&vector);
             G::new_mut(&storage, &arena, &mut txn)
-                .insert_v::<Filter>(data, "search_test", None)
+                .insert_v(data, "search_test", None)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
         }
@@ -228,7 +228,7 @@ fn test_concurrent_searches_during_inserts() {
                 let data = arena.alloc_slice_copy(&vector);
 
                 G::new_mut(&storage, &arena, &mut wtxn)
-                    .insert_v::<Filter>(data, "search_test", None)
+                    .insert_v(data, "search_test", None)
                     .collect::<Result<Vec<_>, _>>()
                     .expect("Insert should succeed");
                 wtxn.commit().expect("Commit should succeed");
@@ -245,7 +245,7 @@ fn test_concurrent_searches_during_inserts() {
 
     // Final verification
     let rtxn = storage.graph_env.read_txn().unwrap();
-    let final_count = storage.vectors.num_inserted_vectors(&rtxn).unwrap();
+    let final_count = storage.vectors.num_inserted_vectors();
 
     assert!(
         final_count >= 50,
@@ -298,7 +298,7 @@ fn test_concurrent_inserts_multiple_labels() {
                     let label_ref = arena.alloc_str(&label);
 
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .insert_v::<Filter>(data, label_ref, None)
+                        .insert_v(data, label_ref, None)
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
                     wtxn.commit().unwrap();
@@ -335,8 +335,8 @@ fn test_concurrent_inserts_multiple_labels() {
         );
     }
 
-    let total_count = storage.vectors.num_inserted_vectors(&rtxn).unwrap();
-    let expected_total = (num_labels * vectors_per_label) as u64;
+    let total_count = storage.vectors.num_inserted_vectors();
+    let expected_total = num_labels * vectors_per_label;
     assert!(
         total_count == expected_total || total_count == expected_total + 1,
         "Expected {} or {} vectors (with entry point), found {}",
@@ -379,7 +379,7 @@ fn test_entry_point_consistency() {
                     let data = arena.alloc_slice_copy(&vector);
 
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .insert_v::<Filter>(data, "entry_test", None)
+                        .insert_v(data, "entry_test", None)
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
                     wtxn.commit().unwrap();
@@ -418,8 +418,10 @@ fn test_entry_point_consistency() {
             result
         {
             assert!(v.id > 0, "Result ID should be valid");
-            assert!(!v.deleted, "Results should not be deleted");
-            assert!(!v.data.is_empty(), "Results should have data");
+            assert!(
+                !v.data.as_ref().unwrap().is_empty(),
+                "Results should have data"
+            );
         }
     }
 }
@@ -454,7 +456,7 @@ fn test_graph_connectivity_after_concurrent_inserts() {
                     let data = arena.alloc_slice_copy(&vector);
 
                     G::new_mut(&storage, &arena, &mut wtxn)
-                        .insert_v::<Filter>(data, "connectivity_test", None)
+                        .insert_v(data, "connectivity_test", None)
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
                     wtxn.commit().unwrap();
@@ -518,7 +520,7 @@ fn test_transaction_isolation() {
             let vector = random_vector(32);
             let data = arena.alloc_slice_copy(&vector);
             G::new_mut(&storage, &arena, &mut txn)
-                .insert_v::<Filter>(data, "isolation_test", None)
+                .insert_v(data, "isolation_test", None)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
         }
@@ -527,7 +529,7 @@ fn test_transaction_isolation() {
 
     // Start a long-lived read transaction
     let rtxn = storage.graph_env.read_txn().unwrap();
-    let count_before = storage.vectors.num_inserted_vectors(&rtxn).unwrap();
+    let count_before = storage.vectors.num_inserted_vectors();
 
     // Entry point may be included in count (+1)
     assert!(
@@ -548,7 +550,7 @@ fn test_transaction_isolation() {
             let vector = random_vector(32);
             let data = arena.alloc_slice_copy(&vector);
             G::new_mut(&storage_clone, &arena, &mut wtxn)
-                .insert_v::<Filter>(data, "isolation_test", None)
+                .insert_v(data, "isolation_test", None)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             wtxn.commit().unwrap();
@@ -558,7 +560,7 @@ fn test_transaction_isolation() {
     handle.join().unwrap();
 
     // Original read transaction should still see the same count (snapshot isolation)
-    let count_after = storage.vectors.num_inserted_vectors(&rtxn).unwrap();
+    let count_after = storage.vectors.num_inserted_vectors();
     assert_eq!(
         count_after, count_before,
         "Read transaction should see consistent snapshot"
@@ -567,8 +569,7 @@ fn test_transaction_isolation() {
     // New read transaction should see new vectors
     drop(rtxn);
 
-    let rtxn_new = storage.graph_env.read_txn().unwrap();
-    let count_new = storage.vectors.num_inserted_vectors(&rtxn_new).unwrap();
+    let count_new = storage.vectors.num_inserted_vectors();
 
     // Entry point may be included in counts (+1)
     let expected_new = initial_count + 20;

@@ -1,3 +1,4 @@
+use serial_test::serial;
 /// Concurrent access tests for Storage Layer
 ///
 /// This test suite validates thread safety and concurrent operation correctness
@@ -11,7 +12,6 @@
 /// - Drop operations are multi-step (not atomic) - could leave orphans
 /// - LMDB provides single-writer guarantee but needs validation
 /// - MVCC snapshot isolation needs verification
-use serial_test::serial;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;

@@ -5,9 +5,9 @@ use crate::metrics_sender::MetricsSender;
 use crate::project::{ProjectContext, get_helix_repo_cache};
 use crate::prompts;
 use crate::utils::{
-    Spinner, copy_dir_recursive_excluding, diagnostic_source,
-    helixc_utils::{collect_hx_contents, collect_hx_files},
-    print_confirm, print_error, print_status, print_success, print_warning,
+    Spinner, copy_dir_recursive_excluding, diagnostic_source, helixc_utils::collect_hx_contents,
+    helixc_utils::collect_hx_files, print_confirm, print_error, print_status, print_success,
+    print_warning,
 };
 use eyre::Result;
 use std::time::Instant;

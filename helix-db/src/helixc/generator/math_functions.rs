@@ -31,7 +31,7 @@ pub struct MathFunctionCallGen {
 
 #[derive(Debug, Clone)]
 pub struct NumericLiteral {
-    pub value: f64,
+    pub value: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -54,10 +54,10 @@ impl Display for MathExpr {
 impl Display for NumericLiteral {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Handle special formatting for cleaner output
-        if self.value.fract() == 0.0 && self.value.abs() < i64::MAX as f64 {
-            write!(f, "{}_f64", self.value as i64)
+        if self.value.fract() == 0.0 && self.value.abs() < i64::MAX as f32 {
+            write!(f, "{}_f32", self.value as i64)
         } else {
-            write!(f, "{}_f64", self.value)
+            write!(f, "{}_f32", self.value)
         }
     }
 }
@@ -68,28 +68,28 @@ impl Display for PropertyAccess {
             PropertyContext::Edge => {
                 write!(
                     f,
-                    "(edge.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    "(edge.get_property({}).ok_or(GraphError::Default)?.as_f32())",
                     self.property
                 )
             }
             PropertyContext::SourceNode => {
                 write!(
                     f,
-                    "(src_node.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    "(src_node.get_property({}).ok_or(GraphError::Default)?.as_f32())",
                     self.property
                 )
             }
             PropertyContext::TargetNode => {
                 write!(
                     f,
-                    "(dst_node.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    "(dst_node.get_property({}).ok_or(GraphError::Default)?.as_f32())",
                     self.property
                 )
             }
             PropertyContext::Current => {
                 write!(
                     f,
-                    "(v.get_property({}).ok_or(GraphError::Default)?.as_f64())",
+                    "(v.get_property({}).ok_or(GraphError::Default)?.as_f32())",
                     self.property
                 )
             }
@@ -239,8 +239,8 @@ impl Display for MathFunctionCallGen {
             }
 
             // Constants (nullary)
-            MathFunction::Pi => write!(f, "std::f64::consts::PI"),
-            MathFunction::E => write!(f, "std::f64::consts::E"),
+            MathFunction::Pi => write!(f, "std::f32::consts::PI"),
+            MathFunction::E => write!(f, "std::f32::consts::E"),
 
             // Aggregates (special handling needed)
             MathFunction::Min
@@ -286,7 +286,7 @@ pub fn generate_math_expr(
             }))
         }
         ExpressionType::IntegerLiteral(i) => Ok(MathExpr::NumericLiteral(NumericLiteral {
-            value: *i as f64,
+            value: *i as f32,
         })),
         ExpressionType::FloatLiteral(f) => {
             Ok(MathExpr::NumericLiteral(NumericLiteral { value: *f }))
@@ -376,13 +376,13 @@ mod tests {
     #[test]
     fn test_numeric_literal_integer() {
         let lit = NumericLiteral { value: 5.0 };
-        assert_eq!(lit.to_string(), "5_f64");
+        assert_eq!(lit.to_string(), "5_f32");
     }
 
     #[test]
     fn test_numeric_literal_float() {
         let lit = NumericLiteral { value: 3.14 };
-        assert_eq!(lit.to_string(), "3.14_f64");
+        assert_eq!(lit.to_string(), "3.14_f32");
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 3.0 }),
             ],
         };
-        assert_eq!(add.to_string(), "(5_f64 + 3_f64)");
+        assert_eq!(add.to_string(), "(5_f32 + 3_f32)");
     }
 
     #[test]
@@ -406,7 +406,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 30.0 }),
             ],
         };
-        assert_eq!(pow.to_string(), "(0.95_f64).powf(30_f64)");
+        assert_eq!(pow.to_string(), "(0.95_f32).powf(30_f32)");
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
                 }),
             ],
         };
-        assert_eq!(nested.to_string(), "(0.95_f64).powf((10_f64 / 30_f64))");
+        assert_eq!(nested.to_string(), "(0.95_f32).powf((10_f32 / 30_f32))");
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
             function: MathFunction::Sqrt,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 16.0 })],
         };
-        assert_eq!(sqrt.to_string(), "(16_f64).sqrt()");
+        assert_eq!(sqrt.to_string(), "(16_f32).sqrt()");
     }
 
     #[test]
@@ -442,7 +442,7 @@ mod tests {
             function: MathFunction::Sin,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.57 })],
         };
-        assert_eq!(sin.to_string(), "(1.57_f64).sin()");
+        assert_eq!(sin.to_string(), "(1.57_f32).sin()");
     }
 
     #[test]
@@ -451,13 +451,13 @@ mod tests {
             function: MathFunction::Pi,
             args: vec![],
         };
-        assert_eq!(pi.to_string(), "std::f64::consts::PI");
+        assert_eq!(pi.to_string(), "std::f32::consts::PI");
 
         let e = MathFunctionCallGen {
             function: MathFunction::E,
             args: vec![],
         };
-        assert_eq!(e.to_string(), "std::f64::consts::E");
+        assert_eq!(e.to_string(), "std::f32::consts::E");
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
         };
         assert_eq!(
             edge_prop.to_string(),
-            "(edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64())"
+            "(edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f32())"
         );
 
         // Test SourceNode context
@@ -479,7 +479,7 @@ mod tests {
         };
         assert_eq!(
             src_prop.to_string(),
-            "(src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f64())"
+            "(src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f32())"
         );
 
         // Test TargetNode context
@@ -489,14 +489,14 @@ mod tests {
         };
         assert_eq!(
             dst_prop.to_string(),
-            "(dst_node.get_property(\"popularity\").ok_or(GraphError::Default)?.as_f64())"
+            "(dst_node.get_property(\"popularity\").ok_or(GraphError::Default)?.as_f32())"
         );
     }
 
     #[test]
     fn test_complex_weight_expression() {
         // Test: MUL(_::{distance}, POW(0.95, DIV(_::{days}, 30)))
-        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f64()) * (0.95_f64).powf(((edge.get_property("days").ok_or(GraphError::Default)?.as_f64()) / 30_f64)))
+        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f32()) * (0.95_f32).powf(((edge.get_property("days").ok_or(GraphError::Default)?.as_f32()) / 30_f32)))
         let expr = MathFunctionCallGen {
             function: MathFunction::Mul,
             args: vec![
@@ -525,14 +525,14 @@ mod tests {
 
         assert_eq!(
             expr.to_string(),
-            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64()) * (0.95_f64).powf(((edge.get_property(\"days\").ok_or(GraphError::Default)?.as_f64()) / 30_f64)))"
+            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f32()) * (0.95_f32).powf(((edge.get_property(\"days\").ok_or(GraphError::Default)?.as_f32()) / 30_f32)))"
         );
     }
 
     #[test]
     fn test_multi_context_expression() {
         // Test: MUL(_::{distance}, _::From::{traffic_factor})
-        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f64()) * (src_node.get_property("traffic_factor").ok_or(GraphError::Default)?.as_f64()))
+        // Should generate: ((edge.get_property("distance").ok_or(GraphError::Default)?.as_f32()) * (src_node.get_property("traffic_factor").ok_or(GraphError::Default)?.as_f32()))
         let expr = MathFunctionCallGen {
             function: MathFunction::Mul,
             args: vec![
@@ -549,7 +549,7 @@ mod tests {
 
         assert_eq!(
             expr.to_string(),
-            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f64()) * (src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f64()))"
+            "((edge.get_property(\"distance\").ok_or(GraphError::Default)?.as_f32()) * (src_node.get_property(\"traffic_factor\").ok_or(GraphError::Default)?.as_f32()))"
         );
     }
 
@@ -566,7 +566,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 5.0 }),
             ],
         };
-        assert_eq!(modulo.to_string(), "(17_f64) % (5_f64)");
+        assert_eq!(modulo.to_string(), "(17_f32) % (5_f32)");
     }
 
     #[test]
@@ -575,7 +575,7 @@ mod tests {
             function: MathFunction::Abs,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: -5.5 })],
         };
-        assert_eq!(abs.to_string(), "(-5.5_f64).abs()");
+        assert_eq!(abs.to_string(), "(-5.5_f32).abs()");
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
             function: MathFunction::Ln,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 2.71828 })],
         };
-        assert_eq!(ln.to_string(), "(2.71828_f64).ln()");
+        assert_eq!(ln.to_string(), "(2.71828_f32).ln()");
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
             function: MathFunction::Log10,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 100.0 })],
         };
-        assert_eq!(log10.to_string(), "(100_f64).log10()");
+        assert_eq!(log10.to_string(), "(100_f32).log10()");
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 2.0 }),
             ],
         };
-        assert_eq!(log.to_string(), "(8_f64).log(2_f64)");
+        assert_eq!(log.to_string(), "(8_f32).log(2_f32)");
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
             function: MathFunction::Exp,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.0 })],
         };
-        assert_eq!(exp.to_string(), "(1_f64).exp()");
+        assert_eq!(exp.to_string(), "(1_f32).exp()");
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
             function: MathFunction::Ceil,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.3 })],
         };
-        assert_eq!(ceil.to_string(), "(4.3_f64).ceil()");
+        assert_eq!(ceil.to_string(), "(4.3_f32).ceil()");
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
             function: MathFunction::Floor,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.9 })],
         };
-        assert_eq!(floor.to_string(), "(4.9_f64).floor()");
+        assert_eq!(floor.to_string(), "(4.9_f32).floor()");
     }
 
     #[test]
@@ -641,7 +641,7 @@ mod tests {
             function: MathFunction::Round,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 4.5 })],
         };
-        assert_eq!(round.to_string(), "(4.5_f64).round()");
+        assert_eq!(round.to_string(), "(4.5_f32).round()");
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
             function: MathFunction::Asin,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.5 })],
         };
-        assert_eq!(asin.to_string(), "(0.5_f64).asin()");
+        assert_eq!(asin.to_string(), "(0.5_f32).asin()");
     }
 
     #[test]
@@ -659,7 +659,7 @@ mod tests {
             function: MathFunction::Acos,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.5 })],
         };
-        assert_eq!(acos.to_string(), "(0.5_f64).acos()");
+        assert_eq!(acos.to_string(), "(0.5_f32).acos()");
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
             function: MathFunction::Atan,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 1.0 })],
         };
-        assert_eq!(atan.to_string(), "(1_f64).atan()");
+        assert_eq!(atan.to_string(), "(1_f32).atan()");
     }
 
     #[test]
@@ -680,7 +680,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 1.0 }),
             ],
         };
-        assert_eq!(atan2.to_string(), "(1_f64).atan2(1_f64)");
+        assert_eq!(atan2.to_string(), "(1_f32).atan2(1_f32)");
     }
 
     #[test]
@@ -692,7 +692,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 3.0 }),
             ],
         };
-        assert_eq!(sub.to_string(), "(10_f64 - 3_f64)");
+        assert_eq!(sub.to_string(), "(10_f32 - 3_f32)");
     }
 
     #[test]
@@ -704,7 +704,7 @@ mod tests {
                 MathExpr::NumericLiteral(NumericLiteral { value: 4.0 }),
             ],
         };
-        assert_eq!(div.to_string(), "(20_f64 / 4_f64)");
+        assert_eq!(div.to_string(), "(20_f32 / 4_f32)");
     }
 
     #[test]
@@ -713,7 +713,7 @@ mod tests {
             function: MathFunction::Cos,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.0 })],
         };
-        assert_eq!(cos.to_string(), "(0_f64).cos()");
+        assert_eq!(cos.to_string(), "(0_f32).cos()");
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
             function: MathFunction::Tan,
             args: vec![MathExpr::NumericLiteral(NumericLiteral { value: 0.785 })],
         };
-        assert_eq!(tan.to_string(), "(0.785_f64).tan()");
+        assert_eq!(tan.to_string(), "(0.785_f32).tan()");
     }
 
     #[test]
@@ -733,7 +733,7 @@ mod tests {
         };
         assert_eq!(
             current_prop.to_string(),
-            "(v.get_property(\"score\").ok_or(GraphError::Default)?.as_f64())"
+            "(v.get_property(\"score\").ok_or(GraphError::Default)?.as_f32())"
         );
     }
 

@@ -22,14 +22,10 @@ use crate::{
             traversal_value::TraversalValue,
         },
         types::GraphError,
-        vector_core::vector::HVector,
     },
     props,
     protocol::value::Value,
 };
-use heed3::RoTxn;
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
@@ -282,12 +278,11 @@ fn test_vector_edges_roundtrip() {
         .unwrap()[0]
         .id();
     let vector_id = match G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<Filter>(&[1.0, 0.0, 0.0], "embedding", None)
+        .insert_v(&[1.0, 0.0, 0.0], "embedding", None)
         .collect_to_obj()
         .unwrap()
     {
         TraversalValue::Vector(vector) => vector.id,
-        TraversalValue::VectorNodeWithoutVectorData(vector) => *vector.id(),
         other => panic!("unexpected traversal value: {other:?}"),
     };
     G::new_mut(&storage, &arena, &mut txn)
@@ -305,8 +300,7 @@ fn test_vector_edges_roundtrip() {
         .unwrap();
     assert_eq!(vectors.len(), 1);
     match &vectors[0] {
-        TraversalValue::Vector(vec) => assert_eq!(*vec.id(), vector_id),
-        TraversalValue::VectorNodeWithoutVectorData(vec) => assert_eq!(*vec.id(), vector_id),
+        TraversalValue::Vector(vec) => assert_eq!(vec.id, vector_id),
         other => panic!("unexpected traversal value: {other:?}"),
     }
 }

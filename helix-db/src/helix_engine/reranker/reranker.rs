@@ -55,7 +55,7 @@ pub trait Reranker: Send + Sync {
 ///
 /// This handles the different types (Node, Edge, Vector) and extracts
 /// their associated score/distance value.
-pub fn extract_score(item: &TraversalValue) -> RerankerResult<f64> {
+pub fn extract_score(item: &TraversalValue) -> RerankerResult<f32> {
     match item {
         TraversalValue::Vector(v) => Ok(v.score()),
         TraversalValue::NodeWithScore { score, .. } => Ok(*score),
@@ -71,7 +71,7 @@ pub fn extract_score(item: &TraversalValue) -> RerankerResult<f64> {
 ///
 /// This modifies the distance/score field of the item to reflect
 /// the new reranked score.
-pub fn update_score(item: &mut TraversalValue, new_score: f64) -> RerankerResult<()> {
+pub fn update_score(item: &mut TraversalValue, new_score: f32) -> RerankerResult<()> {
     match item {
         TraversalValue::Vector(v) => {
             v.distance = Some(new_score);

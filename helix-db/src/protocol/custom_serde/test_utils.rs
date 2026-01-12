@@ -5,7 +5,9 @@
 
 #![cfg(test)]
 
-use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::vector_core::HVector;
+use crate::helix_engine::vector_core::distance::Cosine;
+use crate::helix_engine::vector_core::node::Item;
 use crate::protocol::value::Value;
 use crate::utils::items::{Edge, Node};
 use crate::utils::properties::ImmutablePropertiesMap;
@@ -224,24 +226,23 @@ pub fn create_arena_vector<'arena>(
     id: u128,
     label: &str,
     version: u8,
-    deleted: bool,
-    level: usize,
-    data: &[f64],
+    data: &[f32],
     props: Vec<(&str, Value)>,
 ) -> HVector<'arena> {
     let label_ref = arena.alloc_str(label);
-    let data_ref = arena.alloc_slice_copy(data);
+
+    let mut bump_vec = bumpalo::collections::Vec::new_in(arena);
+    bump_vec.extend_from_slice(data);
 
     if props.is_empty() {
         HVector {
             id,
             label: label_ref,
             version,
-            deleted,
-            level,
             distance: None,
-            data: data_ref,
+            data: Some(Item::<Cosine>::from_vec(bump_vec)),
             properties: None,
+            level: None,
         }
     } else {
         let len = props.len();
@@ -255,11 +256,10 @@ pub fn create_arena_vector<'arena>(
             id,
             label: label_ref,
             version,
-            deleted,
-            level,
             distance: None,
-            data: data_ref,
+            data: Some(Item::<Cosine>::from_vec(bump_vec)),
             properties: Some(props_map),
+            level: None,
         }
     }
 }
@@ -269,13 +269,13 @@ pub fn create_simple_vector<'arena>(
     arena: &'arena Bump,
     id: u128,
     label: &str,
-    data: &[f64],
+    data: &[f32],
 ) -> HVector<'arena> {
-    create_arena_vector(arena, id, label, 1, false, 0, data, vec![])
+    create_arena_vector(arena, id, label, 1, data, vec![])
 }
 
 /// Creates vector data as raw bytes
-pub fn create_vector_bytes(data: &[f64]) -> Vec<u8> {
+pub fn create_vector_bytes(data: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(data).to_vec()
 }
 
@@ -437,11 +437,15 @@ pub fn assert_vectors_semantically_equal(vec1: &HVector, vec2: &HVector) {
     assert_eq!(vec1.id, vec2.id, "Vector IDs differ");
     assert_eq!(vec1.label, vec2.label, "Vector labels differ");
     assert_eq!(vec1.version, vec2.version, "Vector versions differ");
-    assert_eq!(vec1.deleted, vec2.deleted, "Vector deleted flags differ");
-    assert_eq!(vec1.data.len(), vec2.data.len(), "Vector dimensions differ");
+    assert_eq!(vec1.len(), vec2.len(), "Vector dimensions differ");
 
     // Compare vector data with floating point tolerance
-    for (i, (v1, v2)) in vec1.data.iter().zip(vec2.data.iter()).enumerate() {
+    for (i, (v1, v2)) in vec1
+        .data_borrowed()
+        .iter()
+        .zip(vec2.data_borrowed().iter())
+        .enumerate()
+    {
         assert!(
             (v1 - v2).abs() < 1e-10,
             "Vector data differs at index {}: {} vs {}",

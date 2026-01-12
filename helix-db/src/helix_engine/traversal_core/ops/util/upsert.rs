@@ -7,7 +7,7 @@ use crate::{
         storage_core::HelixGraphStorage,
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
-        vector_core::vector::HVector,
+        vector_core::{HVector, node::Item},
     },
     protocol::value::Value,
     utils::{
@@ -45,7 +45,7 @@ pub trait UpsertAdapter<'db, 'arena, 'txn>: Iterator {
 
     fn upsert_v(
         self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         label: &'arena str,
         props: &[(&'static str, Value)],
     ) -> RwTraversalIterator<
@@ -85,22 +85,20 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             match bincode::serialize(v) {
                                 Ok(v_serialized) => {
                                     if let Err(e) = match secondary_index {
-                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => {
-                                            db.put_with_flags(
+                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                            .put_with_flags(
                                                 self.txn,
                                                 PutFlags::NO_OVERWRITE,
                                                 &v_serialized,
                                                 &node.id,
-                                            )
-                                        }
-                                        crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                            db.put_with_flags(
+                                            ),
+                                        crate::helix_engine::types::SecondaryIndex::Index(_) => db
+                                            .put_with_flags(
                                                 self.txn,
                                                 PutFlags::APPEND_DUP,
                                                 &v_serialized,
                                                 &node.id,
-                                            )
-                                        }
+                                            ),
                                         crate::helix_engine::types::SecondaryIndex::None => {
                                             unreachable!()
                                         }
@@ -153,22 +151,20 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             match bincode::serialize(v) {
                                 Ok(v_serialized) => {
                                     if let Err(e) = match secondary_index {
-                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => {
-                                            db.put_with_flags(
+                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                            .put_with_flags(
                                                 self.txn,
                                                 PutFlags::NO_OVERWRITE,
                                                 &v_serialized,
                                                 &node.id,
-                                            )
-                                        }
-                                        crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                            db.put_with_flags(
+                                            ),
+                                        crate::helix_engine::types::SecondaryIndex::Index(_) => db
+                                            .put_with_flags(
                                                 self.txn,
                                                 PutFlags::APPEND_DUP,
                                                 &v_serialized,
                                                 &node.id,
-                                            )
-                                        }
+                                            ),
                                         crate::helix_engine::types::SecondaryIndex::None => {
                                             unreachable!()
                                         }
@@ -195,22 +191,20 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             match bincode::serialize(v) {
                                 Ok(v_serialized) => {
                                     if let Err(e) = match secondary_index {
-                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => {
-                                            db.put_with_flags(
+                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                            .put_with_flags(
                                                 self.txn,
                                                 PutFlags::NO_OVERWRITE,
                                                 &v_serialized,
                                                 &node.id,
-                                            )
-                                        }
-                                        crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                            db.put_with_flags(
+                                            ),
+                                        crate::helix_engine::types::SecondaryIndex::Index(_) => db
+                                            .put_with_flags(
                                                 self.txn,
                                                 PutFlags::APPEND_DUP,
                                                 &v_serialized,
                                                 &node.id,
-                                            )
-                                        }
+                                            ),
                                         crate::helix_engine::types::SecondaryIndex::None => {
                                             unreachable!()
                                         }
@@ -307,30 +301,27 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 }
 
                 for (k, v) in props.iter() {
-                    let Some((db, secondary_index)) = self.storage.secondary_indices.get(*k)
-                    else {
+                    let Some((db, secondary_index)) = self.storage.secondary_indices.get(*k) else {
                         continue;
                     };
 
                     match bincode::serialize(v) {
                         Ok(v_serialized) => {
                             if let Err(e) = match secondary_index {
-                                crate::helix_engine::types::SecondaryIndex::Unique(_) => {
-                                    db.put_with_flags(
+                                crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                    .put_with_flags(
                                         self.txn,
                                         PutFlags::NO_OVERWRITE,
                                         &v_serialized,
                                         &node.id,
-                                    )
-                                }
-                                crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                    db.put_with_flags(
+                                    ),
+                                crate::helix_engine::types::SecondaryIndex::Index(_) => db
+                                    .put_with_flags(
                                         self.txn,
                                         PutFlags::APPEND_DUP,
                                         &v_serialized,
                                         &node.id,
-                                    )
-                                }
+                                    ),
                                 crate::helix_engine::types::SecondaryIndex::None => unreachable!(),
                             } {
                                 result = Err(GraphError::from(e));
@@ -520,7 +511,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
     fn upsert_v(
         mut self,
-        query: &'arena [f64],
+        query: &'arena [f32],
         label: &'arena str,
         props: &[(&'static str, Value)],
     ) -> RwTraversalIterator<
@@ -665,7 +656,13 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     }
                 }
 
-                match self.storage.vectors.put_vector(self.txn, &vector) {
+                match self.storage.vectors.insert(
+                    self.txn,
+                    vector.label,
+                    vector.data_borrowed(),
+                    vector.properties,
+                    self.arena,
+                ) {
                     Ok(_) => {
                         if result.is_ok() {
                             result = Ok(TraversalValue::Vector(vector));
@@ -693,17 +690,22 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     id: v6_uuid(),
                     label,
                     version,
-                    deleted: false,
-                    level: 1,
                     distance: None,
-                    data: query,
+                    data: Some(Item::from_slice(query)),
                     properties,
+                    level: None,
                 };
 
-                match self.storage.vectors.put_vector(self.txn, &vector) {
+                match self.storage.vectors.insert(
+                    self.txn,
+                    vector.label,
+                    vector.data_borrowed(),
+                    vector.properties,
+                    self.arena,
+                ) {
                     Ok(_) => {
                         if result.is_ok() {
-                            result = Ok(TraversalValue::Vector(vector));
+                            result = Ok(TraversalValue::Vector(vector.clone()));
                         }
                     }
                     Err(e) => result = Err(GraphError::from(e)),
@@ -740,7 +742,7 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 }
 
                 if result.is_ok() {
-                    result = Ok(TraversalValue::Vector(vector));
+                    result = Ok(TraversalValue::Vector(vector.clone()));
                 }
                 // Don't overwrite existing errors with a generic message
             }

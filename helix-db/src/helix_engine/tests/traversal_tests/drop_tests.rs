@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use heed3::RoTxn;
 use rand::Rng;
 use tempfile::TempDir;
 
@@ -25,12 +24,9 @@ use crate::{
             traversal_value::TraversalValue,
         },
         types::GraphError,
-        vector_core::vector::HVector,
     },
     props,
 };
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
@@ -391,24 +387,22 @@ fn test_vector_deletion_in_existing_graph() {
     let mut vector_ids = Vec::new();
     for _ in 0..10 {
         let id = match G::new_mut(&storage, &arena, &mut txn)
-            .insert_v::<Filter>(&[1.0, 1.0, 1.0, 1.0], "vector", None)
+            .insert_v(&[1.0, 1.0, 1.0, 1.0], "vector", None)
             .collect_to_obj()
             .unwrap()
         {
             TraversalValue::Vector(vector) => vector.id,
-            TraversalValue::VectorNodeWithoutVectorData(vector) => *vector.id(),
             other => panic!("unexpected value: {other:?}"),
         };
         vector_ids.push(id);
     }
 
     let target_vector_id = match G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<Filter>(&[1.0, 1.0, 1.0, 1.0], "vector", None)
+        .insert_v(&[1.0, 1.0, 1.0, 1.0], "vector", None)
         .collect_to_obj()
         .unwrap()
     {
         TraversalValue::Vector(vector) => vector.id,
-        TraversalValue::VectorNodeWithoutVectorData(vector) => *vector.id(),
         other => panic!("unexpected value: {other:?}"),
     };
 
@@ -444,10 +438,8 @@ fn test_vector_deletion_in_existing_graph() {
         .n_from_id(&node_id)
         .out_vec("knows", false)
         .filter_ref(|val, _| match val {
-            Ok(TraversalValue::Vector(vector)) => Ok(*vector.id() == target_vector_id),
-            Ok(TraversalValue::VectorNodeWithoutVectorData(vector)) => {
-                Ok(*vector.id() == target_vector_id)
-            }
+            Ok(TraversalValue::Vector(vector)) => Ok(vector.id == target_vector_id),
+
             Ok(_) => Ok(false),
             Err(err) => Err(GraphError::from(err.to_string())),
         })

@@ -66,6 +66,7 @@ async fn check_issue_exists(github_config: &GitHubConfig, error_hash: &str) -> R
 }
 
 #[allow(unused)]
+#[allow(clippy::too_many_arguments)]
 async fn create_github_issue(
     github_config: &GitHubConfig,
     error_type: &str,

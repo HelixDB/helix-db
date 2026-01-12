@@ -31,8 +31,8 @@ fn parse_api_error(provider: &str, status: u16, body: &str) -> GraphError {
 /// Trait for embedding models to fetch text embeddings.
 #[allow(async_fn_in_trait)]
 pub trait EmbeddingModel {
-    fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError>;
-    async fn fetch_embedding_async(&self, text: &str) -> Result<Vec<f64>, GraphError>;
+    fn fetch_embedding(&self, text: &str) -> Result<Vec<f32>, GraphError>;
+    async fn fetch_embedding_async(&self, text: &str) -> Result<Vec<f32>, GraphError>;
 }
 
 #[derive(Debug, Clone)]
@@ -171,12 +171,12 @@ impl EmbeddingModelImpl {
 
 impl EmbeddingModel for EmbeddingModelImpl {
     /// Must be called with an active tokio context
-    fn fetch_embedding(&self, text: &str) -> Result<Vec<f64>, GraphError> {
+    fn fetch_embedding(&self, text: &str) -> Result<Vec<f32>, GraphError> {
         let handle = tokio::runtime::Handle::current();
         handle.block_on(self.fetch_embedding_async(text))
     }
 
-    async fn fetch_embedding_async(&self, text: &str) -> Result<Vec<f64>, GraphError> {
+    async fn fetch_embedding_async(&self, text: &str) -> Result<Vec<f32>, GraphError> {
         match &self.provider {
             EmbeddingProvider::OpenAI => {
                 let api_key = self.api_key.as_ref().ok_or_else(|| {
@@ -222,13 +222,11 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     })?
                     .iter()
                     .map(|v| {
-                        v.as_f64().ok_or_else(|| {
-                            GraphError::EmbeddingError(
-                                "Invalid float value in embedding".to_string(),
-                            )
-                        })
+                        v.as_f64()
+                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                            .map(|f| f as f32)
                     })
-                    .collect::<Result<Vec<f64>, GraphError>>()?;
+                    .collect::<Result<Vec<f32>, GraphError>>()?;
 
                 Ok(embedding)
             }
@@ -236,9 +234,10 @@ impl EmbeddingModel for EmbeddingModelImpl {
                 resource_name,
                 deployment_id,
             } => {
-                let api_key = self.api_key.as_ref().ok_or_else(|| {
-                    GraphError::EmbeddingError("Azure OpenAI API key not set".to_string())
-                })?;
+                let api_key = self
+                    .api_key
+                    .as_ref()
+                    .ok_or_else(|| GraphError::from("AzureOpenAI API key not set"))?;
 
                 let url = format!(
                     "https://{}.openai.azure.com/openai/deployments/{}/embeddings?api-version=2024-10-21",
@@ -286,19 +285,15 @@ impl EmbeddingModel for EmbeddingModelImpl {
                 let embedding = response["data"][0]["embedding"]
                     .as_array()
                     .ok_or_else(|| {
-                        GraphError::EmbeddingError(
-                            "Invalid embedding format in Azure OpenAI response".to_string(),
-                        )
+                        GraphError::from("Invalid embedding format from Azure OpenAI API")
                     })?
                     .iter()
                     .map(|v| {
-                        v.as_f64().ok_or_else(|| {
-                            GraphError::EmbeddingError(
-                                "Invalid float value in embedding".to_string(),
-                            )
-                        })
+                        v.as_f64()
+                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                            .map(|v| v as f32)
                     })
-                    .collect::<Result<Vec<f64>, GraphError>>()?;
+                    .collect::<Result<Vec<f32>, GraphError>>()?;
                 Ok(embedding)
             }
 
@@ -354,13 +349,11 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     })?
                     .iter()
                     .map(|v| {
-                        v.as_f64().ok_or_else(|| {
-                            GraphError::EmbeddingError(
-                                "Invalid float value in embedding".to_string(),
-                            )
-                        })
+                        v.as_f64()
+                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                            .map(|f| f as f32)
                     })
-                    .collect::<Result<Vec<f64>, GraphError>>()?;
+                    .collect::<Result<Vec<f32>, GraphError>>()?;
 
                 Ok(embedding)
             }
@@ -415,13 +408,11 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     })?
                     .iter()
                     .map(|v| {
-                        v.as_f64().ok_or_else(|| {
-                            GraphError::EmbeddingError(
-                                "Invalid float value in embedding".to_string(),
-                            )
-                        })
+                        v.as_f64()
+                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                            .map(|f| f as f32)
                     })
-                    .collect::<Result<Vec<f64>, GraphError>>()?;
+                    .collect::<Result<Vec<f32>, GraphError>>()?;
 
                 Ok(embedding)
             }

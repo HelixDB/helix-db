@@ -98,7 +98,7 @@ pub fn nodes_edges_inner(input: HandlerInput) -> Result<protocol::Response, Grap
 
     let vectors_result = db
         .vectors
-        .get_all_vectors(&txn, None, &arena)
+        .get_all_vectors(&txn, true, &arena)
         .map(|vecs| {
             let vectors_json: Vec<sonic_rs::Value> = vecs
                 .iter()
@@ -108,7 +108,7 @@ pub fn nodes_edges_inner(input: HandlerInput) -> Result<protocol::Response, Grap
                         "level": v.level,
                         "distance": v.distance,
                         "data": v.data,
-                        "dimension": v.data.len()
+                        "dimension": v.data.as_ref().unwrap().vector.len()
                     })
                 })
                 .collect();

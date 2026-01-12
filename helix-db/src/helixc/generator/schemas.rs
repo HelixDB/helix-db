@@ -219,7 +219,7 @@ mod tests {
                 },
                 SchemaProperty {
                     name: "score".to_string(),
-                    field_type: GeneratedType::RustType(RustType::F64),
+                    field_type: GeneratedType::RustType(RustType::F32),
                     default_value: None,
                     field_prefix: FieldPrefix::Empty,
                 },
@@ -228,7 +228,7 @@ mod tests {
 
         let output = format!("{}", schema);
         assert!(output.contains("pub count: i32,"));
-        assert!(output.contains("pub score: f64,"));
+        assert!(output.contains("pub score: f32,"));
     }
 
     // ============================================================================

@@ -13,7 +13,7 @@
 #[cfg(test)]
 mod edge_case_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bumpalo::Bump;
@@ -79,12 +79,12 @@ mod edge_case_tests {
             })
             .collect();
 
-        let vector = create_arena_vector(&arena, id, "many_props", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "many_props", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().properties.unwrap().len(), 500);
     }
@@ -156,7 +156,7 @@ mod edge_case_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
         assert!(result.unwrap().label.len() > 2000);
     }
@@ -240,12 +240,12 @@ mod edge_case_tests {
             ("Ключ", Value::String("Значение".to_string())),
         ];
 
-        let vector = create_arena_vector(&arena, id, "unicode", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "unicode", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -364,12 +364,12 @@ mod edge_case_tests {
         );
 
         let props = vec![("complex", Value::Object(map))];
-        let vector = create_arena_vector(&arena, id, "complex", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "complex", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -449,12 +449,12 @@ mod edge_case_tests {
         let data = vec![1.0];
 
         let props = vec![("empty_obj", Value::Object(HashMap::new()))];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "test", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -519,14 +519,14 @@ mod edge_case_tests {
         let id = 800800u128;
 
         // Subnormal (denormalized) numbers
-        let data = vec![f64::MIN_POSITIVE, f64::MIN_POSITIVE / 2.0, 1e-308, 1e-320];
+        let data = vec![f32::MIN_POSITIVE, f32::MIN_POSITIVE / 2.0, 1e-308, 1e-320];
 
         let vector = create_simple_vector(&arena, id, "subnormal", &data);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -541,7 +541,7 @@ mod edge_case_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -598,12 +598,12 @@ mod edge_case_tests {
             ("123", Value::String("one-two-three".to_string())),
         ];
 
-        let vector = create_arena_vector(&arena, id, "numeric_keys", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "numeric_keys", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -663,12 +663,12 @@ mod edge_case_tests {
         ]);
 
         let props = vec![("mixed", mixed_array)];
-        let vector = create_arena_vector(&arena, id, "test", 1, false, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, "test", 1, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 
@@ -680,16 +680,16 @@ mod edge_case_tests {
     fn test_vector_with_8192_dimensions() {
         let arena = Bump::new();
         let id = 707707u128;
-        let data: Vec<f64> = (0..8192).map(|i| (i as f64) * 0.0001).collect();
+        let data: Vec<f32> = (0..8192).map(|i| (i as f32) * 0.0001).collect();
 
         let vector = create_simple_vector(&arena, id, "8k_dims", &data);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().data.len(), 8192);
+        assert_eq!(result.unwrap().len(), 8192);
     }
 
     #[test]
@@ -703,10 +703,10 @@ mod edge_case_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
         let deserialized = result.unwrap();
-        assert!(deserialized.data.iter().all(|&v| v == 0.0));
+        assert!(deserialized.data_borrowed().iter().all(|&v| v == 0.0));
     }
 
     #[test]
@@ -720,10 +720,15 @@ mod edge_case_tests {
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
         let deserialized = result.unwrap();
-        assert!(deserialized.data.iter().all(|&v| (v - 42.42).abs() < 1e-10));
+        assert!(
+            deserialized
+                .data_borrowed()
+                .iter()
+                .all(|&v| (v - 42.42).abs() < 1e-10)
+        );
     }
 
     // ========================================================================
@@ -782,7 +787,7 @@ mod edge_case_tests {
     fn test_vector_max_complexity() {
         let arena = Bump::new();
         let id = u128::MAX;
-        let data: Vec<f64> = (0..2048).map(|i| (i as f64).sin()).collect();
+        let data: Vec<f32> = (0..2048).map(|i| (i as f32).sin()).collect();
 
         let props: Vec<(&str, Value)> = (0..200)
             .map(|i| {
@@ -791,13 +796,12 @@ mod edge_case_tests {
             })
             .collect();
 
-        let vector =
-            create_arena_vector(&arena, id, &"Vec".repeat(200), 255, true, 0, &data, props);
+        let vector = create_arena_vector(&arena, id, &"Vec".repeat(200), 255, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
         let arena2 = Bump::new();
-        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id, true);
         assert!(result.is_ok());
     }
 }

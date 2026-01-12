@@ -75,10 +75,10 @@ pub enum ToolArgs {
         k: usize,
     },
     SearchVec {
-        vector: Vec<f64>,
+        vector: Vec<f32>,
         k: usize,
-        min_score: Option<f64>,
         cutoff: Option<usize>,
+        min_score: Option<f32>,
     },
 }
 

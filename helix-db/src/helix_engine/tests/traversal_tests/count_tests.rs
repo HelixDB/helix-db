@@ -173,8 +173,8 @@ fn test_count_filter_ref() {
                     .out_node("Country_to_City")
                     .count_to_val()
                     .map_value_or(false, |v| {
-                        println!("v: {v:?}, res: {:?}", *v > 10.clone());
-                        *v > 10.clone()
+                        println!("v: {v:?}, res: {:?}", *v > 10);
+                        *v > 10
                     })?)
             } else {
                 Ok(false)

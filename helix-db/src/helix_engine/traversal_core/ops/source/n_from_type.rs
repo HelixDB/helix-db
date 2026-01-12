@@ -58,18 +58,18 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 );
                 let length_of_label_in_lmdb =
                     u64::from_le_bytes(value[..LMDB_STRING_HEADER_LENGTH].try_into().unwrap()) as usize;
-    
+
                 if length_of_label_in_lmdb != label.len() {
                     return None;
                 }
-    
+
                 assert!(
                     value.len() >= length_of_label_in_lmdb + LMDB_STRING_HEADER_LENGTH,
                     "value length is not at least the header length plus the label length meaning there has been a corruption on node insertion"
                 );
                 let label_in_lmdb = &value[LMDB_STRING_HEADER_LENGTH
                     ..LMDB_STRING_HEADER_LENGTH + length_of_label_in_lmdb];
-    
+
                 if label_in_lmdb == label_as_bytes {
                     match Node::<'arena>::from_bincode_bytes(id, value, self.arena) {
                         Ok(node) => {

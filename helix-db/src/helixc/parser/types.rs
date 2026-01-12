@@ -599,7 +599,7 @@ pub enum ExpressionType {
     Identifier(String),
     StringLiteral(String),
     IntegerLiteral(i32),
-    FloatLiteral(f64),
+    FloatLiteral(f32),
     BooleanLiteral(bool),
     ArrayLiteral(Vec<Expression>),
     Exists(ExistsExpression),
@@ -951,7 +951,7 @@ pub enum BooleanOpType {
 
 #[derive(Debug, Clone)]
 pub enum VectorData {
-    Vector(Vec<f64>),
+    Vector(Vec<f32>),
     Identifier(String),
     Embed(Embed),
 }
@@ -1131,6 +1131,10 @@ impl From<Value> for ValueType {
             },
             Value::I32(i) => ValueType::Literal {
                 value: Value::I32(i),
+                loc: Loc::empty(),
+            },
+            Value::F32(f) => ValueType::Literal {
+                value: Value::F32(f),
                 loc: Loc::empty(),
             },
             Value::F64(f) => ValueType::Literal {

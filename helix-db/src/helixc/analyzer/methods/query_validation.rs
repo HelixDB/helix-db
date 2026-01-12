@@ -166,13 +166,13 @@ fn build_return_fields(
             if should_add_field("data") {
                 fields.push(ReturnFieldInfo::new_implicit(
                     "data".to_string(),
-                    "&'a [f64]".to_string(),
+                    "&'a [f32]".to_string(),
                 ));
             }
             if should_add_field("score") {
                 fields.push(ReturnFieldInfo::new_implicit(
                     "score".to_string(),
-                    "f64".to_string(),
+                    "f32".to_string(),
                 ));
             }
         }
@@ -234,8 +234,8 @@ fn build_return_fields(
 
                         if is_implicit_field {
                             let rust_type = match *field_name {
-                                "data" => "&'a [f64]".to_string(),
-                                "score" => "f64".to_string(),
+                                "data" => "&'a [f32]".to_string(),
+                                "score" => "f32".to_string(),
                                 _ => "&'a str".to_string(),
                             };
                             fields.push(ReturnFieldInfo::new_implicit(
@@ -304,8 +304,8 @@ fn build_return_fields(
                     let rust_type = if is_implicit {
                         // Use the appropriate type based on the implicit field
                         match accessed_field.map(|s| s.as_str()) {
-                            Some("data") => "&'a [f64]".to_string(),
-                            Some("score") => "f64".to_string(),
+                            Some("data") => "&'a [f32]".to_string(),
+                            Some("score") => "f32".to_string(),
                             Some("id") | Some("ID") | Some("label") | Some("Label")
                             | Some("from_node") | Some("to_node") | None => "&'a str".to_string(),
                             _ => "Option<&'a Value>".to_string(),

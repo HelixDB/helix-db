@@ -11,7 +11,7 @@ use crate::{
             util::{dedup::DedupAdapter, order::OrderByAdapter},
             vectors::{insert::InsertVAdapter, search::SearchVAdapter},
         },
-        vector_core::vector::HVector,
+        vector_core::HVector,
     },
     props,
 };
@@ -231,7 +231,7 @@ fn test_order_vector_by_asc() {
     type FnTy = fn(&HVector, &RoTxn) -> bool;
 
     let vector = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<FnTy>(
+        .insert_v(
             &[1.0, 2.0, 3.0],
             "vector",
             props_option(&arena, props! { "age" => 30 }),
@@ -240,7 +240,7 @@ fn test_order_vector_by_asc() {
         .unwrap();
 
     let vector2 = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<FnTy>(
+        .insert_v(
             &[1.0, 2.0, 3.0],
             "vector",
             props_option(&arena, props! { "age" => 20 }),
@@ -249,7 +249,7 @@ fn test_order_vector_by_asc() {
         .unwrap();
 
     let vector3 = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<FnTy>(
+        .insert_v(
             &[1.0, 2.0, 3.0],
             "vector",
             props_option(&arena, props! { "age" => 10 }),
@@ -280,7 +280,7 @@ fn test_order_vector_by_desc() {
     type FnTy = fn(&HVector, &RoTxn) -> bool;
 
     let vector = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<FnTy>(
+        .insert_v(
             &[1.0, 2.0, 3.0],
             "vector",
             props_option(&arena, props! { "age" => 30 }),
@@ -289,7 +289,7 @@ fn test_order_vector_by_desc() {
         .unwrap();
 
     let vector2 = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<FnTy>(
+        .insert_v(
             &[1.0, 2.0, 3.0],
             "vector",
             props_option(&arena, props! { "age" => 20 }),
@@ -298,7 +298,7 @@ fn test_order_vector_by_desc() {
         .unwrap();
 
     let vector3 = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<FnTy>(
+        .insert_v(
             &[1.0, 2.0, 3.0],
             "vector",
             props_option(&arena, props! { "age" => 10 }),

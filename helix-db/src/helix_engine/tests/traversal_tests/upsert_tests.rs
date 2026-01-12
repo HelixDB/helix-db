@@ -17,13 +17,11 @@ use crate::{
             },
             traversal_value::TraversalValue,
         },
-        vector_core::vector::HVector,
+        vector_core::HVector,
     },
     props,
     protocol::value::Value,
 };
-
-type Filter = fn(&HVector, &RoTxn) -> bool;
 
 fn setup_test_db() -> (TempDir, Arc<HelixGraphStorage>) {
     let temp_dir = TempDir::new().unwrap();
@@ -506,7 +504,7 @@ fn test_upsert_v_creates_new_vector_when_none_exists() {
     assert_eq!(result.len(), 1);
     if let TraversalValue::Vector(vector) = &result[0] {
         assert_eq!(vector.label, "embedding");
-        assert_eq!(vector.data, &query);
+        assert_eq!(vector.data_borrowed(), &query);
         assert_eq!(vector.get_property("model").unwrap(), &Value::from("bert"));
         assert_eq!(vector.get_property("version").unwrap(), &Value::from(2));
     } else {
@@ -534,7 +532,7 @@ fn test_upsert_v_creates_vector_with_default_data_when_none_provided() {
     assert_eq!(result.len(), 1);
     if let TraversalValue::Vector(vector) = &result[0] {
         assert_eq!(vector.label, "placeholder");
-        assert!(vector.data.is_empty()); // Default empty data
+        assert!(vector.is_empty()); // Default empty data
         assert_eq!(
             vector.get_property("status").unwrap(),
             &Value::from("pending")
@@ -553,7 +551,7 @@ fn test_upsert_v_updates_existing_vector_with_no_properties() {
 
     // Create existing vector
     let existing_vector = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<Filter>(&[0.5, 0.6, 0.7], "embedding", None)
+        .insert_v(&[0.5, 0.6, 0.7], "embedding", None)
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
         .into_iter()
@@ -594,7 +592,7 @@ fn test_upsert_v_updates_existing_vector_with_properties() {
 
     // Create existing vector with properties
     let existing_vector = G::new_mut(&storage, &arena, &mut txn)
-        .insert_v::<Filter>(
+        .insert_v(
             &[0.1, 0.2, 0.3],
             "embedding",
             props_option(

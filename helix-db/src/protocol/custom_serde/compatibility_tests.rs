@@ -10,7 +10,7 @@
 #[cfg(test)]
 mod compatibility_tests {
     use super::super::test_utils::*;
-    use crate::helix_engine::vector_core::vector::HVector;
+    use crate::helix_engine::vector_core::HVector;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bumpalo::Bump;
@@ -249,7 +249,8 @@ mod compatibility_tests {
         let data_bytes = create_vector_bytes(&data);
 
         let arena = Bump::new();
-        let new_vector = HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id);
+        let new_vector =
+            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true);
 
         assert!(new_vector.is_ok(), "Should deserialize old vector format");
         let restored = new_vector.unwrap();
@@ -257,23 +258,6 @@ mod compatibility_tests {
         assert_eq!(restored.id, id);
         assert_eq!(restored.label, "LegacyVector");
         assert_eq!(restored.version, 1);
-        assert!(!restored.deleted);
-    }
-
-    #[test]
-    fn test_old_vector_deleted_flag() {
-        let id = 111000u128;
-
-        let old_vector = create_old_vector(id, "DeletedVector", 1, true, vec![]);
-
-        let old_bytes = bincode::serialize(&old_vector).unwrap();
-        let data_bytes = create_vector_bytes(&[0.0]);
-
-        let arena = Bump::new();
-        let new_vector =
-            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id).unwrap();
-
-        assert!(new_vector.deleted);
     }
 
     #[test]
@@ -292,7 +276,7 @@ mod compatibility_tests {
 
         let arena = Bump::new();
         let new_vector =
-            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id).unwrap();
+            HVector::from_bincode_bytes(&arena, Some(&old_bytes), &data_bytes, id, true).unwrap();
 
         assert!(new_vector.properties.is_some());
         let props = new_vector.properties.unwrap();
@@ -354,8 +338,8 @@ mod compatibility_tests {
         let data = vec![1.0, 2.0];
 
         // Different vector versions
-        let vec_v1 = create_arena_vector(&arena, id, "V1", 1, false, 0, &data, vec![]);
-        let vec_v2 = create_arena_vector(&arena, id, "V2", 2, false, 0, &data, vec![]);
+        let vec_v1 = create_arena_vector(&arena, id, "V1", 1, &data, vec![]);
+        let vec_v2 = create_arena_vector(&arena, id, "V2", 2, &data, vec![]);
 
         let props_v1 = bincode::serialize(&vec_v1).unwrap();
         let props_v2 = bincode::serialize(&vec_v2).unwrap();
@@ -363,9 +347,9 @@ mod compatibility_tests {
 
         let arena2 = Bump::new();
         let restored_v1 =
-            HVector::from_bincode_bytes(&arena2, Some(&props_v1), &data_bytes, id).unwrap();
+            HVector::from_bincode_bytes(&arena2, Some(&props_v1), &data_bytes, id, true).unwrap();
         let restored_v2 =
-            HVector::from_bincode_bytes(&arena2, Some(&props_v2), &data_bytes, id).unwrap();
+            HVector::from_bincode_bytes(&arena2, Some(&props_v2), &data_bytes, id, true).unwrap();
 
         assert_eq!(restored_v1.version, 1);
         assert_eq!(restored_v2.version, 2);

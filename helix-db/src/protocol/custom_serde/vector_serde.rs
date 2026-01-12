@@ -1,13 +1,13 @@
 use crate::{
-    helix_engine::vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
+    helix_engine::vector_core::{HVector, distance::Cosine, node::Item},
     utils::properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
 };
 use serde::de::{DeserializeSeed, Visitor};
 use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
-struct OptionPropertiesMapDeSeed<'arena> {
-    arena: &'arena bumpalo::Bump,
+pub struct OptionPropertiesMapDeSeed<'arena> {
+    pub arena: &'arena bumpalo::Bump,
 }
 
 impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
@@ -80,31 +80,34 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
             where
                 A: serde::de::SeqAccess<'de>,
             {
+                // Read label (field 0)
                 let label_string: &'de str = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                 let label = self.arena.alloc_str(label_string);
 
+                // Read version (field 1)
                 let version: u8 = seq.next_element()?.unwrap_or(0);
 
-                let deleted: bool = seq.next_element()?.unwrap_or(false);
+                // Read deleted field (field 2) - present for backwards compatibility, always ignored
+                let _deleted: bool = seq.next_element()?.unwrap_or(false);
 
-                // Use our custom DeserializeSeed that handles the Option wrapper
+                // Read properties (field 3)
                 let properties: Option<ImmutablePropertiesMap<'arena>> = seq
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
 
-                let data = HVector::cast_raw_vector_data(self.arena, self.raw_vector_data);
+                let data = HVector::raw_vector_data_to_vec(self.raw_vector_data, self.arena)
+                    .map_err(serde::de::Error::custom)?;
 
                 Ok(HVector {
                     id: self.id,
                     label,
-                    deleted,
                     version,
-                    level: 0,
                     distance: None,
-                    data,
+                    data: Some(Item::<Cosine>::from_vec(data)),
                     properties,
+                    level: None,
                 })
             }
         }
@@ -128,7 +131,7 @@ pub struct VectoWithoutDataDeSeed<'arena> {
 }
 
 impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'arena> {
-    type Value = VectorWithoutData<'arena>;
+    type Value = HVector<'arena>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -140,7 +143,7 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
         }
 
         impl<'de, 'arena> serde::de::Visitor<'de> for VectorVisitor<'arena> {
-            type Value = VectorWithoutData<'arena>;
+            type Value = HVector<'arena>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("struct VectorWithoutData")
@@ -150,27 +153,31 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
             where
                 A: serde::de::SeqAccess<'de>,
             {
+                // Read label (field 0)
                 let label_string: &'de str = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                 let label = self.arena.alloc_str(label_string);
 
+                // Read version (field 1)
                 let version: u8 = seq.next_element()?.unwrap_or(0);
 
-                let deleted: bool = seq.next_element()?.unwrap_or(false);
+                // Read deleted field (field 2) - present for backwards compatibility, always ignored
+                let _deleted: bool = seq.next_element()?.unwrap_or(false);
 
-                // Use our custom DeserializeSeed that handles the Option wrapper
+                // Read properties (field 3)
                 let properties: Option<ImmutablePropertiesMap<'arena>> = seq
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
 
-                Ok(VectorWithoutData {
+                Ok(HVector {
                     id: self.id,
                     label,
                     version,
-                    deleted,
-                    level: 0,
                     properties,
+                    distance: None,
+                    level: None,
+                    data: None,
                 })
             }
         }

@@ -365,7 +365,7 @@ pub(crate) fn validate_statements<'a>(
                                         );
                                     }
                                 }
-                            }
+                            },
                             _ => {
                                 generate_error!(
                                     ctx,
