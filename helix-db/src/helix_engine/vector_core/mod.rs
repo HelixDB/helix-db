@@ -108,9 +108,11 @@ impl<'arena> serde::Serialize for HVector<'arena> {
             state.end()
         } else {
             // Skip id, level, distance, and data for bincode serialization
+            // Include deleted field for backwards compatibility (always false)
             let mut state = serializer.serialize_struct("HVector", 4)?;
             state.serialize_field("label", &self.label)?;
             state.serialize_field("version", &self.version)?;
+            state.serialize_field("deleted", &false)?; // Backwards compatibility: always false
             state.serialize_field("properties", &self.properties)?;
             state.end()
         }

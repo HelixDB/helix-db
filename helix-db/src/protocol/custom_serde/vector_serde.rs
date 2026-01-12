@@ -80,14 +80,19 @@ impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, '
             where
                 A: serde::de::SeqAccess<'de>,
             {
+                // Read label (field 0)
                 let label_string: &'de str = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                 let label = self.arena.alloc_str(label_string);
 
+                // Read version (field 1)
                 let version: u8 = seq.next_element()?.unwrap_or(0);
 
-                // Use our custom DeserializeSeed that handles the Option wrapper
+                // Read deleted field (field 2) - present for backwards compatibility, always ignored
+                let _deleted: bool = seq.next_element()?.unwrap_or(false);
+
+                // Read properties (field 3)
                 let properties: Option<ImmutablePropertiesMap<'arena>> = seq
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
@@ -148,14 +153,19 @@ impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'ar
             where
                 A: serde::de::SeqAccess<'de>,
             {
+                // Read label (field 0)
                 let label_string: &'de str = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
                 let label = self.arena.alloc_str(label_string);
 
+                // Read version (field 1)
                 let version: u8 = seq.next_element()?.unwrap_or(0);
 
-                // Use our custom DeserializeSeed that handles the Option wrapper
+                // Read deleted field (field 2) - present for backwards compatibility, always ignored
+                let _deleted: bool = seq.next_element()?.unwrap_or(false);
+
+                // Read properties (field 3)
                 let properties: Option<ImmutablePropertiesMap<'arena>> = seq
                     .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
                     .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
