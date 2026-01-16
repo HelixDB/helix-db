@@ -51,6 +51,7 @@ pub struct RawEvent<D: Serialize + std::fmt::Debug + Clone> {
     pub event_data: D,
     pub user_id: Option<&'static str>,
     pub email: Option<&'static str>,
+    pub device_id: Option<&'static str>,
     pub timestamp: u64,
 }
 
