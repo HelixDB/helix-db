@@ -136,7 +136,7 @@ async fn push_local_instance(
 
     // Build the instance first (this ensures it's up to date) and get metrics data
     let metrics_data =
-        crate::commands::build::run(Some(instance_name.to_string()), metrics_sender).await?;
+        crate::commands::build::run(Some(instance_name.to_string()), None, metrics_sender).await?;
 
     // Start the instance
     docker.start_instance(instance_name)?;
@@ -182,7 +182,7 @@ async fn push_cloud_instance(
 
     let metrics_data = if instance_config.should_build_docker_image() {
         // Build happens, get metrics data from build
-        crate::commands::build::run(Some(instance_name.to_string()), metrics_sender).await?
+        crate::commands::build::run(Some(instance_name.to_string()), None, metrics_sender).await?
     } else {
         // No build, use lightweight parsing
         parse_queries_for_metrics(project)?

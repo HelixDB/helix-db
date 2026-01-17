@@ -7,7 +7,7 @@ pub struct ProjectContext {
     /// The root directory of the project
     pub root: PathBuf,
     pub config: HelixConfig,
-    // The path to the .helix directory
+    /// The path to the .helix directory (including ".helix")
     pub helix_dir: PathBuf,
 }
 

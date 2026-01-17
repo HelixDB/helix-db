@@ -79,7 +79,11 @@ enum Commands {
     /// Build and compile project for an instance
     Build {
         /// Instance name to build (interactive selection if not provided)
+        #[clap(short, long)]
         instance: Option<String>,
+        /// Should build HelixDB into at binary at the specified file location
+        #[clap(long, default_value = "./")]
+        bin: Option<String>,
     },
 
     /// Deploy/start an instance
@@ -226,7 +230,7 @@ async fn main() -> Result<()> {
         }
         Commands::Check { instance } => commands::check::run(instance, &metrics_sender).await,
         Commands::Compile { output, path } => commands::compile::run(output, path).await,
-        Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
+        Commands::Build { instance, bin } => commands::build::run(instance, bin, &metrics_sender)
             .await
             .map(|_| ()),
         Commands::Push { instance, dev } => {

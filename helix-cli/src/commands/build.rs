@@ -9,7 +9,8 @@ use crate::utils::{
     helixc_utils::{collect_hx_contents, collect_hx_files},
     print_confirm, print_error, print_status, print_success, print_warning,
 };
-use eyre::Result;
+use eyre::{Result, eyre};
+use std::process::Command;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,7 @@ const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 pub async fn run(
     instance_name: Option<String>,
+    bin: Option<String>,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
     let start_time = Instant::now();
@@ -113,11 +115,15 @@ pub async fn run(
     // Propagate compilation error if any
     compile_result?;
 
-    // Generate Docker files
-    generate_docker_files(&project, &instance_name, instance_config.clone()).await?;
+    if let Some(binary_output) = bin {
+        let mut spinner = Spinner::new("CARGO", "Building HelixDB binary...");
+        spinner.start();
 
-    // For local instances, build Docker image
-    if instance_config.should_build_docker_image() {
+        build_binary_using_cargo(&project, &instance_name, &binary_output)?;
+    } else if instance_config.should_build_docker_image() {
+        // For local instances, build Docker image
+        // Generate Docker files
+        generate_docker_files(&project, &instance_name, instance_config.clone()).await?;
         let runtime = project.config.project.container_runtime;
         DockerManager::check_runtime_available(runtime)?;
         let docker = DockerManager::new(&project);
@@ -509,5 +515,31 @@ fn handle_docker_rust_compilation_failure(
 
     print_success("GitHub issue page opened in your browser");
 
+    Ok(())
+}
+
+fn build_binary_using_cargo(
+    project: &ProjectContext,
+    instance_name: &str,
+    binary_output: &str,
+) -> Result<()> {
+    let binary_output_path = std::path::Path::new(binary_output);
+    if !binary_output_path.exists() {
+        return Err(eyre!("Binary output path should exist"));
+    }
+
+    // <path-to-.helix>/<instance_name>/helix-repo-copy/helix-container/
+    let current_dir = project
+        .helix_dir
+        .join(instance_name)
+        .join("helix-repo-copy")
+        .join("helix-container");
+
+    Command::new("cargo")
+        .arg("build")
+        .arg("--target-dir")
+        .arg(binary_output_path.as_os_str())
+        .current_dir(current_dir)
+        .status()?;
     Ok(())
 }
