@@ -5,7 +5,7 @@ use crate::{
         types::{
             Assignment, BM25Search, Embed, EvaluatesToNumber, EvaluatesToNumberType,
             EvaluatesToString, ExistsExpression, Expression, ExpressionType, ForLoop, ForLoopVars,
-            MathFunction, MathFunctionCall, SearchVector, ValueType, VectorData,
+            MathFunction, MathFunctionCall, SearchHybrid, SearchVector, ValueType, VectorData,
         },
         utils::{PairTools, PairsTools},
     },
@@ -146,6 +146,10 @@ impl HelixParser {
             Rule::math_function_call => Ok(Expression {
                 loc: pair.loc(),
                 expr: ExpressionType::MathFunctionCall(self.parse_math_function_call(pair)?),
+            }),
+            Rule::search_hybrid => Ok(Expression {
+                loc: pair.loc(),
+                expr: ExpressionType::SearchHybrid(self.parse_search_hybrid(pair)?),
             }),
             _ => Err(ParserError::from(format!(
                 "Unexpected expression type: {:?}",
@@ -510,6 +514,107 @@ impl HelixParser {
             data,
             k,
             pre_filter,
+        })
+    }
+
+    pub(super) fn parse_search_hybrid(
+        &self,
+        pair: Pair<Rule>,
+    ) -> Result<SearchHybrid, ParserError> {
+        let mut pairs = pair.clone().into_inner();
+        // parse identifier_upper (label)
+        let label = Some(pairs.try_next()?.as_str().to_string());
+        // parse vector_data
+        let vector_data = {
+            let vd_pair = pairs.try_next()?;
+            let vd = vd_pair.clone().try_inner_next()?;
+            match vd.as_rule() {
+                Rule::identifier => Some(VectorData::Identifier(vd.as_str().to_string())),
+                Rule::vec_literal => Some(VectorData::Vector(self.parse_vec_literal(vd)?)),
+                Rule::embed_method => {
+                    let embed_args = vd.clone().into_inner().next();
+                    let mut arg_values = Vec::new();
+
+                    if let Some(args_pair) = embed_args {
+                        for arg in args_pair.into_inner() {
+                            match arg.as_rule() {
+                                Rule::identifier => arg_values.push(arg.as_str().to_string()),
+                                Rule::string_literal => {
+                                    arg_values.push(self.parse_string_literal(arg)?)
+                                }
+                                _ => {} // Skip commas
+                            }
+                        }
+                    }
+
+                    Some(VectorData::Embed(Embed {
+                        loc: vd.loc(),
+                        value: EvaluatesToString::Arguments(arg_values),
+                    }))
+                }
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in SearchHybrid vector_data: {:?} => {:?}",
+                        vd.as_rule(),
+                        vd,
+                    )));
+                }
+            }
+        };
+
+        // parse query same as BM25
+        let query = {
+            let q_pair = pairs.try_next()?;
+            match q_pair.as_rule() {
+                Rule::identifier => Some(ValueType::Identifier {
+                    value: q_pair.as_str().to_string(),
+                    loc: q_pair.loc(),
+                }),
+                Rule::string_literal => Some(ValueType::Literal {
+                    value: Value::String(self.parse_string_literal(q_pair.clone())?),
+                    loc: q_pair.loc(),
+                }),
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in SearchHybrid query: {:?}",
+                        q_pair.as_rule()
+                    )));
+                }
+            }
+        };
+
+        // parse k
+        let k = {
+            let k_pair = pairs.try_next()?;
+            match k_pair.as_rule() {
+                Rule::identifier => Some(EvaluatesToNumber {
+                    loc: k_pair.loc(),
+                    value: EvaluatesToNumberType::Identifier(k_pair.as_str().to_string()),
+                }),
+                Rule::integer => Some(EvaluatesToNumber {
+                    loc: k_pair.loc(),
+                    value: EvaluatesToNumberType::I32(
+                        k_pair
+                            .as_str()
+                            .parse::<i32>()
+                            .map_err(|_| ParserError::from("Invalid integer value"))?,
+                    ),
+                }),
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in SearchHybrid k: {:?}",
+                        k_pair.as_rule()
+                    )));
+                }
+            }
+        };
+
+        Ok(SearchHybrid {
+            loc: pair.loc(),
+            label,
+            vector_data,
+            query,
+            k,
         })
     }
 
