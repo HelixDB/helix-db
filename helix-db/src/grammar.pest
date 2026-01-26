@@ -225,6 +225,13 @@ rerank_mmr = { "RerankMMR" ~ "(" ~ "lambda" ~ ":" ~ evaluates_to_number ~ ("," ~
 // ---------------------------------------------------------------------
 search_vector = { "SearchV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ vector_data ~ "," ~ (integer | identifier) ~ ")" }// ~ ("::" ~ pre_filter)? }
 bm25_search = { "SearchBM25" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ (string_literal | identifier) ~ "," ~ (integer | identifier) ~ ")" }
+search_hybrid = {
+    "SearchHybrid" ~ "<" ~ identifier_upper ~ ">" ~ "("
+    ~ vector_data ~ ","
+    ~ (string_literal | identifier) ~ ","
+    ~ (integer | identifier)
+    ~ ")"
+}
 pre_filter = { "PREFILTER" ~ "(" ~ (evaluates_to_bool | anonymous_traversal) ~ ")" }
 BatchAddV = { "BatchAddV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ identifier ~ ")" }
 embed_method = { "Embed" ~ "(" ~ (identifier | string_literal) ~ ")" }
