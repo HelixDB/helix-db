@@ -709,8 +709,17 @@ impl HNSW for VectorCore {
             }
         }
 
-        // Only update entry point if our level is higher AND the current entry point
-        // hasn't been updated by another transaction to something even higher.
+        // Update entry point if our level is higher than what we observed at the start.
+        //
+        // Note: There is an inherent race condition here that cannot be fully resolved
+        // without atomic compare-and-swap semantics (which LMDB doesn't support for
+        // arbitrary values). Between our check and commit, another transaction may have
+        // set a higher-level entry point. In this rare case, our lower-level entry point
+        // will overwrite it. This is acceptable because:
+        // 1. High-level vectors are exponentially rare (~1/m probability per level)
+        // 2. The impact is only slightly slower search (more levels to traverse)
+        // 3. Search correctness is not affected
+        // 4. The next high-level insert will fix it
         if new_level > l {
             match self.get_entry_point(txn, label, arena) {
                 Ok(current_ep) => {
@@ -719,10 +728,13 @@ impl HNSW for VectorCore {
                     }
                 }
                 Err(VectorError::EntryPointNotFound) => {
+                    // Entry point was deleted (unusual), set ours
                     self.set_entry_point(txn, &query)?;
                 }
                 Err(_) => {
-                    self.set_entry_point(txn, &query)?;
+                    // I/O or other error reading entry point - don't risk overwriting
+                    // a valid higher-level entry point. Skip this update; the next
+                    // high-level insert will retry.
                 }
             }
         }
