@@ -1128,8 +1128,6 @@ pub(crate) fn infer_expr_type<'a>(
         //     }
         //     Type::Vector(add.vector_type.as_deref())
         // }
-        // search hybrid goes here
-        // SearchHybrid(sh) => {}
         SearchVector(sv) => {
             if let Some(ref ty) = sv.vector_type
                 && !ctx.vector_set.contains(ty.as_str())
