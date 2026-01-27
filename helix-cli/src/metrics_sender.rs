@@ -425,9 +425,13 @@ fn get_current_timestamp() -> u64 {
 /// Get a deterministic device ID derived from the machine's unique identifier.
 /// This ID is stable across CLI reinstalls and file deletions.
 pub fn get_device_id() -> Option<&'static str> {
-    get_machine_id()
-        .map(|id| hash_to_device_id(&id))
-        .map(|s| -> &'static str { s.leak() })
+    use std::sync::LazyLock;
+    static DEVICE_ID: LazyLock<Option<&'static str>> = LazyLock::new(|| {
+        get_machine_id()
+            .map(|id| hash_to_device_id(&id))
+            .map(|s| -> &'static str { s.leak() })
+    });
+    *DEVICE_ID
 }
 
 /// Hash the machine ID to create a privacy-preserving device identifier.
