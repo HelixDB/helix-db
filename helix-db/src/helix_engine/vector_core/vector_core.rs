@@ -640,6 +640,84 @@ impl HNSW for VectorCore {
         Ok(query)
     }
 
+    /// Reconnect an existing vector to the HNSW graph without changing its ID.
+    /// Used for index rebuilding after deletions cause graph fragmentation.
+    fn reconnect_vector<'db, 'arena, 'txn, F>(
+        &'db self,
+        txn: &'txn mut RwTxn<'db>,
+        vector: &HVector<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<(), VectorError>
+    where
+        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        'db: 'arena,
+        'arena: 'txn,
+    {
+        let new_level = vector.level; // Keep existing level
+        let label = vector.label;
+
+        let entry_point = match self.get_entry_point(txn, label, arena) {
+            Ok(ep) => ep,
+            Err(_) => {
+                // First vector becomes entry point
+                self.set_entry_point(txn, vector)?;
+                return Ok(());
+            }
+        };
+
+        let l = entry_point.level;
+        let mut curr_ep = entry_point;
+
+        // Navigate to insertion level
+        for level in (new_level + 1..=l).rev() {
+            let mut nearest =
+                self.search_level::<F>(txn, label, vector, &mut curr_ep, 1, level, None, arena)?;
+            if let Some(closest) = nearest.pop() {
+                curr_ep = closest;
+            }
+        }
+
+        // Connect at each level
+        for level in (0..=l.min(new_level)).rev() {
+            let nearest = self.search_level::<F>(
+                txn,
+                label,
+                vector,
+                &mut curr_ep,
+                self.config.ef_construct,
+                level,
+                None,
+                arena,
+            )?;
+
+            if let Some(closest) = nearest.peek() {
+                curr_ep = *closest;
+            }
+
+            let neighbors =
+                self.select_neighbors::<F>(txn, label, vector, nearest, level, true, None, arena)?;
+            self.set_neighbours(txn, vector.id, &neighbors, level)?;
+
+            // Update neighbors' connections
+            for e in neighbors {
+                let e_conns = BinaryHeap::from(
+                    arena,
+                    self.get_neighbors::<F>(txn, label, e.id, level, None, arena)?,
+                );
+                let e_new_conn =
+                    self.select_neighbors::<F>(txn, label, vector, e_conns, level, true, None, arena)?;
+                self.set_neighbours(txn, e.id, &e_new_conn, level)?;
+            }
+        }
+
+        // Update entry point if this vector has higher level
+        if new_level > l {
+            self.set_entry_point(txn, vector)?;
+        }
+
+        Ok(())
+    }
+
     fn delete(&self, txn: &mut RwTxn, id: u128, arena: &bumpalo::Bump) -> Result<(), VectorError> {
         match self.get_vector_properties(txn, id, arena)? {
             Some(mut properties) => {
