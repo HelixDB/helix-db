@@ -723,9 +723,9 @@ impl HNSW for VectorCore {
                 arena,
             )?;
 
-            if let Some(closest) = nearest.peek() {
-                curr_ep = *closest;
-            }
+            curr_ep = *nearest.peek().ok_or(VectorError::VectorCoreError(
+                "empty search result".to_string(),
+            ))?;
 
             let neighbors =
                 self.select_neighbors::<F>(txn, label, vector, nearest, level, true, None, arena)?;
