@@ -7,6 +7,55 @@ use std::path::{Path, PathBuf};
 use crate::commands::integrations::ecr::EcrConfig;
 use crate::commands::integrations::fly::FlyInstanceConfig;
 
+/// Global workspace configuration stored in ~/.helix/config
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceConfig {
+    pub workspace_id: Option<String>,
+}
+
+impl WorkspaceConfig {
+    /// Get the path to the global config file
+    pub fn config_path() -> Result<PathBuf> {
+        let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
+        Ok(home.join(".helix").join("config"))
+    }
+
+    /// Load the workspace config from ~/.helix/config
+    pub fn load() -> Result<Self> {
+        let path = Self::config_path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|e| eyre!("Failed to read config file: {}", e))?;
+
+        toml::from_str(&content).map_err(|e| eyre!("Failed to parse config file: {}", e))
+    }
+
+    /// Save the workspace config to ~/.helix/config
+    pub fn save(&self) -> Result<()> {
+        let path = Self::config_path()?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let content =
+            toml::to_string_pretty(self).map_err(|e| eyre!("Failed to serialize config: {}", e))?;
+
+        fs::write(&path, content).map_err(|e| eyre!("Failed to write config file: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Check if workspace_id is set
+    pub fn has_workspace_id(&self) -> bool {
+        self.workspace_id.as_ref().is_some_and(|id| !id.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelixConfig {
     pub project: ProjectConfig,
@@ -476,7 +525,6 @@ impl HelixConfig {
 
     /// List all instances with their type labels for display
     /// Returns tuples of (name, type_hint) e.g. ("dev", "local"), ("prod", "Helix Cloud")
-    #[allow(dead_code)]
     pub fn list_instances_with_types(&self) -> Vec<(&String, &'static str)> {
         let mut instances = Vec::new();
 
