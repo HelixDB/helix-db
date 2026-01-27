@@ -487,6 +487,39 @@ impl VectorCore {
 
         Ok(vectors)
     }
+
+    /// Get all vector IDs from the database without loading full vector data.
+    /// This is memory-efficient for operations that only need IDs.
+    pub fn get_all_vector_ids<'db, 'txn>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+    ) -> Result<Vec<u128>, VectorError> {
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Iterate over all vectors in the database
+        let prefix_iter = self.vectors_db.prefix_iter(txn, VECTOR_PREFIX)?;
+
+        for result in prefix_iter {
+            let (key, _) = result?;
+
+            // Extract id from the key: v: (2 bytes) + id (16 bytes) + level (8 bytes)
+            if key.len() < VECTOR_PREFIX.len() + 16 {
+                continue; // Skip malformed keys
+            }
+
+            let mut id_bytes = [0u8; 16];
+            id_bytes.copy_from_slice(&key[VECTOR_PREFIX.len()..VECTOR_PREFIX.len() + 16]);
+            let id = u128::from_be_bytes(id_bytes);
+
+            // Deduplicate (same ID may have multiple level entries)
+            if seen.insert(id) {
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
+    }
 }
 
 impl HNSW for VectorCore {
