@@ -172,15 +172,3 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    // Integration tests would require full storage setup
-    // Unit tests for the trait signature verification
-
-    #[test]
-    fn test_search_hybrid_trait_exists() {
-        // Verify the trait compiles correctly
-        // Actual integration tests need a full HelixGraphStorage instance
-    }
-}
