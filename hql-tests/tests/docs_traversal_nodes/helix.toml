@@ -1,0 +1,7 @@
+[project]
+name = "docs_traversal_nodes"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "dev"

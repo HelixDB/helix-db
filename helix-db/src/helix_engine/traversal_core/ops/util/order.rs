@@ -2,9 +2,12 @@ use std::cmp::Ordering;
 
 use itertools::Itertools;
 
-use crate::helix_engine::{
-    traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
-    types::GraphError,
+use crate::{
+    helix_engine::{
+        traversal_core::{traversal_iter::RoTraversalIterator, traversal_value::TraversalValue},
+        types::GraphError,
+    },
+    protocol::value::Value,
 };
 
 pub struct OrderByAsc<I> {
@@ -38,127 +41,79 @@ where
 }
 
 pub trait OrderByAdapter<'db, 'arena, 'txn>: Iterator {
-    fn order_by_asc(
+    fn order_by_asc<F>(
         self,
-        property: &str,
+        property: F,
     ) -> RoTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    >;
+    >
+    where
+        F: Fn(&TraversalValue<'arena>) -> Value;
 
-    fn order_by_desc(
+    fn order_by_desc<F>(
         self,
-        property: &str,
+        property: F,
     ) -> RoTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    >;
+    >
+    where
+        F: Fn(&TraversalValue<'arena>) -> Value;
 }
 
 impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphError>>>
     OrderByAdapter<'db, 'arena, 'txn> for RoTraversalIterator<'db, 'arena, 'txn, I>
 {
-    fn order_by_asc(
+    fn order_by_asc<F>(
         self,
-        property: &str,
+        property: F,
     ) -> RoTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    > {
+    >
+    where
+        F: Fn(&TraversalValue<'arena>) -> Value,
+    {
+        let iter = self.inner.sorted_by(|a, b| match (a, b) {
+            (Ok(a), Ok(b)) => property(a).cmp(&property(b)),
+            (Err(_), _) => Ordering::Equal,
+            (_, Err(_)) => Ordering::Equal,
+        });
+
         RoTraversalIterator {
             arena: self.arena,
             storage: self.storage,
             txn: self.txn,
-            inner: OrderByAsc {
-                iter: self.inner.sorted_by(|a, b| match (a, b) {
-                    (Ok(a), Ok(b)) => match (a, b) {
-                        (TraversalValue::Node(a), TraversalValue::Node(b)) => {
-                            match (a.get_property(property), b.get_property(property)) {
-                                (Some(val_a), Some(val_b)) => val_a.cmp(val_b),
-                                (Some(_), None) => Ordering::Less,
-                                (None, Some(_)) => Ordering::Greater,
-                                (None, None) => Ordering::Equal,
-                            }
-                        }
-                        (TraversalValue::Edge(a), TraversalValue::Edge(b)) => {
-                            match (a.get_property(property), b.get_property(property)) {
-                                (Some(val_a), Some(val_b)) => val_a.cmp(val_b),
-                                (Some(_), None) => Ordering::Less,
-                                (None, Some(_)) => Ordering::Greater,
-                                (None, None) => Ordering::Equal,
-                            }
-                        }
-                        (TraversalValue::Vector(a), TraversalValue::Vector(b)) => {
-                            match (a.get_property(property), b.get_property(property)) {
-                                (Some(val_a), Some(val_b)) => val_a.cmp(val_b),
-                                (Some(_), None) => Ordering::Less,
-                                (None, Some(_)) => Ordering::Greater,
-                                (None, None) => Ordering::Equal,
-                            }
-                        }
-                        (TraversalValue::Value(val_a), TraversalValue::Value(val_b)) => {
-                            val_a.cmp(val_b)
-                        }
-                        _ => Ordering::Equal,
-                    },
-                    (Err(_), _) => Ordering::Equal,
-                    (_, Err(_)) => Ordering::Equal,
-                }),
-            },
+            inner: OrderByAsc { iter },
         }
     }
 
-    fn order_by_desc(
+    fn order_by_desc<F>(
         self,
-        property: &str,
+        property: F,
     ) -> RoTraversalIterator<
         'db,
         'arena,
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
-    > {
+    >
+    where
+        F: Fn(&TraversalValue<'arena>) -> Value,
+    {
         RoTraversalIterator {
             arena: self.arena,
             storage: self.storage,
             txn: self.txn,
-            inner: OrderByAsc {
+            inner: OrderByDesc {
                 iter: self.inner.sorted_by(|a, b| match (a, b) {
-                    (Ok(a), Ok(b)) => match (a, b) {
-                        (TraversalValue::Node(a), TraversalValue::Node(b)) => {
-                            match (a.get_property(property), b.get_property(property)) {
-                                (Some(val_a), Some(val_b)) => val_b.cmp(val_a),
-                                (Some(_), None) => Ordering::Less,
-                                (None, Some(_)) => Ordering::Greater,
-                                (None, None) => Ordering::Equal,
-                            }
-                        }
-                        (TraversalValue::Edge(a), TraversalValue::Edge(b)) => {
-                            match (a.get_property(property), b.get_property(property)) {
-                                (Some(val_a), Some(val_b)) => val_b.cmp(val_a),
-                                (Some(_), None) => Ordering::Less,
-                                (None, Some(_)) => Ordering::Greater,
-                                (None, None) => Ordering::Equal,
-                            }
-                        }
-                        (TraversalValue::Vector(a), TraversalValue::Vector(b)) => {
-                            match (a.get_property(property), b.get_property(property)) {
-                                (Some(val_a), Some(val_b)) => val_b.cmp(val_a),
-                                (Some(_), None) => Ordering::Less,
-                                (None, Some(_)) => Ordering::Greater,
-                                (None, None) => Ordering::Equal,
-                            }
-                        }
-                        (TraversalValue::Value(val_a), TraversalValue::Value(val_b)) => {
-                            val_b.cmp(val_a)
-                        }
-                        _ => Ordering::Equal,
-                    },
+                    (Ok(a), Ok(b)) => property(b).cmp(&property(a)),
                     (Err(_), _) => Ordering::Equal,
                     (_, Err(_)) => Ordering::Equal,
                 }),

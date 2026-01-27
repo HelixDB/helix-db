@@ -4,8 +4,9 @@
 //! share the same CLI interface and support standard Dockerfile formats.
 
 use crate::config::{BuildMode, ContainerRuntime, InstanceInfo};
+use crate::output::Step;
 use crate::project::ProjectContext;
-use crate::utils::{print_confirm, print_status, print_warning};
+use crate::utils::{print_confirm, print_info, print_warning};
 use eyre::{Result, eyre};
 use std::fmt;
 use std::process::{Command, Output};
@@ -25,8 +26,15 @@ pub enum DockerBuildError {
 impl fmt::Display for DockerBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DockerBuildError::RustCompilation { output, instance_name } => {
-                write!(f, "Rust compilation failed for instance '{}': {}", instance_name, output)
+            DockerBuildError::RustCompilation {
+                output,
+                instance_name,
+            } => {
+                write!(
+                    f,
+                    "Rust compilation failed for instance '{}': {}",
+                    instance_name, output
+                )
             }
         }
     }
@@ -46,8 +54,6 @@ pub struct DockerManager<'a> {
     /// The container runtime to use (Docker or Podman)
     pub(crate) runtime: ContainerRuntime,
 }
-
-pub const HELIX_DATA_DIR: &str = "/data";
 
 impl<'a> DockerManager<'a> {
     pub fn new(project: &'a ProjectContext) -> Self {
@@ -85,10 +91,28 @@ impl<'a> DockerManager<'a> {
         format!("{project_name}:{tag}")
     }
 
+    #[inline]
+    pub(crate) fn data_dir(&self, instance_name: &str) -> String {
+        std::env::var("HELIX_DATA_DIR").unwrap_or_else(|_| format!("../.volumes/{instance_name}"))
+    }
+
     /// Get environment variables for an instance
     pub(crate) fn environment_variables(&self, instance_name: &str) -> Vec<String> {
-        // Load .env file (silently ignore if it doesn't exist)
-        let _ = dotenvy::dotenv();
+        // Load .env from project root first (base configuration)
+        let root_env = self.project.root.join(".env");
+        if root_env.exists() {
+            let _ = dotenvy::from_path(&root_env);
+            print_info(&format!("Loading environment from {}", root_env.display()));
+        }
+
+        // Load .env from db/queries directory (overrides project root)
+        let queries_dir = self.project.root.join(&self.project.config.project.queries);
+        let db_env = queries_dir.join(".env");
+        if db_env.exists() {
+            let _ = dotenvy::from_path_override(&db_env);
+            print_info(&format!("Overriding environment from {}", db_env.display()));
+        }
+        let data_dir = self.data_dir(instance_name);
 
         let mut env_vars = vec![
             {
@@ -101,13 +125,16 @@ impl<'a> DockerManager<'a> {
                     .unwrap_or(6969);
                 format!("HELIX_PORT={port}")
             },
-            format!("HELIX_DATA_DIR={HELIX_DATA_DIR}"),
+            format!("HELIX_DATA_DIR={data_dir}"),
             format!("HELIX_INSTANCE={instance_name}"),
             {
                 let project_name = &self.project.config.project.name;
                 format!("HELIX_PROJECT={project_name}")
             },
         ];
+        if let Ok(core_override) = std::env::var("HELIX_CORES_OVERRIDE") {
+            env_vars.push(format!("HELIX_CORES_OVERRIDE={core_override}"));
+        }
 
         // Add API keys from environment (which includes .env after dotenv() call)
         if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
@@ -199,7 +226,7 @@ impl<'a> DockerManager<'a> {
         match (runtime, platform) {
             // Docker on macOS
             (ContainerRuntime::Docker, "macos") => {
-                print_status("DOCKER", "Starting Docker Desktop for macOS...");
+                Step::verbose_substep("Starting Docker Desktop for macOS...");
                 Command::new("open")
                     .args(["-a", "Docker"])
                     .output()
@@ -208,7 +235,7 @@ impl<'a> DockerManager<'a> {
 
             // Podman on macOS
             (ContainerRuntime::Podman, "macos") => {
-                print_status("PODMAN", "Starting Podman machine on macOS...");
+                Step::verbose_substep("Starting Podman machine on macOS...");
 
                 // Check if machine exists first
                 let list_output = Command::new("podman")
@@ -220,7 +247,7 @@ impl<'a> DockerManager<'a> {
 
                 if machines.trim().is_empty() {
                     // No machine exists, initialize one
-                    print_status("PODMAN", "Initializing Podman machine (first time)...");
+                    Step::verbose_substep("Initializing Podman machine (first time)...");
                     let init_output = Command::new("podman")
                         .args(["machine", "init"])
                         .output()
@@ -241,7 +268,7 @@ impl<'a> DockerManager<'a> {
 
             // Docker on Linux
             (ContainerRuntime::Docker, "linux") => {
-                print_status("DOCKER", "Attempting to start Docker daemon on Linux...");
+                Step::verbose_substep("Attempting to start Docker daemon on Linux...");
                 let systemctl_result = Command::new("systemctl").args(["start", "docker"]).output();
 
                 match systemctl_result {
@@ -262,7 +289,7 @@ impl<'a> DockerManager<'a> {
 
             // Podman on Linux
             (ContainerRuntime::Podman, "linux") => {
-                print_status("PODMAN", "Starting Podman service on Linux...");
+                Step::verbose_substep("Starting Podman service on Linux...");
 
                 // Try to start user service (rootless)
                 let user_service = Command::new("systemctl")
@@ -283,7 +310,7 @@ impl<'a> DockerManager<'a> {
             }
             // Docker on Windows
             (ContainerRuntime::Docker, "windows") => {
-                print_status("DOCKER", "Starting Docker Desktop for Windows...");
+                Step::verbose_substep("Starting Docker Desktop for Windows...");
                 // Try Docker Desktop CLI (4.37+) first
                 let cli_result = Command::new("docker").args(["desktop", "start"]).output();
 
@@ -309,7 +336,7 @@ impl<'a> DockerManager<'a> {
 
             // Podman on Windows
             (ContainerRuntime::Podman, "windows") => {
-                print_status("PODMAN", "Starting Podman machine on Windows...");
+                Step::verbose_substep("Starting Podman machine on Windows...");
 
                 // Check if machine exists
                 let list_output = Command::new("podman")
@@ -321,7 +348,7 @@ impl<'a> DockerManager<'a> {
 
                 if machines.trim().is_empty() {
                     // Initialize machine first
-                    print_status("PODMAN", "Initializing Podman machine (first time)...");
+                    Step::verbose_substep("Initializing Podman machine (first time)...");
                     let init_output = Command::new("podman")
                         .args(["machine", "init"])
                         .output()
@@ -358,7 +385,10 @@ impl<'a> DockerManager<'a> {
     }
 
     fn wait_for_runtime(runtime: ContainerRuntime, timeout_secs: u64) -> Result<()> {
-        print_status(runtime.label(), "Waiting for daemon to start...");
+        Step::verbose_substep(&format!(
+            "{}: Waiting for daemon to start...",
+            runtime.label()
+        ));
 
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
@@ -369,7 +399,7 @@ impl<'a> DockerManager<'a> {
             if let Ok(output) = output
                 && output.status.success()
             {
-                print_status(runtime.label(), "Daemon is now running");
+                Step::verbose_substep(&format!("{}: Daemon is now running", runtime.label()));
                 return Ok(());
             }
 
@@ -454,12 +484,16 @@ impl<'a> DockerManager<'a> {
         instance_config: InstanceInfo<'_>,
     ) -> Result<String> {
         let build_flag = match instance_config.build_mode() {
-            BuildMode::Debug => "",
+            BuildMode::Debug => unreachable!(
+                "Please report as a bug. BuildMode::Debug should have been caught in validation."
+            ),
             BuildMode::Release => "--release",
             BuildMode::Dev => "--features dev",
         };
         let build_mode = match instance_config.build_mode() {
-            BuildMode::Debug => "debug",
+            BuildMode::Debug => unreachable!(
+                "Please report as a bug. BuildMode::Debug should have been caught in validation."
+            ),
             BuildMode::Release => "release",
             BuildMode::Dev => "debug",
         };
@@ -529,8 +563,11 @@ CMD ["helix-container"]
         &self,
         instance_name: &str,
         instance_config: InstanceInfo<'_>,
+        port_override: Option<u16>,
     ) -> Result<String> {
-        let port = instance_config.port().unwrap_or(6969);
+        let port = port_override
+            .or_else(|| instance_config.port())
+            .unwrap_or(6969);
 
         // Use centralized naming methods
         let service_name = Self::service_name();
@@ -557,7 +594,7 @@ services:
     ports:
       - "{port}:{port}"
     volumes:
-      - ../.volumes/{instance_name}:/data
+      - {data_dir}:/data
     environment:
 {env_section}
     restart: unless-stopped
@@ -571,6 +608,7 @@ networks:
             platform = instance_config
                 .docker_build_target()
                 .map_or("".to_string(), |p| format!("platforms:\n        - {p}")),
+            data_dir = self.data_dir(instance_name)
         );
 
         Ok(compose)
@@ -578,10 +616,10 @@ networks:
 
     /// Build Docker/Podman image for an instance
     pub fn build_image(&self, instance_name: &str, _build_target: Option<&str>) -> Result<()> {
-        print_status(
-            self.runtime.label(),
-            &format!("Building image for instance '{instance_name}'..."),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Building image for instance '{instance_name}'...",
+            self.runtime.label()
+        ));
         let output = self.run_compose_command(instance_name, vec!["build"])?;
 
         if !output.status.success() {
@@ -600,17 +638,20 @@ networks:
 
             return Err(eyre!("{} build failed:\n{stderr}", self.runtime.binary()));
         }
-        print_status(self.runtime.label(), "Image built successfully");
+        Step::verbose_substep(&format!(
+            "{}: Image built successfully",
+            self.runtime.label()
+        ));
 
         Ok(())
     }
 
     /// Start instance using docker/podman compose
     pub fn start_instance(&self, instance_name: &str) -> Result<()> {
-        print_status(
-            self.runtime.label(),
-            &format!("Starting instance '{instance_name}'..."),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Starting instance '{instance_name}'...",
+            self.runtime.label()
+        ));
 
         let output = self.run_compose_command(instance_name, vec!["up", "-d"])?;
 
@@ -619,19 +660,19 @@ networks:
             return Err(eyre!("Failed to start instance:\n{stderr}"));
         }
 
-        print_status(
-            self.runtime.label(),
-            &format!("Instance '{instance_name}' started successfully"),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Instance '{instance_name}' started successfully",
+            self.runtime.label()
+        ));
         Ok(())
     }
 
     /// Stop instance using docker/podman compose
     pub fn stop_instance(&self, instance_name: &str) -> Result<()> {
-        print_status(
-            self.runtime.label(),
-            &format!("Stopping instance '{instance_name}'..."),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Stopping instance '{instance_name}'...",
+            self.runtime.label()
+        ));
 
         let output = self.run_compose_command(instance_name, vec!["down"])?;
 
@@ -640,10 +681,10 @@ networks:
             return Err(eyre!("Failed to stop instance:\n{stderr}"));
         }
 
-        print_status(
-            self.runtime.label(),
-            &format!("Instance '{instance_name}' stopped successfully"),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Instance '{instance_name}' stopped successfully",
+            self.runtime.label()
+        ));
         Ok(())
     }
 
@@ -716,30 +757,28 @@ networks:
 
     /// Remove instance containers and optionally volumes
     pub fn prune_instance(&self, instance_name: &str, remove_volumes: bool) -> Result<()> {
-        print_status(
-            self.runtime.label(),
-            &format!("Pruning instance '{instance_name}'..."),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Pruning instance '{instance_name}'...",
+            self.runtime.label()
+        ));
 
         // Check if workspace exists - if not, there's nothing to prune
         let workspace = self.project.instance_workspace(instance_name);
         if !workspace.exists() {
-            print_status(
-                self.runtime.label(),
-                &format!("No workspace found for instance '{instance_name}', nothing to prune"),
-            );
+            Step::verbose_substep(&format!(
+                "{}: No workspace found for instance '{instance_name}', nothing to prune",
+                self.runtime.label()
+            ));
             return Ok(());
         }
 
         // Check if docker-compose file exists
         let compose_file = workspace.join("docker-compose.yml");
         if !compose_file.exists() {
-            print_status(
-                self.runtime.label(),
-                &format!(
-                    "No docker-compose.yml found for instance '{instance_name}', nothing to prune"
-                ),
-            );
+            Step::verbose_substep(&format!(
+                "{}: No docker-compose.yml found for instance '{instance_name}', nothing to prune",
+                self.runtime.label()
+            ));
             return Ok(());
         }
 
@@ -756,18 +795,18 @@ networks:
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Don't fail if containers are already down
             if stderr.contains("No such container") || stderr.contains("not running") {
-                print_status(
-                    self.runtime.label(),
-                    &format!("Instance '{instance_name}' containers already stopped"),
-                );
+                Step::verbose_substep(&format!(
+                    "{}: Instance '{instance_name}' containers already stopped",
+                    self.runtime.label()
+                ));
             } else {
                 return Err(eyre!("Failed to prune instance:\n{stderr}"));
             }
         } else {
-            print_status(
-                self.runtime.label(),
-                &format!("Instance '{instance_name}' pruned successfully"),
-            );
+            Step::verbose_substep(&format!(
+                "{}: Instance '{instance_name}' pruned successfully",
+                self.runtime.label()
+            ));
         }
 
         // Clean up orphaned named volumes from old CLI versions
@@ -789,20 +828,21 @@ networks:
 
     /// Remove Docker/Podman images associated with an instance
     pub fn remove_instance_images(&self, instance_name: &str) -> Result<()> {
-        print_status(
-            self.runtime.label(),
-            &format!("Removing images for instance '{instance_name}'..."),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Removing images for instance '{instance_name}'...",
+            self.runtime.label()
+        ));
 
         // Get image names for both debug and release modes
         let debug_image = self.image_name(instance_name, BuildMode::Debug);
+        let dev_image = self.image_name(instance_name, BuildMode::Dev);
         let release_image = self.image_name(instance_name, BuildMode::Release);
 
         // Try to remove both images (ignore errors if they don't exist)
-        for image in [debug_image, release_image] {
+        for image in [debug_image, dev_image, release_image] {
             let output = self.run_docker_command(&["rmi", "-f", &image])?;
             if output.status.success() {
-                print_status(self.runtime.label(), &format!("Removed image: {image}"));
+                Step::verbose_substep(&format!("{}: Removed image: {image}", self.runtime.label()));
             }
         }
 
@@ -839,20 +879,26 @@ networks:
 
     /// Remove all Helix-related images from the system
     pub fn clean_all_helix_images(runtime: ContainerRuntime) -> Result<()> {
-        print_status(runtime.label(), "Finding all Helix images on system...");
+        Step::verbose_substep(&format!(
+            "{}: Finding all Helix images on system...",
+            runtime.label()
+        ));
 
         let images = Self::get_helix_images(runtime)?;
 
         if images.is_empty() {
-            print_status(runtime.label(), "No Helix images found to clean");
+            Step::verbose_substep(&format!(
+                "{}: No Helix images found to clean",
+                runtime.label()
+            ));
             return Ok(());
         }
 
         let count = images.len();
-        print_status(
-            runtime.label(),
-            &format!("Found {count} Helix images to remove"),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Found {count} Helix images to remove",
+            runtime.label()
+        ));
 
         for image in images {
             let output = Command::new(runtime.binary())
@@ -861,13 +907,13 @@ networks:
                 .map_err(|e| eyre!("Failed to remove image {image}: {e}"))?;
 
             if output.status.success() {
-                print_status(runtime.label(), &format!("Removed image: {image}"));
+                Step::verbose_substep(&format!("{}: Removed image: {image}", runtime.label()));
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                print_status(
-                    runtime.label(),
-                    &format!("Warning: Failed to remove {image}: {stderr}"),
-                );
+                Step::verbose_substep(&format!(
+                    "{}: Warning: Failed to remove {image}: {stderr}",
+                    runtime.label()
+                ));
             }
         }
 
@@ -887,10 +933,10 @@ networks:
 
     pub fn push(&self, image_name: &str, registry_url: &str) -> Result<()> {
         let registry_image = format!("{registry_url}/{image_name}");
-        print_status(
-            self.runtime.label(),
-            &format!("Pushing image: {registry_image}"),
-        );
+        Step::verbose_substep(&format!(
+            "{}: Pushing image: {registry_image}",
+            self.runtime.label()
+        ));
         let output = Command::new(self.runtime.binary())
             .arg("push")
             .arg(&registry_image)

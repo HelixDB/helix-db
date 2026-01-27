@@ -6,12 +6,12 @@ container_runtime = "docker"
 # Testing out helix db with default schema
 [local.test]
 port = 7070
-build_mode = "debug"
+build_mode = "dev"
 bm25 = true
 
 [local.dev]
 port = 6969
-build_mode = "debug"
+build_mode = "dev"
 bm25 = true
 
 [cloud]

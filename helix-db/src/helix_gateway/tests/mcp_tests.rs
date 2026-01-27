@@ -62,7 +62,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -292,7 +292,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -340,7 +340,7 @@ mod mcp_tests {
 
         let response = out_step(&mut input).unwrap();
         let body = String::from_utf8(response.body.clone()).unwrap();
-        assert!(body.contains(&uuid_str(person2.id(), &arena)));
+        assert!(body.contains(uuid_str(person2.id(), &arena)));
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -421,7 +421,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -480,7 +480,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -585,7 +585,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -813,12 +813,12 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, alice.id(), bob.id(), false)
+            .add_edge("knows", None, alice.id(), bob.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, bob.id(), charlie.id(), false)
+            .add_edge("knows", None, bob.id(), charlie.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -879,7 +879,7 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, alice.id(), bob.id(), false)
+            .add_edge("knows", None, alice.id(), bob.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -906,7 +906,7 @@ mod mcp_tests {
                 .unwrap();
 
         let results = stream.collect().unwrap();
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
     }
 
     #[test]
@@ -1104,12 +1104,12 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, alice.id(), bob.id(), false)
+            .add_edge("knows", None, alice.id(), bob.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, bob.id(), charlie.id(), false)
+            .add_edge("knows", None, bob.id(), charlie.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
@@ -1141,7 +1141,7 @@ mod mcp_tests {
                 .unwrap();
 
         let results = stream.collect().unwrap();
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
     }
 
     #[test]
@@ -1161,12 +1161,12 @@ mod mcp_tests {
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("knows", None, person1.id(), person2.id(), false)
+            .add_edge("knows", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 
         G::new_mut(engine.storage.as_ref(), &arena, &mut txn)
-            .add_edge("likes", None, person1.id(), person2.id(), false)
+            .add_edge("likes", None, person1.id(), person2.id(), false, false)
             .collect_to_obj()
             .unwrap();
 

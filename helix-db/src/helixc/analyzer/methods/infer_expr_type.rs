@@ -1,6 +1,8 @@
 //! Semantic analyzer for Helix‑QL.
 use crate::helixc::analyzer::error_codes::ErrorCode;
-use crate::helixc::analyzer::utils::{DEFAULT_VAR_NAME, VariableInfo, is_in_scope, is_param};
+use crate::helixc::analyzer::utils::{
+    DEFAULT_VAR_NAME, VariableInfo, is_in_scope, is_param, validate_id_type,
+};
 use crate::helixc::generator::utils::EmbedData;
 use crate::{
     generate_error,
@@ -127,7 +129,7 @@ pub(crate) fn infer_expr_type<'a>(
             });
             match result {
                 Ok(stmts) => (
-                    Type::Array(Box::new(inner_array_ty.unwrap())),
+                    Type::Array(Box::new(inner_array_ty.unwrap_or(Type::Unknown))),
                     Some(GeneratedStatement::Array(stmts)),
                 ),
                 Err(()) => (Type::Unknown, Some(GeneratedStatement::Empty)),
@@ -288,16 +290,19 @@ pub(crate) fn infer_expr_type<'a>(
                                     match value {
                                         ValueType::Literal { value, loc } => {
                                             match ctx.node_fields.get(ty.as_str()) {
-                                                Some(fields) => match fields.get(field_name.as_str())
+                                                Some(fields) => match fields
+                                                    .get(field_name.as_str())
                                                 {
                                                     Some(field) => {
                                                         match field.field_type == FieldType::Date {
                                                             true => match Date::new(value) {
-                                                                Ok(date) => GeneratedValue::Literal(
-                                                                    GenRef::Literal(
-                                                                        date.to_rfc3339(),
-                                                                    ),
-                                                                ),
+                                                                Ok(date) => {
+                                                                    GeneratedValue::Literal(
+                                                                        GenRef::Literal(
+                                                                            date.to_rfc3339(),
+                                                                        ),
+                                                                    )
+                                                                }
                                                                 Err(_) => {
                                                                     generate_error!(
                                                                         ctx,
@@ -359,8 +364,7 @@ pub(crate) fn infer_expr_type<'a>(
                                 .properties
                                 .iter()
                                 .filter_map(|p| {
-                                    matches!(p.is_index, FieldPrefix::Index)
-                                        .then_some(p.name.clone())
+                                    p.field_prefix.is_indexed().then_some(p.name.clone())
                                 })
                                 .collect::<Vec<_>>();
                             match secondary_indices.is_empty() {
@@ -542,16 +546,19 @@ pub(crate) fn infer_expr_type<'a>(
                                     match value {
                                         ValueType::Literal { value, loc } => {
                                             match ctx.edge_fields.get(ty.as_str()) {
-                                                Some(fields) => match fields.get(field_name.as_str())
+                                                Some(fields) => match fields
+                                                    .get(field_name.as_str())
                                                 {
                                                     Some(field) => {
                                                         match field.field_type == FieldType::Date {
                                                             true => match Date::new(value) {
-                                                                Ok(date) => GeneratedValue::Literal(
-                                                                    GenRef::Literal(
-                                                                        date.to_rfc3339(),
-                                                                    ),
-                                                                ),
+                                                                Ok(date) => {
+                                                                    GeneratedValue::Literal(
+                                                                        GenRef::Literal(
+                                                                            date.to_rfc3339(),
+                                                                        ),
+                                                                    )
+                                                                }
                                                                 Err(_) => {
                                                                     generate_error!(
                                                                         ctx,
@@ -616,12 +623,10 @@ pub(crate) fn infer_expr_type<'a>(
 
                         Some(properties.into_iter().collect())
                     }
-                    None => {
-                        match default_properties.is_empty() {
-                            true => None,
-                            false => Some(default_properties),
-                        }
-                    }
+                    None => match default_properties.is_empty() {
+                        true => None,
+                        false => Some(default_properties),
+                    },
                 };
 
                 let (to, to_is_plural) = match &add.connection.to_id {
@@ -629,7 +634,9 @@ pub(crate) fn infer_expr_type<'a>(
                         IdType::Identifier { value, loc } => {
                             is_valid_identifier(ctx, original_query, loc.clone(), value.as_str());
                             // Validate that the identifier exists in scope or is a parameter
-                            if !scope.contains_key(value.as_str()) && is_param(original_query, value.as_str()).is_none() {
+                            if !scope.contains_key(value.as_str())
+                                && is_param(original_query, value.as_str()).is_none()
+                            {
                                 generate_error!(
                                     ctx,
                                     original_query,
@@ -638,6 +645,14 @@ pub(crate) fn infer_expr_type<'a>(
                                     value.as_str()
                                 );
                             }
+                            // Validate that the identifier is of type ID
+                            validate_id_type(
+                                ctx,
+                                original_query,
+                                loc.clone(),
+                                scope,
+                                value.as_str(),
+                            );
                             // Check if this variable is plural
                             let is_plural = scope
                                 .get(value.as_str())
@@ -665,7 +680,8 @@ pub(crate) fn infer_expr_type<'a>(
                             GeneratedValue::Literal(GenRef::Literal(value.clone())),
                             false,
                         ),
-                        _ => unreachable!(),
+                        // Parser guarantees edge to_id is Identifier or Literal
+                        _ => unreachable!("parser guarantees edge to_id is Identifier or Literal"),
                     },
                     _ => {
                         generate_error!(ctx, original_query, add.loc.clone(), E611);
@@ -677,7 +693,9 @@ pub(crate) fn infer_expr_type<'a>(
                         IdType::Identifier { value, loc } => {
                             is_valid_identifier(ctx, original_query, loc.clone(), value.as_str());
                             // Validate that the identifier exists in scope or is a parameter
-                            if !scope.contains_key(value.as_str()) && is_param(original_query, value.as_str()).is_none() {
+                            if !scope.contains_key(value.as_str())
+                                && is_param(original_query, value.as_str()).is_none()
+                            {
                                 generate_error!(
                                     ctx,
                                     original_query,
@@ -686,6 +704,14 @@ pub(crate) fn infer_expr_type<'a>(
                                     value.as_str()
                                 );
                             }
+                            // Validate that the identifier is of type ID
+                            validate_id_type(
+                                ctx,
+                                original_query,
+                                loc.clone(),
+                                scope,
+                                value.as_str(),
+                            );
                             // Check if this variable is plural
                             let is_plural = scope
                                 .get(value.as_str())
@@ -713,7 +739,10 @@ pub(crate) fn infer_expr_type<'a>(
                             GeneratedValue::Literal(GenRef::Literal(value.clone())),
                             false,
                         ),
-                        _ => unreachable!(),
+                        // Parser guarantees edge from_id is Identifier or Literal
+                        _ => {
+                            unreachable!("parser guarantees edge from_id is Identifier or Literal")
+                        }
                     },
                     _ => {
                         generate_error!(ctx, original_query, add.loc.clone(), E612);
@@ -727,6 +756,7 @@ pub(crate) fn infer_expr_type<'a>(
                     properties,
                     from_is_plural,
                     to_is_plural,
+                    is_unique: edge_in_schema.is_unique,
                 };
                 // If either from or to is plural, use Standalone (no G::new_mut wrapper),
                 // Empty separator (no period before it), and No collection (already done in iteration)
@@ -773,7 +803,12 @@ pub(crate) fn infer_expr_type<'a>(
                 }
                 let label = GenRef::Literal(ty.clone());
 
-                let vector_in_schema = match ctx.output.vectors.iter().find(|v| v.name == ty.as_str()) {
+                let vector_in_schema = match ctx
+                    .output
+                    .vectors
+                    .iter()
+                    .find(|v| v.name == ty.as_str())
+                {
                     Some(vector) => vector.clone(),
                     None => {
                         generate_error!(ctx, original_query, add.loc.clone(), E103, ty.as_str());
@@ -897,16 +932,19 @@ pub(crate) fn infer_expr_type<'a>(
                                     match value {
                                         ValueType::Literal { value, loc } => {
                                             match ctx.vector_fields.get(ty.as_str()) {
-                                                Some(fields) => match fields.get(field_name.as_str())
+                                                Some(fields) => match fields
+                                                    .get(field_name.as_str())
                                                 {
                                                     Some(field) => {
                                                         match field.field_type == FieldType::Date {
                                                             true => match Date::new(value) {
-                                                                Ok(date) => GeneratedValue::Literal(
-                                                                    GenRef::Literal(
-                                                                        date.to_rfc3339(),
-                                                                    ),
-                                                                ),
+                                                                Ok(date) => {
+                                                                    GeneratedValue::Literal(
+                                                                        GenRef::Literal(
+                                                                            date.to_rfc3339(),
+                                                                        ),
+                                                                    )
+                                                                }
                                                                 Err(_) => {
                                                                     generate_error!(
                                                                         ctx,
@@ -971,15 +1009,13 @@ pub(crate) fn infer_expr_type<'a>(
 
                         properties
                     }
-                    None => {
-                        default_properties.into_iter().fold(
-                            HashMap::new(),
-                            |mut acc, (field_name, default_value)| {
-                                acc.insert(field_name, default_value);
-                                acc
-                            },
-                        )
-                    }
+                    None => default_properties.into_iter().fold(
+                        HashMap::new(),
+                        |mut acc, (field_name, default_value)| {
+                            acc.insert(field_name, default_value);
+                            acc
+                        },
+                    ),
                 };
                 if let Some(vec_data) = &add.data {
                     let vec = match vec_data {
@@ -1011,6 +1047,14 @@ pub(crate) fn infer_expr_type<'a>(
                                         ty.as_str()
                                     );
                                 }
+                            } else {
+                                generate_error!(
+                                    ctx,
+                                    original_query,
+                                    add.loc.clone(),
+                                    E301,
+                                    i.as_str()
+                                );
                             }
                             let id =
                                 gen_identifier_or_param(original_query, i.as_str(), true, false);
@@ -1018,15 +1062,24 @@ pub(crate) fn infer_expr_type<'a>(
                         }
                         VectorData::Embed(e) => {
                             let embed_data = match &e.value {
-                                EvaluatesToString::Identifier(i) => EmbedData {
-                                    data: gen_identifier_or_param(
+                                EvaluatesToString::Identifier(i) => {
+                                    type_in_scope(
+                                        ctx,
                                         original_query,
+                                        add.loc.clone(),
+                                        scope,
                                         i.as_str(),
-                                        true,
-                                        false,
-                                    ),
-                                    model_name: gen_query.embedding_model_to_use.clone(),
-                                },
+                                    );
+                                    EmbedData {
+                                        data: gen_identifier_or_param(
+                                            original_query,
+                                            i.as_str(),
+                                            true,
+                                            false,
+                                        ),
+                                        model_name: gen_query.embedding_model_to_use.clone(),
+                                    }
+                                }
                                 EvaluatesToString::StringLiteral(s) => EmbedData {
                                     data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                                     model_name: gen_query.embedding_model_to_use.clone(),
@@ -1062,6 +1115,7 @@ pub(crate) fn infer_expr_type<'a>(
             );
             (Type::Vector(None), None)
         }
+
         // BatchAddVector(add) => {
         //     if let Some(ref ty) = add.vector_type {
         //         if !ctx.vector_set.contains(ty.as_str()) {
@@ -1097,8 +1151,7 @@ pub(crate) fn infer_expr_type<'a>(
                     if let Some(var_type) =
                         type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str())
                     {
-                        let expected_type =
-                            Type::Array(Box::new(Type::Scalar(FieldType::F64)));
+                        let expected_type = Type::Array(Box::new(Type::Scalar(FieldType::F64)));
                         if var_type != expected_type {
                             generate_error!(
                                 ctx,
@@ -1122,10 +1175,18 @@ pub(crate) fn infer_expr_type<'a>(
                 }
                 Some(VectorData::Embed(e)) => {
                     let embed_data = match &e.value {
-                        EvaluatesToString::Identifier(i) => EmbedData {
-                            data: gen_identifier_or_param(original_query, i.as_str(), true, false),
-                            model_name: gen_query.embedding_model_to_use.clone(),
-                        },
+                        EvaluatesToString::Identifier(i) => {
+                            type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str());
+                            EmbedData {
+                                data: gen_identifier_or_param(
+                                    original_query,
+                                    i.as_str(),
+                                    true,
+                                    false,
+                                ),
+                                model_name: gen_query.embedding_model_to_use.clone(),
+                            }
+                        }
                         EvaluatesToString::StringLiteral(s) => EmbedData {
                             data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                             model_name: gen_query.embedding_model_to_use.clone(),
@@ -1178,6 +1239,7 @@ pub(crate) fn infer_expr_type<'a>(
                     }
                     EvaluatesToNumberType::Identifier(i) => {
                         is_valid_identifier(ctx, original_query, sv.loc.clone(), i.as_str());
+                        type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str());
                         gen_identifier_or_param(original_query, i, false, false)
                     }
                     _ => {
@@ -1244,7 +1306,11 @@ pub(crate) fn infer_expr_type<'a>(
                                     _ => Where::Ref(WhereRef { expr }),
                                 })));
                         }
-                        _ => unreachable!(),
+                        // Pre-filter should produce Traversal or BoExp
+                        _ => {
+                            // Fall through - pre-filter will be None
+                            return (Type::Vector(sv.vector_type.clone()), None);
+                        }
                     }
                     Some(vec![BoExp::Expr(gen_traversal)])
                 }
@@ -1260,7 +1326,7 @@ pub(crate) fn infer_expr_type<'a>(
                     should_collect: ShouldCollect::ToVec,
                     source_step: Separator::Period(SourceStep::SearchVector(
                         GeneratedSearchVector {
-                            label: GenRef::Literal(sv.vector_type.clone().unwrap()),
+                            label: GenRef::Literal(sv.vector_type.clone().unwrap_or_default()),
                             vec,
                             k,
                             pre_filter,
@@ -1283,7 +1349,10 @@ pub(crate) fn infer_expr_type<'a>(
                         gen_query,
                     );
 
-                    match stmt.unwrap() {
+                    let Some(stmt) = stmt else {
+                        return BoExp::Empty;
+                    };
+                    match stmt {
                         GeneratedStatement::BoExp(expr) => match expr {
                             BoExp::Exists(mut traversal) => {
                                 traversal.should_collect = ShouldCollect::No;
@@ -1331,7 +1400,10 @@ pub(crate) fn infer_expr_type<'a>(
                         gen_query,
                     );
 
-                    match stmt.unwrap() {
+                    let Some(stmt) = stmt else {
+                        return BoExp::Empty;
+                    };
+                    match stmt {
                         GeneratedStatement::BoExp(expr) => match expr {
                             BoExp::Exists(mut traversal) => {
                                 traversal.should_collect = ShouldCollect::No;
@@ -1370,7 +1442,10 @@ pub(crate) fn infer_expr_type<'a>(
             let (ty, stmt) =
                 infer_expr_type(ctx, expr, scope, original_query, parent_ty, gen_query);
 
-            match stmt.unwrap() {
+            let Some(stmt) = stmt else {
+                return (Type::Unknown, None);
+            };
+            match stmt {
                 GeneratedStatement::BoExp(expr) => (
                     Type::Boolean,
                     Some(GeneratedStatement::BoExp(BoExp::Not(Box::new(expr)))),
@@ -1387,7 +1462,6 @@ pub(crate) fn infer_expr_type<'a>(
             if stmt.is_none() {
                 return (Type::Boolean, None);
             }
-            assert!(matches!(stmt, Some(GeneratedStatement::Traversal(_))));
             let traversal = match stmt.unwrap() {
                 GeneratedStatement::Traversal(mut tr) => {
                     // Only modify traversal_type if source is Identifier or Anonymous
@@ -1407,7 +1481,9 @@ pub(crate) fn infer_expr_type<'a>(
                             };
                         }
                         SourceStep::Anonymous => {
-                            tr.traversal_type = TraversalType::FromSingle(GenRef::Std(DEFAULT_VAR_NAME.to_string()));
+                            tr.traversal_type = TraversalType::FromSingle(GenRef::Std(
+                                DEFAULT_VAR_NAME.to_string(),
+                            ));
                         }
                         _ => {
                             // For AddN, AddV, AddE, SearchVector, etc., leave traversal_type unchanged (Ref)
@@ -1416,7 +1492,10 @@ pub(crate) fn infer_expr_type<'a>(
                     tr.should_collect = ShouldCollect::No;
                     tr
                 }
-                _ => unreachable!(),
+                // EXISTS expects a traversal expression
+                _ => {
+                    return (Type::Boolean, None);
+                }
             };
             (
                 Type::Boolean,
@@ -1513,6 +1592,13 @@ pub(crate) fn infer_expr_type<'a>(
                             bm25_search.loc.clone(),
                             i.as_str(),
                         );
+                        type_in_scope(
+                            ctx,
+                            original_query,
+                            bm25_search.loc.clone(),
+                            scope,
+                            i.as_str(),
+                        );
                         gen_identifier_or_param(original_query, i, false, false)
                     }
                     _ => {
@@ -1540,7 +1626,7 @@ pub(crate) fn infer_expr_type<'a>(
             };
 
             let search_bm25 = SearchBM25 {
-                type_arg: GenRef::Literal(bm25_search.type_arg.clone().unwrap()),
+                type_arg: GenRef::Literal(bm25_search.type_arg.clone().unwrap_or_default()),
                 query: vec,
                 k,
             };
@@ -1621,6 +1707,28 @@ mod tests {
                 edge <- AddE<Knows>::From(person1)::To(person2)
                 RETURN edge
         "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_add_edge_with_unique_index_valid() {
+        let source = r#"
+                N::Person { name: String }
+                E::Knows UNIQUE { From: Person, To: Person }
+
+                QUERY test(id1: ID, id2: ID) =>
+                    person1 <- N<Person>(id1)
+                    person2 <- N<Person>(id2)
+                    edge <- AddE<Knows>::From(person1)::To(person2)
+                    RETURN edge
+            "#;
 
         let content = write_to_temp_file(vec![source]);
         let parsed = HelixParser::parse_source(&content).unwrap();

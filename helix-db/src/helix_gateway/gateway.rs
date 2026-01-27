@@ -53,7 +53,7 @@ impl HelixGateway {
         opts: Option<HelixGraphEngineOpts>,
     ) -> HelixGateway {
         let router = Arc::new(HelixRouter::new(routes, mcp_routes, write_routes));
-        let cluster_id = std::env::var("CLUSTER_ID").ok();
+        let cluster_id = std::env::var("HELIX_CLUSTER_ID").ok();
         HelixGateway {
             address: address.to_string(),
             graph_access,
@@ -68,6 +68,31 @@ impl HelixGateway {
         trace!("Starting Helix Gateway");
 
         let all_core_ids = core_affinity::get_core_ids().expect("unable to get core IDs");
+
+        let all_core_ids = match std::env::var("HELIX_CORES_OVERRIDE") {
+            Ok(val) => {
+                let override_count: usize = val
+                    .parse()
+                    .expect("HELIX_CORES_OVERRIDE must be a valid number");
+                if override_count > all_core_ids.len() {
+                    warn!(
+                        "HELIX_CORES_OVERRIDE ({}) exceeds available cores ({}), using all cores",
+                        override_count,
+                        all_core_ids.len()
+                    );
+                    all_core_ids
+                } else {
+                    all_core_ids.into_iter().take(override_count).collect()
+                }
+            }
+            Err(_) => all_core_ids,
+        };
+
+        info!(
+            "Worker pool initialized: {} cores, {} worker threads, 1 writer thread",
+            all_core_ids.len(),
+            all_core_ids.len() * self.workers_per_core
+        );
 
         let tokio_core_ids = all_core_ids.clone();
         let tokio_core_setter = Arc::new(CoreSetter::new(tokio_core_ids, 1));
@@ -195,6 +220,14 @@ async fn post_handler(
 
     match res {
         Ok(r) => {
+            #[cfg(any(feature = "dev-instance", feature = "production"))]
+            {
+                let resp_str = String::from_utf8_lossy(&r.body);
+                info!(query = %query_name, response = %resp_str, "Response");
+            }
+            if !*helix_metrics::METRICS_ENABLED {
+                return r.into_response();
+            }
             helix_metrics::log_event(
                 helix_metrics::events::EventType::QuerySuccess,
                 helix_metrics::events::QuerySuccessEvent {
@@ -206,14 +239,17 @@ async fn post_handler(
             r.into_response()
         }
         Err(e) => {
-            info!(?e, "Got error");
+            info!(query = %query_name, error = ?e, "Error response");
+            if !*helix_metrics::METRICS_ENABLED {
+                return e.into_response();
+            }
             helix_metrics::log_event(
                 helix_metrics::events::EventType::QueryError,
                 helix_metrics::events::QueryErrorEvent {
                     cluster_id: state.cluster_id.clone(),
                     query_name,
                     input_json: sonic_rs::to_string(&body).ok(),
-                    output_json: Some(format!(r#"{{"error":"{e}"}}"#)),
+                    output_json: sonic_rs::to_string(&e).ok(),
                     time_taken_usec: start_time.elapsed().as_micros() as u32,
                 },
             );
@@ -256,7 +292,6 @@ impl CoreSetter {
         match self.cores.get(core_index) {
             Some(c) => {
                 core_affinity::set_for_current(*c);
-                trace!("Set core affinity to: {c:?}");
             }
             None => warn!(
                 "CoreSetter::set_current called more times than cores.len() * threads_per_core. Core affinity not set"

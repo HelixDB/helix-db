@@ -37,6 +37,7 @@ pub trait AddEAdapter<'db, 'arena, 'txn, 's>:
         from_node: u128,
         to_node: u128,
         should_check: bool,
+        is_unique: bool,
     ) -> RwTraversalIterator<
         'db,
         'arena,
@@ -57,6 +58,7 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         from_node: u128,
         to_node: u128,
         should_check: bool,
+        is_unique: bool,
     ) -> RwTraversalIterator<
         'db,
         'arena,
@@ -89,35 +91,49 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             Err(e) => result = Err(GraphError::from(e)),
         }
 
-        let label_hash = hash_label(edge.label, None);
+        // Skip remaining operations if edge insertion failed
+        if result.is_ok() {
+            let label_hash = hash_label(edge.label, None);
 
-        match self.storage.out_edges_db.put_with_flags(
-            self.txn,
-            PutFlags::APPEND_DUP,
-            &HelixGraphStorage::out_edge_key(&from_node, &label_hash),
-            &HelixGraphStorage::pack_edge_data(&edge.id, &to_node),
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                println!(
-                    "add_e => error adding out edge between {from_node:?} and {to_node:?}: {e:?}"
-                );
-                result = Err(GraphError::from(e));
+            match self.storage.out_edges_db.put_with_flags(
+                self.txn,
+                if is_unique {
+                    PutFlags::NO_OVERWRITE
+                } else {
+                    PutFlags::APPEND_DUP
+                },
+                &HelixGraphStorage::out_edge_key(&from_node, &label_hash),
+                &HelixGraphStorage::pack_edge_data(&edge.id, &to_node),
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!(
+                        "add_e => error adding out edge between {from_node:?} and {to_node:?}: {e:?}"
+                    );
+                    result = Err(GraphError::from(e));
+                }
             }
-        }
 
-        match self.storage.in_edges_db.put_with_flags(
-            self.txn,
-            PutFlags::APPEND_DUP,
-            &HelixGraphStorage::in_edge_key(&to_node, &label_hash),
-            &HelixGraphStorage::pack_edge_data(&edge.id, &from_node),
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                println!(
-                    "add_e => error adding in edge between {from_node:?} and {to_node:?}: {e:?}"
-                );
-                result = Err(GraphError::from(e));
+            // Skip in_edges if out_edges failed
+            if result.is_ok() {
+                match self.storage.in_edges_db.put_with_flags(
+                    self.txn,
+                    if is_unique {
+                        PutFlags::NO_OVERWRITE
+                    } else {
+                        PutFlags::APPEND_DUP
+                    },
+                    &HelixGraphStorage::in_edge_key(&to_node, &label_hash),
+                    &HelixGraphStorage::pack_edge_data(&edge.id, &from_node),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        println!(
+                            "add_e => error adding in edge between {from_node:?} and {to_node:?}: {e:?}"
+                        );
+                        result = Err(GraphError::from(e));
+                    }
+                }
             }
         }
 

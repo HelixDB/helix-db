@@ -72,10 +72,12 @@ impl HelixParser {
                 Rule::to => {
                     to_id = self.parse_id_args(p.into_inner().next().unwrap())?;
                 }
-                _ => return Err(ParserError::from(format!(
-                    "Unexpected rule in parse_to_from: {:?}",
-                    p.as_rule()
-                ))),
+                _ => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in parse_to_from: {:?}",
+                        p.as_rule()
+                    )));
+                }
             }
         }
         Ok(EdgeConnection {

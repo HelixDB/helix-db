@@ -12,13 +12,14 @@ QUERY getAllFiles1() =>
     RETURN files::!{text}
 
 // Spread Operator (can't compile)
-QUERY getAllFiles2() => 
-    files <- N<File>
+QUERY getAllFiles2(id: ID) => 
+    files <- N<File>(id)
     RETURN files::{
         file_id: ID,
         name: name,
         extension: extension,
-        extracted_at: extracted_at
+        extracted_at: extracted_at,
+        other: _::Out<FileEdge>
     }
 
 // Accessing ID (empty)

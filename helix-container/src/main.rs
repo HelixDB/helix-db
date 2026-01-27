@@ -11,7 +11,7 @@ use helix_db::helix_gateway::{
 };
 use std::{collections::HashMap, sync::Arc};
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod queries;
 
@@ -26,6 +26,7 @@ fn main() {
                         && !target.starts_with("hyper")
                         && !target.starts_with("tower")
                         && !target.starts_with("h2")
+                        && !target.starts_with("reqwest")
                 },
             )),
         )
@@ -55,7 +56,7 @@ fn main() {
     };
 
     println!("Running with the following setup:");
-    println!("\tconfig: {config:?}");
+    println!("\tconfig: {config:#?}");
     println!("\tpath: {}", path.display());
     println!("\tport: {port}");
 
@@ -112,40 +113,25 @@ fn main() {
     let submissions: Vec<_> = inventory::iter::<HandlerSubmission>.into_iter().collect();
     println!("Found {} route submissions", submissions.len());
 
-    let (query_routes, write_routes): (HashMap<String, HandlerFn>, std::collections::HashSet<String>) =
-        inventory::iter::<HandlerSubmission>
-            .into_iter()
-            .fold((HashMap::new(), std::collections::HashSet::new()), |(mut routes, mut writes), submission| {
-                println!(
-                    "Processing POST submission for handler: {} (is_write: {})",
-                    submission.0.name,
-                    submission.0.is_write
-                );
-                let handler = &submission.0;
-                let func: HandlerFn = Arc::new(handler.func);
-                routes.insert(handler.name.to_string(), func);
-                if handler.is_write {
-                    writes.insert(handler.name.to_string());
-                }
-                (routes, writes)
-            });
-
-    // collect GET routes
-    // let get_routes: HashMap<(String, String), HandlerFn> = inventory::iter::<HandlerSubmission>
-    //     .into_iter()
-    //     .map(|submission| {
-    //         println!("Processing GET submission for handler: {}", submission.0.name);
-    //         let handler = &submission.0;
-    //         let func: HandlerFn = Arc::new(move |input, response| (handler.func)(input, response));
-    //         (
-    //             (
-    //                 "GET".to_string(),
-    //                 format!("/get/{}", handler.name.to_string()),
-    //             ),
-    //             func,
-    //         )
-    //     })
-    // .collect();
+    let (query_routes, write_routes): (
+        HashMap<String, HandlerFn>,
+        std::collections::HashSet<String>,
+    ) = inventory::iter::<HandlerSubmission>.into_iter().fold(
+        (HashMap::new(), std::collections::HashSet::new()),
+        |(mut routes, mut writes), submission| {
+            println!(
+                "Processing POST submission for handler: {} (is_write: {})",
+                submission.0.name, submission.0.is_write
+            );
+            let handler = &submission.0;
+            let func: HandlerFn = Arc::new(handler.func);
+            routes.insert(handler.name.to_string(), func);
+            if handler.is_write {
+                writes.insert(handler.name.to_string());
+            }
+            (routes, writes)
+        },
+    );
 
     let mcp_routes = inventory::iter::<MCPHandlerSubmission>
         .into_iter()

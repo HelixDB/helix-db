@@ -1,0 +1,45 @@
+name: Add macOS x64 Binary to Latest Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Get latest release
+        id: latest_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            core.setOutput('upload_url', release.data.upload_url);
+            core.setOutput('release_id', release.data.id);
+            console.log(`Found release: ${release.data.tag_name}`);
+
+      - name: Build
+        run: |
+          cd helix-cli
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.latest_release.outputs.upload_url }}
+          asset_path: target/x86_64-apple-darwin/release/helix
+          asset_name: helix-x86_64-apple-darwin
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

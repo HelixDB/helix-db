@@ -203,7 +203,6 @@ mod tests {
                 },
             },
         },
-        helixc::generator::traversal_steps::EdgeType,
         protocol::{Format, request::Request, request::RequestType},
     };
     use axum::body::Bytes;
@@ -260,7 +259,7 @@ mod tests {
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
-        let props1 = vec![("name", Value::String("Alice".to_string()))];
+        let props1 = [("name", Value::String("Alice".to_string()))];
         let props_map1 = ImmutablePropertiesMap::new(
             props1.len(),
             props1
@@ -273,7 +272,7 @@ mod tests {
             .add_n(arena.alloc_str("person"), Some(props_map1), None)
             .collect_to_obj()?;
 
-        let props2 = vec![("name", Value::String("Bob".to_string()))];
+        let props2 = [("name", Value::String("Bob".to_string()))];
         let props_map2 = ImmutablePropertiesMap::new(
             props2.len(),
             props2
@@ -292,6 +291,7 @@ mod tests {
                 None,
                 node1.id(),
                 node2.id(),
+                false,
                 false,
             )
             .collect_to_obj()?;
@@ -333,7 +333,7 @@ mod tests {
 
         let mut nodes = Vec::new();
         for i in 0..10 {
-            let props = vec![("index", Value::I64(i))];
+            let props = [("index", Value::I64(i))];
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
                 props
@@ -356,6 +356,7 @@ mod tests {
                     None,
                     nodes[i].id(),
                     nodes[i + 1].id(),
+                    false,
                     false,
                 )
                 .collect_to_obj()?;
@@ -395,7 +396,7 @@ mod tests {
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
-        let props = vec![("name", Value::String("Test".to_string()))];
+        let props = [("name", Value::String("Test".to_string()))];
         let props_map = ImmutablePropertiesMap::new(
             props.len(),
             props

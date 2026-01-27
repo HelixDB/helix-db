@@ -1,3 +1,4 @@
+use crate::commands::auth::require_auth;
 use crate::commands::build::MetricsData;
 use crate::commands::integrations::ecr::EcrManager;
 use crate::commands::integrations::fly::FlyManager;
@@ -5,19 +6,56 @@ use crate::commands::integrations::helix::HelixManager;
 use crate::config::{BuildMode, CloudConfig, InstanceInfo};
 use crate::docker::DockerManager;
 use crate::metrics_sender::MetricsSender;
+use crate::output::{Operation, Step, Verbosity};
+use crate::port;
 use crate::project::ProjectContext;
-use crate::utils::{Spinner, print_status, print_success};
+use crate::prompts;
 use eyre::Result;
 use std::time::Instant;
 
-pub async fn run(instance_name: String, dev: bool, metrics_sender: &MetricsSender) -> Result<()> {
+pub async fn run(
+    instance_name: Option<String>,
+    dev: bool,
+    metrics_sender: &MetricsSender,
+) -> Result<()> {
     let start_time = Instant::now();
 
     // Load project context
     let project = ProjectContext::find_and_load(None)?;
 
+    // Get instance name - prompt if not provided
+    let instance_name = match instance_name {
+        Some(name) => name,
+        None if prompts::is_interactive() => {
+            let instances = project.config.list_instances_with_types();
+            prompts::intro(
+                "helix push",
+                Some(
+                    "This will build and redeploy your selected instance based on the configuration in helix.toml.",
+                ),
+            )?;
+            prompts::select_instance(&instances)?
+        }
+        None => {
+            let instances = project.config.list_instances();
+            return Err(eyre::eyre!(
+                "No instance specified. Available instances: {}",
+                instances
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    };
+
     // Get instance config
     let instance_config = project.config.get_instance(&instance_name)?;
+
+    // Check auth early for Helix Cloud instances
+    if let InstanceInfo::Helix(_) = &instance_config {
+        require_auth().await?;
+    }
 
     let deploy_result = if instance_config.is_local() {
         push_local_instance(&project, &instance_name, metrics_sender).await
@@ -87,35 +125,63 @@ async fn push_local_instance(
     instance_name: &str,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
-    print_status(
-        "DEPLOY",
-        &format!("Deploying local instance '{instance_name}'"),
-    );
+    let op = Operation::new("Deploying", instance_name);
 
     let docker = DockerManager::new(project);
 
     // Check Docker availability
     DockerManager::check_runtime_available(docker.runtime)?;
 
+    // Check port availability before building
+    let instance_config = project.config.get_instance(instance_name)?;
+    let requested_port = instance_config.port().unwrap_or(port::DEFAULT_PORT);
+    let (actual_port, port_changed) = port::ensure_port_available(requested_port)?;
+
+    if port_changed {
+        crate::output::warning(&format!(
+            "Port {} is in use. Using port {} instead.",
+            requested_port, actual_port
+        ));
+    }
+
     // Build the instance first (this ensures it's up to date) and get metrics data
     let metrics_data =
-        crate::commands::build::run(instance_name.to_string(), metrics_sender).await?;
+        crate::commands::build::run_build_steps(&op, project, instance_name, None, metrics_sender)
+            .await?;
+
+    // If port changed, regenerate docker-compose with new port
+    if port_changed {
+        let compose_content = docker.generate_docker_compose(
+            instance_name,
+            instance_config.clone(),
+            Some(actual_port),
+        )?;
+        let compose_path = project.docker_compose_path(instance_name);
+        std::fs::write(&compose_path, compose_content)?;
+    }
 
     // Start the instance
+    let mut start_step = Step::with_messages("Starting instance", "Instance started");
+    start_step.start();
     docker.start_instance(instance_name)?;
+    start_step.done();
 
-    // Get the instance configuration to show connection info
-    let instance_config = project.config.get_instance(instance_name)?;
-    let port = instance_config.port().unwrap_or(6969);
+    op.success();
 
-    print_success(&format!("Instance '{instance_name}' is now running"));
-    println!("  Local URL: http://localhost:{port}");
     let project_name = &project.config.project.name;
-    println!("  Container: helix_{project_name}_{instance_name}");
-    println!(
-        "  Data volume: {}",
-        project.instance_volume(instance_name).display()
-    );
+    if Verbosity::current().show_normal() {
+        Operation::print_details(&[
+            ("Local URL", &format!("http://localhost:{actual_port}")),
+            (
+                "Container",
+                &format!("helix_{project_name}_{instance_name}"),
+            ),
+            (
+                "Data volume",
+                &project.instance_volume(instance_name).display().to_string(),
+            ),
+        ]);
+    }
 
     Ok(metrics_data)
 }
@@ -127,10 +193,7 @@ async fn push_cloud_instance(
     dev: bool,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
-    print_status(
-        "CLOUD",
-        &format!("Deploying to cloud instance '{instance_name}'"),
-    );
+    let op = Operation::new("Deploying", instance_name);
 
     let cluster_id = instance_config
         .cluster_id()
@@ -138,6 +201,7 @@ async fn push_cloud_instance(
 
     // Check if cluster has been created
     if cluster_id == "YOUR_CLUSTER_ID" {
+        op.failure();
         return Err(eyre::eyre!(
             "Cluster for instance '{instance_name}' has not been created yet.\nRun 'helix create-cluster {instance_name}' to create the cluster first."
         ));
@@ -145,7 +209,7 @@ async fn push_cloud_instance(
 
     let metrics_data = if instance_config.should_build_docker_image() {
         // Build happens, get metrics data from build
-        crate::commands::build::run(instance_name.to_string(), metrics_sender).await?
+        crate::commands::build::run(Some(instance_name.to_string()), None, metrics_sender).await?
     } else {
         // No build, use lightweight parsing
         parse_queries_for_metrics(project)?
@@ -153,11 +217,12 @@ async fn push_cloud_instance(
 
     // Deploy to cloud
     let config = project.config.cloud.get(instance_name).unwrap();
-    let mut deploy_spinner = Spinner::new("DEPLOY", "Deploying instance...");
-    deploy_spinner.start();
+    let mut deploy_step = Step::with_messages("Deploying to cloud", "Deployed to cloud");
+    deploy_step.start();
+
     match config {
         CloudConfig::FlyIo(config) => {
-            deploy_spinner.update("Deploying to Fly.io...");
+            Step::verbose_substep("Deploying to Fly.io...");
             let fly = FlyManager::new(project, config.auth_type.clone()).await?;
             let docker = DockerManager::new(project);
             // Get the correct image name from docker compose project name
@@ -167,7 +232,7 @@ async fn push_cloud_instance(
                 .await?;
         }
         CloudConfig::Ecr(config) => {
-            deploy_spinner.update("Deploying to ECR...");
+            Step::verbose_substep("Deploying to ECR...");
             let ecr = EcrManager::new(project, config.auth_type.clone()).await?;
             let docker = DockerManager::new(project);
             // Get the correct image name from docker compose project name
@@ -177,7 +242,6 @@ async fn push_cloud_instance(
                 .await?;
         }
         CloudConfig::Helix(config) => {
-            deploy_spinner.stop(); // Stop spinner before helix.deploy() starts its own progress
             let helix = HelixManager::new(project);
             // CLI --dev flag takes precedence, otherwise use build_mode from config
             let build_mode = if dev {
@@ -191,9 +255,9 @@ async fn push_cloud_instance(
                 .await?;
         }
     }
-    deploy_spinner.stop();
+    deploy_step.done_with_info(&format!("cluster: {cluster_id}"));
 
-    print_status("UPLOAD", &format!("Uploading to cluster: {cluster_id}"));
+    op.success();
 
     Ok(metrics_data)
 }

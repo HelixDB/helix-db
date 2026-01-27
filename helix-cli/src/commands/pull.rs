@@ -1,6 +1,7 @@
 use crate::config::InstanceInfo;
+use crate::output::Operation;
 use crate::project::ProjectContext;
-use crate::utils::{print_status, print_warning};
+use crate::utils::print_warning;
 use eyre::Result;
 
 pub async fn run(instance_name: String) -> Result<()> {
@@ -18,10 +19,7 @@ pub async fn run(instance_name: String) -> Result<()> {
 }
 
 async fn pull_from_local_instance(project: &ProjectContext, instance_name: &str) -> Result<()> {
-    print_status(
-        "PULL",
-        &format!("Pulling queries from local instance '{instance_name}'"),
-    );
+    let op = Operation::new("Pulling", instance_name);
 
     // For local instances, we'd need to extract the .hql files from the running container
     // or from the compiled workspace
@@ -30,6 +28,7 @@ async fn pull_from_local_instance(project: &ProjectContext, instance_name: &str)
     let container_dir = workspace.join("helix-container");
 
     if !container_dir.exists() {
+        op.failure();
         return Err(eyre::eyre!(
             "Instance '{instance_name}' has not been built yet. Run 'helix build {instance_name}' first."
         ));
@@ -51,19 +50,14 @@ async fn pull_from_cloud_instance(
     instance_name: &str,
     instance_config: InstanceInfo<'_>,
 ) -> Result<()> {
-    print_status(
-        "CLOUD",
-        &format!("Pulling queries from cloud instance '{instance_name}'"),
-    );
+    let op = Operation::new("Pulling", instance_name);
 
-    let cluster_id = instance_config
-        .cluster_id()
-        .ok_or_else(|| eyre::eyre!("Cloud instance '{instance_name}' must have a cluster_id"))?;
+    let cluster_id = instance_config.cluster_id().ok_or_else(|| {
+        op.failure();
+        eyre::eyre!("Cloud instance '{instance_name}' must have a cluster_id")
+    })?;
 
-    print_status(
-        "DOWNLOAD",
-        &format!("Downloading from cluster: {cluster_id}"),
-    );
+    crate::output::Step::verbose_substep(&format!("Downloading from cluster: {cluster_id}"));
 
     // TODO: Implement cloud query download
     // This would:

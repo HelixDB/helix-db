@@ -5,8 +5,11 @@ use crate::{
     generate_error,
     helixc::{
         analyzer::{
-            Ctx, errors::push_query_err, methods::infer_expr_type::infer_expr_type, types::Type,
-            utils::{is_valid_identifier, VariableInfo},
+            Ctx,
+            errors::push_query_err,
+            methods::infer_expr_type::infer_expr_type,
+            types::Type,
+            utils::{VariableInfo, is_valid_identifier},
         },
         generator::{
             queries::Query as GeneratedQuery,
@@ -23,6 +26,14 @@ use crate::{
 };
 use paste::paste;
 use std::collections::HashMap;
+
+fn capitalize_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().chain(c).collect(),
+    }
+}
 
 /// Validates the statements in the query used at the highest level to generate each statement in the query
 ///
@@ -63,14 +74,17 @@ pub(crate) fn validate_statements<'a>(
             // Determine if the variable is single or collection based on type
             let is_single = if let Some(GeneratedStatement::Traversal(ref tr)) = stmt {
                 // Check if should_collect is ToObj, or if the type is a single value
-                matches!(tr.should_collect, ShouldCollect::ToObj) ||
-                matches!(rhs_ty, Type::Node(_) | Type::Edge(_) | Type::Vector(_))
+                matches!(tr.should_collect, ShouldCollect::ToObj)
+                    || matches!(rhs_ty, Type::Node(_) | Type::Edge(_) | Type::Vector(_))
             } else {
                 // Non-traversal: check if type is single
                 matches!(rhs_ty, Type::Node(_) | Type::Edge(_) | Type::Vector(_))
             };
 
-            scope.insert(assign.variable.as_str(), VariableInfo::new(rhs_ty, is_single));
+            scope.insert(
+                assign.variable.as_str(),
+                VariableInfo::new(rhs_ty, is_single),
+            );
 
             stmt.as_ref()?;
 
@@ -91,7 +105,13 @@ pub(crate) fn validate_statements<'a>(
                 tr.should_collect = ShouldCollect::No;
                 Some(GeneratedStatement::Drop(GeneratedDrop { expression: tr }))
             } else {
-                generate_error!(ctx, original_query, expr.loc.clone(), E628, &expr_ty.get_type_name());
+                generate_error!(
+                    ctx,
+                    original_query,
+                    expr.loc.clone(),
+                    E628,
+                    &expr_ty.get_type_name()
+                );
                 None
             }
         }
@@ -119,8 +139,15 @@ pub(crate) fn validate_statements<'a>(
             // else assume variable in scope and add it to the body scope
             let in_var_type = match param {
                 Some(param) => {
-                    for_loop_in_variable =
-                        ForLoopInVariable::Parameter(GenRef::Std(fl.in_variable.1.clone()));
+                    let struct_name = format!(
+                        "{}{}Data",
+                        original_query.name,
+                        capitalize_first(&param.name.1)
+                    );
+                    for_loop_in_variable = ForLoopInVariable::Parameter(
+                        GenRef::Std(fl.in_variable.1.clone()),
+                        struct_name,
+                    );
                     Type::from(param.param_type.1.clone())
                 }
                 None => match scope.get(fl.in_variable.1.as_str()) {
@@ -132,8 +159,10 @@ pub(crate) fn validate_statements<'a>(
                             fl.in_variable.1.as_str(),
                         );
 
-                        for_loop_in_variable =
-                            ForLoopInVariable::Identifier(GenRef::Std(fl.in_variable.1.clone()));
+                        for_loop_in_variable = ForLoopInVariable::Identifier(
+                            GenRef::Std(fl.in_variable.1.clone()),
+                            fl_in_var_info.struct_name.clone(),
+                        );
                         fl_in_var_info.ty.clone()
                     }
                     None => {
@@ -173,19 +202,39 @@ pub(crate) fn validate_statements<'a>(
                     scope.insert(name.as_str(), VariableInfo::new(field_type, true));
                     for_variable = ForVariable::Identifier(GenRef::Std(name.clone()));
                 }
-                ForLoopVars::ObjectAccess { .. } => {
-                    todo!()
+                ForLoopVars::ObjectAccess { name, field, loc } => {
+                    // Object access syntax (e.g., `obj.field`) is not yet supported in for loops
+                    generate_error!(
+                        ctx,
+                        original_query,
+                        loc.clone(),
+                        E654,
+                        [&name, &field],
+                        [&field]
+                    );
+                    // Continue with Unknown type to allow analysis to proceed
+                    body_scope.insert(field.as_str(), VariableInfo::new(Type::Unknown, true));
+                    for_variable = ForVariable::Identifier(GenRef::Std(field.clone()));
                 }
                 ForLoopVars::ObjectDestructuring { fields, loc: _ } => {
                     match &param {
                         Some(p) => {
-                            for_loop_in_variable =
-                                ForLoopInVariable::Parameter(GenRef::Std(p.name.1.clone()));
+                            let struct_name = format!(
+                                "{}{}Data",
+                                original_query.name,
+                                capitalize_first(&p.name.1)
+                            );
+                            for_loop_in_variable = ForLoopInVariable::Parameter(
+                                GenRef::Std(p.name.1.clone()),
+                                struct_name,
+                            );
                             match &p.param_type.1 {
                                 FieldType::Array(inner) => match inner.as_ref() {
                                     FieldType::Object(param_fields) => {
                                         for (field_loc, field_name) in fields {
-                                            if !param_fields.contains_key(field_name.as_str()) {
+                                            let Some(param_field_type) =
+                                                param_fields.get(field_name.as_str())
+                                            else {
                                                 generate_error!(
                                                     ctx,
                                                     original_query,
@@ -194,15 +243,32 @@ pub(crate) fn validate_statements<'a>(
                                                     [field_name, &fl.in_variable.1],
                                                     [field_name, &fl.in_variable.1]
                                                 );
-                                            }
-                                            let field_type = Type::from(
-                                                param_fields
-                                                    .get(field_name.as_str())
-                                                    .unwrap()
-                                                    .clone(),
-                                            );
-                                            body_scope.insert(field_name.as_str(), VariableInfo::new(field_type.clone(), true));
-                                            scope.insert(field_name.as_str(), VariableInfo::new(field_type, true));
+                                                continue;
+                                            };
+                                            let field_type = Type::from(param_field_type.clone());
+                                            // Check if the field is an Array(Object) and compute struct name for nested loops
+                                            let field_struct_name = match param_field_type {
+                                                FieldType::Array(inner) => match inner.as_ref() {
+                                                    FieldType::Object(_) => Some(format!(
+                                                        "{}{}Data",
+                                                        original_query.name,
+                                                        capitalize_first(field_name)
+                                                    )),
+                                                    _ => None,
+                                                },
+                                                _ => None,
+                                            };
+                                            let var_info = match field_struct_name {
+                                                Some(sn) => VariableInfo::new_with_struct_name(
+                                                    field_type.clone(),
+                                                    true,
+                                                    sn,
+                                                ),
+                                                None => VariableInfo::new(field_type.clone(), true),
+                                            };
+                                            body_scope
+                                                .insert(field_name.as_str(), var_info.clone());
+                                            scope.insert(field_name.as_str(), var_info);
                                         }
                                         for_variable = ForVariable::ObjectDestructure(
                                             fields
@@ -235,44 +301,91 @@ pub(crate) fn validate_statements<'a>(
                             }
                         }
                         None => match scope.get(fl.in_variable.1.as_str()) {
-                            Some(var_info) => match &var_info.ty {
-                                Type::Array(object_arr) => {
-                                    match object_arr.as_ref() {
-                                        Type::Object(object) => {
-                                            let mut obj_dest_fields = Vec::with_capacity(fields.len());
-                                            let object = object.clone();
-                                            for (_, field_name) in fields {
-                                                let name = field_name.as_str();
-                                                // adds non-param fields to scope
-                                                let field_type = object.get(name).unwrap().clone();
-                                                body_scope.insert(name, VariableInfo::new(field_type.clone(), true));
-                                                scope.insert(name, VariableInfo::new(field_type, true));
-                                            obj_dest_fields.push(GenRef::Std(name.to_string()));
-                                        }
-                                        for_variable =
-                                            ForVariable::ObjectDestructure(obj_dest_fields);
-                                        }
-                                        _ => {
-                                            generate_error!(
-                                                ctx,
-                                                original_query,
-                                                fl.in_variable.0.clone(),
-                                                E653,
-                                                [&fl.in_variable.1],
-                                                [&fl.in_variable.1]
-                                            );
+                            Some(var_info) => {
+                                // Set the for_loop_in_variable with struct_name from scope
+                                for_loop_in_variable = ForLoopInVariable::Identifier(
+                                    GenRef::Std(fl.in_variable.1.clone()),
+                                    var_info.struct_name.clone(),
+                                );
+                                match &var_info.ty {
+                                    Type::Array(object_arr) => {
+                                        match object_arr.as_ref() {
+                                            Type::Object(object) => {
+                                                let mut obj_dest_fields =
+                                                    Vec::with_capacity(fields.len());
+                                                let object = object.clone();
+                                                for (field_loc, field_name) in fields {
+                                                    let name = field_name.as_str();
+                                                    // adds non-param fields to scope
+                                                    let Some(field_type) =
+                                                        object.get(name).cloned()
+                                                    else {
+                                                        generate_error!(
+                                                            ctx,
+                                                            original_query,
+                                                            field_loc.clone(),
+                                                            E658,
+                                                            name
+                                                        );
+                                                        continue;
+                                                    };
+                                                    // Check if the field is an Array(Object) and compute struct name for nested loops
+                                                    let field_struct_name = match &field_type {
+                                                        Type::Array(inner) => {
+                                                            match inner.as_ref() {
+                                                                Type::Object(_) => Some(format!(
+                                                                    "{}{}Data",
+                                                                    original_query.name,
+                                                                    capitalize_first(name)
+                                                                )),
+                                                                _ => None,
+                                                            }
+                                                        }
+                                                        _ => None,
+                                                    };
+                                                    let field_var_info = match field_struct_name {
+                                                        Some(sn) => {
+                                                            VariableInfo::new_with_struct_name(
+                                                                field_type.clone(),
+                                                                true,
+                                                                sn,
+                                                            )
+                                                        }
+                                                        None => VariableInfo::new(
+                                                            field_type.clone(),
+                                                            true,
+                                                        ),
+                                                    };
+                                                    body_scope.insert(name, field_var_info.clone());
+                                                    scope.insert(name, field_var_info);
+                                                    obj_dest_fields
+                                                        .push(GenRef::Std(name.to_string()));
+                                                }
+                                                for_variable =
+                                                    ForVariable::ObjectDestructure(obj_dest_fields);
+                                            }
+                                            _ => {
+                                                generate_error!(
+                                                    ctx,
+                                                    original_query,
+                                                    fl.in_variable.0.clone(),
+                                                    E653,
+                                                    [&fl.in_variable.1],
+                                                    [&fl.in_variable.1]
+                                                );
+                                            }
                                         }
                                     }
-                                }
-                                _ => {
-                                    generate_error!(
-                                        ctx,
-                                        original_query,
-                                        fl.in_variable.0.clone(),
-                                        E653,
-                                        [&fl.in_variable.1],
-                                        [&fl.in_variable.1]
-                                    );
+                                    _ => {
+                                        generate_error!(
+                                            ctx,
+                                            original_query,
+                                            fl.in_variable.0.clone(),
+                                            E653,
+                                            [&fl.in_variable.1],
+                                            [&fl.in_variable.1]
+                                        );
+                                    }
                                 }
                             }
                             _ => {
@@ -312,7 +425,7 @@ pub(crate) fn validate_statements<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Assignment Validation Tests
@@ -336,7 +449,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E302));
-        assert!(diagnostics.iter().any(|d| d.message.contains("previously declared")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("previously declared"))
+        );
     }
 
     #[test]
@@ -382,7 +499,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
-        assert!(diagnostics.iter().any(|d| d.message.contains("not in scope") && d.message.contains("unknownList")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("not in scope") && d.message.contains("unknownList"))
+        );
     }
 
     #[test]
@@ -426,7 +547,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E651));
-        assert!(diagnostics.iter().any(|d| d.message.contains("not iterable")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("not iterable"))
+        );
     }
 
     #[test]
@@ -515,7 +640,9 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         // Expression statements should not produce errors
-        assert!(diagnostics.is_empty() || !diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+        assert!(
+            diagnostics.is_empty() || !diagnostics.iter().any(|d| d.error_code == ErrorCode::E301)
+        );
     }
 
     #[test]
@@ -587,7 +714,11 @@ mod tests {
 
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
-        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302)
+        );
     }
 
     #[test]
@@ -610,6 +741,10 @@ mod tests {
 
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
-        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E301 || d.error_code == ErrorCode::E302)
+        );
     }
 }

@@ -48,7 +48,15 @@ fn test_gateway_new_with_routes() {
 fn test_gateway_new_with_mcp_routes() {
     let (graph, _temp_dir) = create_test_graph();
     let mcp_routes = HashMap::new();
-    let gateway = HelixGateway::new("127.0.0.1:8080", graph, 8, None, Some(mcp_routes), None, None);
+    let gateway = HelixGateway::new(
+        "127.0.0.1:8080",
+        graph,
+        8,
+        None,
+        Some(mcp_routes),
+        None,
+        None,
+    );
 
     assert_eq!(gateway.address, "127.0.0.1:8080");
     assert!(gateway.router.mcp_routes.is_empty());
@@ -70,7 +78,7 @@ fn test_gateway_new_with_opts() {
 #[test]
 fn test_gateway_new_with_cluster_id() {
     unsafe {
-        std::env::set_var("CLUSTER_ID", "test-cluster-123");
+        std::env::set_var("HELIX_CLUSTER_ID", "test-cluster-123");
     }
     let (graph, _temp_dir) = create_test_graph();
     let gateway = HelixGateway::new("127.0.0.1:8080", graph, 8, None, None, None, None);
@@ -78,7 +86,7 @@ fn test_gateway_new_with_cluster_id() {
     assert!(gateway.cluster_id.is_some());
     assert_eq!(gateway.cluster_id.unwrap(), "test-cluster-123");
     unsafe {
-        std::env::remove_var("CLUSTER_ID");
+        std::env::remove_var("HELIX_CLUSTER_ID");
     }
 }
 

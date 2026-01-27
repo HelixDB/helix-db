@@ -5,6 +5,29 @@ use sonic_rs::{JsonContainerTrait, json};
 use std::env;
 use url::Url;
 
+/// Parse an API error response and return a descriptive GraphError
+fn parse_api_error(provider: &str, status: u16, body: &str) -> GraphError {
+    // Try to extract error message from JSON response
+    if let Ok(json) = sonic_rs::from_str::<sonic_rs::Value>(body)
+        && let Some(error_msg) = json["error"]["message"].as_str()
+    {
+        return GraphError::EmbeddingError(format!(
+            "{} embedding API error ({}): {}",
+            provider, status, error_msg
+        ));
+    }
+    // Fallback if JSON parsing fails or no message found
+    let truncated_body = if body.len() > 200 {
+        format!("{}...", &body[..200])
+    } else {
+        body.to_string()
+    };
+    GraphError::EmbeddingError(format!(
+        "{} embedding API error ({}): {}",
+        provider, status, truncated_body
+    ))
+}
+
 /// Trait for embedding models to fetch text embeddings.
 #[allow(async_fn_in_trait)]
 pub trait EmbeddingModel {
@@ -15,7 +38,13 @@ pub trait EmbeddingModel {
 #[derive(Debug, Clone)]
 pub enum EmbeddingProvider {
     OpenAI,
-    Gemini { task_type: String },
+    Gemini {
+        task_type: String,
+    },
+    AzureOpenAI {
+        resource_name: String,
+        deployment_id: String,
+    },
     Local,
 }
 
@@ -47,6 +76,13 @@ impl EmbeddingModelImpl {
                     .map(String::from)
                     .or_else(|| env::var("GEMINI_API_KEY").ok())
                     .ok_or_else(|| GraphError::from("GEMINI_API_KEY not set"))?;
+                Some(key)
+            }
+            EmbeddingProvider::AzureOpenAI { .. } => {
+                let key = api_key
+                    .map(String::from)
+                    .or_else(|| env::var("AZURE_OPENAI_API_KEY").ok())
+                    .ok_or_else(|| GraphError::from("AZURE_OPENAI_API_KEY not set"))?;
                 Some(key)
             }
             EmbeddingProvider::Local => None,
@@ -98,6 +134,30 @@ impl EmbeddingModelImpl {
                     .unwrap_or("text-embedding-ada-002");
                 Ok((EmbeddingProvider::OpenAI, model_name.to_string()))
             }
+            Some(m) if m.starts_with("azure_openai:") => {
+                let model_name = m
+                    .strip_prefix("azure_openai:")
+                    .unwrap_or("text-embedding-3-small");
+
+                // Get Azure-specific configuration from environment
+                let resource_name = env::var("AZURE_OPENAI_RESOURCE_NAME")
+                    .map_err(|_| GraphError::from("AZURE_OPENAI_RESOURCE_NAME not set"))?;
+
+                // deployment_id comes from the model_name
+                let deployment_id = if model_name.is_empty() {
+                    return Err(GraphError::from("Azure OpenAI deployment ID not specified"));
+                } else {
+                    model_name.to_string()
+                };
+
+                Ok((
+                    EmbeddingProvider::AzureOpenAI {
+                        resource_name,
+                        deployment_id,
+                    },
+                    model_name.to_string(),
+                ))
+            }
             Some("local") => Ok((EmbeddingProvider::Local, "local".to_string())),
 
             Some(_) => Ok((
@@ -119,10 +179,9 @@ impl EmbeddingModel for EmbeddingModelImpl {
     async fn fetch_embedding_async(&self, text: &str) -> Result<Vec<f64>, GraphError> {
         match &self.provider {
             EmbeddingProvider::OpenAI => {
-                let api_key = self
-                    .api_key
-                    .as_ref()
-                    .ok_or_else(|| GraphError::from("OpenAI API key not set"))?;
+                let api_key = self.api_key.as_ref().ok_or_else(|| {
+                    GraphError::EmbeddingError("OpenAI API key not set".to_string())
+                })?;
 
                 let response = self
                     .client
@@ -134,34 +193,119 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     }))
                     .send()
                     .await
-                    .map_err(|e| GraphError::from(format!("Failed to send request: {e}")))?;
+                    .map_err(|e| {
+                        GraphError::EmbeddingError(format!("Failed to send request to OpenAI: {e}"))
+                    })?;
 
-                let text_response = response
-                    .text()
-                    .await
-                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+                // Save status before consuming response body
+                let status = response.status();
+                let text_response = response.text().await.map_err(|e| {
+                    GraphError::EmbeddingError(format!("Failed to read OpenAI response: {e}"))
+                })?;
 
-                let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
-                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+                // Check for API errors
+                if !status.is_success() {
+                    return Err(parse_api_error("OpenAI", status.as_u16(), &text_response));
+                }
+
+                let response =
+                    sonic_rs::from_str::<sonic_rs::Value>(&text_response).map_err(|e| {
+                        GraphError::EmbeddingError(format!("Failed to parse OpenAI response: {e}"))
+                    })?;
 
                 let embedding = response["data"][0]["embedding"]
                     .as_array()
-                    .ok_or_else(|| GraphError::from("Invalid embedding format"))?
+                    .ok_or_else(|| {
+                        GraphError::EmbeddingError(
+                            "Invalid embedding format in OpenAI response".to_string(),
+                        )
+                    })?
                     .iter()
                     .map(|v| {
-                        v.as_f64()
-                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                        v.as_f64().ok_or_else(|| {
+                            GraphError::EmbeddingError(
+                                "Invalid float value in embedding".to_string(),
+                            )
+                        })
                     })
                     .collect::<Result<Vec<f64>, GraphError>>()?;
 
                 Ok(embedding)
             }
+            EmbeddingProvider::AzureOpenAI {
+                resource_name,
+                deployment_id,
+            } => {
+                let api_key = self.api_key.as_ref().ok_or_else(|| {
+                    GraphError::EmbeddingError("Azure OpenAI API key not set".to_string())
+                })?;
+
+                let url = format!(
+                    "https://{}.openai.azure.com/openai/deployments/{}/embeddings?api-version=2024-10-21",
+                    resource_name, deployment_id
+                );
+                let response = self
+                    .client
+                    .post(&url)
+                    .header("api-key", api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "input": text
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        GraphError::EmbeddingError(format!(
+                            "Failed to send request to Azure OpenAI: {e}"
+                        ))
+                    })?;
+
+                // Save status before consuming response body
+                let status = response.status();
+                let text_response = response.text().await.map_err(|e| {
+                    GraphError::EmbeddingError(format!("Failed to read Azure OpenAI response: {e}"))
+                })?;
+
+                // Check for API errors
+                if !status.is_success() {
+                    return Err(parse_api_error(
+                        "Azure OpenAI",
+                        status.as_u16(),
+                        &text_response,
+                    ));
+                }
+
+                let response =
+                    sonic_rs::from_str::<sonic_rs::Value>(&text_response).map_err(|e| {
+                        GraphError::EmbeddingError(format!(
+                            "Failed to parse Azure OpenAI response: {e}"
+                        ))
+                    })?;
+
+                // Azure OpenAI uses the same response format as OpenAI
+                let embedding = response["data"][0]["embedding"]
+                    .as_array()
+                    .ok_or_else(|| {
+                        GraphError::EmbeddingError(
+                            "Invalid embedding format in Azure OpenAI response".to_string(),
+                        )
+                    })?
+                    .iter()
+                    .map(|v| {
+                        v.as_f64().ok_or_else(|| {
+                            GraphError::EmbeddingError(
+                                "Invalid float value in embedding".to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<f64>, GraphError>>()?;
+                Ok(embedding)
+            }
 
             EmbeddingProvider::Gemini { task_type } => {
-                let api_key = self
-                    .api_key
-                    .as_ref()
-                    .ok_or_else(|| GraphError::from("Gemini API key not set"))?;
+                let api_key = self.api_key.as_ref().ok_or_else(|| {
+                    GraphError::EmbeddingError("Gemini API key not set".to_string())
+                })?;
 
                 let url = format!(
                     "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent",
@@ -181,23 +325,40 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     }))
                     .send()
                     .await
-                    .map_err(|e| GraphError::from(format!("Failed to send request: {e}")))?;
+                    .map_err(|e| {
+                        GraphError::EmbeddingError(format!("Failed to send request to Gemini: {e}"))
+                    })?;
 
-                let text_response = response
-                    .text()
-                    .await
-                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+                // Save status before consuming response body
+                let status = response.status();
+                let text_response = response.text().await.map_err(|e| {
+                    GraphError::EmbeddingError(format!("Failed to read Gemini response: {e}"))
+                })?;
 
-                let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
-                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+                // Check for API errors
+                if !status.is_success() {
+                    return Err(parse_api_error("Gemini", status.as_u16(), &text_response));
+                }
+
+                let response =
+                    sonic_rs::from_str::<sonic_rs::Value>(&text_response).map_err(|e| {
+                        GraphError::EmbeddingError(format!("Failed to parse Gemini response: {e}"))
+                    })?;
 
                 let embedding = response["embedding"]["values"]
                     .as_array()
-                    .ok_or_else(|| GraphError::from("Invalid embedding format from Gemini API"))?
+                    .ok_or_else(|| {
+                        GraphError::EmbeddingError(
+                            "Invalid embedding format in Gemini response".to_string(),
+                        )
+                    })?
                     .iter()
                     .map(|v| {
-                        v.as_f64()
-                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                        v.as_f64().ok_or_else(|| {
+                            GraphError::EmbeddingError(
+                                "Invalid float value in embedding".to_string(),
+                            )
+                        })
                     })
                     .collect::<Result<Vec<f64>, GraphError>>()?;
 
@@ -205,10 +366,9 @@ impl EmbeddingModel for EmbeddingModelImpl {
             }
 
             EmbeddingProvider::Local => {
-                let url = self
-                    .url
-                    .as_ref()
-                    .ok_or_else(|| GraphError::from("Local URL not set"))?;
+                let url = self.url.as_ref().ok_or_else(|| {
+                    GraphError::EmbeddingError("Local embedding URL not set".to_string())
+                })?;
 
                 let response = self
                     .client
@@ -220,23 +380,46 @@ impl EmbeddingModel for EmbeddingModelImpl {
                     }))
                     .send()
                     .await
-                    .map_err(|e| GraphError::from(format!("Request failed: {e}")))?;
+                    .map_err(|e| {
+                        GraphError::EmbeddingError(format!(
+                            "Failed to send request to local embedding server: {e}"
+                        ))
+                    })?;
 
-                let text_response = response
-                    .text()
-                    .await
-                    .map_err(|e| GraphError::from(format!("Failed to parse response: {e}")))?;
+                // Save status before consuming response body
+                let status = response.status();
+                let text_response = response.text().await.map_err(|e| {
+                    GraphError::EmbeddingError(format!(
+                        "Failed to read local embedding response: {e}"
+                    ))
+                })?;
 
-                let response = sonic_rs::from_str::<sonic_rs::Value>(&text_response)
-                    .map_err(|e| GraphError::from(format!("Failed to parse JSON response: {e}")))?;
+                // Check for API errors
+                if !status.is_success() {
+                    return Err(parse_api_error("Local", status.as_u16(), &text_response));
+                }
+
+                let response =
+                    sonic_rs::from_str::<sonic_rs::Value>(&text_response).map_err(|e| {
+                        GraphError::EmbeddingError(format!(
+                            "Failed to parse local embedding response: {e}"
+                        ))
+                    })?;
 
                 let embedding = response["embedding"]
                     .as_array()
-                    .ok_or_else(|| GraphError::from("Invalid embedding format"))?
+                    .ok_or_else(|| {
+                        GraphError::EmbeddingError(
+                            "Invalid embedding format in local response".to_string(),
+                        )
+                    })?
                     .iter()
                     .map(|v| {
-                        v.as_f64()
-                            .ok_or_else(|| GraphError::from("Invalid float value"))
+                        v.as_f64().ok_or_else(|| {
+                            GraphError::EmbeddingError(
+                                "Invalid float value in embedding".to_string(),
+                            )
+                        })
                     })
                     .collect::<Result<Vec<f64>, GraphError>>()?;
 

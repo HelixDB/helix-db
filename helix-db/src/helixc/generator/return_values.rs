@@ -1,6 +1,8 @@
 use core::fmt;
 use std::fmt::Display;
 
+use crate::helixc::generator::utils::RustType;
+
 use super::utils::GenRef;
 
 /// Represents a return value field with enhanced metadata
@@ -51,6 +53,7 @@ pub struct ReturnValueStruct {
     pub field_infos: Vec<ReturnFieldInfo>, // Original field info for nested struct generation
     pub aggregate_properties: Vec<String>, // Properties to group by (for closure-style aggregates)
     pub is_count_aggregate: bool,   // True for COUNT mode aggregates
+    pub closure_param_name: Option<String>, // HQL closure parameter name (e.g., "e" from entries::|e|)
 }
 
 impl ReturnValueStruct {
@@ -68,6 +71,7 @@ impl ReturnValueStruct {
             field_infos: Vec::new(),
             aggregate_properties: Vec::new(),
             is_count_aggregate: false,
+            closure_param_name: None,
         }
     }
 
@@ -106,7 +110,7 @@ impl ReturnValueStruct {
         let mut output = String::new();
 
         // Generate derive attributes
-        output.push_str("#[derive(Serialize)]\n");
+        output.push_str("#[derive(Serialize, Default)]\n");
 
         // Generate struct declaration
         if self.has_lifetime {
@@ -192,6 +196,7 @@ impl ReturnValueStruct {
         is_group_by: bool,
         aggregate_properties: Vec<String>,
         is_count_aggregate: bool,
+        closure_param_name: Option<String>,
     ) -> Self {
         // First, recursively build nested structs to determine if they have lifetimes
         let mut nested_has_lifetime = std::collections::HashMap::new();
@@ -217,6 +222,7 @@ impl ReturnValueStruct {
                     false,      // Not group_by
                     Vec::new(), // No aggregate properties for nested structs
                     false,      // Not count aggregate
+                    None,       // Nested structs don't have their own closure param
                 );
                 nested_has_lifetime.insert(nested_name, nested_struct.has_lifetime);
             }
@@ -226,24 +232,36 @@ impl ReturnValueStruct {
             .iter()
             .map(|field_info| {
                 let (field_type, _is_nested, nested_name) = match &field_info.field_type {
-                    ReturnFieldType::Simple(ty) => (ty.clone(), false, None),
+                    ReturnFieldType::Simple(ty) => (ty.to_string(), false, None),
                     ReturnFieldType::Nested(_) => {
-                        // Nested fields become Vec<NestedTypeName> or Vec<NestedTypeName<'a>>
+                        // Nested fields become Vec<NestedTypeName> or NestedTypeName (if is_first)
                         // Use the nested_struct_name from the source if available, otherwise fall back to field name
-                        let nested_type_name = if let ReturnFieldSource::NestedTraversal {
-                            nested_struct_name: Some(name),
-                            ..
-                        } = &field_info.source
-                        {
-                            name.clone()
-                        } else {
-                            format!("{}ReturnType", capitalize_first(&field_info.name))
-                        };
+                        let (nested_type_name, is_first) =
+                            if let ReturnFieldSource::NestedTraversal {
+                                nested_struct_name: Some(name),
+                                is_first,
+                                ..
+                            } = &field_info.source
+                            {
+                                (name.clone(), *is_first)
+                            } else {
+                                (
+                                    format!("{}ReturnType", capitalize_first(&field_info.name)),
+                                    false,
+                                )
+                            };
                         let has_lt = nested_has_lifetime
                             .get(&nested_type_name)
                             .copied()
                             .unwrap_or(false);
-                        let type_ref = if has_lt {
+                        // For ::FIRST, use single struct type; otherwise use Vec
+                        let type_ref = if is_first {
+                            if has_lt {
+                                format!("{}<'a>", nested_type_name)
+                            } else {
+                                nested_type_name.clone()
+                            }
+                        } else if has_lt {
                             format!("Vec<{}<'a>>", nested_type_name)
                         } else {
                             format!("Vec<{}>", nested_type_name)
@@ -255,7 +273,10 @@ impl ReturnValueStruct {
                 ReturnValueField {
                     name: field_info.name.clone(),
                     field_type,
-                    is_implicit: matches!(field_info.source, ReturnFieldSource::ImplicitField),
+                    is_implicit: matches!(
+                        field_info.source,
+                        ReturnFieldSource::ImplicitField { .. }
+                    ),
                     is_nested_traversal: matches!(
                         field_info.source,
                         ReturnFieldSource::NestedTraversal { .. }
@@ -279,6 +300,7 @@ impl ReturnValueStruct {
         struct_def.field_infos = field_infos; // Store for nested generation
         struct_def.aggregate_properties = aggregate_properties;
         struct_def.is_count_aggregate = is_count_aggregate;
+        struct_def.closure_param_name = closure_param_name;
         struct_def
     }
 
@@ -309,6 +331,7 @@ impl ReturnValueStruct {
                     false,              // Not group_by
                     Vec::new(),         // No aggregate properties for nested structs
                     false,              // Not count aggregate
+                    None,               // Nested structs don't have their own closure param
                 );
                 // Recursively generate nested struct defs
                 output.push_str(&nested_struct.generate_all_struct_defs());
@@ -420,10 +443,33 @@ pub struct ReturnFieldInfo {
     pub source: ReturnFieldSource,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum RustFieldType {
+    OptionValue,
+    Value,
+    TraversalValue,
+    Vec(Box<RustFieldType>),
+    RefArray(RustType),
+    Primitive(GenRef<RustType>),
+}
+
+impl Display for RustFieldType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RustFieldType::OptionValue => write!(f, "Option<&'a Value>"),
+            RustFieldType::Value => write!(f, "Value"),
+            RustFieldType::TraversalValue => write!(f, "TraversalValue<'a>"),
+            RustFieldType::Vec(ty) => write!(f, "Vec<{ty}>"),
+            RustFieldType::RefArray(ty) => write!(f, "&'a [{ty}]"),
+            RustFieldType::Primitive(ty) => write!(f, "{ty}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ReturnFieldType {
     /// Simple type like "&'a str", "Option<&'a Value>", etc.
-    Simple(String),
+    Simple(RustFieldType),
     /// Nested object with its own fields (for nested traversals)
     Nested(Vec<ReturnFieldInfo>),
 }
@@ -431,9 +477,11 @@ pub enum ReturnFieldType {
 #[derive(Clone, Debug)]
 pub enum ReturnFieldSource {
     /// Field from the schema (node/edge/vector properties)
-    SchemaField,
+    /// property_name is the source property name if different from output field name
+    SchemaField { property_name: Option<String> },
     /// Implicit field (id, label, from_node, to_node, data, score)
-    ImplicitField,
+    /// property_name is the source property name if different from output field name
+    ImplicitField { property_name: Option<String> },
     /// User-defined field in custom object
     UserDefined,
     /// Result of a nested traversal expression
@@ -446,23 +494,61 @@ pub enum ReturnFieldSource {
         closure_source_var: Option<String>, // Actual variable for the closure parameter
         accessed_field_name: Option<String>, // For simple property access, the field being accessed (e.g., "name" for usr::{name})
         own_closure_param: Option<String>, // This traversal's own closure parameter if it ends with a Closure step
+        requires_full_traversal: bool, // True if traversal has graph navigation steps (Out, In, COUNT, etc.)
+        is_first: bool,                // True if ::FIRST was used (should_collect = ToObj)
     },
 }
 
 impl ReturnFieldInfo {
-    pub fn new_implicit(name: String, field_type: String) -> Self {
+    pub fn new_implicit(name: String, field_type: RustFieldType) -> Self {
         Self {
             name,
             field_type: ReturnFieldType::Simple(field_type),
-            source: ReturnFieldSource::ImplicitField,
+            source: ReturnFieldSource::ImplicitField {
+                property_name: None,
+            },
         }
     }
 
-    pub fn new_schema(name: String, field_type: String) -> Self {
+    /// Create an implicit field with a different source property name
+    /// e.g., output "file_id" from property "ID"
+    pub fn new_implicit_with_property(
+        name: String,
+        property_name: String,
+        field_type: RustFieldType,
+    ) -> Self {
         Self {
             name,
             field_type: ReturnFieldType::Simple(field_type),
-            source: ReturnFieldSource::SchemaField,
+            source: ReturnFieldSource::ImplicitField {
+                property_name: Some(property_name),
+            },
+        }
+    }
+
+    pub fn new_schema(name: String, field_type: RustFieldType) -> Self {
+        Self {
+            name,
+            field_type: ReturnFieldType::Simple(field_type),
+            source: ReturnFieldSource::SchemaField {
+                property_name: None,
+            },
+        }
+    }
+
+    /// Create a schema field with a different source property name
+    /// e.g., output "post" from property "content"
+    pub fn new_schema_with_property(
+        name: String,
+        property_name: String,
+        field_type: RustFieldType,
+    ) -> Self {
+        Self {
+            name,
+            field_type: ReturnFieldType::Simple(field_type),
+            source: ReturnFieldSource::SchemaField {
+                property_name: Some(property_name),
+            },
         }
     }
 
@@ -479,11 +565,13 @@ impl ReturnFieldInfo {
                 closure_source_var: None,
                 accessed_field_name: None,
                 own_closure_param: None,
+                requires_full_traversal: false,
+                is_first: false,
             },
         }
     }
 
-    pub fn new_user_defined(name: String, field_type: String) -> Self {
+    pub fn new_user_defined(name: String, field_type: RustFieldType) -> Self {
         Self {
             name,
             field_type: ReturnFieldType::Simple(field_type),

@@ -1,5 +1,8 @@
 use super::location::Loc;
-use crate::{helixc::parser::{errors::ParserError, HelixParser}, protocol::value::Value};
+use crate::{
+    helixc::parser::{HelixParser, errors::ParserError},
+    protocol::value::Value,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -47,13 +50,11 @@ pub struct Source {
 
 impl Source {
     pub fn get_latest_schema(&self) -> Result<&Schema, ParserError> {
-        let latest_schema = self
-            .schema
+        self.schema
             .iter()
             .max_by(|a, b| a.1.version.1.cmp(&b.1.version.1))
-            .map(|(_, schema)| schema);
-        assert!(latest_schema.is_some());
-        latest_schema.ok_or_else(|| ParserError::from("No latest schema found"))
+            .map(|(_, schema)| schema)
+            .ok_or_else(|| ParserError::from("No latest schema found"))
     }
 
     /// Gets the schemas in order of version, from oldest to newest.
@@ -96,6 +97,7 @@ pub struct EdgeSchema {
     pub to: (Loc, String),
     pub properties: Option<Vec<Field>>,
     pub loc: Loc,
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +172,11 @@ impl Field {
         self.prefix.is_indexed()
     }
 }
+impl PartialEq for Field {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum DefaultValue {
@@ -193,12 +200,13 @@ pub enum DefaultValue {
 #[derive(Debug, Clone)]
 pub enum FieldPrefix {
     Index,
+    UniqueIndex,
     Optional,
     Empty,
 }
 impl FieldPrefix {
     pub fn is_indexed(&self) -> bool {
-        matches!(self, FieldPrefix::Index)
+        matches!(self, FieldPrefix::Index | FieldPrefix::UniqueIndex)
     }
 }
 
@@ -477,7 +485,7 @@ pub enum MathFunction {
     Sqrt,
     Ln,
     Log10,
-    Log,    // Binary: LOG(x, base)
+    Log, // Binary: LOG(x, base)
     Exp,
     Ceil,
     Floor,
@@ -490,7 +498,7 @@ pub enum MathFunction {
     Asin,
     Acos,
     Atan,
-    Atan2,  // Binary: ATAN2(y, x)
+    Atan2, // Binary: ATAN2(y, x)
 
     // Constants (nullary)
     Pi,
@@ -509,16 +517,33 @@ impl MathFunction {
     pub fn arity(&self) -> usize {
         match self {
             MathFunction::Pi | MathFunction::E => 0,
-            MathFunction::Abs | MathFunction::Sqrt | MathFunction::Ln |
-            MathFunction::Log10 | MathFunction::Exp | MathFunction::Ceil |
-            MathFunction::Floor | MathFunction::Round | MathFunction::Sin |
-            MathFunction::Cos | MathFunction::Tan | MathFunction::Asin |
-            MathFunction::Acos | MathFunction::Atan | MathFunction::Min |
-            MathFunction::Max | MathFunction::Sum | MathFunction::Avg |
-            MathFunction::Count => 1,
-            MathFunction::Add | MathFunction::Sub | MathFunction::Mul |
-            MathFunction::Div | MathFunction::Pow | MathFunction::Mod |
-            MathFunction::Atan2 | MathFunction::Log => 2,
+            MathFunction::Abs
+            | MathFunction::Sqrt
+            | MathFunction::Ln
+            | MathFunction::Log10
+            | MathFunction::Exp
+            | MathFunction::Ceil
+            | MathFunction::Floor
+            | MathFunction::Round
+            | MathFunction::Sin
+            | MathFunction::Cos
+            | MathFunction::Tan
+            | MathFunction::Asin
+            | MathFunction::Acos
+            | MathFunction::Atan
+            | MathFunction::Min
+            | MathFunction::Max
+            | MathFunction::Sum
+            | MathFunction::Avg
+            | MathFunction::Count => 1,
+            MathFunction::Add
+            | MathFunction::Sub
+            | MathFunction::Mul
+            | MathFunction::Div
+            | MathFunction::Pow
+            | MathFunction::Mod
+            | MathFunction::Atan2
+            | MathFunction::Log => 2,
         }
     }
 
@@ -639,7 +664,9 @@ impl Display for ExpressionType {
             ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
             ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
             ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
-            ExpressionType::MathFunctionCall(mfc) => write!(f, "{}({:?})", mfc.function.name(), mfc.args),
+            ExpressionType::MathFunctionCall(mfc) => {
+                write!(f, "{}({:?})", mfc.function.name(), mfc.args)
+            }
             ExpressionType::Empty => write!(f, "Empty"),
         }
     }
@@ -701,13 +728,13 @@ pub struct OrderBy {
 #[derive(Debug, Clone)]
 pub struct Aggregate {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GroupBy {
     pub loc: Loc,
-    pub properties: Vec<String>
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -739,6 +766,10 @@ pub enum StepType {
     BooleanOperation(BooleanOp),
     Count,
     Update(Update),
+    Upsert(Upsert),
+    UpsertN(UpsertN),
+    UpsertE(UpsertE),
+    UpsertV(UpsertV),
     Object(Object),
     Exclude(Exclude),
     Closure(Closure),
@@ -764,6 +795,10 @@ impl PartialEq<StepType> for StepType {
                 )
                 | (&StepType::Count, &StepType::Count)
                 | (&StepType::Update(_), &StepType::Update(_))
+                | (&StepType::Upsert(_), &StepType::Upsert(_))
+                | (&StepType::UpsertN(_), &StepType::UpsertN(_))
+                | (&StepType::UpsertE(_), &StepType::UpsertE(_))
+                | (&StepType::UpsertV(_), &StepType::UpsertV(_))
                 | (&StepType::Object(_), &StepType::Object(_))
                 | (&StepType::Exclude(_), &StepType::Exclude(_))
                 | (&StepType::Closure(_), &StepType::Closure(_))
@@ -832,7 +867,7 @@ impl GraphStep {
             GraphStepType::In(s) => Some(s.clone()),
             GraphStepType::OutE(s) => Some(s.clone()),
             GraphStepType::InE(s) => Some(s.clone()),
-            GraphStepType::SearchVector(s) => Some(s.vector_type.clone().unwrap()),
+            GraphStepType::SearchVector(s) => s.vector_type.clone(),
             _ => None,
         }
     }
@@ -1123,6 +1158,32 @@ impl From<String> for IdType {
 #[derive(Debug, Clone)]
 pub struct Update {
     pub fields: Vec<FieldAddition>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct Upsert {
+    pub fields: Vec<FieldAddition>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertN {
+    pub fields: Vec<FieldAddition>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertE {
+    pub fields: Vec<FieldAddition>,
+    pub connection: EdgeConnection,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertV {
+    pub fields: Vec<FieldAddition>,
+    pub data: Option<VectorData>,
     pub loc: Loc,
 }
 

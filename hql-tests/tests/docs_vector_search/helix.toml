@@ -1,0 +1,7 @@
+[project]
+name = "docs_vector_search"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "dev"

@@ -2,8 +2,8 @@ use crate::{
     AuthAction,
     commands::integrations::helix::CLOUD_AUTHORITY,
     metrics_sender::{load_metrics_config, save_metrics_config},
+    output,
     sse_client::{SseClient, SseEvent},
-    utils::{print_info, print_line, print_status, print_success, print_warning},
 };
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{OptionExt, Result, eyre};
@@ -21,7 +21,7 @@ pub async fn run(action: AuthAction) -> Result<()> {
 }
 
 async fn login() -> Result<()> {
-    print_status("LOGIN", "Logging into Helix Cloud");
+    output::info("Logging into Helix Cloud");
 
     let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
     let config_path = home.join(".helix");
@@ -55,14 +55,14 @@ async fn login() -> Result<()> {
     metrics.user_id = Some(user_id.leak());
     save_metrics_config(&metrics)?;
 
-    print_success("Logged in successfully");
-    print_info("Your credentials are stored in ~/.helix/credentials");
+    output::success("Logged in successfully");
+    output::info("Your credentials are stored in ~/.helix/credentials");
 
     Ok(())
 }
 
 async fn logout() -> Result<()> {
-    print_status("LOGOUT", "Logging out of Helix Cloud");
+    output::info("Logging out of Helix Cloud");
 
     // Remove credentials file
     let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
@@ -70,19 +70,16 @@ async fn logout() -> Result<()> {
 
     if credentials_path.exists() {
         fs::remove_file(&credentials_path)?;
-        print_success("Logged out successfully");
+        output::success("Logged out successfully");
     } else {
-        print_info("Not currently logged in");
+        output::info("Not currently logged in");
     }
 
     Ok(())
 }
 
 async fn create_key(cluster: &str) -> Result<()> {
-    print_status(
-        "API_KEY",
-        &format!("Creating API key for cluster: {cluster}"),
-    );
+    output::info(&format!("Creating API key for cluster: {cluster}"));
 
     // TODO: Implement API key creation
     // This would:
@@ -90,10 +87,8 @@ async fn create_key(cluster: &str) -> Result<()> {
     // 2. Create new API key for specified cluster
     // 3. Display the key to the user
 
-    print_warning("API key creation not yet implemented");
-    print_line(&format!(
-        "  This will create a new API key for cluster: {cluster}"
-    ));
+    output::warning("API key creation not yet implemented");
+    println!("  This will create a new API key for cluster: {cluster}");
 
     Ok(())
 }
@@ -105,10 +100,11 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub(crate) fn is_authenticated(&self) -> bool {
+    pub fn is_authenticated(&self) -> bool {
         !self.user_id.is_empty() && !self.helix_admin_key.is_empty()
     }
 
+    #[allow(unused)]
     pub(crate) fn read_from_file(path: &PathBuf) -> Self {
         let content = fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Failed to read credentials file at {path:?}: {e}"));
@@ -165,6 +161,43 @@ impl Credentials {
                 .ok_or_eyre("Missing helix_user_key in credentials file")?,
         })
     }
+}
+
+/// Check that the user is authenticated with Helix Cloud.
+/// If not authenticated, prompts the user to login interactively.
+/// Returns credentials if authenticated (or after successful login).
+pub async fn require_auth() -> Result<Credentials> {
+    let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
+    let credentials_path = home.join(".helix").join("credentials");
+
+    // Check if we have valid credentials
+    if let Some(credentials) = Credentials::try_read_from_file(&credentials_path)
+        && credentials.is_authenticated()
+    {
+        return Ok(credentials);
+    }
+
+    // Not authenticated - prompt user to login
+    output::warning("Not authenticated with Helix Cloud");
+
+    if !crate::prompts::is_interactive() {
+        return Err(eyre!("Run 'helix auth login' first."));
+    }
+
+    let should_login = crate::prompts::confirm("Would you like to login now?")?;
+
+    if !should_login {
+        return Err(eyre!(
+            "Authentication required. Run 'helix auth login' to authenticate."
+        ));
+    }
+
+    // Run login flow
+    login().await?;
+
+    // Read the newly saved credentials
+    Credentials::try_read_from_file(&credentials_path)
+        .ok_or_else(|| eyre!("Login succeeded but failed to read credentials. Please try again."))
 }
 
 pub async fn github_login() -> Result<(String, String)> {

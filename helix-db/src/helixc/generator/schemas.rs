@@ -34,7 +34,10 @@ impl ToTypeScript for NodeSchema {
                 property.name,
                 match &property.field_type {
                     GeneratedType::RustType(t) => t.to_ts(),
-                    _ => unreachable!(),
+                    _ => {
+                        debug_assert!(false, "NodeSchema property has unexpected type");
+                        format!("/* ERROR: unsupported type for {} */", property.name)
+                    }
                 }
             ));
         }
@@ -49,6 +52,7 @@ pub struct EdgeSchema {
     pub name: String,
     pub from: String,
     pub to: String,
+    pub is_unique: bool,
     pub properties: Vec<SchemaProperty>,
 }
 impl Display for EdgeSchema {
@@ -74,7 +78,10 @@ impl ToTypeScript for VectorSchema {
                 property.name,
                 match &property.field_type {
                     GeneratedType::RustType(t) => t.to_ts(),
-                    _ => unreachable!(),
+                    _ => {
+                        debug_assert!(false, "VectorSchema property has unexpected type");
+                        format!("/* ERROR: unsupported type for {} */", property.name)
+                    }
                 }
             ));
         }
@@ -108,7 +115,10 @@ impl ToTypeScript for EdgeSchema {
                     p.name,
                     match &p.field_type {
                         GeneratedType::RustType(t) => t.to_ts(),
-                        _ => unreachable!(),
+                        _ => {
+                            debug_assert!(false, "EdgeSchema property has unexpected type");
+                            format!("/* ERROR: unsupported type for {} */", p.name)
+                        }
                     }
                 )
             })
@@ -128,7 +138,7 @@ pub struct SchemaProperty {
     pub field_type: GeneratedType,
     pub default_value: Option<GeneratedValue>,
     // pub is_optional: bool,
-    pub is_index: FieldPrefix,
+    pub field_prefix: FieldPrefix,
 }
 
 #[cfg(test)]
@@ -149,13 +159,13 @@ mod tests {
                     name: "name".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "age".to_string(),
                     field_type: GeneratedType::RustType(RustType::U32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -187,13 +197,13 @@ mod tests {
                     name: "email".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "active".to_string(),
                     field_type: GeneratedType::RustType(RustType::Bool),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -214,13 +224,13 @@ mod tests {
                     name: "count".to_string(),
                     field_type: GeneratedType::RustType(RustType::I32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "score".to_string(),
                     field_type: GeneratedType::RustType(RustType::F64),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -244,8 +254,9 @@ mod tests {
                 name: "since".to_string(),
                 field_type: GeneratedType::RustType(RustType::U32),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
+            is_unique: false,
         };
 
         let output = format!("{}", schema);
@@ -262,6 +273,7 @@ mod tests {
             from: "User".to_string(),
             to: "User".to_string(),
             properties: vec![],
+            is_unique: false,
         };
 
         let output = format!("{}", schema);
@@ -280,8 +292,9 @@ mod tests {
                 name: "role".to_string(),
                 field_type: GeneratedType::RustType(RustType::String),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
+            is_unique: false,
         };
 
         let output = schema.to_typescript();
@@ -297,18 +310,19 @@ mod tests {
             name: "Rated".to_string(),
             from: "User".to_string(),
             to: "Movie".to_string(),
+            is_unique: false,
             properties: vec![
                 SchemaProperty {
                     name: "rating".to_string(),
                     field_type: GeneratedType::RustType(RustType::F32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "comment".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -330,7 +344,7 @@ mod tests {
                 name: "metadata".to_string(),
                 field_type: GeneratedType::RustType(RustType::String),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
         };
 
@@ -360,13 +374,13 @@ mod tests {
                     name: "source".to_string(),
                     field_type: GeneratedType::RustType(RustType::String),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
                 SchemaProperty {
                     name: "chunk_index".to_string(),
                     field_type: GeneratedType::RustType(RustType::U32),
                     default_value: None,
-                    is_index: FieldPrefix::Empty,
+                    field_prefix: FieldPrefix::Empty,
                 },
             ],
         };
@@ -387,7 +401,7 @@ mod tests {
                 name: "is_normalized".to_string(),
                 field_type: GeneratedType::RustType(RustType::Bool),
                 default_value: None,
-                is_index: FieldPrefix::Empty,
+                field_prefix: FieldPrefix::Empty,
             }],
         };
 

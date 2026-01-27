@@ -1,15 +1,14 @@
 //! Dashboard management for Helix projects
 
 use crate::DashboardAction;
-use crate::commands::auth::Credentials;
+use crate::commands::auth::require_auth;
 use crate::commands::integrations::helix::CLOUD_AUTHORITY;
-use crate::config::{ContainerRuntime, InstanceInfo};
+use crate::config::{BuildMode, ContainerRuntime, InstanceInfo};
 use crate::docker::DockerManager;
+use crate::metrics_sender::MetricsSender;
+use crate::output::{self, Operation};
 use crate::project::ProjectContext;
-use crate::utils::{
-    print_field, print_header, print_info, print_newline, print_status, print_success,
-    print_warning,
-};
+use crate::prompts;
 use eyre::{Result, eyre};
 use std::process::Command;
 
@@ -58,21 +57,21 @@ async fn start(
     // Check if dashboard is already running
     if is_dashboard_running(runtime)? {
         if restart {
-            print_status("DASHBOARD", "Stopping existing dashboard...");
+            output::info("Stopping existing dashboard...");
             stop_dashboard_container(runtime)?;
         } else {
-            print_warning("Dashboard is already running");
+            output::warning("Dashboard is already running");
             if let Ok(existing_port) = get_dashboard_port(runtime) {
-                print_info(&format!("Access it at: http://localhost:{existing_port}"));
+                output::info(&format!("Access it at: http://localhost:{existing_port}"));
             }
-            print_info("Use 'helix dashboard stop' to stop it, or '--restart' to restart");
+            output::info("Use 'helix dashboard stop' to stop it, or '--restart' to restart");
             return Ok(());
         }
     }
 
     // Warn if --helix-port is specified without --host
     if host.is_none() && helix_port != DEFAULT_HELIX_PORT {
-        print_warning("--helix-port is ignored without --host; using project config or defaults");
+        output::warning("--helix-port is ignored without --host; using project config or defaults");
     }
 
     // Prepare environment variables based on connection mode
@@ -81,7 +80,7 @@ async fn start(
         prepare_direct_env_vars(&host, helix_port, runtime)?
     } else {
         // Try to use project config, or fall back to defaults
-        prepare_env_vars_from_context(instance, runtime)?
+        prepare_env_vars_from_context(instance, runtime).await?
     };
 
     // Pull the dashboard image
@@ -93,20 +92,25 @@ async fn start(
     if !attach {
         let url = format!("http://localhost:{port}");
 
-        print_success("Dashboard started successfully");
-        print_field("URL", &url);
-        print_field("Helix Host", &display_info.host);
-        print_field("Helix Port", &display_info.helix_port.to_string());
+        output::success("Dashboard started successfully");
+        let mut details: Vec<(&str, String)> = vec![
+            ("URL", url.clone()),
+            ("Helix Host", display_info.host.clone()),
+            ("Helix Port", display_info.helix_port.to_string()),
+        ];
         if let Some(instance_name) = &display_info.instance_name {
-            print_field("Instance", instance_name);
+            details.push(("Instance", instance_name.clone()));
         }
-        print_field("Mode", &display_info.mode);
-        print_newline();
-        print_info("Run 'helix dashboard stop' to stop the dashboard");
+        details.push(("Mode", display_info.mode.clone()));
+        let details_refs: Vec<(&str, &str)> =
+            details.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        Operation::print_details(&details_refs);
+        println!();
+        output::info("Run 'helix dashboard stop' to stop the dashboard");
 
         // Open the dashboard in the default browser
         if let Err(e) = open::that(&url) {
-            print_warning(&format!("Could not open browser: {e}"));
+            output::warning(&format!("Could not open browser: {e}"));
         }
     }
 
@@ -144,16 +148,26 @@ fn prepare_direct_env_vars(
     Ok((env_vars, display_info))
 }
 
-fn prepare_env_vars_from_context(
+async fn prepare_env_vars_from_context(
     instance: Option<String>,
     runtime: ContainerRuntime,
 ) -> Result<(Vec<String>, DisplayInfo)> {
     // Try to load project context
     match ProjectContext::find_and_load(None) {
         Ok(project) => {
-            // Resolve instance from project
+            // Resolve instance from project (with interactive selection if needed)
             let (instance_name, instance_config) = resolve_instance(&project, instance)?;
-            let env_vars = prepare_environment_vars(&project, &instance_name, &instance_config)?;
+
+            // Check if instance is in dev mode (required for dashboard)
+            check_dev_mode_requirement(&project, &instance_name, &instance_config).await?;
+
+            // For local instances, check if the instance is running
+            if instance_config.is_local() {
+                check_instance_running(&project, &instance_name).await?;
+            }
+
+            let env_vars =
+                prepare_environment_vars(&project, &instance_name, &instance_config).await?;
 
             let (host, helix_port, mode) = if instance_config.is_local() {
                 let port = instance_config.port().unwrap_or(DEFAULT_HELIX_PORT);
@@ -173,7 +187,7 @@ fn prepare_env_vars_from_context(
         }
         Err(_) => {
             // No project found - use defaults
-            print_info(&format!(
+            output::info(&format!(
                 "No helix.toml found, using default connection (localhost:{DEFAULT_HELIX_PORT})"
             ));
             prepare_direct_env_vars("localhost", DEFAULT_HELIX_PORT, runtime)
@@ -191,34 +205,180 @@ fn resolve_instance<'a>(
             Ok((name, config))
         }
         None => {
-            // Try to find a running local instance, or use first local instance
-            let local_instances: Vec<_> = project.config.local.keys().collect();
+            // Get all instances for interactive selection
+            let instances = project.config.list_instances_with_types();
 
-            if local_instances.is_empty() {
-                // No local instances, try cloud instances
-                let cloud_instances: Vec<_> = project.config.cloud.keys().collect();
-                if cloud_instances.is_empty() {
-                    return Err(eyre!("No instances configured in helix.toml"));
-                }
-
-                let name = cloud_instances[0].clone();
-                let config = project.config.get_instance(&name)?;
-                print_info(&format!("Using cloud instance: {name}"));
-                Ok((name, config))
-            } else {
-                let name = local_instances[0].clone();
-                let config = project.config.get_instance(&name)?;
-                print_info(&format!("Using local instance: {name}"));
-                Ok((name, config))
+            if instances.is_empty() {
+                return Err(eyre!("No instances configured in helix.toml"));
             }
+
+            // If interactive terminal, prompt user to select instance
+            let name = if prompts::is_interactive() {
+                prompts::select_instance(&instances)?
+            } else {
+                // Non-interactive: use first local instance, or first cloud instance
+                let local_instances: Vec<_> = project.config.local.keys().collect();
+                if !local_instances.is_empty() {
+                    let name = local_instances[0].clone();
+                    output::info(&format!("Using local instance: {name}"));
+                    name
+                } else {
+                    let cloud_instances: Vec<_> = project.config.cloud.keys().collect();
+                    let name = cloud_instances[0].clone();
+                    output::info(&format!("Using cloud instance: {name}"));
+                    name
+                }
+            };
+
+            let config = project.config.get_instance(&name)?;
+            Ok((name, config))
         }
     }
 }
 
-fn prepare_environment_vars(
+/// Check if the instance is in dev mode. If not, prompt user to redeploy in dev mode.
+/// The dashboard requires dev mode to access internal debugging endpoints.
+async fn check_dev_mode_requirement(
     project: &ProjectContext,
     instance_name: &str,
-    instance_config: &InstanceInfo,
+    instance_config: &InstanceInfo<'_>,
+) -> Result<()> {
+    let build_mode = instance_config.build_mode();
+
+    if build_mode == BuildMode::Dev {
+        // Already in dev mode, nothing to do
+        return Ok(());
+    }
+
+    // Not in dev mode - warn the user
+    output::warning(&format!(
+        "Instance '{}' is currently in {:?} mode, not dev mode.",
+        instance_name, build_mode
+    ));
+    output::warning("The dashboard requires dev mode to access internal debugging endpoints.");
+
+    // If not interactive, just fail
+    if !prompts::is_interactive() {
+        return Err(eyre!(
+            "Instance '{}' must be in dev mode for the dashboard. \
+            Redeploy with 'helix push {} --dev' or update build_mode to 'dev' in helix.toml.",
+            instance_name,
+            instance_name
+        ));
+    }
+
+    // Ask user if they want to redeploy in dev mode
+    println!();
+    output::warning("⚠️  WARNING: Redeploying in dev mode will:");
+    output::warning("   - Restart the running instance");
+    output::warning("   - Expose internal debug and dashboard endpoints");
+    output::warning("   - This should NOT be used with production workloads");
+    println!();
+
+    let should_redeploy = prompts::confirm(&format!(
+        "Do you want to redeploy '{}' in dev mode?",
+        instance_name
+    ))?;
+
+    if !should_redeploy {
+        return Err(eyre!(
+            "Dashboard requires dev mode. Update build_mode to 'dev' in helix.toml or use --host flag to connect directly."
+        ));
+    }
+
+    // Redeploy the instance in dev mode
+    output::info(&format!("Redeploying '{}' in dev mode...", instance_name));
+
+    // Update the config to use dev mode and redeploy
+    let metrics_sender = MetricsSender::new()?;
+
+    if instance_config.is_local() {
+        // For local instances, we need to rebuild with dev mode
+        // First update the config file
+        let mut config = project.config.clone();
+        if let Some(local_config) = config.local.get_mut(instance_name) {
+            local_config.build_mode = BuildMode::Dev;
+        }
+        let config_path = project.root.join("helix.toml");
+        config.save_to_file(&config_path)?;
+
+        // Reload the project context and push
+        crate::commands::push::run(Some(instance_name.to_string()), false, &metrics_sender).await?;
+    } else {
+        // For cloud instances, use the --dev flag
+        crate::commands::push::run(Some(instance_name.to_string()), true, &metrics_sender).await?;
+    }
+
+    output::success(&format!(
+        "Instance '{}' redeployed in dev mode",
+        instance_name
+    ));
+    Ok(())
+}
+
+/// Check if a local instance is running. If not, prompt user to start or push it.
+async fn check_instance_running(project: &ProjectContext, instance_name: &str) -> Result<()> {
+    let docker = DockerManager::new(project);
+
+    // Check if Docker/Podman is available
+    DockerManager::check_runtime_available(docker.runtime)?;
+
+    // Get container status
+    let statuses = docker.get_project_status()?;
+    let container_prefix = format!("helix-{}-{}", project.config.project.name, instance_name);
+
+    // Find the container for this instance
+    let container_status = statuses
+        .iter()
+        .find(|s| s.container_name.starts_with(&container_prefix));
+
+    // Check if container is running
+    let is_running = container_status
+        .map(|s| s.status.to_lowercase().starts_with("up"))
+        .unwrap_or(false);
+
+    if is_running {
+        // Instance is running, nothing to do
+        return Ok(());
+    }
+
+    // If not interactive, just fail with instructions
+    if !prompts::is_interactive() {
+        return Err(eyre!(
+            "Instance '{}' is not running. Start it with 'helix push {}'",
+            instance_name,
+            instance_name
+        ));
+    }
+
+    // Interactive mode - prompt user
+    output::warning(&format!("Instance '{}' is not running.", instance_name));
+
+    let should_push = prompts::confirm(&format!("Do you want to start '{}'?", instance_name))?;
+
+    if !should_push {
+        return Err(eyre!(
+            "Dashboard requires a running instance. Build and start it with 'helix push {}'",
+            instance_name
+        ));
+    }
+
+    // Push (build and start) the instance
+    output::info(&format!(
+        "Building and starting instance '{}'...",
+        instance_name
+    ));
+    let metrics_sender = MetricsSender::new()?;
+    crate::commands::push::run(Some(instance_name.to_string()), false, &metrics_sender).await?;
+    output::success(&format!("Instance '{}' built and started", instance_name));
+
+    Ok(())
+}
+
+async fn prepare_environment_vars(
+    project: &ProjectContext,
+    instance_name: &str,
+    instance_config: &InstanceInfo<'_>,
 ) -> Result<Vec<String>> {
     let mut env_vars = Vec::new();
 
@@ -237,7 +397,7 @@ fn prepare_environment_vars(
         env_vars.push(format!("HELIX_INSTANCE={instance_name}"));
     } else {
         // Cloud instance - use cloud URL and API key
-        let credentials = load_cloud_credentials()?;
+        let credentials = require_auth().await?;
 
         // Get cloud URL based on instance type
         let cloud_url = get_cloud_url(instance_config)?;
@@ -254,20 +414,6 @@ fn prepare_environment_vars(
     }
 
     Ok(env_vars)
-}
-
-fn load_cloud_credentials() -> Result<Credentials> {
-    let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
-    let credentials_path = home.join(".helix").join("credentials");
-
-    if !credentials_path.exists() {
-        return Err(eyre!(
-            "Not authenticated with Helix Cloud. Run 'helix auth login' first."
-        ));
-    }
-
-    Credentials::try_read_from_file(&credentials_path)
-        .ok_or_else(|| eyre!("Failed to read credentials. Try 'helix auth login' again."))
 }
 
 fn get_cloud_url(instance_config: &InstanceInfo) -> Result<String> {
@@ -317,24 +463,24 @@ fn get_dashboard_port(runtime: ContainerRuntime) -> Result<u16> {
 }
 
 fn pull_dashboard_image(runtime: ContainerRuntime) -> Result<()> {
-    print_status("DASHBOARD", "Pulling dashboard image...");
+    output::info("Pulling dashboard image...");
 
     let _ = Command::new(runtime.binary())
         .args(["logout", "public.ecr.aws"])
         .output();
 
     let image = format!("{DASHBOARD_IMAGE}:{DASHBOARD_TAG}");
-    let output = Command::new(runtime.binary())
+    let cmd_output = Command::new(runtime.binary())
         .args(["pull", &image])
         .output()
         .map_err(|e| eyre!("Failed to pull dashboard image: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !cmd_output.status.success() {
+        let stderr = String::from_utf8_lossy(&cmd_output.stderr);
         return Err(eyre!("Failed to pull dashboard image:\n{stderr}"));
     }
 
-    print_status("DASHBOARD", "Image pulled successfully");
+    output::info("Image pulled successfully");
     Ok(())
 }
 
@@ -344,7 +490,7 @@ fn start_dashboard_container(
     env_vars: &[String],
     attach: bool,
 ) -> Result<()> {
-    print_status("DASHBOARD", "Starting dashboard container...");
+    output::info("Starting dashboard container...");
 
     let image = format!("{DASHBOARD_IMAGE}:{DASHBOARD_TAG}");
 
@@ -421,13 +567,13 @@ fn stop() -> Result<()> {
     let runtime = detect_runtime()?;
 
     if !is_dashboard_running(runtime)? {
-        print_info("Dashboard is not running");
+        output::info("Dashboard is not running");
         return Ok(());
     }
 
-    print_status("DASHBOARD", "Stopping dashboard...");
+    output::info("Stopping dashboard...");
     stop_dashboard_container(runtime)?;
-    print_success("Dashboard stopped");
+    output::success("Dashboard stopped");
 
     Ok(())
 }
@@ -455,24 +601,26 @@ fn detect_runtime() -> Result<ContainerRuntime> {
 }
 
 fn status() -> Result<()> {
+    use color_eyre::owo_colors::OwoColorize;
+
     let runtime = detect_runtime()?;
 
-    print_header("Dashboard Status");
+    println!("\n{}", "Dashboard Status".bold().underline());
 
     if !is_dashboard_running(runtime)? {
-        print_field("Status", "Not running");
+        println!("  {}: Not running", "Status".bright_white().bold());
         return Ok(());
     }
 
-    print_field("Status", "Running");
+    println!("  {}: Running", "Status".bright_white().bold());
 
     // Get port
     if let Ok(port) = get_dashboard_port(runtime) {
-        print_field("URL", &format!("http://localhost:{port}"));
+        println!("  {}: http://localhost:{port}", "URL".bright_white().bold());
     }
 
     // Get container info
-    let output = Command::new(runtime.binary())
+    let cmd_output = Command::new(runtime.binary())
         .args([
             "inspect",
             DASHBOARD_CONTAINER_NAME,
@@ -481,22 +629,22 @@ fn status() -> Result<()> {
         ])
         .output();
 
-    if let Ok(output) = output {
-        let env_output = String::from_utf8_lossy(&output.stdout);
+    if let Ok(cmd_output) = cmd_output {
+        let env_output = String::from_utf8_lossy(&cmd_output.stdout);
 
         // Extract connection info from environment
         for line in env_output.lines() {
             if let Some(instance) = line.strip_prefix("HELIX_INSTANCE=") {
-                print_field("Instance", instance);
+                println!("  {}: {instance}", "Instance".bright_white().bold());
             }
             if let Some(host) = line.strip_prefix("HELIX_HOST=") {
-                print_field("Helix Host", host);
+                println!("  {}: {host}", "Helix Host".bright_white().bold());
             }
             if let Some(port) = line.strip_prefix("HELIX_PORT=") {
-                print_field("Helix Port", port);
+                println!("  {}: {port}", "Helix Port".bright_white().bold());
             }
             if line.starts_with("HELIX_CLOUD_URL=") {
-                print_field("Mode", "Cloud");
+                println!("  {}: Cloud", "Mode".bright_white().bold());
             }
         }
     }

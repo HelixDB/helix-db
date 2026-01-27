@@ -223,7 +223,6 @@ mod tests {
             },
         },
         helix_gateway::router::router::HandlerInput,
-        helixc::generator::traversal_steps::EdgeType,
         protocol::{Format, request::Request, request::RequestType},
         utils::id::ID,
     };
@@ -263,6 +262,7 @@ mod tests {
                 None,
                 node1.id(),
                 node2.id(),
+                false,
                 false,
             )
             .collect_to_obj()?;
@@ -316,6 +316,7 @@ mod tests {
                 None,
                 node1.id(),
                 node2.id(),
+                false,
                 false,
             )
             .collect_to_obj()?;

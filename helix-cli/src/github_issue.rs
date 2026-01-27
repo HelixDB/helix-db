@@ -1,11 +1,18 @@
-//! GitHub issue creation helper for reporting cargo check failures.
+//! GitHub issue creation helpers for reporting issues via URL.
+//!
+//! This module provides shared utilities for creating GitHub issue URLs
+//! with proper truncation to stay within URL length limits.
 
 use eyre::Result;
 use regex::Regex;
 use std::collections::HashSet;
 
-const GITHUB_ISSUE_URL: &str = "https://github.com/helixdb/helix-db/issues/new";
-const MAX_URL_LENGTH: usize = 8000;
+/// The base URL for creating new GitHub issues.
+pub const GITHUB_ISSUE_URL: &str = "https://github.com/helixdb/helix-db/issues/new";
+
+/// Maximum URL length to stay within browser limits.
+pub const MAX_URL_LENGTH: usize = 8000;
+
 const CONTEXT_LINES: usize = 5;
 
 /// Builder for creating GitHub issue URLs with diagnostic information.
@@ -49,30 +56,39 @@ impl GitHubIssueBuilder {
             Some(error) => format!("bug (hql): rust generation failure - {}", error),
             None => "bug (hql): rust generation failure".to_string(),
         };
-        let body = self.build_body();
 
-        // URL encode the parameters
+        // URL encode the fixed parameters
         let encoded_title = urlencoding::encode(&title);
-        let encoded_body = urlencoding::encode(&body);
         let encoded_labels = urlencoding::encode("bug,cli");
         let encoded_type = urlencoding::encode("Bug");
 
-        let url = format!(
+        // Calculate the URL overhead (everything except the body)
+        // Format: {base}?type={type}&title={title}&body={body}&labels={labels}
+        let url_overhead = GITHUB_ISSUE_URL.len()
+            + "?type=&title=&body=&labels=".len()
+            + encoded_type.len()
+            + encoded_title.len()
+            + encoded_labels.len();
+
+        let max_body_encoded_len = MAX_URL_LENGTH.saturating_sub(url_overhead);
+
+        // First try the full body
+        let body = self.build_body();
+        let body_encoded_len = urlencoding::encoded_len(&body);
+
+        let final_body = if body_encoded_len <= max_body_encoded_len {
+            body
+        } else {
+            // Need to truncate - use adaptive truncation based on available space
+            self.build_truncated_body_to_fit(max_body_encoded_len)
+        };
+
+        let encoded_body = urlencoding::encode(&final_body);
+
+        format!(
             "{}?type={}&title={}&body={}&labels={}",
             GITHUB_ISSUE_URL, encoded_type, encoded_title, encoded_body, encoded_labels
-        );
-
-        // Truncate if too long
-        if url.len() > MAX_URL_LENGTH {
-            let truncated_body = self.build_truncated_body();
-            let encoded_body = urlencoding::encode(&truncated_body);
-            format!(
-                "{}?type={}&title={}&body={}&labels={}",
-                GITHUB_ISSUE_URL, encoded_type, encoded_title, encoded_body, encoded_labels
-            )
-        } else {
-            url
-        }
+        )
     }
 
     /// Open the issue URL in the default browser.
@@ -122,11 +138,26 @@ impl GitHubIssueBuilder {
         body
     }
 
-    /// Build a truncated body for when the URL would be too long.
-    fn build_truncated_body(&self) -> String {
+    /// Build a truncated body that fits within the specified encoded length limit.
+    /// Uses adaptive truncation to maximize content while staying under the limit.
+    fn build_truncated_body_to_fit(&self, max_encoded_len: usize) -> String {
+        // Start with aggressive truncation limits and adjust if needed
+        // We use conservative estimates: assume ~2x expansion for URL encoding on average
+        // (actual expansion varies from 1x for alphanumeric to 3x for special chars)
+
+        // Reserve space for the fixed template parts (markdown headers, code fences, etc.)
+        // These are mostly alphanumeric so they encode ~1:1
+        let template_overhead = 300; // Conservative estimate for markdown structure
+        let available_for_content = max_encoded_len.saturating_sub(template_overhead);
+
+        // Divide available space among sections (errors get priority, then schema)
+        // Use ~2.5x divisor to account for URL encoding expansion
+        let max_error_chars = (available_for_content / 3).min(1500);
+        let max_hx_chars = (available_for_content / 4).min(1000);
+
         let mut body = String::new();
 
-        // Environment section (always include)
+        // Environment section (always include - small and important)
         body.push_str("## Environment\n");
         body.push_str(&format!(
             "- Helix CLI version: {}\n",
@@ -137,26 +168,52 @@ impl GitHubIssueBuilder {
         // Error output section (truncated)
         body.push_str("## Error Output\n");
         body.push_str("```\n");
-        let truncated_errors: String = self.cargo_errors.chars().take(2000).collect();
+        let truncated_errors: String = self.cargo_errors.chars().take(max_error_chars).collect();
         body.push_str(&truncated_errors);
-        if self.cargo_errors.len() > 2000 {
+        if self.cargo_errors.chars().count() > max_error_chars {
             body.push_str("\n... [truncated]");
         }
         body.push_str("\n```\n\n");
 
-        // Schema/Queries section (truncated)
-        if let Some(hx_content) = &self.hx_content {
-            body.push_str("## Schema/Queries (.hx files)\n");
-            body.push_str("```helix\n");
-            let truncated_hx: String = hx_content.chars().take(3000).collect();
-            body.push_str(&truncated_hx);
-            if hx_content.len() > 3000 {
-                body.push_str("\n... [truncated - please add full content manually]");
+        // Check if we still have room for schema content
+        let current_encoded_len = urlencoding::encoded_len(&body);
+        if current_encoded_len < max_encoded_len {
+            let remaining = max_encoded_len.saturating_sub(current_encoded_len);
+            let actual_max_hx = (remaining / 3).min(max_hx_chars);
+
+            // Schema/Queries section (truncated)
+            if let Some(hx_content) = &self.hx_content
+                && actual_max_hx > 100
+            {
+                // Only include if we have reasonable space
+                body.push_str("## Schema/Queries (.hx files)\n");
+                body.push_str("```helix\n");
+                let truncated_hx: String = hx_content.chars().take(actual_max_hx).collect();
+                body.push_str(&truncated_hx);
+                if hx_content.chars().count() > actual_max_hx {
+                    body.push_str("\n... [truncated]");
+                }
+                body.push_str("\n```\n\n");
             }
-            body.push_str("\n```\n\n");
         }
 
-        body.push_str("\n_Note: Content was truncated due to URL length limits. Please add additional details if needed._\n");
+        body.push_str("_Note: Content truncated due to URL length limits. Please add full details manually._\n");
+
+        // Final safety check - if still too long, do emergency truncation
+        let final_encoded_len = urlencoding::encoded_len(&body);
+        if final_encoded_len > max_encoded_len {
+            // Emergency: just return minimal body
+            let mut minimal = String::new();
+            minimal.push_str("## Environment\n");
+            minimal.push_str(&format!(
+                "- Helix CLI version: {}\n",
+                env!("CARGO_PKG_VERSION")
+            ));
+            minimal.push_str(&format!("- OS: {}\n\n", std::env::consts::OS));
+            minimal.push_str("## Error\n");
+            minimal.push_str("Content too large for URL. Please describe the issue manually.\n");
+            return minimal;
+        }
 
         body
     }
@@ -323,8 +380,113 @@ pub fn filter_errors_only(cargo_output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Generic builder for creating GitHub issue URLs with any content.
+///
+/// This is a simpler builder for general-purpose issue creation (like feedback).
+/// For compile error issues, use `GitHubIssueBuilder` instead.
+pub struct GitHubIssueUrlBuilder {
+    title: String,
+    body: String,
+    labels: String,
+    issue_type: String,
+}
+
+impl GitHubIssueUrlBuilder {
+    /// Create a new URL builder with the given title.
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            body: String::new(),
+            labels: String::new(),
+            issue_type: String::new(),
+        }
+    }
+
+    /// Set the issue body content.
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    /// Set the issue labels (comma-separated).
+    pub fn labels(mut self, labels: impl Into<String>) -> Self {
+        self.labels = labels.into();
+        self
+    }
+
+    /// Set the issue type (Bug, Feature, etc.).
+    pub fn issue_type(mut self, issue_type: impl Into<String>) -> Self {
+        self.issue_type = issue_type.into();
+        self
+    }
+
+    /// Build the GitHub issue URL with proper truncation.
+    pub fn build_url(&self) -> String {
+        let encoded_title = urlencoding::encode(&self.title);
+        let encoded_labels = urlencoding::encode(&self.labels);
+        let encoded_type = urlencoding::encode(&self.issue_type);
+
+        // Calculate the URL overhead (everything except the body)
+        let url_overhead = GITHUB_ISSUE_URL.len()
+            + "?type=&title=&body=&labels=".len()
+            + encoded_type.len()
+            + encoded_title.len()
+            + encoded_labels.len();
+
+        let max_body_encoded_len = MAX_URL_LENGTH.saturating_sub(url_overhead);
+
+        // Check if body fits, truncate if needed
+        let body_encoded_len = urlencoding::encoded_len(&self.body);
+        let final_body = if body_encoded_len <= max_body_encoded_len {
+            self.body.clone()
+        } else {
+            self.truncate_body_to_fit(max_body_encoded_len)
+        };
+
+        let encoded_body = urlencoding::encode(&final_body);
+
+        format!(
+            "{}?type={}&title={}&body={}&labels={}",
+            GITHUB_ISSUE_URL, encoded_type, encoded_title, encoded_body, encoded_labels
+        )
+    }
+
+    /// Truncate the body to fit within the encoded length limit.
+    fn truncate_body_to_fit(&self, max_encoded_len: usize) -> String {
+        // Use conservative estimate: ~2.5x expansion for URL encoding
+        let approx_max_chars = max_encoded_len / 3;
+
+        let mut truncated: String = self.body.chars().take(approx_max_chars).collect();
+
+        // Verify and adjust if still too long
+        while urlencoding::encoded_len(&truncated) > max_encoded_len && !truncated.is_empty() {
+            // Remove 10% of remaining chars
+            let new_len = (truncated.chars().count() * 9) / 10;
+            truncated = truncated.chars().take(new_len).collect();
+        }
+
+        if truncated.len() < self.body.len() {
+            truncated.push_str("\n\n_[Content truncated due to URL length limits]_");
+
+            // Final check - if the note itself pushed us over, truncate more aggressively
+            while urlencoding::encoded_len(&truncated) > max_encoded_len && truncated.len() > 100 {
+                let new_len = (truncated.chars().count() * 9) / 10;
+                truncated = truncated.chars().take(new_len).collect();
+            }
+        }
+
+        truncated
+    }
+
+    /// Open the issue URL in the default browser.
+    pub fn open_in_browser(&self) -> Result<()> {
+        let url = self.build_url();
+        open::that(&url).map_err(|e| eyre::eyre!("Failed to open browser: {}", e))
+    }
+}
+
 /// Simple URL encoding for the issue URL.
-mod urlencoding {
+pub mod urlencoding {
     pub fn encode(input: &str) -> String {
         let mut encoded = String::new();
         for byte in input.bytes() {
@@ -339,6 +501,17 @@ mod urlencoding {
             }
         }
         encoded
+    }
+
+    /// Calculate the length of a string after URL encoding without allocating.
+    pub fn encoded_len(input: &str) -> usize {
+        input
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => 1,
+                _ => 3,
+            })
+            .sum()
     }
 }
 
@@ -439,5 +612,84 @@ error: could not compile `helix-container` due to 2 previous errors
         let cargo_output = "error: could not compile `helix-container`";
         let first_error = extract_first_error(cargo_output);
         assert_eq!(first_error, None);
+    }
+
+    #[test]
+    fn test_encoded_len() {
+        // Alphanumeric stays same length
+        assert_eq!(urlencoding::encoded_len("abc123"), 6);
+        // Spaces become %20 (3 chars each)
+        assert_eq!(urlencoding::encoded_len("a b c"), 9); // a(1) + %20(3) + b(1) + %20(3) + c(1) = 9
+        // Special chars triple
+        assert_eq!(urlencoding::encoded_len("{}"), 6); // %7B(3) + %7D(3) = 6
+        // Mix: "error: test" = e(1)+r(1)+r(1)+o(1)+r(1)+:(3)+space(3)+t(1)+e(1)+s(1)+t(1) = 15
+        assert_eq!(urlencoding::encoded_len("error: test"), 15);
+    }
+
+    #[test]
+    fn test_url_length_with_long_content_stays_under_limit() {
+        // Create very long error message with lots of special characters
+        let long_error = "error[E0308]: mismatched types\n".repeat(500);
+
+        let builder = GitHubIssueBuilder::new(long_error.clone())
+            .with_hx_content("N {}\nE {}\nQ test() {}".repeat(200));
+
+        let url = builder.build_url();
+
+        assert!(
+            url.len() <= MAX_URL_LENGTH,
+            "URL length {} exceeds limit {}",
+            url.len(),
+            MAX_URL_LENGTH
+        );
+    }
+
+    #[test]
+    fn test_url_includes_content_when_short() {
+        let short_error = "error[E0308]: mismatched types";
+        let builder = GitHubIssueBuilder::new(short_error.to_string())
+            .with_hx_content("N User {}".to_string());
+
+        let url = builder.build_url();
+
+        // URL should contain the error
+        assert!(url.contains("mismatched"));
+        // URL should be well under the limit
+        assert!(url.len() < MAX_URL_LENGTH / 2);
+    }
+
+    #[test]
+    fn test_generic_url_builder_truncates_long_content() {
+        // Create very long content with special characters
+        let long_body = "This is feedback with special chars: {} [] <> \n".repeat(500);
+
+        let url = GitHubIssueUrlBuilder::new("Test Issue")
+            .body(long_body)
+            .labels("feedback")
+            .issue_type("Feature")
+            .build_url();
+
+        assert!(
+            url.len() <= MAX_URL_LENGTH,
+            "URL length {} exceeds limit {}",
+            url.len(),
+            MAX_URL_LENGTH
+        );
+    }
+
+    #[test]
+    fn test_generic_url_builder_preserves_short_content() {
+        let short_body = "This is a short feedback message.";
+
+        let url = GitHubIssueUrlBuilder::new("Short Test")
+            .body(short_body)
+            .labels("feedback")
+            .issue_type("Feature")
+            .build_url();
+
+        // URL should contain the message
+        assert!(url.contains("short%20feedback"));
+        // URL should be well under the limit
+        assert!(url.len() < MAX_URL_LENGTH / 2);
     }
 }

@@ -1,10 +1,11 @@
-use crate::commands::auth::Credentials;
+use crate::commands::auth::require_auth;
 use crate::config::{BuildMode, CloudInstanceConfig, DbConfig, InstanceInfo};
+use crate::output;
 use crate::project::ProjectContext;
 use crate::sse_client::{SseEvent, SseProgressHandler};
 use crate::utils::helixc_utils::{collect_hx_files, generate_content};
-use crate::utils::{print_error, print_error_with_hint, print_status, print_success};
-use eyre::{OptionExt, Result, eyre};
+use crate::utils::print_error;
+use eyre::{Result, eyre};
 use helix_db::helix_engine::traversal_core::config::Config;
 use reqwest_eventsource::RequestBuilderExt;
 use serde_json::json;
@@ -34,30 +35,6 @@ impl<'a> HelixManager<'a> {
         Self { project }
     }
 
-    fn credentials_path(&self) -> Result<PathBuf> {
-        // get home directory
-        let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
-        Ok(home.join(".helix").join("credentials"))
-    }
-
-    fn check_auth(&self) -> Result<()> {
-        let credentials_path = self.credentials_path()?;
-        if !credentials_path.exists() {
-            print_error_with_hint(
-                "Credentials file not found",
-                "Run 'helix auth login' to authenticate with Helix Cloud",
-            );
-            return Err(eyre!(""));
-        }
-
-        let credentials = Credentials::read_from_file(&credentials_path);
-        if !credentials.is_authenticated() {
-            return Err(eyre!("Credentials file is not authenticated"));
-        }
-
-        Ok(())
-    }
-
     pub async fn create_instance_config(
         &self,
         _instance_name: &str,
@@ -69,11 +46,6 @@ impl<'a> HelixManager<'a> {
 
         // Use provided region or default to us-east-1
         let region = region.or_else(|| Some("us-east-1".to_string()));
-
-        print_status(
-            "CONFIG",
-            &format!("Creating cloud configuration for cluster: {cluster_id}"),
-        );
 
         Ok(CloudInstanceConfig {
             cluster_id,
@@ -91,18 +63,14 @@ impl<'a> HelixManager<'a> {
         config: &CloudInstanceConfig,
     ) -> Result<()> {
         // Check authentication first
-        self.check_auth()?;
+        require_auth().await?;
 
-        print_status(
-            "CLOUD",
-            &format!("Initializing Helix cloud cluster: {}", config.cluster_id),
-        );
-        print_status(
-            "INFO",
-            "Note: Cluster provisioning API is not yet implemented",
-        );
-        print_status(
-            "INFO",
+        output::info(&format!(
+            "Initializing Helix cloud cluster: {}",
+            config.cluster_id
+        ));
+        output::info("Note: Cluster provisioning API is not yet implemented");
+        output::info(
             "This will create the configuration locally and provision the cluster when the API is ready",
         );
 
@@ -144,11 +112,10 @@ impl<'a> HelixManager<'a> {
         //     }
         // }
 
-        print_success(format!("Cloud instance '{instance_name}' configuration created").as_str());
-        print_status(
-            "NEXT",
-            "Run 'helix build <instance>' to compile your project for this instance",
-        );
+        output::success(&format!(
+            "Cloud instance '{instance_name}' configuration created"
+        ));
+        output::info("Run 'helix build <instance>' to compile your project for this instance");
 
         Ok(())
     }
@@ -159,7 +126,7 @@ impl<'a> HelixManager<'a> {
         cluster_name: String,
         build_mode: BuildMode,
     ) -> Result<()> {
-        self.check_auth()?;
+        let credentials = require_auth().await?;
         let path = match get_path_or_cwd(path.as_ref()) {
             Ok(path) => path,
             Err(e) => {
@@ -175,9 +142,6 @@ impl<'a> HelixManager<'a> {
                 return Err(eyre!("Error: failed to generate content: {e}"));
             }
         };
-
-        // get credentials - already validated by check_auth()
-        let credentials = Credentials::read_from_file(&self.credentials_path()?);
 
         // Optionally load config from helix.toml or legacy config.hx.json
         let helix_toml_path = path.join("helix.toml");
@@ -306,8 +270,8 @@ impl<'a> HelixManager<'a> {
                         SseEvent::Deployed { url, auth_key } => {
                             deployment_success = true;
                             progress.finish("Deployment completed!");
-                            print_success(&format!("Deployed to: {}", url));
-                            print_status("AUTH_KEY", &format!("Your auth key: {}", auth_key));
+                            output::success(&format!("Deployed to: {}", url));
+                            output::info(&format!("Your auth key: {}", auth_key));
 
                             // Prompt user for .env handling
                             println!();
@@ -343,7 +307,7 @@ impl<'a> HelixManager<'a> {
                                             "HELIX_API_KEY",
                                             &auth_key,
                                         ) {
-                                            Ok(_) => print_success(&format!(
+                                            Ok(_) => output::success(&format!(
                                                 "Added HELIX_CLOUD_URL and HELIX_API_KEY to {}",
                                                 env_path.display()
                                             )),
@@ -353,7 +317,7 @@ impl<'a> HelixManager<'a> {
                                         }
                                     }
                                     "2" => {
-                                        print_status("INFO", "Skipped saving to .env");
+                                        output::info("Skipped saving to .env");
                                     }
                                     "3" => {
                                         print!("Enter path: ");
@@ -381,7 +345,7 @@ impl<'a> HelixManager<'a> {
                                                 "HELIX_API_KEY",
                                                 &auth_key,
                                             ) {
-                                                Ok(_) => print_success(&format!(
+                                                Ok(_) => output::success(&format!(
                                                     "Added HELIX_CLOUD_URL and HELIX_API_KEY to {}",
                                                     custom_path.display()
                                                 )),
@@ -393,10 +357,7 @@ impl<'a> HelixManager<'a> {
                                         }
                                     }
                                     _ => {
-                                        print_status(
-                                            "INFO",
-                                            "Invalid choice, skipped saving to .env",
-                                        );
+                                        output::info("Invalid choice, skipped saving to .env");
                                     }
                                 }
                             }
@@ -407,7 +368,7 @@ impl<'a> HelixManager<'a> {
                         SseEvent::Redeployed { url } => {
                             deployment_success = true;
                             progress.finish("Redeployment completed!");
-                            print_success(&format!("Redeployed to: {}", url));
+                            output::success(&format!("Redeployed to: {}", url));
                             event_source.close();
                             break;
                         }
@@ -437,7 +398,7 @@ impl<'a> HelixManager<'a> {
             return Err(eyre!("Deployment did not complete successfully"));
         }
 
-        print_success("Queries deployed successfully");
+        output::success("Queries deployed successfully");
         Ok(())
     }
 
@@ -450,10 +411,7 @@ impl<'a> HelixManager<'a> {
     ) -> Result<()> {
         // Redeploy is similar to deploy but may have different backend handling
         // For now, we'll use the same implementation with a different status message
-        print_status(
-            "REDEPLOY",
-            &format!("Redeploying to cluster: {}", cluster_name),
-        );
+        output::info(&format!("Redeploying to cluster: {}", cluster_name));
 
         // Call deploy with the same logic
         // In the future, this could use a different endpoint or add a "redeploy" flag

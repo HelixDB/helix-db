@@ -2,8 +2,8 @@ use crate::utils::{
     items::Edge,
     properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
 };
-use std::fmt;
 use serde::de::{DeserializeSeed, Visitor};
+use std::fmt;
 
 /// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
 struct OptionPropertiesMapDeSeed<'arena> {

@@ -33,11 +33,16 @@ pub enum SseEvent {
         message: Option<String>,
     },
 
-    /// Log message from operation
+    /// Log message from operation (supports both level and severity field names)
     Log {
         message: String,
-        level: Option<String>,
+        #[serde(alias = "level")]
+        severity: Option<String>,
+        timestamp: Option<String>,
     },
+
+    /// Backfill complete marker (logs endpoint)
+    BackfillComplete,
 
     /// Status transition (e.g., PENDING → PROVISIONING → READY)
     StatusTransition {

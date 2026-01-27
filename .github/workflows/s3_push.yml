@@ -3,9 +3,6 @@ name: Push to S3
 on:
   release:
     types: [published, created]
-  create:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -19,6 +16,31 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release is from main branch
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            # Get the commit SHA for the release tag
+            TAG_COMMIT=$(git rev-list -n 1 ${{ github.event.release.tag_name }})
+
+            # Check if this commit is on the main branch
+            if git merge-base --is-ancestor $TAG_COMMIT origin/main; then
+              echo "Tag ${{ github.event.release.tag_name }} is on main branch"
+            else
+              echo "Tag ${{ github.event.release.tag_name }} is NOT on main branch, skipping S3 push"
+              exit 1
+            fi
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "workflow_dispatch triggered from main branch"
+            else
+              echo "workflow_dispatch must be run from main branch, not ${{ github.ref }}"
+              exit 1
+            fi
+          fi
 
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4

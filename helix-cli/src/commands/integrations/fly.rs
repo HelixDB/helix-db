@@ -2,8 +2,8 @@ use crate::config::default_release_build_mode;
 use crate::{
     config::{self, BuildMode},
     docker::DockerManager,
+    output,
     project::ProjectContext,
-    utils::print_status,
 };
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ impl TryFrom<String> for FlyAuthType {
 }
 
 /// VM sizes available on Fly.io
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum VmSize {
     /// 4 CPU, 1GB RAM
     #[serde(rename = "shared-cpu-4x")]
@@ -106,8 +106,9 @@ impl TryFrom<String> for VmSize {
 }
 
 impl VmSize {
-    fn into_command_args(&self) -> [&'static str; 2] {
-        let vm_size_arg = match self {
+    /// Get the string representation of the VM size (used for CLI args and config)
+    pub fn as_str(&self) -> &'static str {
+        match self {
             VmSize::SharedCpu4x => "shared-cpu-4x",
             VmSize::SharedCpu8x => "shared-cpu-8x",
             VmSize::PerformanceCpu4x => "performance-4x",
@@ -117,8 +118,11 @@ impl VmSize {
             VmSize::A10040Gb => "a100-40gb",
             VmSize::A10080Gb => "a100-80gb",
             VmSize::L40s => "l40s",
-        };
-        ["--vm-size", vm_size_arg]
+        }
+    }
+
+    fn into_command_args(&self) -> [&'static str; 2] {
+        ["--vm-size", self.as_str()]
     }
 }
 /// Configuration for a Fly.io instance
@@ -354,7 +358,10 @@ impl<'a> FlyManager<'a> {
         }
 
         // Check if fly.toml already exists for this instance
-        let fly_toml_path = self.project.instance_workspace(instance_name).join("fly.toml");
+        let fly_toml_path = self
+            .project
+            .instance_workspace(instance_name)
+            .join("fly.toml");
         if let Some(existing_app_name) = Self::read_app_name_from_fly_toml(&fly_toml_path)? {
             // Check if the app in fly.toml exists on Fly.io
             if self.app_exists(&existing_app_name).await? {
@@ -378,7 +385,7 @@ impl<'a> FlyManager<'a> {
             ));
         }
 
-        print_status("FLY", &format!("Creating Fly.io app '{app_name}'"));
+        output::info(&format!("Creating Fly.io app '{app_name}'"));
 
         match &self.auth {
             FlyAuth::ApiKey(api_key) => {
@@ -474,7 +481,7 @@ impl<'a> FlyManager<'a> {
             .display()
             .to_string();
 
-        print_status("FLY", &format!("Deploying '{app_name}' to Fly.io"));
+        output::info(&format!("Deploying '{app_name}' to Fly.io"));
         println!("\tImage: {image_name}");
 
         match &self.auth {
@@ -483,7 +490,7 @@ impl<'a> FlyManager<'a> {
             )),
             FlyAuth::Cli => {
                 // Tag image for Fly.io registry
-                print_status("FLY", "Tagging image for Fly.io registry");
+                output::info("Tagging image for Fly.io registry");
 
                 // authenticate docker
                 let auth_args = vec!["auth", "docker"];
@@ -495,10 +502,7 @@ impl<'a> FlyManager<'a> {
                 docker.tag(image_name, FLY_REGISTRY_URL)?;
 
                 // Push image to registry
-                print_status(
-                    "FLY",
-                    &format!("Pushing image '{image_name}' to Fly.io registry"),
-                );
+                output::info(&format!("Pushing image '{image_name}' to Fly.io registry"));
                 docker.push(image_name, FLY_REGISTRY_URL)?;
 
                 // Get environment variables first to ensure they live long enough
@@ -522,7 +526,7 @@ impl<'a> FlyManager<'a> {
                 }
 
                 // Deploy image
-                print_status("FLY", "Deploying image to Fly.io");
+                output::info("Deploying image to Fly.io");
                 let deploy_status = self.run_fly_command_async(&deploy_args).await?;
 
                 if !deploy_status.status.success() {
@@ -612,7 +616,7 @@ impl<'a> FlyManager<'a> {
     pub async fn delete_app(&self, instance_name: &str) -> Result<()> {
         let app_name = self.app_name(instance_name);
 
-        print_status("FLY", &format!("Deleting Fly.io app '{app_name}'"));
+        output::info(&format!("Deleting Fly.io app '{app_name}'"));
 
         let delete_status = self
             .run_fly_command_async(&["apps", "destroy", &app_name, "--yes"])

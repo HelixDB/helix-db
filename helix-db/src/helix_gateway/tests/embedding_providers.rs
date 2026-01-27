@@ -15,6 +15,18 @@ fn test_openai_embedding_success() {
 
 #[test]
 #[ignore] // Requires API key and network
+fn test_azure_openai_embedding_success() {
+    // Requires AZURE_OPENAI_API_KEY and AZURE_OPENAI_RESOURCE_NAME env vars
+    let model =
+        get_embedding_model(None, Some("azure_openai:text-embedding-3-small"), None).unwrap();
+    let result = model.fetch_embedding("test text");
+    assert!(result.is_ok());
+    let embedding = result.unwrap();
+    println!("embedding: {embedding:?}");
+}
+
+#[test]
+#[ignore] // Requires API key and network
 fn test_gemini_embedding_success() {
     let model = get_embedding_model(None, Some("gemini-embedding-001"), None).unwrap();
     let result = model.fetch_embedding("test text");
@@ -73,6 +85,38 @@ fn test_parse_openai_provider_empty_model() {
     let (provider, model) = result.unwrap();
     assert!(matches!(provider, EmbeddingProvider::OpenAI));
     assert_eq!(model, ""); // Returns empty string when no model specified after colon
+}
+
+#[test]
+fn test_parse_azure_openai_provider_with_deployment() {
+    unsafe {
+        std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "test-resource");
+    }
+    let result =
+        EmbeddingModelImpl::parse_provider_and_model(Some("azure_openai:text-embedding-3-small"));
+    assert!(result.is_ok());
+    let (provider, model) = result.unwrap();
+    match provider {
+        EmbeddingProvider::AzureOpenAI {
+            resource_name,
+            deployment_id,
+        } => {
+            assert_eq!(resource_name, "test-resource");
+            assert_eq!(deployment_id, "text-embedding-3-small");
+        }
+        _ => panic!("Expected AzureOpenAI provider"),
+    }
+    assert_eq!(model, "text-embedding-3-small");
+}
+
+#[test]
+fn test_parse_azure_openai_provider_empty_deployment() {
+    unsafe {
+        std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "test-resource");
+    }
+    // Should fail because deployment ID is required
+    let result = EmbeddingModelImpl::parse_provider_and_model(Some("azure_openai:"));
+    assert!(result.is_err());
 }
 
 #[test]
@@ -158,6 +202,36 @@ fn test_new_gemini_without_api_key_fails() {
         std::env::remove_var("GEMINI_API_KEY");
     }
     let result = EmbeddingModelImpl::new(None, Some("gemini:gemini-embedding-001"), None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_new_azure_openai_without_api_key_fails() {
+    unsafe {
+        std::env::remove_var("AZURE_OPENAI_API_KEY");
+        std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "test-resource");
+    }
+    let result = EmbeddingModelImpl::new(None, Some("azure_openai:text-embedding-3-small"), None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_new_azure_openai_without_resource_name_fails() {
+    unsafe {
+        std::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+        std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME");
+    }
+    let result = EmbeddingModelImpl::new(None, Some("azure_openai:text-embedding-3-small"), None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_new_azure_openai_without_deployment_fails() {
+    unsafe {
+        std::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+        std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "test-resource");
+    }
+    let result = EmbeddingModelImpl::new(None, Some("azure_openai:"), None);
     assert!(result.is_err());
 }
 

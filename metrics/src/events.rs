@@ -63,10 +63,10 @@ pub enum EventData {
     DeployLocal(DeployLocalEvent),
     DeployCloud(DeployCloudEvent),
     RedeployLocal(RedeployLocalEvent),
-    QuerySuccess(QuerySuccessEvent),
     QueryError(QueryErrorEvent),
     WriteError(WriteErrorEvent),
     ReadError(ReadErrorEvent),
+    QuerySuccess(QuerySuccessEvent),
     InvalidApiKey(InvalidApiKeyEvent),
     Test(TestEvent),
 }
@@ -227,11 +227,8 @@ pub struct ReadErrorEvent {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QueryErrorEvent {
     pub query_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_json: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_json: Option<String>,
     pub time_taken_usec: u32,
 }

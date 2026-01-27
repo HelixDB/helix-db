@@ -10,7 +10,10 @@ mod docker;
 mod errors;
 mod github_issue;
 mod metrics_sender;
+mod output;
+mod port;
 mod project;
+mod prompts;
 mod sse_client;
 mod update;
 mod utils;
@@ -19,6 +22,14 @@ mod utils;
 #[command(name = "Helix CLI")]
 #[command(version)]
 struct Cli {
+    /// Suppress output (errors and final result only)
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
+    /// Show detailed output with timing information
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[clap(subcommand)]
     command: Commands,
 }
@@ -45,7 +56,7 @@ enum Commands {
     /// Add a new instance to an existing Helix project
     Add {
         #[clap(subcommand)]
-        cloud: CloudDeploymentTypeCommand,
+        cloud: Option<CloudDeploymentTypeCommand>,
     },
 
     /// Create a new Helix Cloud cluster
@@ -77,14 +88,18 @@ enum Commands {
 
     /// Build and compile project for an instance
     Build {
-        /// Instance name to build
-        instance: String,
+        /// Instance name to build (interactive selection if not provided)
+        #[clap(short, long)]
+        instance: Option<String>,
+        /// Should build HelixDB into a binary at the specified directory location
+        #[clap(long)]
+        bin: Option<String>,
     },
 
     /// Deploy/start an instance
     Push {
-        /// Instance name to push
-        instance: String,
+        /// Instance name to push (interactive selection if not provided)
+        instance: Option<String>,
         /// Use development profile for faster builds (Helix Cloud only)
         #[clap(long)]
         dev: bool,
@@ -98,18 +113,40 @@ enum Commands {
 
     /// Start an instance (doesn't rebuild)
     Start {
-        /// Instance name to start
-        instance: String,
+        /// Instance name to start (interactive selection if not provided)
+        instance: Option<String>,
     },
 
     /// Stop an instance
     Stop {
-        /// Instance name to stop
-        instance: String,
+        /// Instance name to stop (interactive selection if not provided)
+        instance: Option<String>,
     },
 
     /// Show status of all instances
     Status,
+
+    /// View logs for an instance
+    Logs {
+        /// Instance name (interactive selection if not provided)
+        instance: Option<String>,
+
+        /// Stream live logs (non-interactive)
+        #[clap(long, short = 'l')]
+        live: bool,
+
+        /// Query historical logs with time range
+        #[clap(long, short = 'r')]
+        range: bool,
+
+        /// Start time (ISO 8601: 2024-01-15T10:00:00Z)
+        #[clap(long, requires = "range")]
+        start: Option<String>,
+
+        /// End time (ISO 8601: 2024-01-15T11:00:00Z)
+        #[clap(long, requires = "range")]
+        end: Option<String>,
+    },
 
     /// Cloud operations (login, keys, etc.)
     Auth {
@@ -188,6 +225,12 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Send feedback to the Helix team
+    Feedback {
+        /// Feedback message (opens interactive prompt if not provided)
+        message: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -206,6 +249,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Set verbosity level from flags
+    output::Verbosity::set(output::Verbosity::from_flags(cli.quiet, cli.verbose));
+
     let result = match cli.command {
         Commands::Init {
             path,
@@ -219,14 +265,23 @@ async fn main() -> Result<()> {
         }
         Commands::Check { instance } => commands::check::run(instance, &metrics_sender).await,
         Commands::Compile { output, path } => commands::compile::run(output, path).await,
-        Commands::Build { instance } => commands::build::run(instance, &metrics_sender)
+        Commands::Build { instance, bin } => commands::build::run(instance, bin, &metrics_sender)
             .await
             .map(|_| ()),
-        Commands::Push { instance, dev } => commands::push::run(instance, dev, &metrics_sender).await,
+        Commands::Push { instance, dev } => {
+            commands::push::run(instance, dev, &metrics_sender).await
+        }
         Commands::Pull { instance } => commands::pull::run(instance).await,
         Commands::Start { instance } => commands::start::run(instance).await,
         Commands::Stop { instance } => commands::stop::run(instance).await,
         Commands::Status => commands::status::run().await,
+        Commands::Logs {
+            instance,
+            live,
+            range,
+            start,
+            end,
+        } => commands::logs::run(instance, live, range, start, end).await,
         Commands::Auth { action } => commands::auth::run(action).await,
         Commands::Prune { instance, all } => commands::prune::run(instance, all).await,
         Commands::Delete { instance } => commands::delete::run(instance).await,
@@ -244,6 +299,7 @@ async fn main() -> Result<()> {
             commands::migrate::run(path, queries_dir, instance_name, port, dry_run, no_backup).await
         }
         Commands::Backup { instance, output } => commands::backup::run(output, instance).await,
+        Commands::Feedback { message } => commands::feedback::run(message).await,
     };
 
     // Shutdown metrics sender

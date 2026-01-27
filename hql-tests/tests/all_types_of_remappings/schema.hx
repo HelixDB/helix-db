@@ -36,3 +36,11 @@ N::File {
     text: String,
     extracted_at: Date DEFAULT NOW
 }
+
+E::FileEdge {
+    From: File,
+    To: File,
+    Properties: {
+        since: I32,
+    }
+}

@@ -19,16 +19,28 @@ use crate::helix_engine::traversal_core::HelixGraphEngine;
 /// - No deadlocks or livelocks under high concurrency
 use crate::helix_engine::traversal_core::HelixGraphEngineOpts;
 use crate::helix_engine::traversal_core::config::Config;
+use crate::helix_engine::types::GraphError;
 use crate::helix_gateway::worker_pool::WorkerPool;
-use crate::helix_gateway::{gateway::CoreSetter, router::router::HelixRouter};
+use crate::helix_gateway::{
+    gateway::CoreSetter,
+    router::router::{HandlerInput, HelixRouter},
+};
 use crate::protocol::Format;
-use crate::protocol::{Request, request::RequestType};
+use crate::protocol::{Request, request::RequestType, response::Response};
 use axum::body::Bytes;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
+
+fn test_handler(_input: HandlerInput) -> Result<Response, GraphError> {
+    Ok(Response {
+        body: b"test response".to_vec(),
+        fmt: Format::Json,
+    })
+}
 
 fn create_test_graph() -> (Arc<HelixGraphEngine>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
@@ -55,9 +67,12 @@ fn create_request(name: &str) -> Request {
 fn create_test_pool(
     num_cores: usize,
     threads_per_core: usize,
+    routes: Option<
+        HashMap<String, Arc<dyn Fn(HandlerInput) -> Result<Response, GraphError> + Send + Sync>>,
+    >,
 ) -> (WorkerPool, Arc<HelixGraphEngine>, TempDir) {
     let (graph, temp_dir) = create_test_graph();
-    let router = Arc::new(HelixRouter::new(None, None, None));
+    let router = Arc::new(HelixRouter::new(routes, None, None));
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(num_cores)
@@ -81,7 +96,7 @@ async fn test_concurrent_requests_high_load() {
     //
     // EXPECTED: All requests complete successfully, no deadlocks
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2); // 4 workers
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, None); // 4 workers
     let pool = Arc::new(pool);
 
     let num_concurrent = 100;
@@ -113,13 +128,24 @@ async fn test_concurrent_requests_high_load() {
     println!("High load test: {} requests completed", num_concurrent);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_burst_requests() {
     // Tests burst of concurrent requests
     //
     // EXPECTED: Pool handles bursts without deadlock
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2);
+    // Register handlers for all burst request names
+    let mut routes = HashMap::new();
+    for burst in 0..5 {
+        for req in 0..20 {
+            routes.insert(
+                format!("burst_{}_req_{}", burst, req),
+                Arc::new(test_handler) as Arc<_>,
+            );
+        }
+    }
+
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, Some(routes));
     let pool = Arc::new(pool);
 
     // Send multiple bursts
@@ -150,7 +176,7 @@ async fn test_channel_backpressure() {
     //
     // EXPECTED: Requests block when channel is full but don't fail
 
-    let (pool, _graph, _temp_dir) = create_test_pool(1, 2); // 2 workers
+    let (pool, _graph, _temp_dir) = create_test_pool(1, 2, None); // 2 workers
     let pool = Arc::new(pool);
 
     // Send requests that should stress channel capacity
@@ -184,7 +210,7 @@ async fn test_request_timeout_handling() {
     //
     // EXPECTED: Timeout mechanism works correctly
 
-    let (pool, _graph, _temp_dir) = create_test_pool(1, 2);
+    let (pool, _graph, _temp_dir) = create_test_pool(1, 2, None);
     let pool = Arc::new(pool);
 
     let req = create_request("timeout_test");
@@ -201,7 +227,7 @@ async fn test_parity_mechanism_both_workers() {
     //
     // This is indirect - we validate many requests complete successfully
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2); // 4 workers (even number for parity)
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, None); // 4 workers (even number for parity)
     let pool = Arc::new(pool);
 
     // Send many requests - with proper parity, both types of workers participate
@@ -238,7 +264,7 @@ async fn test_worker_pool_drop_graceful() {
     // EXPECTED: No panics or hangs when pool is dropped
 
     {
-        let (pool, _graph, _temp_dir) = create_test_pool(1, 2);
+        let (pool, _graph, _temp_dir) = create_test_pool(1, 2, None);
         let pool = Arc::new(pool);
 
         // Process a few requests
@@ -252,13 +278,13 @@ async fn test_worker_pool_drop_graceful() {
     println!("Drop test: Pool dropped gracefully");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_stress_sustained_load() {
     // Stress test: sustained high load over time
     //
     // EXPECTED: No degradation, memory leaks, or panics
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2);
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, None);
     let pool = Arc::new(pool);
 
     let total_requests = Arc::new(AtomicUsize::new(0));
@@ -303,7 +329,7 @@ async fn test_concurrent_different_request_types() {
     //
     // EXPECTED: All request types handled concurrently
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2);
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, None);
     let pool = Arc::new(pool);
 
     let mut handles = vec![];
@@ -343,7 +369,7 @@ async fn test_sequential_then_concurrent() {
     //
     // EXPECTED: No issues transitioning between load patterns
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2);
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, None);
     let pool = Arc::new(pool);
 
     // Sequential requests
@@ -379,7 +405,13 @@ async fn test_worker_distribution_fairness() {
     //
     // With 4 workers and 100 requests, work should be distributed
 
-    let (pool, _graph, _temp_dir) = create_test_pool(2, 2); // 4 workers
+    // Register handlers for all fairness request names
+    let mut routes = HashMap::new();
+    for i in 0..100 {
+        routes.insert(format!("fairness_{}", i), Arc::new(test_handler) as Arc<_>);
+    }
+
+    let (pool, _graph, _temp_dir) = create_test_pool(2, 2, Some(routes)); // 4 workers
     let pool = Arc::new(pool);
 
     let start = std::time::Instant::now();

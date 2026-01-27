@@ -1,15 +1,17 @@
 use crate::{
+    commands::auth::require_auth,
     commands::integrations::helix::CLOUD_AUTHORITY,
     config::{CloudInstanceConfig, DbConfig},
+    output,
     project::ProjectContext,
     sse_client::SseEvent,
-    utils::{print_error, print_info, print_status, print_success},
+    utils::print_error,
 };
 use eyre::{OptionExt, Result, eyre};
 
 /// Create a new cluster in Helix Cloud
 pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
-    print_status("CREATE", &format!("Creating cluster: {}", instance_name));
+    output::info(&format!("Creating cluster: {}", instance_name));
 
     // Load project context
     let project = ProjectContext::find_and_load(None)?;
@@ -34,28 +36,15 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
         }
     }
 
-    // Get credentials
-    let home = dirs::home_dir().ok_or_eyre("Cannot find home directory")?;
-    let cred_path = home.join(".helix").join("credentials");
-
-    if !cred_path.exists() {
-        print_error("Not logged in. Please run 'helix auth login' first.");
-        return Err(eyre!("Not authenticated"));
-    }
-
-    let credentials = crate::commands::auth::Credentials::read_from_file(&cred_path);
-
-    if !credentials.is_authenticated() {
-        print_error("Invalid credentials. Please run 'helix auth login' again.");
-        return Err(eyre!("Invalid credentials"));
-    }
+    // Check authentication
+    let credentials = require_auth().await?;
 
     // Get or default region
     let region = region.unwrap_or_else(|| "us-east-1".to_string());
 
     // Connect to SSE stream for cluster creation
     // The server will send CheckoutRequired, PaymentConfirmed, CreatingProject, ProjectCreated events
-    print_status("INITIATING", "Starting cluster creation...");
+    output::info("Starting cluster creation...");
 
     let create_url = format!("https://{}/create-cluster", *CLOUD_AUTHORITY);
     let client = reqwest::Client::new();
@@ -91,27 +80,27 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
                 match sse_event {
                     SseEvent::CheckoutRequired { url } => {
                         if !checkout_opened {
-                            print_info("Opening Stripe checkout in your browser...");
-                            print_info(&format!("If the browser doesn't open, visit: {}", url));
+                            output::info("Opening Stripe checkout in your browser...");
+                            output::info(&format!("If the browser doesn't open, visit: {}", url));
 
                             if let Err(e) = webbrowser::open(&url) {
                                 print_error(&format!("Failed to open browser: {}", e));
-                                print_info(&format!("Please manually open: {}", url));
+                                output::info(&format!("Please manually open: {}", url));
                             }
 
                             checkout_opened = true;
-                            print_status("WAITING", "Waiting for payment confirmation...");
+                            output::info("Waiting for payment confirmation...");
                         }
                     }
                     SseEvent::PaymentConfirmed => {
-                        print_success("Payment confirmed!");
+                        output::success("Payment confirmed!");
                     }
                     SseEvent::CreatingProject => {
-                        print_status("CREATING", "Creating cluster...");
+                        output::info("Creating cluster...");
                     }
                     SseEvent::ProjectCreated { cluster_id } => {
                         final_cluster_id = Some(cluster_id);
-                        print_success("Cluster created successfully!");
+                        output::success("Cluster created successfully!");
                         event_source.close();
                         break;
                     }
@@ -168,13 +157,13 @@ pub async fn run(instance_name: &str, region: Option<String>) -> Result<()> {
     let toml_string = toml::to_string_pretty(&helix_config)?;
     std::fs::write(&config_path, toml_string)?;
 
-    print_success(&format!(
+    output::success(&format!(
         "Cluster '{}' created successfully! (ID: {})",
         instance_name, cluster_id
     ));
-    print_info(&format!("Region: {}", region));
-    print_info("Configuration saved to helix.toml");
-    print_info(&format!(
+    output::info(&format!("Region: {}", region));
+    output::info("Configuration saved to helix.toml");
+    output::info(&format!(
         "You can now deploy with: helix push {}",
         instance_name
     ));

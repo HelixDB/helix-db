@@ -2,11 +2,10 @@ use crate::errors::CliError;
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{Result, eyre};
 use helix_db::helixc::parser::types::HxFile;
+use std::io::IsTerminal;
 use std::{borrow::Cow, fs, path::Path};
 use tokio::sync::oneshot;
 use tokio::time::Duration;
-use std::io::IsTerminal;
-
 
 const IGNORES: [&str; 3] = ["target", ".git", ".helix"];
 
@@ -95,6 +94,11 @@ pub fn command_exists(command: &str) -> bool {
 }
 
 /// Print a status message with a prefix
+#[deprecated(
+    since = "2.3.0",
+    note = "Use output::Operation or output::Step instead"
+)]
+#[allow(dead_code)]
 pub fn print_status(prefix: &str, message: &str) {
     println!("{} {message}", format!("[{prefix}]").blue().bold());
 }
@@ -111,6 +115,7 @@ pub fn print_message(prefix: &str, message: &str) {
 }
 
 /// Print a plain message (replaces direct println! usage)
+#[allow(dead_code)]
 pub fn print_line(message: &str) {
     println!("{message}");
 }
@@ -166,6 +171,11 @@ pub fn print_error_with_hint(message: &str, hint: &str) {
 }
 
 /// Print a success message
+#[deprecated(
+    since = "2.3.0",
+    note = "Use output::Operation::success() or output::success() instead"
+)]
+#[allow(dead_code)]
 pub fn print_success(message: &str) {
     println!("{} {message}", "[SUCCESS]".green().bold());
 }
@@ -341,7 +351,12 @@ pub mod helixc_utils {
         let hx_files: Vec<HxFile> = files
             .iter()
             .map(|file| {
-                let name = file.path().to_string_lossy().into_owned();
+                let name = file
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| file.path())
+                    .to_string_lossy()
+                    .into_owned();
                 let content = fs::read_to_string(file.path())
                     .map_err(|e| eyre::eyre!("Failed to read file {name}: {e}"))?;
                 Ok(HxFile { name, content })
@@ -461,6 +476,11 @@ pub mod helixc_utils {
     }
 }
 
+#[deprecated(
+    since = "2.3.0",
+    note = "Use output::LiveSpinner or output::Step instead"
+)]
+#[allow(dead_code)]
 pub struct Spinner {
     message: std::sync::Arc<std::sync::Mutex<String>>,
     prefix: String,
@@ -468,6 +488,8 @@ pub struct Spinner {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[allow(deprecated)]
+#[allow(dead_code)]
 impl Spinner {
     pub fn new(prefix: &str, message: &str) -> Self {
         Self {
@@ -495,10 +517,7 @@ impl Spinner {
                 }
                 let frame = frames[frame_idx % frames.len()];
                 let msg = message.lock().unwrap().clone();
-                print!(
-                    "\r{} {frame} {msg}",
-                    format!("[{prefix}]").blue().bold()
-                );
+                print!("\r{} {frame} {msg}", format!("[{prefix}]").blue().bold());
                 std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 frame_idx += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -527,6 +546,7 @@ impl Spinner {
     }
 }
 
+#[allow(deprecated)]
 impl Drop for Spinner {
     fn drop(&mut self) {
         self.stop();
@@ -584,12 +604,19 @@ mod tests {
         let env_path = dir.path().join(".env");
 
         // Create existing .env file with the key already present
-        fs::write(&env_path, "OTHER_VAR=foo\nHELIX_API_KEY=old-key\nANOTHER_VAR=bar\n").unwrap();
+        fs::write(
+            &env_path,
+            "OTHER_VAR=foo\nHELIX_API_KEY=old-key\nANOTHER_VAR=bar\n",
+        )
+        .unwrap();
 
         add_env_var_to_file(&env_path, "HELIX_API_KEY", "new-key-456").unwrap();
 
         let content = fs::read_to_string(&env_path).unwrap();
-        assert_eq!(content, "OTHER_VAR=foo\nHELIX_API_KEY=new-key-456\nANOTHER_VAR=bar\n");
+        assert_eq!(
+            content,
+            "OTHER_VAR=foo\nHELIX_API_KEY=new-key-456\nANOTHER_VAR=bar\n"
+        );
     }
 
     #[test]

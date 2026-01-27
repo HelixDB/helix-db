@@ -101,6 +101,57 @@ pub(super) fn gen_id_access_or_param(original_query: &Query, name: &str) -> Gene
     }
 }
 
+/// Validates that an identifier used in AddE From/To is of type ID.
+/// Returns true if valid, false if an error was generated.
+pub(super) fn validate_id_type(
+    ctx: &mut Ctx,
+    original_query: &Query,
+    loc: Loc,
+    scope: &HashMap<&str, VariableInfo>,
+    identifier_name: &str,
+) {
+    // Check if it's a parameter
+    if let Some(param) = is_param(original_query, identifier_name) {
+        if param.param_type.1 != FieldType::Uuid {
+            generate_error!(
+                ctx,
+                original_query,
+                loc,
+                E210,
+                identifier_name,
+                &param.param_type.1.to_string()
+            );
+        }
+        return;
+    }
+
+    // Check if it's a scope variable
+    if let Some(var_info) = scope.get(identifier_name) {
+        // Allow Node/Edge/Vector types (they have .id()) and Scalar(Uuid)
+        match &var_info.ty {
+            Type::Node(_)
+            | Type::Nodes(_)
+            | Type::Edge(_)
+            | Type::Edges(_)
+            | Type::Vector(_)
+            | Type::Vectors(_)
+            | Type::Scalar(FieldType::Uuid) => {
+                // Valid - these types can provide an ID
+            }
+            other => {
+                generate_error!(
+                    ctx,
+                    original_query,
+                    loc,
+                    E210,
+                    identifier_name,
+                    &other.to_string()
+                );
+            }
+        }
+    }
+}
+
 pub(super) fn is_in_scope(scope: &HashMap<&str, VariableInfo>, name: &str) -> bool {
     scope.contains_key(name)
 }
@@ -151,7 +202,14 @@ pub(super) fn get_singular_type(ty: Type) -> Type {
         Type::Node(_) => ty,
         Type::Edge(_) => ty,
         Type::Vector(_) => ty,
-        _ => unreachable!("shouldve been caught eariler"),
+        _ => {
+            debug_assert!(
+                false,
+                "get_singular_type called with unexpected type: {:?}",
+                ty
+            );
+            Type::Unknown
+        }
     }
 }
 
@@ -216,9 +274,10 @@ impl Variable {
 #[derive(Clone, Debug)]
 pub(super) struct VariableInfo {
     pub ty: Type,
-    pub is_single: bool,            // true if ToObj, false if ToVec
-    pub reference_count: usize,     // How many times this variable is referenced
-    pub source_var: Option<String>, // For closure parameters, the actual variable they refer to
+    pub is_single: bool,             // true if ToObj, false if ToVec
+    pub reference_count: usize,      // How many times this variable is referenced
+    pub source_var: Option<String>,  // For closure parameters, the actual variable they refer to
+    pub struct_name: Option<String>, // Track generated struct name for nested object types in FOR loops
 }
 
 impl VariableInfo {
@@ -228,6 +287,7 @@ impl VariableInfo {
             is_single,
             reference_count: 0,
             source_var: None,
+            struct_name: None,
         }
     }
 
@@ -237,6 +297,17 @@ impl VariableInfo {
             is_single,
             reference_count: 0,
             source_var: Some(source_var),
+            struct_name: None,
+        }
+    }
+
+    pub fn new_with_struct_name(ty: Type, is_single: bool, struct_name: String) -> Self {
+        Self {
+            ty,
+            is_single,
+            reference_count: 0,
+            source_var: None,
+            struct_name: Some(struct_name),
         }
     }
 
@@ -301,7 +372,14 @@ impl FieldLookup for Type {
                     _ => fields.contains_key(key),
                 })
                 .unwrap_or(true),
-            _ => unreachable!("shouldve been caught eariler"),
+            _ => {
+                debug_assert!(
+                    false,
+                    "item_fields_contains_key called with unexpected type: {:?}",
+                    self
+                );
+                false
+            }
         }
     }
 
@@ -337,7 +415,14 @@ impl FieldLookup for Type {
                     .unwrap_or(true),
                 vector_type.as_str(),
             ),
-            _ => unreachable!("shouldve been caught eariler"),
+            _ => {
+                debug_assert!(
+                    false,
+                    "item_fields_contains_key_with_type called with unexpected type: {:?}",
+                    self
+                );
+                (false, "unknown")
+            }
         };
 
         (is_valid_field, item_type.to_string())
@@ -385,7 +470,14 @@ impl FieldLookup for Type {
                         .unwrap_or(None),
                 })
                 .unwrap_or(None),
-            _ => unreachable!("shouldve been caught eariler"),
+            _ => {
+                debug_assert!(
+                    false,
+                    "get_field_type_from_item_fields called with unexpected type: {:?}",
+                    self
+                );
+                None
+            }
         }
     }
 }

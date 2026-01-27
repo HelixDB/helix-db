@@ -69,10 +69,12 @@ impl HelixParser {
                     Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
                     Rule::id_traversal => self.parse_traversal(traversal)?,
                     Rule::traversal => self.parse_traversal(traversal)?,
-                    other => return Err(ParserError::from(format!(
-                        "Unexpected rule in exists expression: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(ParserError::from(format!(
+                            "Unexpected rule in exists expression: {:?}",
+                            other
+                        )));
+                    }
                 };
                 let expr = ExpressionType::Exists(ExistsExpression {
                     loc: loc.clone(),
@@ -223,10 +225,12 @@ impl HelixParser {
                     Rule::anonymous_traversal => self.parse_anon_traversal(traversal)?,
                     Rule::id_traversal => self.parse_traversal(traversal)?,
                     Rule::traversal => self.parse_traversal(traversal)?,
-                    other => return Err(ParserError::from(format!(
-                        "Unexpected rule in and_or_expression exists: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(ParserError::from(format!(
+                            "Unexpected rule in and_or_expression exists: {:?}",
+                            other
+                        )));
+                    }
                 };
                 let expr = ExpressionType::Exists(ExistsExpression {
                     loc: loc.clone(),
@@ -281,10 +285,12 @@ impl HelixParser {
                 Rule::evaluates_to_bool => {
                     expressions.push(self.parse_boolean_expression(p)?);
                 }
-                other => return Err(ParserError::from(format!(
-                    "Unexpected rule in parse_expression_vec: {:?}",
-                    other
-                ))),
+                other => {
+                    return Err(ParserError::from(format!(
+                        "Unexpected rule in parse_expression_vec: {:?}",
+                        other
+                    )));
+                }
             }
         }
         Ok(expressions)
@@ -555,7 +561,7 @@ impl HelixParser {
                 return Err(ParserError::from(format!(
                     "Unknown mathematical function: {}",
                     function_name
-                )))
+                )));
             }
         };
 
@@ -604,7 +610,9 @@ impl HelixParser {
                 match inner_inner.as_rule() {
                     Rule::math_function_call => Ok(Expression {
                         loc: inner_inner.loc(),
-                        expr: ExpressionType::MathFunctionCall(self.parse_math_function_call(inner_inner)?),
+                        expr: ExpressionType::MathFunctionCall(
+                            self.parse_math_function_call(inner_inner)?,
+                        ),
                     }),
                     Rule::float => inner_inner
                         .as_str()
@@ -628,11 +636,15 @@ impl HelixParser {
                     }),
                     Rule::traversal => Ok(Expression {
                         loc: inner_inner.loc(),
-                        expr: ExpressionType::Traversal(Box::new(self.parse_traversal(inner_inner)?)),
+                        expr: ExpressionType::Traversal(Box::new(
+                            self.parse_traversal(inner_inner)?,
+                        )),
                     }),
                     Rule::id_traversal => Ok(Expression {
                         loc: inner_inner.loc(),
-                        expr: ExpressionType::Traversal(Box::new(self.parse_traversal(inner_inner)?)),
+                        expr: ExpressionType::Traversal(Box::new(
+                            self.parse_traversal(inner_inner)?,
+                        )),
                     }),
                     _ => Err(ParserError::from(format!(
                         "Unexpected evaluates_to_number type: {:?}",
@@ -682,7 +694,7 @@ impl HelixParser {
 
 #[cfg(test)]
 mod tests {
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Literal Expression Tests

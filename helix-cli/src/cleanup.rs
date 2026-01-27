@@ -71,8 +71,7 @@ impl CleanupTracker {
         };
 
         // Step 1: Restore config from in-memory backup if modified
-        if let (Some(original_config), Some(config_path)) =
-            (self.original_config, self.config_path)
+        if let (Some(original_config), Some(config_path)) = (self.original_config, self.config_path)
         {
             match original_config.save_to_file(&config_path) {
                 Ok(_) => {

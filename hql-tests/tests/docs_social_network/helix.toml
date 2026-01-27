@@ -1,0 +1,7 @@
+[project]
+name = "docs_social_network"
+queries = "."
+
+[local.dev]
+port = 6969
+build_mode = "dev"

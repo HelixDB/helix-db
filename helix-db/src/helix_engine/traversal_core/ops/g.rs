@@ -135,4 +135,24 @@ impl G {
             arena,
         }
     }
+
+    /// Create a mutable traversal from a single TraversalValue
+    pub fn new_mut_from<'db: 'arena, 'arena: 'txn, 'txn>(
+        storage: &'db HelixGraphStorage,
+        txn: &'txn mut RwTxn<'db>,
+        item: TraversalValue<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> RwTraversalIterator<
+        'db,
+        'arena,
+        'txn,
+        impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
+    > {
+        RwTraversalIterator {
+            inner: std::iter::once(Ok(item)),
+            storage,
+            txn,
+            arena,
+        }
+    }
 }

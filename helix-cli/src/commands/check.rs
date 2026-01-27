@@ -3,11 +3,12 @@
 use crate::commands::build;
 use crate::github_issue::{GitHubIssueBuilder, filter_errors_only};
 use crate::metrics_sender::MetricsSender;
+use crate::output::{Operation, Step};
 use crate::project::ProjectContext;
 use crate::utils::helixc_utils::{
     analyze_source, collect_hx_contents, collect_hx_files, generate_content, parse_content,
 };
-use crate::utils::{print_confirm, print_error, print_status, print_success, print_warning};
+use crate::utils::{print_confirm, print_error, print_warning};
 use eyre::Result;
 use std::fs;
 use std::path::Path;
@@ -39,24 +40,31 @@ async fn check_instance(
 ) -> Result<()> {
     let start_time = Instant::now();
 
-    print_status("CHECK", &format!("Checking instance '{instance_name}'"));
+    let op = Operation::new("Checking", instance_name);
 
     // Validate instance exists in config
     let _instance_config = project.config.get_instance(instance_name)?;
 
     // Step 1: Validate syntax first (quick check)
-    print_status("SYNTAX", "Validating query syntax...");
+    let mut syntax_step = Step::with_messages("Validating syntax", "Syntax validated");
+    syntax_step.start();
     validate_project_syntax(project)?;
-    print_success("Syntax validation passed");
+    syntax_step.done();
 
     // Step 2: Ensure helix repo is cached (reuse from build.rs)
+    let mut repo_step = Step::with_messages("Syncing repository", "Repository synced");
+    repo_step.start();
     build::ensure_helix_repo_cached().await?;
+    repo_step.done();
 
     // Step 3: Prepare instance workspace (reuse from build.rs)
     build::prepare_instance_workspace(project, instance_name).await?;
 
     // Step 4: Compile project - generate queries.rs (reuse from build.rs)
+    let mut compile_step = Step::with_messages("Compiling queries", "Queries compiled");
+    compile_step.start();
     let metrics_data = build::compile_project(project, instance_name).await?;
+    compile_step.done_with_info(&format!("{} queries", metrics_data.num_of_queries));
 
     // Step 5: Copy generated files to helix-repo-copy for cargo check
     let instance_workspace = project.instance_workspace(instance_name);
@@ -74,13 +82,18 @@ async fn check_instance(
     )?;
 
     // Step 6: Run cargo check
-    print_status("CARGO", "Running cargo check on generated code...");
+    let mut cargo_step = Step::with_messages("Running cargo check", "Cargo check passed");
+    cargo_step.start();
+    Step::verbose_substep("Running cargo check on generated code...");
     let helix_container_dir = instance_workspace.join("helix-repo-copy/helix-container");
     let cargo_output = run_cargo_check(&helix_container_dir)?;
 
     let compile_time = start_time.elapsed().as_secs() as u32;
 
     if !cargo_output.success {
+        cargo_step.fail();
+        op.failure();
+
         // Send failure telemetry
         metrics_sender.send_compile_event(
             instance_name.to_string(),
@@ -101,11 +114,8 @@ async fn check_instance(
         return Err(eyre::eyre!("Cargo check failed on generated Rust code"));
     }
 
-    print_success("Cargo check passed");
-    print_success(&format!(
-        "Instance '{}' check completed successfully",
-        instance_name
-    ));
+    cargo_step.done();
+    op.success();
     Ok(())
 }
 
@@ -113,9 +123,12 @@ async fn check_all_instances(
     project: &ProjectContext,
     metrics_sender: &MetricsSender,
 ) -> Result<()> {
-    print_status("CHECK", "Checking all instances");
-
-    let instances: Vec<String> = project.config.list_instances().into_iter().map(String::from).collect();
+    let instances: Vec<String> = project
+        .config
+        .list_instances()
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     if instances.is_empty() {
         return Err(eyre::eyre!(
@@ -128,7 +141,7 @@ async fn check_all_instances(
         check_instance(project, instance_name, metrics_sender).await?;
     }
 
-    print_success("All instances checked successfully");
+    crate::output::success("All instances checked successfully");
     Ok(())
 }
 
@@ -193,7 +206,8 @@ fn handle_cargo_check_failure(
     print_warning("You can report this issue to help improve Helix.");
     println!();
 
-    let should_create = print_confirm("Would you like to create a GitHub issue with diagnostic information?")?;
+    let should_create =
+        print_confirm("Would you like to create a GitHub issue with diagnostic information?")?;
 
     if !should_create {
         return Ok(());
@@ -208,12 +222,12 @@ fn handle_cargo_check_failure(
         .with_hx_content(hx_content)
         .with_generated_rust(generated_rust.to_string());
 
-    print_status("BROWSER", "Opening GitHub issue page...");
+    crate::output::info("Opening GitHub issue page...");
     println!("Please review the content before submitting.");
 
     issue.open_in_browser()?;
 
-    print_success("GitHub issue page opened in your browser");
+    crate::output::success("GitHub issue page opened in your browser");
 
     Ok(())
 }

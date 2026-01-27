@@ -195,8 +195,21 @@ fn check_duplicate_schema_definitions(ctx: &mut Ctx) -> Result<(), ParserError> 
 
     let schema = ctx.src.get_latest_schema()?;
 
-    // Check duplicate nodes
+    // Check duplicate nodes and reserved names
     for node in &schema.node_schemas {
+        // Check for reserved type names
+        if RESERVED_TYPE_NAMES.contains(&node.name.1.as_str()) {
+            push_schema_err(
+                ctx,
+                node.name.0.clone(),
+                ErrorCode::E110,
+                format!(
+                    "`{}` is a reserved type name and cannot be used as a node name",
+                    node.name.1
+                ),
+                Some("rename the node to something else".to_string()),
+            );
+        }
         if let Some((_first_loc, _)) = seen_nodes.get(&node.name.1) {
             push_schema_err(
                 ctx,
@@ -213,8 +226,21 @@ fn check_duplicate_schema_definitions(ctx: &mut Ctx) -> Result<(), ParserError> 
         }
     }
 
-    // Check duplicate edges
+    // Check duplicate edges and reserved names
     for edge in &schema.edge_schemas {
+        // Check for reserved type names
+        if RESERVED_TYPE_NAMES.contains(&edge.name.1.as_str()) {
+            push_schema_err(
+                ctx,
+                edge.name.0.clone(),
+                ErrorCode::E110,
+                format!(
+                    "`{}` is a reserved type name and cannot be used as an edge name",
+                    edge.name.1
+                ),
+                Some("rename the edge to something else".to_string()),
+            );
+        }
         if let Some((_first_loc, _)) = seen_edges.get(&edge.name.1) {
             push_schema_err(
                 ctx,
@@ -231,8 +257,21 @@ fn check_duplicate_schema_definitions(ctx: &mut Ctx) -> Result<(), ParserError> 
         }
     }
 
-    // Check duplicate vectors
+    // Check duplicate vectors and reserved names
     for vector in &schema.vector_schemas {
+        // Check for reserved type names
+        if RESERVED_TYPE_NAMES.contains(&vector.name.as_str()) {
+            push_schema_err(
+                ctx,
+                vector.loc.clone(),
+                ErrorCode::E110,
+                format!(
+                    "`{}` is a reserved type name and cannot be used as a vector name",
+                    vector.name
+                ),
+                Some("rename the vector to something else".to_string()),
+            );
+        }
         if let Some((_first_loc, _)) = seen_vectors.get(&vector.name) {
             push_schema_err(
                 ctx,
@@ -292,7 +331,8 @@ pub(crate) fn check_schema(ctx: &mut Ctx) -> Result<(), ParserError> {
         }
         if let Some(v) = edge.properties.as_ref() {
             // Check for duplicate field names (case-insensitive)
-            let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut seen_fields: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for f in v {
                 let lower_name = f.name.to_lowercase();
                 if !seen_fields.insert(lower_name) {
@@ -412,6 +452,24 @@ const NODE_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "type", "version"];
 const EDGE_RESERVED_FIELD_NAMES: &[&str] =
     &["id", "label", "to_node", "from_node", "type", "version"];
 const VEC_RESERVED_FIELD_NAMES: &[&str] = &["id", "label", "data", "score", "type", "version"];
+
+/// Reserved type names that cannot be used as schema item names (node, edge, vector).
+/// These names conflict with built-in helix-db types and imports.
+const RESERVED_TYPE_NAMES: &[&str] = &[
+    // Core graph types
+    "Node",
+    "Edge",
+    "HVector",
+    // Protocol and error types
+    "Value",
+    "GraphError",
+    "VectorError",
+    // Other commonly used types
+    "Response",
+    "HandlerInput",
+    "Aggregate",
+    "AggregateItem",
+];
 
 #[cfg(test)]
 mod tests {
@@ -1028,5 +1086,148 @@ mod tests {
             .filter(|d| d.error_code == ErrorCode::E109)
             .collect();
         assert_eq!(dup_errors.len(), 2);
+    }
+
+    // ============================================================================
+    // Reserved Type Name Tests
+    // ============================================================================
+
+    #[test]
+    fn test_reserved_type_name_node() {
+        let source = r#"
+            N::Node { name: String }
+
+            QUERY test() =>
+                n <- N<Node>
+                RETURN n
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("Node"))
+        );
+    }
+
+    #[test]
+    fn test_reserved_type_name_edge() {
+        let source = r#"
+            N::Person { name: String }
+            E::Edge { From: Person, To: Person }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("Edge"))
+        );
+    }
+
+    #[test]
+    fn test_reserved_type_name_hvector() {
+        let source = r#"
+            V::HVector { content: String, embedding: [F32] }
+
+            QUERY test() =>
+                v <- V<HVector>
+                RETURN v
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("HVector"))
+        );
+    }
+
+    #[test]
+    fn test_reserved_type_name_value() {
+        let source = r#"
+            N::Value { data: String }
+
+            QUERY test() =>
+                v <- N<Value>
+                RETURN v
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("Value"))
+        );
+    }
+
+    #[test]
+    fn test_reserved_type_name_graph_error() {
+        let source = r#"
+            N::GraphError { message: String }
+
+            QUERY test() =>
+                e <- N<GraphError>
+                RETURN e
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
+    }
+
+    #[test]
+    fn test_non_reserved_type_names_valid() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { title: String }
+            E::WorksAt { From: Person, To: Company }
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN p
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        // Should not have any E110 errors for valid names
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
     }
 }

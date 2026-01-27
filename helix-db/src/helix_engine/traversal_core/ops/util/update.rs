@@ -61,18 +61,33 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             None => {
                                 // Insert secondary indices
                                 for (k, v) in props.iter() {
-                                    let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                    let Some((db, secondary_index)) =
+                                        self.storage.secondary_indices.get(*k)
+                                    else {
                                         continue;
                                     };
 
                                     match bincode::serialize(v) {
                                         Ok(v_serialized) => {
-                                            if let Err(e) = db.put_with_flags(
-                                                self.txn,
-                                                PutFlags::APPEND_DUP,
-                                                &v_serialized,
-                                                &node.id,
-                                            ) {
+                                            let result = match secondary_index {
+                                                 crate::helix_engine::types::SecondaryIndex::Unique(_) => {
+                                                     db.put_with_flags(
+                                                         self.txn,
+                                                         PutFlags::NO_OVERWRITE,
+                                                         &v_serialized,
+                                                         &node.id,
+                                                     )
+                                                 }
+                                                crate::helix_engine::types::SecondaryIndex::Index(_) => {
+                                                    db.put(
+                                                        self.txn,
+                                                        &v_serialized,
+                                                        &node.id,
+                                                )
+                                                }
+                                                crate::helix_engine::types::SecondaryIndex::None => unreachable!(),
+                                            };
+                                            if let Err(e) = result {
                                                 results.push(Err(GraphError::from(e)));
                                             }
                                         }
@@ -91,7 +106,8 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             }
                             Some(old) => {
                                 for (k, v) in props.iter() {
-                                    let Some(db) = self.storage.secondary_indices.get(*k) else {
+                                    let Some((db, _)) = self.storage.secondary_indices.get(*k)
+                                    else {
                                         continue;
                                     };
 
@@ -108,24 +124,21 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                                 &node.id,
                                             ) {
                                                 results.push(Err(GraphError::from(e)));
-                                                continue;
+                                                break;
                                             }
                                         }
                                         Err(e) => {
                                             results.push(Err(GraphError::from(e)));
-                                            continue;
+                                            break;
                                         }
                                     }
 
                                     // create new secondary indexes for the props changed
                                     match bincode::serialize(v) {
                                         Ok(v_serialized) => {
-                                            if let Err(e) = db.put_with_flags(
-                                                self.txn,
-                                                PutFlags::APPEND_DUP,
-                                                &v_serialized,
-                                                &node.id,
-                                            ) {
+                                            if let Err(e) =
+                                                db.put(self.txn, &v_serialized, &node.id)
+                                            {
                                                 results.push(Err(GraphError::from(e)));
                                             }
                                         }

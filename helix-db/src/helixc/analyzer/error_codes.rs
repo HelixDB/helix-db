@@ -1,5 +1,5 @@
 use paste::paste;
-use std::fmt::{Debug};
+use std::fmt::Debug;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +22,8 @@ pub enum ErrorCode {
     E108,
     /// `E109` – `duplicate field name in schema`
     E109,
+    /// `E110` – `schema item name is a reserved type name`
+    E110,
 
     // TYPE ERRORS
     /// `E201` – `item type not in schema`
@@ -124,11 +126,98 @@ pub enum ErrorCode {
     E652,
     /// `E653` - `inner type of in variable is not an object`
     E653,
-
+    /// `E654` - `object access in for loop not supported`
+    E654,
+    /// `E655` - `internal analyzer error`
+    E655,
+    /// `E656` - `unsupported type conversion`
+    E656,
+    /// `E657` - `step requires a previous step`
+    E657,
+    /// `E658` - `field not found in object type`
+    E658,
 
     /// `W101` - `query has no return`
     W101,
 }
+impl ErrorCode {
+    /// Returns a short human-readable description of the error (e.g. "unknown edge type").
+    pub fn description(&self) -> &'static str {
+        match self {
+            // Schema errors
+            ErrorCode::E101 => "unknown node type",
+            ErrorCode::E102 => "unknown edge type",
+            ErrorCode::E103 => "unknown vector type",
+            ErrorCode::E104 => "cannot access properties on this type",
+            ErrorCode::E105 => "invalid identifier",
+            ErrorCode::E106 => "use of undeclared node type in schema",
+            ErrorCode::E107 => "duplicate schema definition",
+            ErrorCode::E108 => "invalid schema version",
+            ErrorCode::E109 => "duplicate field name in schema",
+            ErrorCode::E110 => "schema item name is a reserved type name",
+            // Type errors
+            ErrorCode::E201 => "item type not in schema",
+            ErrorCode::E202 => "invalid field for item type",
+            ErrorCode::E203 => "cannot access properties on the type",
+            ErrorCode::E204 => "field is a reserved field name",
+            ErrorCode::E205 => "value type does not match field type",
+            ErrorCode::E206 => "invalid value type",
+            ErrorCode::E207 => "invalid edge type for item type",
+            ErrorCode::E208 => "field has not been indexed",
+            ErrorCode::E209 => "unknown type for parameter",
+            ErrorCode::E210 => "expected ID type",
+            // Query errors
+            ErrorCode::E301 => "variable not in scope",
+            ErrorCode::E302 => "variable previously declared",
+            ErrorCode::E303 => "invalid primitive value",
+            ErrorCode::E304 => "missing item type",
+            ErrorCode::E305 => "missing parameter",
+            ErrorCode::E306 => "expression is not a boolean",
+            // MCP errors
+            ErrorCode::E401 => "MCP query must return a single value",
+            // Conversion errors
+            ErrorCode::E501 => "invalid date",
+            // Traversal errors
+            ErrorCode::E601 => "invalid traversal",
+            ErrorCode::E602 => "invalid step",
+            ErrorCode::E603 => "SearchVector must be used on a vector type",
+            ErrorCode::E604 => "update is only valid on nodes or edges",
+            ErrorCode::E611 => "edge creation must have a to id",
+            ErrorCode::E612 => "edge creation must have a from id",
+            ErrorCode::E621 => "boolean comparison cannot be applied to type",
+            ErrorCode::E622 => "property type does not match compared value",
+            ErrorCode::E623 => "edge type does not have a node type as its From source",
+            ErrorCode::E624 => "edge type does not have a node type as its To source",
+            ErrorCode::E625 => "edge type does not have a vector type as its From source",
+            ErrorCode::E626 => "edge type does not have a vector type as its To source",
+            ErrorCode::E627 => "shortest path requires from or to parameter",
+            ErrorCode::E628 => "DROP can only be applied to traversals",
+            // Range errors
+            ErrorCode::E631 => "range must have a start and end",
+            ErrorCode::E632 => "range start must be less than range end",
+            ErrorCode::E633 => "index of range must be an integer",
+            // Object remapping errors
+            ErrorCode::E641 => "closure is only valid as the last step in a traversal",
+            ErrorCode::E642 => "object remapping is only valid as the last step in a traversal",
+            ErrorCode::E643 => "field previously excluded",
+            ErrorCode::E644 => "exclude is only valid as the last step in a traversal",
+            ErrorCode::E645 => "object remapping must have at least one field",
+            ErrorCode::E646 => "field value is empty",
+            // For loop errors
+            ErrorCode::E651 => "in variable is not iterable",
+            ErrorCode::E652 => "variable is not a field of the inner type",
+            ErrorCode::E653 => "inner type of in variable is not an object",
+            ErrorCode::E654 => "object access in for loop not supported",
+            ErrorCode::E655 => "internal analyzer error",
+            ErrorCode::E656 => "unsupported type conversion",
+            ErrorCode::E657 => "step requires a previous step",
+            ErrorCode::E658 => "field not found in object type",
+            // Warnings
+            ErrorCode::W101 => "query has no return",
+        }
+    }
+}
+
 impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -141,6 +230,7 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::E107 => write!(f, "E107"),
             ErrorCode::E108 => write!(f, "E108"),
             ErrorCode::E109 => write!(f, "E109"),
+            ErrorCode::E110 => write!(f, "E110"),
             ErrorCode::E201 => write!(f, "E201"),
             ErrorCode::E202 => write!(f, "E202"),
             ErrorCode::E203 => write!(f, "E203"),
@@ -185,6 +275,11 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::E651 => write!(f, "E651"),
             ErrorCode::E652 => write!(f, "E652"),
             ErrorCode::E653 => write!(f, "E653"),
+            ErrorCode::E654 => write!(f, "E654"),
+            ErrorCode::E655 => write!(f, "E655"),
+            ErrorCode::E656 => write!(f, "E656"),
+            ErrorCode::E657 => write!(f, "E657"),
+            ErrorCode::E658 => write!(f, "E658"),
             ErrorCode::W101 => write!(f, "W101"),
         }
     }
@@ -213,12 +308,13 @@ macro_rules! implement_error_code {
 
 // Schema errors
 implement_error_code!(E101, "unknown node type `{}`" => { node_type }, "check the schema field names or declare the node type" => {});
-implement_error_code!(E102, "unknown edge type `{} `" => { edge_type }, "check the schema field names or declare the edge type" => {});
+implement_error_code!(E102, "unknown edge type `{}`" => { edge_type }, "check the schema field names or declare the edge type" => {});
 implement_error_code!(E103, "unknown vector type `{}`" => { vector_type }, "check the schema field names or declare the vector type" => {});
 implement_error_code!(E105, "invalid identifier `{}`" => { identifier }, "check the identifier" => {});
 implement_error_code!(E106, "use of undeclared node or vector type `{}` in schema" => { item_type_name }, "declare `{}` in the schema before using it in an edge" => { item_type_name });
 implement_error_code!(E107, "duplicate {} definition `{}`" => { schema_type, name }, "rename the {} or remove the duplicate definition" => { schema_type });
 implement_error_code!(E109, "duplicate field `{}` in {} `{}`" => { field_name, schema_type, schema_name }, "rename the field or remove the duplicate" => {});
+implement_error_code!(E110, "`{}` is a reserved type name and cannot be used as a {} name" => { name, schema_type }, "rename the {} to something else" => { schema_type });
 
 // Type errors
 implement_error_code!(E201, "item type not in schema `{}`" => { item_type }, "check the schema field names" => {});
@@ -286,6 +382,11 @@ implement_error_code!(E646, "field value is empty" => {}, "field value must be a
 implement_error_code!(E651, "`IN` variable `{}` is not iterable" => { in_variable }, "ensure the `in` variable is iterable" => {});
 implement_error_code!(E652, "variable `{}` is not a field of the inner object of the `IN` variable `{}`" => { variable, in_variable }, "ensure `{}` is a field of `{}`" => { variable, in_variable });
 implement_error_code!(E653, "inner object of `IN` variable `{}` is not an object" => { in_variable }, "ensure the inner type of `{}` is an object" => { in_variable });
+implement_error_code!(E654, "object access syntax `{}.{}` in for loop is not yet supported" => { object_name, field_name }, "use object destructuring syntax `{{{}}}` instead" => { field_name });
+implement_error_code!(E655, "internal analyzer error: {}" => { message }, "this is a bug in the analyzer, please report it" => {});
+implement_error_code!(E656, "unsupported type conversion from `{}`" => { type_name }, "use a supported type" => {});
+implement_error_code!(E657, "step `{}` requires a previous step but none was found" => { step_name }, "ensure this step follows a property access" => {});
+implement_error_code!(E658, "field `{}` not found in object type" => { field_name }, "check the field name or use a valid field" => {});
 
 #[macro_export]
 macro_rules! generate_error {

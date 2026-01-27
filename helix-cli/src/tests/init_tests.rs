@@ -166,7 +166,10 @@ async fn test_init_creates_directory_if_not_exists() {
     let project_path = temp_dir.path().join("new_project_dir");
 
     // Directory should not exist yet
-    assert!(!project_path.exists(), "Project directory should not exist initially");
+    assert!(
+        !project_path.exists(),
+        "Project directory should not exist initially"
+    );
 
     let result = run(
         Some(project_path.to_str().unwrap().to_string()),

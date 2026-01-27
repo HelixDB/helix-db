@@ -2,13 +2,16 @@ use crate::config::InstanceInfo;
 use crate::docker::{DockerBuildError, DockerManager};
 use crate::github_issue::{GitHubIssueBuilder, filter_errors_only};
 use crate::metrics_sender::MetricsSender;
+use crate::output::{Operation, Step};
 use crate::project::{ProjectContext, get_helix_repo_cache};
+use crate::prompts;
 use crate::utils::{
     copy_dir_recursive_excluding, diagnostic_source,
     helixc_utils::{collect_hx_contents, collect_hx_files},
-    print_confirm, print_error, print_status, print_success, print_warning, Spinner,
+    print_confirm, print_error, print_warning,
 };
-use eyre::Result;
+use eyre::{Result, eyre};
+use std::process::Command;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -36,25 +39,87 @@ const HELIX_REPO_URL: &str = "https://github.com/helixdb/helix-db.git";
 // Get the cargo workspace root at compile time
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
-pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Result<MetricsData> {
-    let start_time = Instant::now();
-
+pub async fn run(
+    instance_name: Option<String>,
+    bin: Option<String>,
+    metrics_sender: &MetricsSender,
+) -> Result<MetricsData> {
     // Load project context
     let project = ProjectContext::find_and_load(None)?;
 
+    // Get instance name - prompt if not provided
+    let instance_name = match instance_name {
+        Some(name) => name,
+        None if prompts::is_interactive() => {
+            let instances = project.config.list_instances_with_types();
+            prompts::intro(
+                "helix build",
+                Some(
+                    "This will build your selected instance based on the configuration in helix.toml.",
+                ),
+            )?;
+            prompts::select_instance(&instances)?
+        }
+        None => {
+            let instances = project.config.list_instances();
+            return Err(eyre::eyre!(
+                "No instance specified. Available instances: {}",
+                instances
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    };
+
+    // Start the build operation
+    let op = Operation::new("Building", &instance_name);
+
+    // Run the build steps
+    let result = run_build_steps(
+        &op,
+        &project,
+        &instance_name,
+        bin.as_deref(),
+        metrics_sender,
+    )
+    .await;
+
+    match &result {
+        Ok(_) => op.success(),
+        Err(_) => op.failure(),
+    }
+
+    result
+}
+
+/// Run the build steps without creating an Operation (for use by other commands like push)
+pub async fn run_build_steps(
+    _op: &Operation,
+    project: &ProjectContext,
+    instance_name: &str,
+    bin: Option<&str>,
+    metrics_sender: &MetricsSender,
+) -> Result<MetricsData> {
+    let start_time = Instant::now();
+
     // Get instance config
-    let instance_config = project.config.get_instance(&instance_name)?;
+    let instance_config = project.config.get_instance(instance_name)?;
 
-    print_status("BUILD", &format!("Building instance '{instance_name}'"));
-
-    // Ensure Helix repo is cached
+    // Step 1: Repository sync
+    let mut repo_step = Step::with_messages("Syncing repository", "Repository synced");
+    repo_step.start();
     ensure_helix_repo_cached().await?;
+    repo_step.done();
 
-    // Prepare instance workspace
-    prepare_instance_workspace(&project, &instance_name).await?;
+    // Step 2: Prepare workspace (verbose only shows details)
+    prepare_instance_workspace(project, instance_name).await?;
 
-    // Compile project queries into the workspace
-    let compile_result = compile_project(&project, &instance_name).await;
+    // Step 3: Compile project queries
+    let mut compile_step = Step::with_messages("Compiling queries", "Queries compiled");
+    compile_step.start();
+    let compile_result = compile_project(project, instance_name).await;
 
     // Collect metrics data
     let compile_time = start_time.elapsed().as_secs() as u32;
@@ -72,7 +137,7 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
 
     // Send compile metrics
     metrics_sender.send_compile_event(
-        instance_name.clone(),
+        instance_name.to_string(),
         metrics_data.queries_string.clone(),
         metrics_data.num_of_queries,
         compile_time,
@@ -80,39 +145,54 @@ pub async fn run(instance_name: String, metrics_sender: &MetricsSender) -> Resul
         error_messages,
     );
 
-    // Propagate compilation error if any
-    compile_result?;
+    // Propagate compilation error if any (fail step on error)
+    match &compile_result {
+        Ok(data) => {
+            compile_step.done_with_info(&format!("{} queries", data.num_of_queries));
+        }
+        Err(_) => {
+            compile_step.fail();
+            return Err(compile_result.unwrap_err());
+        }
+    }
 
-    // Generate Docker files
-    generate_docker_files(&project, &instance_name, instance_config.clone()).await?;
-
-    // For local instances, build Docker image
-    if instance_config.should_build_docker_image() {
+    // Binary output or Docker build
+    if let Some(binary_output) = bin {
+        let mut cargo_step = Step::with_messages("Building binary", "Binary built");
+        cargo_step.start();
+        match build_binary_using_cargo(project, instance_name, binary_output) {
+            Ok(()) => cargo_step.done(),
+            Err(e) => {
+                cargo_step.fail();
+                return Err(e);
+            }
+        }
+    } else if instance_config.should_build_docker_image() {
+        // Generate Docker files
+        generate_docker_files(project, instance_name, instance_config.clone()).await?;
         let runtime = project.config.project.container_runtime;
         DockerManager::check_runtime_available(runtime)?;
-        let docker = DockerManager::new(&project);
+        let docker = DockerManager::new(project);
 
-        let mut spinner = Spinner::new("DOCKER", "Building Docker image...");
-        spinner.start();
+        let mut docker_step = Step::with_messages("Building Docker image", "Docker image built");
+        docker_step.start();
 
-        match docker.build_image(&instance_name, instance_config.docker_build_target()) {
+        match docker.build_image(instance_name, instance_config.docker_build_target()) {
             Ok(()) => {
-                spinner.stop();
+                docker_step.done();
             }
             Err(e) => {
-                spinner.stop();
+                docker_step.fail();
                 // Check if this is a Rust compilation error
                 if let Some(DockerBuildError::RustCompilation { output, .. }) =
                     e.downcast_ref::<DockerBuildError>()
                 {
-                    handle_docker_rust_compilation_failure(output, &project)?;
+                    handle_docker_rust_compilation_failure(output, project)?;
                 }
                 return Err(e);
             }
         }
     }
-
-    print_success(&format!("Instance '{instance_name}' built successfully"));
 
     Ok(metrics_data.clone())
 }
@@ -140,15 +220,11 @@ fn needs_cache_recreation(repo_cache: &std::path::Path) -> Result<bool> {
 
     match (DEV_MODE, is_git_repo) {
         (true, true) => {
-            print_status(
-                "CACHE",
-                "Cache is git repo but DEV_MODE requires copy - recreating...",
-            );
+            Step::verbose_substep("Cache is git repo but DEV_MODE requires copy - recreating...");
             Ok(true)
         }
         (false, false) => {
-            print_status(
-                "CACHE",
+            Step::verbose_substep(
                 "Cache is copy but production mode requires git repo - recreating...",
             );
             Ok(true)
@@ -163,7 +239,7 @@ async fn recreate_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
 }
 
 async fn create_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
-    print_status("CACHE", "Caching Helix repository (first time setup)...");
+    Step::verbose_substep("Caching Helix repository (first time setup)...");
 
     if DEV_MODE {
         create_dev_cache(repo_cache)?;
@@ -171,12 +247,11 @@ async fn create_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
         create_git_cache(repo_cache)?;
     }
 
-    print_success("Helix repository cached successfully");
     Ok(())
 }
 
 async fn update_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
-    print_status("UPDATE", "Updating Helix repository cache...");
+    Step::verbose_substep("Updating Helix repository cache...");
 
     if DEV_MODE {
         update_dev_cache(repo_cache)?;
@@ -184,7 +259,6 @@ async fn update_helix_cache(repo_cache: &std::path::Path) -> Result<()> {
         update_git_cache(repo_cache)?;
     }
 
-    print_success("Helix repository updated");
     Ok(())
 }
 
@@ -193,7 +267,7 @@ fn create_dev_cache(repo_cache: &std::path::Path) -> Result<()> {
         .parent() // helix-cli -> helix-db
         .ok_or_else(|| eyre::eyre!("Cannot determine workspace root"))?;
 
-    print_status("DEV", "Development mode: copying local workspace...");
+    Step::verbose_substep("Development mode: copying local workspace...");
     copy_dir_recursive_excluding(workspace_root, repo_cache)
 }
 
@@ -242,11 +316,11 @@ fn update_git_cache(repo_cache: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn prepare_instance_workspace(project: &ProjectContext, instance_name: &str) -> Result<()> {
-    print_status(
-        "PREPARE",
-        &format!("Preparing workspace for '{instance_name}'"),
-    );
+pub(crate) async fn prepare_instance_workspace(
+    project: &ProjectContext,
+    instance_name: &str,
+) -> Result<()> {
+    Step::verbose_substep(&format!("Preparing workspace for '{instance_name}'"));
 
     // Ensure instance directories exist
     project.ensure_instance_dirs(instance_name)?;
@@ -264,17 +338,18 @@ pub(crate) async fn prepare_instance_workspace(project: &ProjectContext, instanc
     // Copy cached repo to instance workspace
     copy_dir_recursive_excluding(&repo_cache, &repo_copy_path)?;
 
-    print_status(
-        "COPY",
-        &format!("Copied cached repo to {}", repo_copy_path.display()),
-    );
+    Step::verbose_substep(&format!(
+        "Copied cached repo to {}",
+        repo_copy_path.display()
+    ));
 
     Ok(())
 }
 
-pub(crate) async fn compile_project(project: &ProjectContext, instance_name: &str) -> Result<MetricsData> {
-    print_status("COMPILE", "Compiling Helix queries...");
-
+pub(crate) async fn compile_project(
+    project: &ProjectContext,
+    instance_name: &str,
+) -> Result<MetricsData> {
     // Create helix-container directory in instance workspace for generated files
     let instance_workspace = project.instance_workspace(instance_name);
     let helix_container_dir = instance_workspace.join("helix-container");
@@ -289,8 +364,7 @@ pub(crate) async fn compile_project(project: &ProjectContext, instance_name: &st
     let legacy_config_str = serde_json::to_string_pretty(&legacy_config_json)?;
     fs::write(src_dir.join("config.hx.json"), legacy_config_str)?;
 
-    // Read and compile the .hx files using the same logic as the original CLI
-    print_status("CODEGEN", "Generating Rust code from Helix queries...");
+    Step::verbose_substep("Generating Rust code from Helix queries...");
 
     // Collect all .hx files for compilation
     let hx_files = collect_hx_files(&project.root, &project.config.project.queries)?;
@@ -303,7 +377,6 @@ pub(crate) async fn compile_project(project: &ProjectContext, instance_name: &st
     write!(&mut generated_rust_code, "{analyzed_source}")?;
     fs::write(src_dir.join("queries.rs"), generated_rust_code)?;
 
-    print_success("Helix queries compiled to Rust files");
     Ok(metrics_data)
 }
 
@@ -319,18 +392,22 @@ async fn generate_docker_files(
 
     let docker = DockerManager::new(project);
 
-    print_status(docker.runtime.label(), "Generating configuration...");
+    Step::verbose_substep(&format!(
+        "{} configuration generated",
+        docker.runtime.label()
+    ));
+
     // Generate Dockerfile
     let dockerfile_content = docker.generate_dockerfile(instance_name, instance_config.clone())?;
     let dockerfile_path = project.dockerfile_path(instance_name);
     fs::write(&dockerfile_path, dockerfile_content)?;
 
     // Generate docker-compose.yml
-    let compose_content = docker.generate_docker_compose(instance_name, instance_config.clone())?;
+    let compose_content =
+        docker.generate_docker_compose(instance_name, instance_config.clone(), None)?;
     let compose_path = project.docker_compose_path(instance_name);
     fs::write(&compose_path, compose_content)?;
 
-    print_success("Docker configuration generated");
     Ok(())
 }
 
@@ -338,13 +415,13 @@ fn compile_helix_files(
     files: &[std::fs::DirEntry],
     instance_src_dir: &std::path::Path,
 ) -> Result<(GeneratedSource, MetricsData)> {
-    print_status("PARSE", "Parsing Helix files...");
+    Step::verbose_substep("Parsing Helix files...");
 
     // Generate content from the files
     let content = generate_content(files)?;
 
     // Parse the content
-    print_status("ANALYZE", "Analyzing Helix files...");
+    Step::verbose_substep("Analyzing Helix files...");
     let source = parse_content(&content)?;
 
     // Extract metrics data during parsing
@@ -369,7 +446,12 @@ pub(crate) fn generate_content(files: &[std::fs::DirEntry]) -> Result<Content> {
     let files: Vec<HxFile> = files
         .iter()
         .map(|file| {
-            let name = file.path().to_string_lossy().into_owned();
+            let name = file
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| file.path())
+                .to_string_lossy()
+                .into_owned();
             let content = fs::read_to_string(file.path())
                 .map_err(|e| eyre::eyre!("Failed to read file {name}: {e}"))?;
             Ok(HxFile { name, content })
@@ -436,7 +518,10 @@ fn read_config(instance_src_dir: &std::path::Path) -> Result<Config> {
 }
 
 /// Handle Rust compilation failure during Docker build - print errors and offer GitHub issue creation.
-fn handle_docker_rust_compilation_failure(docker_output: &str, project: &ProjectContext) -> Result<()> {
+fn handle_docker_rust_compilation_failure(
+    docker_output: &str,
+    project: &ProjectContext,
+) -> Result<()> {
     print_error("Rust compilation failed during Docker build");
     println!();
     println!("This may indicate a bug in the Helix code generator.");
@@ -463,12 +548,43 @@ fn handle_docker_rust_compilation_failure(docker_output: &str, project: &Project
     // Build and open GitHub issue (no generated Rust available from Docker build)
     let issue = GitHubIssueBuilder::new(cargo_errors).with_hx_content(hx_content);
 
-    print_status("BROWSER", "Opening GitHub issue page...");
+    crate::output::info("Opening GitHub issue page...");
     println!("Please review the content before submitting.");
 
     issue.open_in_browser()?;
 
-    print_success("GitHub issue page opened in your browser");
+    crate::output::success("GitHub issue page opened in your browser");
 
+    Ok(())
+}
+
+fn build_binary_using_cargo(
+    project: &ProjectContext,
+    instance_name: &str,
+    binary_output: &str,
+) -> Result<()> {
+    let binary_output_path = std::path::Path::new(binary_output);
+    std::fs::create_dir_all(binary_output_path)?;
+
+    // <path-to-.helix>/<instance_name>/helix-repo-copy/helix-container/
+    let current_dir = project
+        .helix_dir
+        .join(instance_name)
+        .join("helix-repo-copy")
+        .join("helix-container");
+
+    let status = Command::new("cargo")
+        .arg("build")
+        .arg("--target-dir")
+        .arg(binary_output_path.as_os_str())
+        .current_dir(current_dir)
+        .status()?;
+
+    if !status.success() {
+        return Err(eyre!(
+            "Cargo build failed with exit code: {:?}",
+            status.code()
+        ));
+    }
     Ok(())
 }

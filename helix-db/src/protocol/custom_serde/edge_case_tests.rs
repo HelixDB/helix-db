@@ -354,7 +354,10 @@ mod edge_case_tests {
                 Value::I32(1),
                 Value::Object({
                     let mut inner = HashMap::new();
-                    inner.insert("inner_key".to_string(), Value::String("inner_value".to_string()));
+                    inner.insert(
+                        "inner_key".to_string(),
+                        Value::String("inner_value".to_string()),
+                    );
                     inner
                 }),
             ]),
@@ -516,12 +519,7 @@ mod edge_case_tests {
         let id = 800800u128;
 
         // Subnormal (denormalized) numbers
-        let data = vec![
-            f64::MIN_POSITIVE,
-            f64::MIN_POSITIVE / 2.0,
-            1e-308,
-            1e-320,
-        ];
+        let data = vec![f64::MIN_POSITIVE, f64::MIN_POSITIVE / 2.0, 1e-308, 1e-320];
 
         let vector = create_simple_vector(&arena, id, "subnormal", &data);
         let props_bytes = bincode::serialize(&vector).unwrap();
@@ -578,9 +576,7 @@ mod edge_case_tests {
 
         let long_key = "property_key_".repeat(100); // ~1.3KB key
         let key_ref: &str = arena.alloc_str(&long_key);
-        let props = vec![
-            (key_ref, Value::String("value".to_string())),
-        ];
+        let props = vec![(key_ref, Value::String("value".to_string()))];
 
         let edge = create_arena_edge(&arena, id, "test", 0, 1, 2, props);
         let bytes = bincode::serialize(&edge).unwrap();
@@ -620,9 +616,7 @@ mod edge_case_tests {
         let arena = Bump::new();
         let id = 404404u128;
 
-        let large_array = Value::Array(
-            (0..1000).map(|i| Value::I32(i)).collect()
-        );
+        let large_array = Value::Array((0..1000).map(Value::I32).collect());
 
         let props = vec![("big_array", large_array)];
         let node = create_arena_node(&arena, id, "test", 0, props);
@@ -641,7 +635,7 @@ mod edge_case_tests {
         let string_array = Value::Array(
             (0..100)
                 .map(|i| Value::String(format!("string_{}", i)))
-                .collect()
+                .collect(),
         );
 
         let props = vec![("strings", string_array)];
@@ -797,7 +791,8 @@ mod edge_case_tests {
             })
             .collect();
 
-        let vector = create_arena_vector(&arena, id, &"Vec".repeat(200), 255, true, 0, &data, props);
+        let vector =
+            create_arena_vector(&arena, id, &"Vec".repeat(200), 255, true, 0, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 

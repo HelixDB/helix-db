@@ -1,7 +1,8 @@
 use eyre::Result;
 use self_update::cargo_crate_version;
 
-use crate::utils::{print_error_with_hint, print_status, print_success};
+use crate::output::{Operation, Step, Verbosity};
+use crate::utils::print_error_with_hint;
 
 pub async fn run(force: bool) -> Result<()> {
     // We're using the self_update crate which is very handy but doesn't support async.
@@ -11,7 +12,10 @@ pub async fn run(force: bool) -> Result<()> {
 }
 
 fn run_sync(force: bool) -> Result<()> {
-    print_status("UPDATE", "Checking for updates...");
+    let op = Operation::new("Updating", "CLI");
+
+    let mut check_step = Step::with_messages("Checking for updates", "Checked for updates");
+    check_step.start();
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner("HelixDB")
@@ -27,33 +31,38 @@ fn run_sync(force: bool) -> Result<()> {
     if !force {
         let latest_release = status.get_latest_release()?;
         if latest_release.version == current_version {
-            print_success(&format!("Already up to date! (v{current_version})"));
-            print_status("UPDATE", "Use --force to reinstall");
+            check_step.done_with_info("already up to date");
+            op.success();
+            println!("  Use --force to reinstall");
             return Ok(());
         }
 
-        print_status(
-            "UPDATE",
-            &format!(
-                "Update available: v{current_version} -> v{}",
-                latest_release.version
-            ),
-        );
+        check_step.done_with_info(&format!(
+            "v{current_version} -> v{}",
+            latest_release.version
+        ));
     } else {
-        print_status("UPDATE", "Force update requested");
+        check_step.done_with_info("force update");
     }
 
-    print_status("UPDATE", "Downloading and installing latest version...");
+    let mut install_step =
+        Step::with_messages("Downloading and installing", "Downloaded and installed");
+    install_step.start();
 
     match status.update() {
         Ok(_) => {
-            print_success("Update completed successfully!");
-            print_status(
-                "UPDATE",
-                "Please restart your terminal or run the command again to use the new version",
-            );
+            install_step.done();
+            op.success();
+            if Verbosity::current().show_normal() {
+                Operation::print_details(&[(
+                    "Note",
+                    "Please restart your terminal to use the new version",
+                )]);
+            }
         }
         Err(e) => {
+            install_step.fail();
+            op.failure();
             print_error_with_hint(
                 &format!("Update failed: {e}"),
                 "check your internet connection and try again",

@@ -1,5 +1,6 @@
+use crate::output::{Operation, Step, Verbosity};
 use crate::project::ProjectContext;
-use crate::utils::{print_confirm, print_status, print_success, print_warning};
+use crate::utils::{print_confirm, print_warning};
 use eyre::Result;
 use heed3::{CompactionOption, EnvFlags, EnvOpenOptions};
 use std::fs;
@@ -14,7 +15,7 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
     // Get instance config
     let _instance_config = project.config.get_instance(&instance_name)?;
 
-    print_status("BACKUP", &format!("Backing up instance '{instance_name}'"));
+    let op = Operation::new("Backing up", &instance_name);
 
     // Get the instance volume
     let volumes_dir = project
@@ -30,6 +31,7 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
 
     // Validate existence of environment
     if !env_path.exists() {
+        op.failure();
         return Err(eyre::eyre!(
             "Instance LMDB environment not found at {:?}",
             env_path
@@ -38,6 +40,7 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
 
     // Check existence of data_file before calling metadata()
     if !data_file.exists() {
+        op.failure();
         return Err(eyre::eyre!(
             "instance data file not found at {:?}",
             data_file
@@ -72,12 +75,15 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
         ));
         let confirmed = print_confirm("Do you want to continue?");
         if !confirmed? {
-            print_status("CANCEL", "Backup aborted by user");
+            crate::output::info("Backup aborted by user");
             return Ok(());
         }
     }
 
     // Open LMDB read-only snapshot environment
+    let mut copy_step = Step::with_messages("Copying database", "Database copied");
+    copy_step.start();
+
     let env = unsafe {
         EnvOpenOptions::new()
             .flags(EnvFlags::READ_ONLY)
@@ -86,15 +92,17 @@ pub async fn run(output: Option<PathBuf>, instance_name: String) -> Result<()> {
             .open(env_path)?
     };
 
-    println!("Copying {:?} → {:?}", &data_file, &backup_dir);
+    Step::verbose_substep(&format!("Copying {:?} → {:?}", &data_file, &backup_dir));
 
     // backup database to given database
     env.copy_to_path(backup_dir.join("data.mdb"), CompactionOption::Disabled)?;
 
-    print_success(&format!(
-        "Backup for '{instance_name}' created at {:?}",
-        backup_dir
-    ));
+    copy_step.done();
+    op.success();
+
+    if Verbosity::current().show_normal() {
+        Operation::print_details(&[("Backup location", &backup_dir.display().to_string())]);
+    }
 
     Ok(())
 }

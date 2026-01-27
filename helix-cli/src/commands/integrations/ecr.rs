@@ -2,8 +2,8 @@ use crate::config::default_release_build_mode;
 use crate::{
     config::{self, BuildMode},
     docker::DockerManager,
+    output,
     project::ProjectContext,
-    utils::print_status,
 };
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,9 @@ impl<'a> EcrManager<'a> {
 
     fn image_name(&self, repository_name: &str, build_mode: BuildMode) -> String {
         let tag = match build_mode {
-            BuildMode::Debug => "debug",
+            BuildMode::Debug => unreachable!(
+                "Please report as a bug. BuildMode::Debug should have been caught in validation."
+            ),
             BuildMode::Release => "latest",
             BuildMode::Dev => "dev",
         };
@@ -143,7 +145,7 @@ impl<'a> EcrManager<'a> {
     async fn check_aws_cli_auth() -> Result<()> {
         Self::check_aws_cli_available().await?;
 
-        print_status("ECR", "Checking AWS CLI authentication");
+        output::info("Checking AWS CLI authentication");
         let output = tokio::process::Command::new("aws")
             .args(["sts", "get-caller-identity"])
             .output()
@@ -258,10 +260,7 @@ impl<'a> EcrManager<'a> {
         let repository_name = &config.repository_name;
         let region = &config.region;
 
-        print_status(
-            "ECR",
-            &format!("Creating ECR repository '{repository_name}'"),
-        );
+        output::info(&format!("Creating ECR repository '{repository_name}'"));
 
         // Check if repository already exists
         let check_output = self
@@ -321,13 +320,13 @@ impl<'a> EcrManager<'a> {
         let repository_name = &config.repository_name;
         let region = &config.region;
 
-        print_status("ECR", &format!("Deploying '{image_name}' to ECR"));
+        output::info(&format!("Deploying '{image_name}' to ECR"));
         println!("\tRepository: {repository_name}");
         println!("\tRegion: {region}");
         println!("\tTag: {tag}");
 
         // Authenticate Docker with ECR
-        print_status("ECR", "Authenticating Docker with ECR");
+        output::info("Authenticating Docker with ECR");
         let auth_output = self
             .run_aws_command_async(&["ecr", "get-login-password", "--region", region])
             .await?;
@@ -361,12 +360,12 @@ impl<'a> EcrManager<'a> {
             return Err(eyre!("Failed to login to ECR: {}", stderr));
         }
         // Tag image for ECR
-        print_status("ECR", "Tagging image for ECR");
+        output::info("Tagging image for ECR");
         let image_name = self.image_name(repository_name, config.build_mode);
         docker.tag(&image_name, registry_url)?;
 
         // Push image to ECR
-        print_status("ECR", &format!("Pushing image '{image_name}' to ECR"));
+        output::info(&format!("Pushing image '{image_name}' to ECR"));
         docker.push(&image_name, registry_url)?;
 
         println!("[ECR] Image '{image_name}' deployed successfully to {registry_url}");
@@ -379,10 +378,7 @@ impl<'a> EcrManager<'a> {
         let repository_name = &config.repository_name;
         let region = &config.region;
 
-        print_status(
-            "ECR",
-            &format!("Deleting ECR repository '{repository_name}'"),
-        );
+        output::info(&format!("Deleting ECR repository '{repository_name}'"));
 
         let delete_output = self
             .run_aws_command_async(&[

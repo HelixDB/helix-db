@@ -13,6 +13,7 @@ pub struct Loc {
 pub struct Span {
     pub line: usize,
     pub column: usize,
+    pub byte_offset: usize,
 }
 
 impl Span {
@@ -20,6 +21,7 @@ impl Span {
         Self {
             line,
             column: column + 1,
+            byte_offset: 0,
         }
     }
 
@@ -28,6 +30,7 @@ impl Span {
         Self {
             line,
             column: column + 1,
+            byte_offset: pos.pos(),
         }
     }
 }
@@ -44,6 +47,11 @@ impl Loc {
 
     pub fn empty() -> Self {
         Self::new(None, Span::new(1, 1), Span::new(1, 1), "".to_string())
+    }
+
+    /// Returns the byte range for use with ariadne.
+    pub fn byte_range(&self) -> std::ops::Range<usize> {
+        self.start.byte_offset..self.end.byte_offset
     }
 }
 

@@ -16,5 +16,6 @@ E::User_Has_Access_To {
     To: App,
     Properties: {
        modified_at: Date,
+       created_at: Date
     }
 }

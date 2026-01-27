@@ -26,6 +26,15 @@ pub enum HelixError {
     InvalidApiKey,
 }
 
+impl Serialize for HelixError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(&self.to_string())
+    }
+}
+
 impl HelixError {
     fn code(&self) -> &'static str {
         match self {
@@ -50,14 +59,24 @@ impl IntoResponse for HelixError {
             code: self.code(),
         };
 
-        let body = sonic_rs::to_vec(&error_response)
-            .unwrap_or_else(|_| br#"{"error":"Internal serialization error","code":"INTERNAL_ERROR"}"#.to_vec());
+        let body = sonic_rs::to_vec(&error_response).unwrap_or_else(|_| {
+            br#"{"error":"Internal serialization error","code":"INTERNAL_ERROR"}"#.to_vec()
+        });
 
         axum::response::Response::builder()
             .status(status)
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body))
-            .unwrap_or_else(|_| panic!("Should be able to turn HelixError into Response: {self}"))
+            .unwrap_or_else(|e| {
+                // This should never happen with valid HTTP headers, but handle gracefully
+                tracing::error!("Failed to build error response: {e:?}");
+                axum::response::Response::builder()
+                    .status(500)
+                    .body(Body::from(
+                        r#"{"error":"Internal server error","code":"INTERNAL_ERROR"}"#,
+                    ))
+                    .expect("static response should always build")
+            })
     }
 }
 

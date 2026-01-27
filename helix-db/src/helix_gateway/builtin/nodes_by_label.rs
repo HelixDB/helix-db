@@ -181,7 +181,7 @@ mod tests {
         let mut txn = engine.storage.graph_env.write_txn().unwrap();
         let arena = bumpalo::Bump::new();
 
-        let props1 = vec![("name", Value::String("Alice".to_string()))];
+        let props1 = [("name", Value::String("Alice".to_string()))];
         let props_map1 = ImmutablePropertiesMap::new(
             props1.len(),
             props1
@@ -194,7 +194,7 @@ mod tests {
             .add_n(arena.alloc_str("person"), Some(props_map1), None)
             .collect_to_obj()?;
 
-        let props2 = vec![("name", Value::String("Bob".to_string()))];
+        let props2 = [("name", Value::String("Bob".to_string()))];
         let props_map2 = ImmutablePropertiesMap::new(
             props2.len(),
             props2
@@ -243,7 +243,7 @@ mod tests {
         let arena = bumpalo::Bump::new();
 
         for i in 0..10 {
-            let props = vec![("index", Value::I64(i))];
+            let props = [("index", Value::I64(i))];
             let props_map = ImmutablePropertiesMap::new(
                 props.len(),
                 props

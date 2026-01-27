@@ -156,23 +156,29 @@ impl CloudConfig {
             CloudConfig::Ecr(_) => Some("ecr"), // ECR doesn't use cluster_id
         }
     }
+
+    pub fn build_mode(&self) -> BuildMode {
+        match self {
+            Self::Helix(CloudInstanceConfig { build_mode, .. })
+            | Self::FlyIo(FlyInstanceConfig { build_mode, .. })
+            | Self::Ecr(EcrConfig { build_mode, .. }) => *build_mode,
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum BuildMode {
-    Dev,
     #[default]
-    Debug,
+    Dev,
     Release,
+
+    // Validates that this is not used, and all previous code matching it now
+    // has an unreachable!("Please report as a bug. BuildMode::Debug should have been caught in validation.")
+    Debug,
 }
 
 pub fn default_dev_build_mode() -> BuildMode {
     BuildMode::Dev
-}
-
-#[allow(unused)]
-pub fn default_debug_build_mode() -> BuildMode {
-    BuildMode::Debug
 }
 
 pub fn default_release_build_mode() -> BuildMode {
@@ -255,19 +261,17 @@ pub enum InstanceInfo<'a> {
 impl<'a> InstanceInfo<'a> {
     pub fn build_mode(&self) -> BuildMode {
         match self {
-            InstanceInfo::Local(config) => config.build_mode,
-            InstanceInfo::Helix(config) => config.build_mode,
-            InstanceInfo::FlyIo(config) => config.build_mode,
-            InstanceInfo::Ecr(config) => config.build_mode,
+            InstanceInfo::Local(LocalInstanceConfig { build_mode, .. })
+            | InstanceInfo::Helix(CloudInstanceConfig { build_mode, .. })
+            | InstanceInfo::FlyIo(FlyInstanceConfig { build_mode, .. })
+            | InstanceInfo::Ecr(EcrConfig { build_mode, .. }) => *build_mode,
         }
     }
 
     pub fn port(&self) -> Option<u16> {
         match self {
             InstanceInfo::Local(config) => config.port,
-            InstanceInfo::Helix(_) => None,
-            InstanceInfo::FlyIo(_) => None,
-            InstanceInfo::Ecr(_) => None,
+            InstanceInfo::Helix(_) | InstanceInfo::FlyIo(_) | InstanceInfo::Ecr(_) => None,
         }
     }
 
@@ -282,10 +286,10 @@ impl<'a> InstanceInfo<'a> {
 
     pub fn db_config(&self) -> &DbConfig {
         match self {
-            InstanceInfo::Local(config) => &config.db_config,
-            InstanceInfo::Helix(config) => &config.db_config,
-            InstanceInfo::FlyIo(config) => &config.db_config,
-            InstanceInfo::Ecr(config) => &config.db_config,
+            InstanceInfo::Local(LocalInstanceConfig { db_config, .. })
+            | InstanceInfo::Helix(CloudInstanceConfig { db_config, .. })
+            | InstanceInfo::FlyIo(FlyInstanceConfig { db_config, .. })
+            | InstanceInfo::Ecr(EcrConfig { db_config, .. }) => db_config,
         }
     }
 
@@ -299,10 +303,8 @@ impl<'a> InstanceInfo<'a> {
 
     pub fn docker_build_target(&self) -> Option<&str> {
         match self {
-            InstanceInfo::Local(_) => None,
-            InstanceInfo::Helix(_) => None,
-            InstanceInfo::FlyIo(_) => Some("linux/amd64"),
-            InstanceInfo::Ecr(_) => Some("linux/amd64"),
+            InstanceInfo::Local(_) | InstanceInfo::Helix(_) => None,
+            InstanceInfo::FlyIo(_) | InstanceInfo::Ecr(_) => Some("linux/amd64"),
         }
     }
 
@@ -361,7 +363,7 @@ impl HelixConfig {
         let config: HelixConfig =
             toml::from_str(&content).map_err(|e| eyre!("Failed to parse helix.toml: {}", e))?;
 
-        config.validate()?;
+        config.validate(path)?;
         Ok(config)
     }
 
@@ -374,33 +376,68 @@ impl HelixConfig {
         Ok(())
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, path: &Path) -> Result<()> {
+        // Compute relative path for error messages
+        let relative_path = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| path.strip_prefix(&cwd).ok())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| path.to_path_buf());
+
         // Validate project config
         if self.project.name.is_empty() {
-            return Err(eyre!("Project name cannot be empty"));
+            return Err(eyre!(
+                "Project name cannot be empty in {}",
+                relative_path.display()
+            ));
         }
 
         // Validate instances
         if self.local.is_empty() && self.cloud.is_empty() {
-            return Err(eyre!("At least one instance must be defined"));
+            return Err(eyre!(
+                "At least one instance must be defined in {}",
+                relative_path.display()
+            ));
         }
 
         // Validate local instances
-        for name in self.local.keys() {
+        for (name, config) in &self.local {
             if name.is_empty() {
-                return Err(eyre!("Instance name cannot be empty"));
+                return Err(eyre!(
+                    "Instance name cannot be empty in {}",
+                    relative_path.display()
+                ));
+            }
+
+            if config.build_mode == BuildMode::Debug {
+                return Err(eyre!(
+                    "`build_mode = \"debug\"` is removed in favour of dev mode.\nPlease update `build_mode = \"debug\"` to `build_mode = \"dev\"` in {}",
+                    relative_path.display()
+                ));
             }
         }
 
         // Validate cloud instances
-        for (name, cloud_config) in &self.cloud {
+        for (name, config) in &self.cloud {
             if name.is_empty() {
-                return Err(eyre!("Instance name cannot be empty"));
-            }
-            if cloud_config.get_cluster_id().is_none() {
                 return Err(eyre!(
-                    "Cloud instance '{}' must have a non-empty cluster_id",
-                    name
+                    "Instance name cannot be empty in {}",
+                    relative_path.display()
+                ));
+            }
+
+            if config.get_cluster_id().is_none() {
+                return Err(eyre!(
+                    "Cloud instance '{}' must have a non-empty cluster_id in {}",
+                    name,
+                    relative_path.display()
+                ));
+            }
+
+            if config.build_mode() == BuildMode::Debug {
+                return Err(eyre!(
+                    "`build_mode = \"debug\"` is removed in favour of dev mode.\nPlease update `build_mode = \"debug\"` to `build_mode = \"dev\"` in {}",
+                    relative_path.display()
                 ));
             }
         }
@@ -437,13 +474,36 @@ impl HelixConfig {
         instances
     }
 
+    /// List all instances with their type labels for display
+    /// Returns tuples of (name, type_hint) e.g. ("dev", "local"), ("prod", "Helix Cloud")
+    #[allow(dead_code)]
+    pub fn list_instances_with_types(&self) -> Vec<(&String, &'static str)> {
+        let mut instances = Vec::new();
+
+        for name in self.local.keys() {
+            instances.push((name, "local"));
+        }
+
+        for (name, config) in &self.cloud {
+            let type_hint = match config {
+                CloudConfig::Helix(_) => "Helix Cloud",
+                CloudConfig::FlyIo(_) => "Fly.io",
+                CloudConfig::Ecr(_) => "AWS ECR",
+            };
+            instances.push((name, type_hint));
+        }
+
+        instances.sort_by(|a, b| a.0.cmp(b.0));
+        instances
+    }
+
     pub fn default_config(project_name: &str) -> Self {
         let mut local = HashMap::new();
         local.insert(
             "dev".to_string(),
             LocalInstanceConfig {
                 port: Some(6969),
-                build_mode: BuildMode::Debug,
+                build_mode: BuildMode::Dev,
                 db_config: DbConfig::default(),
             },
         );
