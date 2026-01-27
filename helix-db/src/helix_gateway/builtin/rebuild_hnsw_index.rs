@@ -8,13 +8,35 @@ use crate::helix_engine::vector_core::vector_core::ENTRY_POINT_KEY;
 use crate::helix_gateway::router::router::{Handler, HandlerInput, HandlerSubmission};
 use crate::protocol;
 
-const BATCH_SIZE: usize = 5;
+const DEFAULT_BATCH_SIZE: usize = 5;
 
 /// Rebuild the HNSW index by reconnecting all vectors.
 /// This fixes graph fragmentation caused by deletions and re-insertions.
-/// Processes in batches to avoid OOM.
+///
+/// Request body (optional):
+/// - batch_size: Number of vectors to process per transaction (default: 5)
+///
+/// Example: {"batch_size": 10}
 pub fn rebuild_hnsw_index_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     eprintln!("[RebuildHNSWIndex] Starting rebuild...");
+
+    // Parse batch_size from request body (default to DEFAULT_BATCH_SIZE)
+    let batch_size: usize = if input.request.body.is_empty() {
+        DEFAULT_BATCH_SIZE
+    } else {
+        match sonic_rs::from_slice::<sonic_rs::Value>(&input.request.body) {
+            Ok(val) => val
+                .get("batch_size")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(DEFAULT_BATCH_SIZE),
+            Err(_) => DEFAULT_BATCH_SIZE,
+        }
+    };
+
+    // Ensure batch_size is at least 1
+    let batch_size = batch_size.max(1);
+    eprintln!("[RebuildHNSWIndex] Using batch size: {}", batch_size);
 
     let db = Arc::clone(&input.graph.storage);
 
@@ -56,10 +78,10 @@ pub fn rebuild_hnsw_index_inner(input: HandlerInput) -> Result<protocol::Respons
     }
 
     // Step 3: Reconnect vectors in batches (fresh arena per batch to control memory)
-    eprintln!("[RebuildHNSWIndex] Reconnecting {} vectors in batches of {}...", vector_count, BATCH_SIZE);
+    eprintln!("[RebuildHNSWIndex] Reconnecting {} vectors in batches of {}...", vector_count, batch_size);
 
-    for (batch_idx, chunk) in vector_ids.chunks(BATCH_SIZE).enumerate() {
-        let processed = batch_idx * BATCH_SIZE;
+    for (batch_idx, chunk) in vector_ids.chunks(batch_size).enumerate() {
+        let processed = batch_idx * batch_size;
         if processed % 500 == 0 {
             eprintln!("[RebuildHNSWIndex] Progress: {}/{} ({:.1}%)",
                 processed, vector_count, (processed as f64 / vector_count as f64) * 100.0);
@@ -90,7 +112,8 @@ pub fn rebuild_hnsw_index_inner(input: HandlerInput) -> Result<protocol::Respons
     Ok(protocol::Response {
         body: sonic_rs::to_vec(&json!({
             "status": "success",
-            "vectors_rebuilt": vector_count
+            "vectors_rebuilt": vector_count,
+            "batch_size": batch_size
         }))
         .map_err(|e| GraphError::New(e.to_string()))?,
         fmt: Default::default(),
