@@ -705,9 +705,9 @@ impl HNSW for VectorCore {
         for level in (new_level + 1..=l).rev() {
             let mut nearest =
                 self.search_level::<F>(txn, label, vector, &mut curr_ep, 1, level, None, arena)?;
-            if let Some(closest) = nearest.pop() {
-                curr_ep = closest;
-            }
+            curr_ep = nearest.pop().ok_or(VectorError::VectorCoreError(
+                "empty search result".to_string(),
+            ))?;
         }
 
         // Connect at each level
