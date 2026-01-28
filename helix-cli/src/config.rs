@@ -1,4 +1,4 @@
-use eyre::{Result, eyre};
+use crate::errors::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -15,37 +15,45 @@ pub struct WorkspaceConfig {
 
 impl WorkspaceConfig {
     /// Get the path to the global config file
-    pub fn config_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
+    pub fn config_path() -> Result<PathBuf, ConfigError> {
+        let home = dirs::home_dir().ok_or(ConfigError::HomeDirNotFound)?;
         Ok(home.join(".helix").join("config"))
     }
 
     /// Load the workspace config from ~/.helix/config
-    pub fn load() -> Result<Self> {
+    pub fn load() -> Result<Self, ConfigError> {
         let path = Self::config_path()?;
         if !path.exists() {
             return Ok(Self::default());
         }
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| eyre!("Failed to read config file: {}", e))?;
+        let content =
+            fs::read_to_string(&path).map_err(|source| ConfigError::ReadWorkspaceConfig {
+                path: path.clone(),
+                source,
+            })?;
 
-        toml::from_str(&content).map_err(|e| eyre!("Failed to parse config file: {}", e))
+        toml::from_str(&content)
+            .map_err(|source| ConfigError::ParseWorkspaceConfig { path, source })
     }
 
     /// Save the workspace config to ~/.helix/config
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&self) -> Result<(), ConfigError> {
         let path = Self::config_path()?;
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|source| ConfigError::CreateWorkspaceDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
 
-        let content =
-            toml::to_string_pretty(self).map_err(|e| eyre!("Failed to serialize config: {}", e))?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|source| ConfigError::SerializeWorkspaceConfig { source })?;
 
-        fs::write(&path, content).map_err(|e| eyre!("Failed to write config file: {}", e))?;
+        fs::write(&path, content)
+            .map_err(|source| ConfigError::WriteWorkspaceConfig { path, source })?;
 
         Ok(())
     }
@@ -405,27 +413,35 @@ impl From<InstanceInfo<'_>> for CloudConfig {
 }
 
 impl HelixConfig {
-    pub fn from_file(path: &Path) -> Result<Self> {
-        let content =
-            fs::read_to_string(path).map_err(|e| eyre!("Failed to read helix.toml: {}", e))?;
+    pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
+        let content = fs::read_to_string(path).map_err(|source| ConfigError::ReadHelixConfig {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         let config: HelixConfig =
-            toml::from_str(&content).map_err(|e| eyre!("Failed to parse helix.toml: {}", e))?;
+            toml::from_str(&content).map_err(|source| ConfigError::ParseHelixConfig {
+                path: path.to_path_buf(),
+                source,
+            })?;
 
         config.validate(path)?;
         Ok(config)
     }
 
-    pub fn save_to_file(&self, path: &Path) -> Result<()> {
+    pub fn save_to_file(&self, path: &Path) -> Result<(), ConfigError> {
         let content = toml::to_string_pretty(self)
-            .map_err(|e| eyre!("Failed to serialize helix.toml: {}", e))?;
+            .map_err(|source| ConfigError::SerializeHelixConfig { source })?;
 
-        fs::write(path, content).map_err(|e| eyre!("Failed to write helix.toml: {}", e))?;
+        fs::write(path, content).map_err(|source| ConfigError::WriteHelixConfig {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         Ok(())
     }
 
-    fn validate(&self, path: &Path) -> Result<()> {
+    fn validate(&self, path: &Path) -> Result<(), ConfigError> {
         // Compute relative path for error messages
         let relative_path = std::env::current_dir()
             .ok()
@@ -435,66 +451,59 @@ impl HelixConfig {
 
         // Validate project config
         if self.project.name.is_empty() {
-            return Err(eyre!(
-                "Project name cannot be empty in {}",
-                relative_path.display()
-            ));
+            return Err(ConfigError::EmptyProjectName {
+                path: relative_path.clone(),
+            });
         }
 
         // Validate instances
         if self.local.is_empty() && self.cloud.is_empty() {
-            return Err(eyre!(
-                "At least one instance must be defined in {}",
-                relative_path.display()
-            ));
+            return Err(ConfigError::MissingInstances {
+                path: relative_path.clone(),
+            });
         }
 
         // Validate local instances
         for (name, config) in &self.local {
             if name.is_empty() {
-                return Err(eyre!(
-                    "Instance name cannot be empty in {}",
-                    relative_path.display()
-                ));
+                return Err(ConfigError::EmptyInstanceName {
+                    path: relative_path.clone(),
+                });
             }
 
             if config.build_mode == BuildMode::Debug {
-                return Err(eyre!(
-                    "`build_mode = \"debug\"` is removed in favour of dev mode.\nPlease update `build_mode = \"debug\"` to `build_mode = \"dev\"` in {}",
-                    relative_path.display()
-                ));
+                return Err(ConfigError::DeprecatedBuildMode {
+                    path: relative_path.clone(),
+                });
             }
         }
 
         // Validate cloud instances
         for (name, config) in &self.cloud {
             if name.is_empty() {
-                return Err(eyre!(
-                    "Instance name cannot be empty in {}",
-                    relative_path.display()
-                ));
+                return Err(ConfigError::EmptyInstanceName {
+                    path: relative_path.clone(),
+                });
             }
 
             if config.get_cluster_id().is_none() {
-                return Err(eyre!(
-                    "Cloud instance '{}' must have a non-empty cluster_id in {}",
-                    name,
-                    relative_path.display()
-                ));
+                return Err(ConfigError::MissingClusterId {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                });
             }
 
             if config.build_mode() == BuildMode::Debug {
-                return Err(eyre!(
-                    "`build_mode = \"debug\"` is removed in favour of dev mode.\nPlease update `build_mode = \"debug\"` to `build_mode = \"dev\"` in {}",
-                    relative_path.display()
-                ));
+                return Err(ConfigError::DeprecatedBuildMode {
+                    path: relative_path.clone(),
+                });
             }
         }
 
         Ok(())
     }
 
-    pub fn get_instance(&self, name: &str) -> Result<InstanceInfo<'_>> {
+    pub fn get_instance(&self, name: &str) -> Result<InstanceInfo<'_>, ConfigError> {
         if let Some(local_config) = self.local.get(name) {
             return Ok(InstanceInfo::Local(local_config));
         }
@@ -513,7 +522,9 @@ impl HelixConfig {
             }
         }
 
-        Err(eyre!("Instance '{}' not found in helix.toml", name))
+        Err(ConfigError::InstanceNotFound {
+            name: name.to_string(),
+        })
     }
 
     pub fn list_instances(&self) -> Vec<&String> {

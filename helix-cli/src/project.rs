@@ -1,5 +1,5 @@
 use crate::config::HelixConfig;
-use eyre::{Result, eyre};
+use crate::errors::ProjectError;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -13,10 +13,10 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     /// Find and load the project context starting from the given directory
-    pub fn find_and_load(start_dir: Option<&Path>) -> Result<Self> {
+    pub fn find_and_load(start_dir: Option<&Path>) -> Result<Self, ProjectError> {
         let start = match start_dir {
             Some(dir) => dir.to_path_buf(),
-            None => env::current_dir()?,
+            None => env::current_dir().map_err(|source| ProjectError::CurrentDir { source })?,
         };
 
         let root = find_project_root(&start)?;
@@ -64,21 +64,30 @@ impl ProjectContext {
     }
 
     /// Ensure all necessary directories exist for an instance
-    pub fn ensure_instance_dirs(&self, instance_name: &str) -> Result<()> {
+    pub fn ensure_instance_dirs(&self, instance_name: &str) -> Result<(), ProjectError> {
         let workspace = self.instance_workspace(instance_name);
         let volume = self.instance_volume(instance_name);
         let container = self.container_dir(instance_name);
 
-        std::fs::create_dir_all(&workspace)?;
-        std::fs::create_dir_all(&volume)?;
-        std::fs::create_dir_all(&container)?;
+        std::fs::create_dir_all(&workspace).map_err(|source| ProjectError::CreateDir {
+            path: workspace,
+            source,
+        })?;
+        std::fs::create_dir_all(&volume).map_err(|source| ProjectError::CreateDir {
+            path: volume,
+            source,
+        })?;
+        std::fs::create_dir_all(&container).map_err(|source| ProjectError::CreateDir {
+            path: container,
+            source,
+        })?;
 
         Ok(())
     }
 }
 
 /// Find the project root by looking for helix.toml file
-fn find_project_root(start: &Path) -> Result<PathBuf> {
+fn find_project_root(start: &Path) -> Result<PathBuf, ProjectError> {
     let mut current = start.to_path_buf();
 
     loop {
@@ -90,14 +99,10 @@ fn find_project_root(start: &Path) -> Result<PathBuf> {
         // Check for old v1 config.hx.json file
         let v1_config_path = current.join("config.hx.json");
         if v1_config_path.exists() {
-            let error = crate::errors::config_error("found v1 project configuration")
-                .with_file_path(v1_config_path.display().to_string())
-                .with_context("This project uses the old v1 configuration format")
-                .with_hint(format!(
-                    "Run 'helix migrate --path \"{}\"' to migrate this project to v2 format",
-                    current.display()
-                ));
-            return Err(eyre!("{}", error.render()));
+            return Err(ProjectError::LegacyConfig {
+                path: v1_config_path,
+                root: current,
+            });
         }
 
         match current.parent() {
@@ -106,34 +111,36 @@ fn find_project_root(start: &Path) -> Result<PathBuf> {
         }
     }
 
-    let error = crate::errors::config_error("project configuration not found")
-        .with_file_path(start.display().to_string())
-        .with_context(format!(
-            "searched from {} up to filesystem root",
-            start.display()
-        ));
-    Err(eyre!("{}", error.render()))
+    Err(ProjectError::ConfigNotFound {
+        start: start.to_path_buf(),
+    })
 }
 
-pub fn get_helix_cache_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
+pub fn get_helix_cache_dir() -> Result<PathBuf, ProjectError> {
+    let home = dirs::home_dir().ok_or(ProjectError::HomeDirNotFound)?;
     let helix_dir = home.join(".helix");
 
     // Check if this is a fresh installation (no .helix directory exists)
     let is_fresh_install = !helix_dir.exists();
 
-    std::fs::create_dir_all(&helix_dir)?;
+    std::fs::create_dir_all(&helix_dir).map_err(|source| ProjectError::CreateDir {
+        path: helix_dir.clone(),
+        source,
+    })?;
 
     // For fresh installations, create .v2 marker to indicate this is a v2 helix directory
     if is_fresh_install {
         let v2_marker = helix_dir.join(".v2");
-        std::fs::write(&v2_marker, "")?;
+        std::fs::write(&v2_marker, "").map_err(|source| ProjectError::WriteCacheMarker {
+            path: v2_marker,
+            source,
+        })?;
     }
 
     Ok(helix_dir)
 }
 
-pub fn get_helix_repo_cache() -> Result<PathBuf> {
+pub fn get_helix_repo_cache() -> Result<PathBuf, ProjectError> {
     let helix_dir = get_helix_cache_dir()?;
     Ok(helix_dir.join("repo"))
 }

@@ -1,6 +1,7 @@
 use crate::commands::check::run;
 use crate::config::{DbConfig, HelixConfig, LocalInstanceConfig};
 use crate::metrics_sender::MetricsSender;
+use crate::tests::support;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -141,10 +142,12 @@ QUERY InvalidQuery {
 #[tokio::test]
 async fn test_check_all_instances_success() {
     let (_temp_dir, project_path) = setup_valid_project();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Check should succeed with valid project: {:?}",
@@ -155,10 +158,12 @@ async fn test_check_all_instances_success() {
 #[tokio::test]
 async fn test_check_specific_instance_success() {
     let (_temp_dir, project_path) = setup_valid_project();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(Some("dev".to_string()), &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(Some("dev".to_string()), &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Check should succeed for valid instance: {:?}",
@@ -169,15 +174,17 @@ async fn test_check_specific_instance_success() {
 #[tokio::test]
 async fn test_check_nonexistent_instance_fails() {
     let (_temp_dir, project_path) = setup_valid_project();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(Some("nonexistent".to_string()), &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(Some("nonexistent".to_string()), &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_err(),
         "Check should fail for nonexistent instance"
     );
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("not found") || error_msg.contains("nonexistent"),
         "Error should mention instance not found"
@@ -187,12 +194,14 @@ async fn test_check_nonexistent_instance_fails() {
 #[tokio::test]
 async fn test_check_fails_without_schema() {
     let (_temp_dir, project_path) = setup_project_without_schema();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(result.is_err(), "Check should fail without schema");
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("schema") || error_msg.contains("N::") || error_msg.contains("E::"),
         "Error should mention missing schema definitions"
@@ -202,10 +211,12 @@ async fn test_check_fails_without_schema() {
 #[tokio::test]
 async fn test_check_fails_with_invalid_syntax() {
     let (_temp_dir, project_path) = setup_project_with_invalid_syntax();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(result.is_err(), "Check should fail with invalid syntax");
 }
 
@@ -213,15 +224,17 @@ async fn test_check_fails_with_invalid_syntax() {
 async fn test_check_fails_without_helix_toml() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let project_path = temp_dir.path().to_path_buf();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_err(),
         "Check should fail without helix.toml in project"
     );
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("not found") || error_msg.contains("helix.toml"),
         "Error should mention missing helix.toml"
@@ -239,7 +252,7 @@ async fn test_check_with_multiple_instances() {
         "staging".to_string(),
         LocalInstanceConfig {
             port: Some(6970),
-            build_mode: crate::config::BuildMode::Debug,
+            build_mode: crate::config::BuildMode::Dev,
             db_config: DbConfig::default(),
         },
     );
@@ -247,7 +260,7 @@ async fn test_check_with_multiple_instances() {
         "production".to_string(),
         LocalInstanceConfig {
             port: Some(6971),
-            build_mode: crate::config::BuildMode::Debug,
+            build_mode: crate::config::BuildMode::Dev,
             db_config: DbConfig::default(),
         },
     );
@@ -275,10 +288,12 @@ E::Follows {
 "#;
     fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Check should succeed with multiple instances: {:?}",
@@ -289,11 +304,13 @@ E::Follows {
 #[tokio::test]
 async fn test_check_validates_each_instance_individually() {
     let (_temp_dir, project_path) = setup_valid_project();
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
     // Check the specific instance
-    let result = run(Some("dev".to_string()), &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(Some("dev".to_string()), &metrics_sender).await
+    })
+    .await;
     assert!(result.is_ok(), "Check should validate dev instance");
 }
 
@@ -316,10 +333,12 @@ async fn test_check_with_empty_queries_directory() {
     let queries_dir = project_path.join("db");
     fs::create_dir_all(&queries_dir).expect("Failed to create queries directory");
 
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_err(),
         "Check should fail with empty queries directory"
@@ -358,10 +377,12 @@ E::Follows {
 "#;
     fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Check should succeed with schema only (queries are optional): {:?}",
@@ -418,10 +439,12 @@ QUERY GetUser(id: ID) =>
 "#;
     fs::write(queries_dir.join("queries.hx"), queries).expect("Failed to write queries.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Check should succeed with multiple .hx files: {:?}",
@@ -456,10 +479,12 @@ N::User {
 "#;
     fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
     let metrics_sender = create_test_metrics_sender();
 
-    let result = run(None, &metrics_sender).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, &metrics_sender).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Check should work with custom queries path: {:?}",

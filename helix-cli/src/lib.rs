@@ -49,23 +49,23 @@ pub enum DashboardAction {
         instance: Option<String>,
 
         /// Port to run dashboard on
-        #[clap(short, long, default_value = "3000")]
+        #[arg(short, long, default_value = "3000")]
         port: u16,
 
         /// Helix host to connect to (e.g., localhost). Bypasses project config.
-        #[clap(long)]
+        #[arg(long)]
         host: Option<String>,
 
         /// Helix port to connect to. Used with --host.
-        #[clap(long, default_value = "6969")]
+        #[arg(long, default_value = "6969")]
         helix_port: u16,
 
         /// Run dashboard in foreground with logs
-        #[clap(long)]
+        #[arg(long)]
         attach: bool,
 
         /// Restart if dashboard is already running
-        #[clap(long)]
+        #[arg(long)]
         restart: bool,
     },
     /// Stop the dashboard
@@ -77,49 +77,49 @@ pub enum DashboardAction {
 #[derive(Subcommand)]
 pub enum CloudDeploymentTypeCommand {
     /// Initialize Helix Cloud deployment
-    #[clap(name = "cloud")]
+    #[command(name = "cloud")]
     Helix {
         /// Region for Helix cloud instance (default: us-east-1)
-        #[clap(long, default_value = "us-east-1")]
+        #[arg(long, default_value = "us-east-1")]
         region: Option<String>,
 
         /// Instance name
-        #[clap(short, long)]
+        #[arg(short, long)]
         name: Option<String>,
     },
     /// Initialize ECR deployment
     Ecr {
         /// Instance name
-        #[clap(short, long)]
+        #[arg(short, long)]
         name: Option<String>,
     },
     /// Initialize Fly.io deployment
     Fly {
         /// Authentication type
-        #[clap(long, default_value = "cli")]
+        #[arg(long, default_value = "cli")]
         auth: String,
 
         /// volume size
-        #[clap(long, default_value = "20")]
+        #[arg(long, default_value = "20")]
         volume_size: u16,
 
         /// vm size
-        #[clap(long, default_value = "shared-cpu-4x")]
+        #[arg(long, default_value = "shared-cpu-4x")]
         vm_size: String,
 
         /// privacy
-        #[clap(long, default_value = "false")]
+        #[arg(long, default_value = "false")]
         private: bool,
 
         /// Instance name
-        #[clap(short, long)]
+        #[arg(short, long)]
         name: Option<String>,
     },
 
     /// Initialize Local deployment
     Local {
         /// Instance name
-        #[clap(short, long)]
+        #[arg(short, long)]
         name: Option<String>,
     },
 }

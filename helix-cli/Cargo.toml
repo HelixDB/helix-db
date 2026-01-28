@@ -17,6 +17,7 @@ serde_json = "1.0.143"
 color-eyre = "0.6.5"
 cliclack = "0.3.7"
 async-trait = "0.1.89"
+thiserror = "2.0.12"
 iota = "0.2.3"
 self_update = "0.42.0"
 uuid = { version = "1.18.1", features = ["v4", "v6", "fast-rng"] }

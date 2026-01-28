@@ -1,5 +1,7 @@
 use color_eyre::owo_colors::OwoColorize;
 use std::fmt;
+use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum CliErrorSeverity {
@@ -147,6 +149,231 @@ impl fmt::Display for CliError {
 }
 
 impl std::error::Error for CliError {}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("cannot find home directory")]
+    HomeDirNotFound,
+    #[error("failed to create config directory at {path}: {source}")]
+    CreateWorkspaceDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read workspace config at {path}: {source}")]
+    ReadWorkspaceConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse workspace config at {path}: {source}")]
+    ParseWorkspaceConfig {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to serialize workspace config: {source}")]
+    SerializeWorkspaceConfig {
+        #[source]
+        source: toml::ser::Error,
+    },
+    #[error("failed to write workspace config at {path}: {source}")]
+    WriteWorkspaceConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read helix.toml at {path}: {source}")]
+    ReadHelixConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse helix.toml at {path}: {source}")]
+    ParseHelixConfig {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to serialize helix.toml: {source}")]
+    SerializeHelixConfig {
+        #[source]
+        source: toml::ser::Error,
+    },
+    #[error("failed to write helix.toml at {path}: {source}")]
+    WriteHelixConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("project name cannot be empty in {path}")]
+    EmptyProjectName { path: PathBuf },
+    #[error("at least one instance must be defined in {path}")]
+    MissingInstances { path: PathBuf },
+    #[error("instance name cannot be empty in {path}")]
+    EmptyInstanceName { path: PathBuf },
+    #[error("cloud instance '{name}' must have a non-empty cluster_id in {path}")]
+    MissingClusterId { name: String, path: PathBuf },
+    #[error(
+        "`build_mode = \"debug\"` is removed in favour of dev mode. Please update to `build_mode = \"dev\"` in {path}"
+    )]
+    DeprecatedBuildMode { path: PathBuf },
+    #[error("instance '{name}' not found in helix.toml")]
+    InstanceNotFound { name: String },
+}
+
+#[derive(Debug, Error)]
+pub enum ProjectError {
+    #[error("failed to determine current directory: {source}")]
+    CurrentDir {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "found v1 project configuration at {path}; run 'helix migrate --path \"{root}\"' to migrate"
+    )]
+    LegacyConfig { path: PathBuf, root: PathBuf },
+    #[error("project configuration not found (searched from {start} up to filesystem root)")]
+    ConfigNotFound { start: PathBuf },
+    #[error("failed to create directory at {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write cache marker at {path}: {source}")]
+    WriteCacheMarker {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot find home directory")]
+    HomeDirNotFound,
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+}
+
+#[derive(Debug, Error)]
+pub enum PortError {
+    #[error("could not find available port in range {start}-{end}")]
+    NoAvailablePort { start: u16, end: u16 },
+}
+
+impl ConfigError {
+    pub fn to_cli_error(&self) -> CliError {
+        match self {
+            ConfigError::HomeDirNotFound => CliError::new("cannot find home directory"),
+            ConfigError::CreateWorkspaceDir { path, source } => CliError::new(format!(
+                "failed to create config directory at {}",
+                path.display()
+            ))
+            .with_caused_by(source.to_string()),
+            ConfigError::ReadWorkspaceConfig { path, source } => CliError::new(format!(
+                "failed to read workspace config at {}",
+                path.display()
+            ))
+            .with_caused_by(source.to_string()),
+            ConfigError::ParseWorkspaceConfig { path, source } => CliError::new(format!(
+                "failed to parse workspace config at {}",
+                path.display()
+            ))
+            .with_caused_by(source.to_string()),
+            ConfigError::SerializeWorkspaceConfig { source } => {
+                CliError::new("failed to serialize workspace config")
+                    .with_caused_by(source.to_string())
+            }
+            ConfigError::WriteWorkspaceConfig { path, source } => CliError::new(format!(
+                "failed to write workspace config at {}",
+                path.display()
+            ))
+            .with_caused_by(source.to_string()),
+            ConfigError::ReadHelixConfig { path, source } => {
+                CliError::new(format!("failed to read helix.toml at {}", path.display()))
+                    .with_caused_by(source.to_string())
+            }
+            ConfigError::ParseHelixConfig { path, source } => {
+                CliError::new(format!("failed to parse helix.toml at {}", path.display()))
+                    .with_caused_by(source.to_string())
+            }
+            ConfigError::SerializeHelixConfig { source } => {
+                CliError::new("failed to serialize helix.toml").with_caused_by(source.to_string())
+            }
+            ConfigError::WriteHelixConfig { path, source } => {
+                CliError::new(format!("failed to write helix.toml at {}", path.display()))
+                    .with_caused_by(source.to_string())
+            }
+            ConfigError::EmptyProjectName { path } => CliError::new(format!(
+                "project name cannot be empty in {}",
+                path.display()
+            )),
+            ConfigError::MissingInstances { path } => CliError::new(format!(
+                "at least one instance must be defined in {}",
+                path.display()
+            )),
+            ConfigError::EmptyInstanceName { path } => CliError::new(format!(
+                "instance name cannot be empty in {}",
+                path.display()
+            )),
+            ConfigError::MissingClusterId { name, path } => CliError::new(format!(
+                "cloud instance '{}' must have a non-empty cluster_id in {}",
+                name,
+                path.display()
+            )),
+            ConfigError::DeprecatedBuildMode { path } => CliError::new(format!(
+                "`build_mode = \"debug\"` is removed in favour of dev mode. Please update to `build_mode = \"dev\"` in {}",
+                path.display()
+            )),
+            ConfigError::InstanceNotFound { name } => {
+                CliError::new(format!("instance '{}' not found in helix.toml", name))
+            }
+        }
+    }
+}
+
+impl ProjectError {
+    pub fn to_cli_error(&self) -> CliError {
+        match self {
+            ProjectError::CurrentDir { source } => {
+                CliError::new("failed to determine current directory")
+                    .with_caused_by(source.to_string())
+            }
+            ProjectError::LegacyConfig { path, root } => {
+                config_error("found v1 project configuration")
+                    .with_file_path(path.display().to_string())
+                    .with_context("This project uses the old v1 configuration format")
+                    .with_hint(format!(
+                        "Run 'helix migrate --path \"{}\"' to migrate this project to v2 format",
+                        root.display()
+                    ))
+            }
+            ProjectError::ConfigNotFound { start } => {
+                config_error("project configuration not found")
+                    .with_file_path(start.display().to_string())
+                    .with_context(format!(
+                        "searched from {} up to filesystem root",
+                        start.display()
+                    ))
+            }
+            ProjectError::CreateDir { path, source } => {
+                CliError::new(format!("failed to create directory at {}", path.display()))
+                    .with_caused_by(source.to_string())
+            }
+            ProjectError::WriteCacheMarker { path, source } => CliError::new(format!(
+                "failed to write cache marker at {}",
+                path.display()
+            ))
+            .with_caused_by(source.to_string()),
+            ProjectError::HomeDirNotFound => CliError::new("cannot find home directory"),
+            ProjectError::Config(config_error) => config_error.to_cli_error(),
+        }
+    }
+}
+
+impl PortError {
+    pub fn to_cli_error(&self) -> CliError {
+        CliError::new(self.to_string())
+    }
+}
 
 impl From<std::io::Error> for CliError {
     fn from(err: std::io::Error) -> Self {

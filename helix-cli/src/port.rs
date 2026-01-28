@@ -1,4 +1,4 @@
-use eyre::{Result, eyre};
+use crate::errors::PortError;
 use std::net::TcpListener;
 
 pub const DEFAULT_PORT: u16 = 6969;
@@ -10,23 +10,22 @@ pub fn is_port_available(port: u16) -> bool {
 }
 
 /// Find the next available port starting from `starting_port`
-pub fn find_available_port(starting_port: u16) -> Result<u16> {
+pub fn find_available_port(starting_port: u16) -> Result<u16, PortError> {
     for offset in 0..MAX_PORT_ATTEMPTS {
         let port = starting_port.saturating_add(offset);
         if is_port_available(port) {
             return Ok(port);
         }
     }
-    Err(eyre!(
-        "Could not find available port in range {}-{}",
-        starting_port,
-        starting_port + MAX_PORT_ATTEMPTS - 1
-    ))
+    Err(PortError::NoAvailablePort {
+        start: starting_port,
+        end: starting_port + MAX_PORT_ATTEMPTS - 1,
+    })
 }
 
 /// Check port and return actual port to use (may differ from requested)
 /// Returns (actual_port, port_was_changed)
-pub fn ensure_port_available(requested_port: u16) -> Result<(u16, bool)> {
+pub fn ensure_port_available(requested_port: u16) -> Result<(u16, bool), PortError> {
     if is_port_available(requested_port) {
         return Ok((requested_port, false));
     }

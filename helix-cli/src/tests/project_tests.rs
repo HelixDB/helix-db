@@ -67,7 +67,7 @@ fn test_find_project_root_fails_without_config() {
 
     let result = ProjectContext::find_and_load(Some(&project_path));
     assert!(result.is_err(), "Should fail when no helix.toml exists");
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("not found"),
         "Error should mention config not found"
@@ -85,7 +85,7 @@ fn test_find_project_root_detects_v1_config() {
 
     let result = ProjectContext::find_and_load(Some(&project_path));
     assert!(result.is_err(), "Should fail on v1 config");
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("v1"),
         "Error should mention v1 configuration"

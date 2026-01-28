@@ -364,4 +364,3 @@ pub fn select_cluster(clusters: &[crate::commands::sync::CliCluster]) -> Result<
     let selected = select.interact()?;
     Ok(selected)
 }
-

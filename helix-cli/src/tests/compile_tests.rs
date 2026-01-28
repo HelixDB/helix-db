@@ -1,5 +1,6 @@
 use crate::commands::compile::run;
 use crate::config::HelixConfig;
+use crate::tests::support;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -60,9 +61,10 @@ QUERY GetUserPosts(user_id: ID) =>
 #[tokio::test]
 async fn test_compile_success() {
     let (_temp_dir, project_path) = setup_compile_project();
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Compile should succeed with valid project: {:?}",
@@ -80,12 +82,13 @@ async fn test_compile_success() {
 #[tokio::test]
 async fn test_compile_with_custom_output_path() {
     let (_temp_dir, project_path) = setup_compile_project();
-    let _guard = std::env::set_current_dir(&project_path);
-
     let output_dir = project_path.join("custom_output");
     fs::create_dir_all(&output_dir).expect("Failed to create custom output dir");
 
-    let result = run(Some(output_dir.to_str().unwrap().to_string()), None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(Some(output_dir.to_str().unwrap().to_string()), None).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Compile should succeed with custom output path: {:?}",
@@ -142,11 +145,12 @@ QUERY GetUser(user_id: ID) =>
 "#;
     fs::write(queries_dir.join("queries.hx"), queries_content).expect("Failed to write queries.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(result.is_err(), "Compile should fail without schema");
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("schema") || error_msg.contains("N::") || error_msg.contains("E::"),
         "Error should mention missing schema definitions"
@@ -187,9 +191,10 @@ QUERY InvalidQuery
 "#;
     fs::write(queries_dir.join("queries.hx"), invalid_queries).expect("Failed to write queries.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(result.is_err(), "Compile should fail with invalid syntax");
 }
 
@@ -197,14 +202,15 @@ QUERY InvalidQuery
 async fn test_compile_fails_without_helix_toml() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let project_path = temp_dir.path().to_path_buf();
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(
         result.is_err(),
         "Compile should fail without helix.toml in project"
     );
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("not found") || error_msg.contains("helix.toml"),
         "Error should mention missing helix.toml"
@@ -243,9 +249,10 @@ E::Follows {
 "#;
     fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Compile should succeed with schema only (queries are optional): {:?}",
@@ -309,9 +316,10 @@ QUERY GetUser(id: ID) =>
 "#;
     fs::write(queries_dir.join("queries.hx"), queries).expect("Failed to write queries.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Compile should succeed with multiple .hx files: {:?}",
@@ -350,9 +358,10 @@ N::User {
 "#;
     fs::write(queries_dir.join("schema.hx"), schema_content).expect("Failed to write schema.hx");
 
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(
         result.is_ok(),
         "Compile should work with custom queries path: {:?}",
@@ -367,9 +376,10 @@ N::User {
 #[tokio::test]
 async fn test_compile_creates_all_required_files() {
     let (_temp_dir, project_path) = setup_compile_project();
-    let _guard = std::env::set_current_dir(&project_path);
-
-    let result = run(None, None).await;
+    let result = support::with_current_dir(&project_path, || async {
+        run(None, None).await
+    })
+    .await;
     assert!(result.is_ok(), "Compile should succeed");
 
     // Check for common generated files

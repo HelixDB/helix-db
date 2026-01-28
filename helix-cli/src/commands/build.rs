@@ -12,7 +12,9 @@ use crate::utils::{
 };
 use eyre::{Result, eyre};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Instant;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct MetricsData {
@@ -38,6 +40,12 @@ const HELIX_REPO_URL: &str = "https://github.com/helixdb/helix-db.git";
 
 // Get the cargo workspace root at compile time
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
+static REPO_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn repo_cache_lock() -> &'static Mutex<()> {
+    REPO_CACHE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 pub async fn run(
     instance_name: Option<String>,
@@ -198,6 +206,7 @@ pub async fn run_build_steps(
 }
 
 pub(crate) async fn ensure_helix_repo_cached() -> Result<()> {
+    let _lock = repo_cache_lock().lock().await;
     let repo_cache = get_helix_repo_cache()?;
 
     if needs_cache_recreation(&repo_cache)? {
@@ -326,6 +335,7 @@ pub(crate) async fn prepare_instance_workspace(
     project.ensure_instance_dirs(instance_name)?;
 
     // Copy cached repo to instance workspace for Docker build context
+    let _lock = repo_cache_lock().lock().await;
     let repo_cache = get_helix_repo_cache()?;
     let instance_workspace = project.instance_workspace(instance_name);
     let repo_copy_path = instance_workspace.join("helix-repo-copy");

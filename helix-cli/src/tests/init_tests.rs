@@ -1,4 +1,5 @@
 use crate::commands::init::run;
+use crate::tests::support;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -93,14 +94,15 @@ async fn test_init_creates_project_structure() {
 #[tokio::test]
 async fn test_init_with_default_path() {
     let temp_dir = setup_test_dir();
-    let _guard = std::env::set_current_dir(temp_dir.path());
-
-    let result = run(
-        None, // Use current directory
-        "default".to_string(),
-        "queries".to_string(),
-        None,
-    )
+    let result = support::with_current_dir(temp_dir.path(), || async {
+        run(
+            None, // Use current directory
+            "default".to_string(),
+            "queries".to_string(),
+            None,
+        )
+        .await
+    })
     .await;
 
     assert!(result.is_ok(), "Init with default path should succeed");
@@ -153,7 +155,7 @@ async fn test_init_fails_if_helix_toml_exists() {
     .await;
 
     assert!(result.is_err(), "Init should fail if helix.toml exists");
-    let error_msg = format!("{:?}", result.err().unwrap());
+    let error_msg = result.err().unwrap().to_string();
     assert!(
         error_msg.contains("already exists"),
         "Error should mention file already exists"

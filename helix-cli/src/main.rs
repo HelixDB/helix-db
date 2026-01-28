@@ -30,7 +30,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    #[clap(subcommand)]
+    #[command(subcommand)]
     command: Commands,
 }
 
@@ -39,23 +39,23 @@ enum Commands {
     /// Initialize a new Helix project with helix.toml
     Init {
         /// Project directory (defaults to current directory)
-        #[clap(short, long)]
+        #[arg(short, long)]
         path: Option<String>,
 
-        #[clap(short, long, default_value = "empty")]
+        #[arg(short, long, default_value = "empty")]
         template: String,
 
         /// Queries directory path (defaults to ./db/)
-        #[clap(short = 'q', long = "queries-path", default_value = "./db/")]
+        #[arg(short = 'q', long = "queries-path", default_value = "./db/")]
         queries_path: String,
 
-        #[clap(subcommand)]
+        #[command(subcommand)]
         cloud: Option<CloudDeploymentTypeCommand>,
     },
 
     /// Add a new instance to an existing Helix project
     Add {
-        #[clap(subcommand)]
+        #[command(subcommand)]
         cloud: Option<CloudDeploymentTypeCommand>,
     },
 
@@ -65,7 +65,7 @@ enum Commands {
         instance: String,
 
         /// Region for cluster (defaults to us-east-1)
-        #[clap(short, long)]
+        #[arg(short, long)]
         region: Option<String>,
     },
 
@@ -78,21 +78,21 @@ enum Commands {
     /// Compile project queries into the workspace
     Compile {
         /// Directory containing helix.toml (defaults to current directory or project root)
-        #[clap(short, long)]
+        #[arg(short, long)]
         path: Option<String>,
 
         /// Path to output compiled queries
-        #[clap(short, long)]
+        #[arg(short, long)]
         output: Option<String>,
     },
 
     /// Build and compile project for an instance
     Build {
         /// Instance name to build (interactive selection if not provided)
-        #[clap(short, long)]
+        #[arg(short, long)]
         instance: Option<String>,
         /// Should build HelixDB into a binary at the specified directory location
-        #[clap(long)]
+        #[arg(long)]
         bin: Option<String>,
     },
 
@@ -101,7 +101,7 @@ enum Commands {
         /// Instance name to push (interactive selection if not provided)
         instance: Option<String>,
         /// Use development profile for faster builds (Helix Cloud only)
-        #[clap(long)]
+        #[arg(long)]
         dev: bool,
     },
 
@@ -132,25 +132,25 @@ enum Commands {
         instance: Option<String>,
 
         /// Stream live logs (non-interactive)
-        #[clap(long, short = 'l')]
+        #[arg(long, short = 'l')]
         live: bool,
 
         /// Query historical logs with time range
-        #[clap(long, short = 'r')]
+        #[arg(long, short = 'r')]
         range: bool,
 
         /// Start time (ISO 8601: 2024-01-15T10:00:00Z)
-        #[clap(long, requires = "range")]
+        #[arg(long, requires = "range")]
         start: Option<String>,
 
         /// End time (ISO 8601: 2024-01-15T11:00:00Z)
-        #[clap(long, requires = "range")]
+        #[arg(long, requires = "range")]
         end: Option<String>,
     },
 
     /// Cloud operations (login, keys, etc.)
     Auth {
-        #[clap(subcommand)]
+        #[command(subcommand)]
         action: AuthAction,
     },
 
@@ -160,7 +160,7 @@ enum Commands {
         instance: Option<String>,
 
         /// Prune all instances in project
-        #[clap(short, long)]
+        #[arg(short, long)]
         all: bool,
     },
 
@@ -172,47 +172,47 @@ enum Commands {
 
     /// Manage metrics collection
     Metrics {
-        #[clap(subcommand)]
+        #[command(subcommand)]
         action: MetricsAction,
     },
 
     /// Launch the Helix Dashboard
     Dashboard {
-        #[clap(subcommand)]
+        #[command(subcommand)]
         action: DashboardAction,
     },
 
     /// Update to the latest version
     Update {
         /// Force update even if already on latest version
-        #[clap(long)]
+        #[arg(long)]
         force: bool,
     },
 
     /// Migrate v1 project to v2 format
     Migrate {
         /// Project directory to migrate (defaults to current directory)
-        #[clap(short, long)]
+        #[arg(short, long)]
         path: Option<String>,
 
         /// Directory to move .hx files to (defaults to ./db/)
-        #[clap(short = 'q', long = "queries-dir", default_value = "./db/")]
+        #[arg(short = 'q', long = "queries-dir", default_value = "./db/")]
         queries_dir: String,
 
         /// Name for the default local instance (defaults to "dev")
-        #[clap(short, long, default_value = "dev")]
+        #[arg(short, long, default_value = "dev")]
         instance_name: String,
 
         /// Port for local instance (defaults to 6969)
-        #[clap(long, default_value = "6969")]
+        #[arg(long, default_value = "6969")]
         port: u16,
 
         /// Show what would be migrated without making changes
-        #[clap(long)]
+        #[arg(long)]
         dry_run: bool,
 
         /// Skip creating backup of v1 files
-        #[clap(long)]
+        #[arg(long)]
         no_backup: bool,
     },
 
@@ -307,7 +307,17 @@ async fn main() -> Result<()> {
 
     // Handle result with proper error formatting
     if let Err(e) = result {
-        eprintln!("{e}");
+        if let Some(cli_error) = e.downcast_ref::<crate::errors::CliError>() {
+            eprint!("{}", cli_error.render());
+        } else if let Some(config_error) = e.downcast_ref::<crate::errors::ConfigError>() {
+            eprint!("{}", config_error.to_cli_error().render());
+        } else if let Some(project_error) = e.downcast_ref::<crate::errors::ProjectError>() {
+            eprint!("{}", project_error.to_cli_error().render());
+        } else if let Some(port_error) = e.downcast_ref::<crate::errors::PortError>() {
+            eprint!("{}", port_error.to_cli_error().render());
+        } else {
+            eprintln!("{e}");
+        }
         std::process::exit(1);
     }
 

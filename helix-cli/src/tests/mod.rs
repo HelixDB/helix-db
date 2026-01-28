@@ -2,6 +2,8 @@
 #[cfg(test)]
 pub mod check_tests;
 #[cfg(test)]
+pub mod support;
+#[cfg(test)]
 pub mod compile_tests;
 #[cfg(test)]
 pub mod init_tests;
