@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const GITHUB_API_URL: &str = "https://api.github.com/repos/helixdb/helix-db/releases/latest";
+const GITHUB_API_URL: &str = "https://api.github.com/repos/himanalot/helix-db/releases/latest";
 const UPDATE_CHECK_INTERVAL: u64 = 24 * 60 * 60; // 24 hours in seconds
 
 #[derive(Deserialize)]

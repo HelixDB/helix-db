@@ -343,7 +343,7 @@ fn create_project_structure(
 //
 // For more information on how to write queries,
 // see the documentation at https://docs.helix-db.com
-// or checkout our GitHub at https://github.com/HelixDB/helix-db
+// or checkout our GitHub at https://github.com/himanalot/helix-db
 "#;
     let queries_path_file = project_dir.join(queries_path).join("queries.hx");
     fs::write(&queries_path_file, default_queries)?;
