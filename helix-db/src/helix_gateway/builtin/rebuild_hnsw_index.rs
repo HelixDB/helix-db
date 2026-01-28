@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use sonic_rs::json;
+use sonic_rs::JsonValueTrait;
 
 use crate::helix_engine::types::GraphError;
 use crate::helix_engine::vector_core::hnsw::HNSW;
