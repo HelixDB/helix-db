@@ -487,6 +487,39 @@ impl VectorCore {
 
         Ok(vectors)
     }
+
+    /// Get all vector IDs from the database without loading full vector data.
+    /// This is memory-efficient for operations that only need IDs.
+    pub fn get_all_vector_ids<'db, 'txn>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+    ) -> Result<Vec<u128>, VectorError> {
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Iterate over all vectors in the database
+        let prefix_iter = self.vectors_db.prefix_iter(txn, VECTOR_PREFIX)?;
+
+        for result in prefix_iter {
+            let (key, _) = result?;
+
+            // Extract id from the key: v: (2 bytes) + id (16 bytes) + level (8 bytes)
+            if key.len() < VECTOR_PREFIX.len() + 16 {
+                continue; // Skip malformed keys
+            }
+
+            let mut id_bytes = [0u8; 16];
+            id_bytes.copy_from_slice(&key[VECTOR_PREFIX.len()..VECTOR_PREFIX.len() + 16]);
+            let id = u128::from_be_bytes(id_bytes);
+
+            // Deduplicate (same ID may have multiple level entries)
+            if seen.insert(id) {
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
+    }
 }
 
 impl HNSW for VectorCore {
@@ -638,6 +671,84 @@ impl HNSW for VectorCore {
 
         debug_println!("vector inserted with id {}", query.id);
         Ok(query)
+    }
+
+    /// Reconnect an existing vector to the HNSW graph without changing its ID.
+    /// Used for index rebuilding after deletions cause graph fragmentation.
+    fn reconnect_vector<'db, 'arena, 'txn, F>(
+        &'db self,
+        txn: &'txn mut RwTxn<'db>,
+        vector: &HVector<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<(), VectorError>
+    where
+        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        'db: 'arena,
+        'arena: 'txn,
+    {
+        let new_level = vector.level; // Keep existing level
+        let label = vector.label;
+
+        let entry_point = match self.get_entry_point(txn, label, arena) {
+            Ok(ep) => ep,
+            Err(_) => {
+                // First vector becomes entry point
+                self.set_entry_point(txn, vector)?;
+                return Ok(());
+            }
+        };
+
+        let l = entry_point.level;
+        let mut curr_ep = entry_point;
+
+        // Navigate to insertion level
+        for level in (new_level + 1..=l).rev() {
+            let mut nearest =
+                self.search_level::<F>(txn, label, vector, &mut curr_ep, 1, level, None, arena)?;
+            curr_ep = nearest.pop().ok_or(VectorError::VectorCoreError(
+                "empty search result".to_string(),
+            ))?;
+        }
+
+        // Connect at each level
+        for level in (0..=l.min(new_level)).rev() {
+            let nearest = self.search_level::<F>(
+                txn,
+                label,
+                vector,
+                &mut curr_ep,
+                self.config.ef_construct,
+                level,
+                None,
+                arena,
+            )?;
+
+            curr_ep = *nearest.peek().ok_or(VectorError::VectorCoreError(
+                "empty search result".to_string(),
+            ))?;
+
+            let neighbors =
+                self.select_neighbors::<F>(txn, label, vector, nearest, level, true, None, arena)?;
+            self.set_neighbours(txn, vector.id, &neighbors, level)?;
+
+            // Update neighbors' connections
+            for e in neighbors {
+                let e_conns = BinaryHeap::from(
+                    arena,
+                    self.get_neighbors::<F>(txn, label, e.id, level, None, arena)?,
+                );
+                let e_new_conn =
+                    self.select_neighbors::<F>(txn, label, vector, e_conns, level, true, None, arena)?;
+                self.set_neighbours(txn, e.id, &e_new_conn, level)?;
+            }
+        }
+
+        // Update entry point if this vector has higher level
+        if new_level > l {
+            self.set_entry_point(txn, vector)?;
+        }
+
+        Ok(())
     }
 
     fn delete(&self, txn: &mut RwTxn, id: u128, arena: &bumpalo::Bump) -> Result<(), VectorError> {
