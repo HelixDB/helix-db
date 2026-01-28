@@ -532,24 +532,25 @@ impl HelixParser {
                 Rule::identifier => Some(VectorData::Identifier(vd.as_str().to_string())),
                 Rule::vec_literal => Some(VectorData::Vector(self.parse_vec_literal(vd)?)),
                 Rule::embed_method => {
-                    let embed_args = vd.clone().into_inner().next();
-                    let mut arg_values = Vec::new();
-
-                    if let Some(args_pair) = embed_args {
-                        for arg in args_pair.into_inner() {
-                            match arg.as_rule() {
-                                Rule::identifier => arg_values.push(arg.as_str().to_string()),
-                                Rule::string_literal => {
-                                    arg_values.push(self.parse_string_literal(arg)?)
-                                }
-                                _ => {} // Skip commas
-                            }
-                        }
-                    }
-
+                    let loc = vd.loc();
+                    let inner = vd.try_inner_next()?;
                     Some(VectorData::Embed(Embed {
-                        loc: vd.loc(),
-                        value: EvaluatesToString::Arguments(arg_values),
+                        loc,
+                        value: match inner.as_rule() {
+                            Rule::identifier => {
+                                EvaluatesToString::Identifier(inner.as_str().to_string())
+                            }
+                            Rule::string_literal => {
+                                EvaluatesToString::StringLiteral(inner.as_str().to_string())
+                            }
+                            _ => {
+                                return Err(ParserError::from(format!(
+                                    "unexpected rule in SearchHybrid embed_method: {:?} => {:?}",
+                                    inner.as_rule(),
+                                    inner,
+                                )));
+                            }
+                        },
                     }))
                 }
                 _ => {
