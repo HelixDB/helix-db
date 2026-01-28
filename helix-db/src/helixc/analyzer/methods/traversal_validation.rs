@@ -564,13 +564,6 @@ pub(crate) fn validate_traversal<'a>(
                             data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                             model_name: gen_query.embedding_model_to_use.clone(),
                         },
-                        EvaluatesToString::Arguments(args) => {
-                            let concatenated = args.join(" ");
-                            EmbedData {
-                                data: GeneratedValue::Literal(GenRef::Ref(concatenated)),
-                                model_name: gen_query.embedding_model_to_use.clone(),
-                            }
-                        }
                     };
                     VecData::Hoisted(gen_query.add_hoisted_embed(embed_data))
                 }
@@ -590,7 +583,10 @@ pub(crate) fn validate_traversal<'a>(
             // Process query (similar to BM25Search)
             let query = match &sh.query {
                 Some(ValueType::Literal { value, loc: _ }) => {
-                    GeneratedValue::Literal(GenRef::Std(value.inner_stringify()))
+                    GeneratedValue::Literal(GenRef::Std(match value {
+                        Value::String(s) => format!("\"{s}\""),
+                        other => other.inner_stringify(),
+                    }))
                 }
                 Some(ValueType::Identifier { value: i, loc: _ }) => {
                     is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
