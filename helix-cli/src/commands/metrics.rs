@@ -84,6 +84,10 @@ async fn show_metrics_status() -> Result<()> {
         println!("  {}: {user_id}", "User ID".bright_white().bold());
     }
 
+    if let Some(device_id) = &config.device_id {
+        print_field("Device ID", device_id);
+    }
+
     let last_updated = std::time::UNIX_EPOCH + std::time::Duration::from_secs(config.last_updated);
     if let Ok(datetime) = last_updated.duration_since(std::time::UNIX_EPOCH) {
         println!(

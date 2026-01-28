@@ -31,6 +31,8 @@ indicatif = "0.18.3"
 webbrowser = "1.0"
 heed3 = "0.22.0"
 open = "5.3"
+sha2 = "0.10"
+hex = "0.4"
 ratatui = "0.29"
 crossterm = "0.28"
 
