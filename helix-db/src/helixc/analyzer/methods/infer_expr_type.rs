@@ -32,7 +32,7 @@ use crate::{
         },
         parser::types::*,
     },
-    protocol::date::Date,
+    protocol::{date::Date, value::Value},
 };
 use paste::paste;
 use std::collections::HashMap;
@@ -741,7 +741,9 @@ pub(crate) fn infer_expr_type<'a>(
                             false,
                         ),
                         // Parser guarantees edge from_id is Identifier or Literal
-                        _ => unreachable!("parser guarantees edge from_id is Identifier or Literal"),
+                        _ => {
+                            unreachable!("parser guarantees edge from_id is Identifier or Literal")
+                        }
                     },
                     _ => {
                         generate_error!(ctx, original_query, add.loc.clone(), E612);
@@ -1524,7 +1526,10 @@ pub(crate) fn infer_expr_type<'a>(
             }
             let vec = match &bm25_search.data {
                 Some(ValueType::Literal { value, loc: _ }) => {
-                    GeneratedValue::Literal(GenRef::Std(value.inner_stringify()))
+                    GeneratedValue::Literal(GenRef::Std(match value {
+                        Value::String(s) => format!("\"{s}\""),
+                        other => other.inner_stringify(),
+                    }))
                 }
                 Some(ValueType::Identifier { value: i, loc: _ }) => {
                     is_valid_identifier(ctx, original_query, bm25_search.loc.clone(), i.as_str());
@@ -1703,13 +1708,6 @@ pub(crate) fn infer_expr_type<'a>(
                             data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
                             model_name: gen_query.embedding_model_to_use.clone(),
                         },
-                        EvaluatesToString::Arguments(args) => {
-                            let concatenated = args.join(" ");
-                            EmbedData {
-                                data: GeneratedValue::Literal(GenRef::Ref(concatenated)),
-                                model_name: gen_query.embedding_model_to_use.clone(),
-                            }
-                        }
                     };
                     VecData::Hoisted(gen_query.add_hoisted_embed(embed_data))
                 }
@@ -1729,7 +1727,10 @@ pub(crate) fn infer_expr_type<'a>(
             // Process query (like BM25Search)
             let query = match &sh.query {
                 Some(ValueType::Literal { value, loc: _ }) => {
-                    GeneratedValue::Literal(GenRef::Std(value.inner_stringify()))
+                    GeneratedValue::Literal(GenRef::Std(match value {
+                        Value::String(s) => format!("\"{s}\""),
+                        other => other.inner_stringify(),
+                    }))
                 }
                 Some(ValueType::Identifier { value: i, loc: _ }) => {
                     is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
