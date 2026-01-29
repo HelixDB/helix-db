@@ -4,6 +4,7 @@ use crate::{
     MetricsAction,
     metrics_sender::{MetricsLevel, load_metrics_config, save_metrics_config},
     output,
+    utils::print_field,
 };
 use color_eyre::owo_colors::OwoColorize;
 use eyre::Result;
@@ -82,6 +83,10 @@ async fn show_metrics_status() -> Result<()> {
 
     if let Some(user_id) = &config.user_id {
         println!("  {}: {user_id}", "User ID".bright_white().bold());
+    }
+
+    if let Some(device_id) = &config.device_id {
+        print_field("Device ID", device_id);
     }
 
     let last_updated = std::time::UNIX_EPOCH + std::time::Duration::from_secs(config.last_updated);
