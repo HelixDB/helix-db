@@ -4,6 +4,7 @@ use crate::{
     MetricsAction,
     metrics_sender::{MetricsLevel, load_metrics_config, save_metrics_config},
     output,
+    utils::print_field,
 };
 use color_eyre::owo_colors::OwoColorize;
 use eyre::Result;
