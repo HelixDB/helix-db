@@ -457,6 +457,7 @@ use helix_db::{
             config::{Config, GraphConfig, VectorConfig},
             ops::{
                 bm25::search_bm25::SearchBM25Adapter,
+                hybrid::SearchHybridAdapter,
                 g::G,
                 in_::{in_::InAdapter, in_e::InEdgesAdapter, to_n::ToNAdapter, to_v::ToVAdapter},
                 out::{
