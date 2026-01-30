@@ -129,10 +129,13 @@ impl<'db, 'arena, 'txn, 'q> VectorFilter<'db, 'arena, 'txn, 'q>
                     continue;
                 }
 
-                if properties.label == label
+                // Expand properties into item BEFORE applying filter
+                // so that filter can access item.get_property() correctly
+                item.expand_from_vector_without_data(properties);
+
+                if item.label == label
                     && (filter.is_none() || filter.unwrap().iter().all(|f| f(&item, txn)))
                 {
-                    item.expand_from_vector_without_data(properties);
                     result.push(item);
                     break;
                 }
