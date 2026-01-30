@@ -64,8 +64,12 @@ pub fn hnsw_diagnostics_inner(input: HandlerInput) -> Result<protocol::Response,
     // Get all vector IDs
     let vector_ids: Vec<u128> = db
         .vectors
-        .get_all_vector_ids(&txn)
-        .map_err(|e| GraphError::New(format!("Failed to get vector IDs: {}", e)))?;
+        .vector_properties_db
+        .iter(&txn)
+        .map_err(|e| GraphError::New(format!("Failed to iterate vector IDs: {}", e)))?
+        .filter_map(|r| r.ok())
+        .map(|(id, _)| id)
+        .collect();
 
     let total_vectors = vector_ids.len();
     eprintln!("[HNSWDiagnostics] Total vectors: {}", total_vectors);
