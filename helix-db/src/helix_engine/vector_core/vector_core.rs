@@ -771,4 +771,40 @@ impl HNSW for VectorCore {
             None => Err(VectorError::VectorNotFound(id.to_string())),
         }
     }
+
+    fn hard_delete(&self, txn: &mut RwTxn, id: u128) -> Result<(), VectorError> {
+        // Delete from vector_properties_db (ignore error if not found)
+        let _ = self.vector_properties_db.delete(txn, &id);
+
+        // Delete vector data from vectors_db for all levels (0 to reasonable max)
+        // HNSW typically uses 16-20 levels max, use 32 to be safe
+        const MAX_LEVEL: usize = 32;
+        for level in 0..=MAX_LEVEL {
+            let key = Self::vector_key(id, level);
+            let _ = self.vectors_db.delete(txn, &key);
+        }
+
+        // Delete HNSW outgoing edges from this vector
+        // Incoming edges are stored as outgoing from other nodes - they'll become
+        // dangling but will be filtered out during search
+        for level in 0..=MAX_LEVEL {
+            let out_prefix = Self::out_edges_key(id, level, None);
+            let mut to_delete = Vec::new();
+            {
+                if let Ok(iter) = self.edges_db.prefix_iter(txn, &out_prefix) {
+                    for result in iter {
+                        if let Ok((key, _)) = result {
+                            to_delete.push(key.to_vec());
+                        }
+                    }
+                }
+            }
+            for key in to_delete {
+                let _ = self.edges_db.delete(txn, &key);
+            }
+        }
+
+        debug_println!("vector hard deleted with id {}", &id);
+        Ok(())
+    }
 }

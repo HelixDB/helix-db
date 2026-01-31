@@ -15,27 +15,41 @@ use crate::protocol;
 /// - But has NO entry in vector_properties_db (no properties/metadata)
 ///
 /// Request body (optional):
-/// - dry_run: If true, only count orphans without deleting (default: false)
+/// - dry_run: If true, only count without deleting (default: false)
+/// - purge_soft_deleted: If true, also hard-delete soft-deleted vectors (default: false)
 ///
-/// Example: {"dry_run": true}
+/// Examples:
+/// - {"dry_run": true} - Count orphans and soft-deleted without deleting
+/// - {"purge_soft_deleted": true} - Hard delete all soft-deleted vectors
+/// - {} - Delete orphans only (default behavior)
 pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Response, GraphError> {
     eprintln!("[PurgeOrphanVectors] Starting...");
 
-    // Parse dry_run from request body
-    let dry_run: bool = if input.request.body.is_empty() {
-        false
+    // Parse options from request body
+    let (dry_run, purge_soft_deleted): (bool, bool) = if input.request.body.is_empty() {
+        (false, false)
     } else {
         match sonic_rs::from_slice::<sonic_rs::Value>(&input.request.body) {
-            Ok(val) => val
-                .get("dry_run")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            Err(_) => false,
+            Ok(val) => {
+                let dry_run = val
+                    .get("dry_run")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let purge_soft_deleted = val
+                    .get("purge_soft_deleted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                (dry_run, purge_soft_deleted)
+            }
+            Err(_) => (false, false),
         }
     };
 
     if dry_run {
         eprintln!("[PurgeOrphanVectors] DRY RUN - no vectors will be deleted");
+    }
+    if purge_soft_deleted {
+        eprintln!("[PurgeOrphanVectors] Will also purge soft-deleted vectors");
     }
 
     let db = Arc::clone(&input.graph.storage);
@@ -51,10 +65,10 @@ pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Respo
     let total_vectors = vector_ids.len();
     eprintln!("[PurgeOrphanVectors] Found {} vectors in HNSW index", total_vectors);
 
-    // Step 2: Find orphan vectors (no corresponding properties in vector_properties_db)
-    eprintln!("[PurgeOrphanVectors] Checking for orphans (vectors without properties)...");
+    // Step 2: Find orphan vectors and soft-deleted vectors
+    eprintln!("[PurgeOrphanVectors] Checking for orphans and soft-deleted vectors...");
     let mut orphan_ids: Vec<u128> = Vec::new();
-    let mut deleted_count: usize = 0;
+    let mut soft_deleted_ids: Vec<u128> = Vec::new();
 
     {
         let txn = db.graph_env.read_txn().map_err(GraphError::from)?;
@@ -71,9 +85,8 @@ pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Respo
                 Ok(Some(props)) => {
                     // Vector has properties
                     if props.deleted {
-                        // Vector is marked as deleted - count it but don't add to orphans
-                        // (it will be cleaned up by normal deletion process)
-                        deleted_count += 1;
+                        // Vector is marked as soft-deleted
+                        soft_deleted_ids.push(vector_id);
                     }
                     // else: Valid vector with properties, not an orphan
                 }
@@ -82,26 +95,40 @@ pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Respo
                     orphan_ids.push(vector_id);
                 }
                 Err(_) => {
-                    // Error getting properties (might be deleted) - skip
-                    deleted_count += 1;
+                    // Error getting properties (VectorDeleted error) - it's soft-deleted
+                    soft_deleted_ids.push(vector_id);
                 }
             }
         }
     }
 
-    eprintln!("[PurgeOrphanVectors] Found {} vectors marked as deleted", deleted_count);
+    let deleted_count = soft_deleted_ids.len();
+    eprintln!("[PurgeOrphanVectors] Found {} vectors marked as soft-deleted", deleted_count);
 
     let orphan_count = orphan_ids.len();
     eprintln!("[PurgeOrphanVectors] Found {} orphan vectors", orphan_count);
 
+    // Determine what to purge
+    let to_purge_count = if purge_soft_deleted {
+        orphan_count + deleted_count
+    } else {
+        orphan_count
+    };
+
     if dry_run {
-        eprintln!("[PurgeOrphanVectors] DRY RUN complete. Would delete {} orphans.", orphan_count);
+        let msg = if purge_soft_deleted {
+            format!("Would delete {} orphans + {} soft-deleted = {} total", orphan_count, deleted_count, to_purge_count)
+        } else {
+            format!("Would delete {} orphans", orphan_count)
+        };
+        eprintln!("[PurgeOrphanVectors] DRY RUN complete. {}", msg);
         return Ok(protocol::Response {
             body: sonic_rs::to_vec(&json!({
                 "status": "dry_run",
                 "total_vectors": total_vectors,
                 "orphan_count": orphan_count,
                 "soft_deleted_count": deleted_count,
+                "would_delete": to_purge_count,
                 "deleted": 0
             }))
             .map_err(|e| GraphError::New(e.to_string()))?,
@@ -109,8 +136,8 @@ pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Respo
         });
     }
 
-    if orphan_count == 0 {
-        eprintln!("[PurgeOrphanVectors] No orphans to purge.");
+    if to_purge_count == 0 {
+        eprintln!("[PurgeOrphanVectors] Nothing to purge.");
         return Ok(protocol::Response {
             body: sonic_rs::to_vec(&json!({
                 "status": "success",
@@ -124,40 +151,74 @@ pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Respo
         });
     }
 
-    // Step 3: Delete orphan vectors
-    eprintln!("[PurgeOrphanVectors] Deleting {} orphan vectors...", orphan_count);
+    // Step 3: Hard delete vectors
     let mut deleted = 0;
     let mut errors = 0;
 
-    for (i, &orphan_id) in orphan_ids.iter().enumerate() {
-        if i % 500 == 0 {
-            eprintln!("[PurgeOrphanVectors] Deleting: {}/{} ({:.1}%)",
-                i, orphan_count, (i as f64 / orphan_count as f64) * 100.0);
-        }
+    // Delete orphan vectors (hard delete - they have no properties anyway)
+    if !orphan_ids.is_empty() {
+        eprintln!("[PurgeOrphanVectors] Hard deleting {} orphan vectors...", orphan_count);
+        for (i, &orphan_id) in orphan_ids.iter().enumerate() {
+            if i % 500 == 0 {
+                eprintln!("[PurgeOrphanVectors] Deleting orphans: {}/{} ({:.1}%)",
+                    i, orphan_count, (i as f64 / orphan_count as f64) * 100.0);
+            }
 
-        let arena = bumpalo::Bump::new();
-        let mut txn = db.graph_env.write_txn().map_err(GraphError::from)?;
-
-        // Use the HNSW delete method which marks the vector as deleted
-        match db.vectors.delete(&mut txn, orphan_id, &arena) {
-            Ok(_) => {
-                match txn.commit() {
-                    Ok(_) => deleted += 1,
-                    Err(e) => {
-                        eprintln!("[PurgeOrphanVectors] Error committing delete for {}: {}", orphan_id, e);
-                        errors += 1;
+            let mut txn = db.graph_env.write_txn().map_err(GraphError::from)?;
+            match db.vectors.hard_delete(&mut txn, orphan_id) {
+                Ok(_) => {
+                    match txn.commit() {
+                        Ok(_) => deleted += 1,
+                        Err(e) => {
+                            eprintln!("[PurgeOrphanVectors] Error committing delete for orphan {}: {}", orphan_id, e);
+                            errors += 1;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!("[PurgeOrphanVectors] Error deleting vector {}: {}", orphan_id, e);
-                errors += 1;
+                Err(e) => {
+                    eprintln!("[PurgeOrphanVectors] Error deleting orphan {}: {}", orphan_id, e);
+                    errors += 1;
+                }
             }
         }
+        eprintln!("[PurgeOrphanVectors] Orphan deletion complete.");
     }
 
-    eprintln!("[PurgeOrphanVectors] Progress: {}/{} (100.0%)", orphan_count, orphan_count);
-    eprintln!("[PurgeOrphanVectors] Purge complete! Deleted: {}, Errors: {}", deleted, errors);
+    // Delete soft-deleted vectors if requested
+    let mut soft_deleted_purged = 0;
+    if purge_soft_deleted && !soft_deleted_ids.is_empty() {
+        eprintln!("[PurgeOrphanVectors] Hard deleting {} soft-deleted vectors...", deleted_count);
+        for (i, &soft_id) in soft_deleted_ids.iter().enumerate() {
+            if i % 500 == 0 {
+                eprintln!("[PurgeOrphanVectors] Deleting soft-deleted: {}/{} ({:.1}%)",
+                    i, deleted_count, (i as f64 / deleted_count as f64) * 100.0);
+            }
+
+            let mut txn = db.graph_env.write_txn().map_err(GraphError::from)?;
+            match db.vectors.hard_delete(&mut txn, soft_id) {
+                Ok(_) => {
+                    match txn.commit() {
+                        Ok(_) => {
+                            deleted += 1;
+                            soft_deleted_purged += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("[PurgeOrphanVectors] Error committing delete for soft-deleted {}: {}", soft_id, e);
+                            errors += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[PurgeOrphanVectors] Error deleting soft-deleted {}: {}", soft_id, e);
+                    errors += 1;
+                }
+            }
+        }
+        eprintln!("[PurgeOrphanVectors] Soft-deleted purge complete.");
+    }
+
+    eprintln!("[PurgeOrphanVectors] Purge complete! Deleted: {} (orphans: {}, soft-deleted: {}), Errors: {}",
+        deleted, orphan_count, soft_deleted_purged, errors);
 
     Ok(protocol::Response {
         body: sonic_rs::to_vec(&json!({
@@ -166,6 +227,7 @@ pub fn purge_orphan_vectors_inner(input: HandlerInput) -> Result<protocol::Respo
             "orphan_count": orphan_count,
             "soft_deleted_count": deleted_count,
             "deleted": deleted,
+            "soft_deleted_purged": soft_deleted_purged,
             "errors": errors
         }))
         .map_err(|e| GraphError::New(e.to_string()))?,
