@@ -81,9 +81,14 @@ pub fn rebuild_hnsw_index_inner(input: HandlerInput) -> Result<protocol::Respons
     // Step 3: Reconnect vectors in batches (fresh arena per batch to control memory)
     eprintln!("[RebuildHNSWIndex] Reconnecting {} vectors in batches of {}...", vector_count, batch_size);
 
+    let mut vectors_reconnected = 0usize;
+    let mut vectors_skipped = 0usize;
+
     for (batch_idx, chunk) in vector_ids.chunks(batch_size).enumerate() {
         let processed = batch_idx * batch_size;
-        if processed % 500 == 0 {
+        // Log every 500, or more frequently in the last 5% (every 100)
+        let near_end = processed as f64 / vector_count as f64 > 0.95;
+        if processed % 500 == 0 || (near_end && processed % 100 == 0) {
             eprintln!("[RebuildHNSWIndex] Progress: {}/{} ({:.1}%)",
                 processed, vector_count, (processed as f64 / vector_count as f64) * 100.0);
         }
@@ -98,9 +103,11 @@ pub fn rebuild_hnsw_index_inner(input: HandlerInput) -> Result<protocol::Respons
                     db.vectors
                         .reconnect_vector::<fn(&_, &_) -> bool>(&mut txn, &v, &arena)
                         .map_err(|e| GraphError::New(format!("Failed to reconnect vector {}: {}", vector_id, e)))?;
+                    vectors_reconnected += 1;
                 }
                 Err(e) => {
                     eprintln!("[RebuildHNSWIndex] Warning: skipping vector {}: {}", vector_id, e);
+                    vectors_skipped += 1;
                 }
             }
         }
@@ -109,11 +116,14 @@ pub fn rebuild_hnsw_index_inner(input: HandlerInput) -> Result<protocol::Respons
         // Arena dropped here, memory freed
     }
 
-    eprintln!("[RebuildHNSWIndex] Rebuild complete! {} vectors reconnected", vector_count);
+    eprintln!("[RebuildHNSWIndex] Progress: {}/{} (100.0%)", vector_count, vector_count);
+    eprintln!("[RebuildHNSWIndex] Rebuild complete! {} vectors reconnected, {} skipped", vectors_reconnected, vectors_skipped);
     Ok(protocol::Response {
         body: sonic_rs::to_vec(&json!({
             "status": "success",
-            "vectors_rebuilt": vector_count,
+            "vectors_rebuilt": vectors_reconnected,
+            "vectors_skipped": vectors_skipped,
+            "total_vectors": vector_count,
             "batch_size": batch_size
         }))
         .map_err(|e| GraphError::New(e.to_string()))?,

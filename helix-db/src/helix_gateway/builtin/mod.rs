@@ -3,4 +3,5 @@ pub mod hnsw_diagnostics;
 pub mod node_by_id;
 pub mod node_connections;
 pub mod nodes_by_label;
+pub mod purge_orphan_vectors;
 pub mod rebuild_hnsw_index;
