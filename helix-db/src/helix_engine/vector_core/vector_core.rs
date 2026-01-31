@@ -655,10 +655,14 @@ impl HNSW for VectorCore {
 
             for e in neighbors {
                 let id = e.id;
-                let e_conns = BinaryHeap::from(
+                let mut e_conns = BinaryHeap::from(
                     arena,
                     self.get_neighbors::<F>(txn, label, id, level, None, arena)?,
                 );
+                // Add the new vector to candidates so it can be selected as e's neighbor
+                let mut new_vec_copy = query;
+                new_vec_copy.set_distance(new_vec_copy.distance_to(&e)?);
+                e_conns.push(new_vec_copy);
                 let e_new_conn = self
                     .select_neighbors::<F>(txn, label, &query, e_conns, level, true, None, arena)?;
                 self.set_neighbours(txn, id, &e_new_conn, level)?;
@@ -731,12 +735,16 @@ impl HNSW for VectorCore {
                 self.select_neighbors::<F>(txn, label, vector, nearest, level, true, None, arena)?;
             self.set_neighbours(txn, vector.id, &neighbors, level)?;
 
-            // Update neighbors' connections
+            // Update neighbors' connections to include this vector
             for e in neighbors {
-                let e_conns = BinaryHeap::from(
+                let mut e_conns = BinaryHeap::from(
                     arena,
                     self.get_neighbors::<F>(txn, label, e.id, level, None, arena)?,
                 );
+                // Add this vector to candidates so it can be selected as e's neighbor
+                let mut vec_copy = *vector;
+                vec_copy.set_distance(vec_copy.distance_to(&e)?);
+                e_conns.push(vec_copy);
                 let e_new_conn =
                     self.select_neighbors::<F>(txn, label, vector, e_conns, level, true, None, arena)?;
                 self.set_neighbours(txn, e.id, &e_new_conn, level)?;
