@@ -1,0 +1,15 @@
+[package]
+name = "helix-lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helix-db = { path = "../helix-db" }
+helix-macros = { path = "../helix-macros" }
+sonic-rs = "0.3"
+bumpalo = "3.17"
+heed3 = "0.22"
+chrono = "0.4"
+inventory = "0.3.16"
+bytes = "1.9"
+

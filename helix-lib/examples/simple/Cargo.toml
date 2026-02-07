@@ -1,0 +1,22 @@
+[workspace]
+# This is a standalone test project, not part of the helix-db workspace
+
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helix-lib = { path = "../.." }
+# Minimal dependencies needed by generated queries.rs  
+helix-db = { path = "../../../helix-db" }
+helix-macros = { path = "../../../helix-macros" }
+bumpalo = "3.17"
+heed3 = "0.22"
+sonic-rs = "0.3"
+chrono = "0.4"
+serde = "1.0.228"
+inventory = "0.3.21"
+
+[build-dependencies]
+helix-lib = { path = "../.." }
