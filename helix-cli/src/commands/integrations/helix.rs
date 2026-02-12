@@ -184,13 +184,40 @@ impl<'a> HelixManager<'a> {
 
         let dev_profile = build_mode == BuildMode::Dev;
 
+        // Build a pruned HelixConfig containing only [project] and the deployed [cloud.<instance>]
+        let helix_toml_content = {
+            use crate::config::HelixConfig;
+            let pruned = HelixConfig {
+                project: self.project.config.project.clone(),
+                local: HashMap::new(),
+                cloud: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        cluster_name.clone(),
+                        crate::config::CloudConfig::from(
+                            self.project.config.get_instance(&cluster_name)?,
+                        ),
+                    );
+                    m
+                },
+            };
+            match toml::to_string_pretty(&pruned) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    output::warning(&format!("Failed to serialize pruned helix.toml: {}", e));
+                    None
+                }
+            }
+        };
+
         // Prepare deployment payload
         let payload = json!({
             "schema": schema_content,
             "queries": queries_map,
             "env_vars": cluster_info.env_vars,
             "instance_name": cluster_name,
-            "dev_profile": dev_profile
+            "dev_profile": dev_profile,
+            "helix_toml": helix_toml_content
         });
 
         // Initiate deployment with SSE streaming

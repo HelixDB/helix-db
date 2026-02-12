@@ -105,10 +105,10 @@ enum Commands {
         dev: bool,
     },
 
-    /// Pull .hql files from instance back to local project
-    Pull {
-        /// Instance name to pull from
-        instance: String,
+    /// Sync .hx source files and config from a deployed Helix Cloud instance
+    Sync {
+        /// Instance name to sync from (interactive selection if not provided)
+        instance: Option<String>,
     },
 
     /// Start an instance (doesn't rebuild)
@@ -277,7 +277,7 @@ async fn main() -> Result<()> {
         Commands::Push { instance, dev } => {
             commands::push::run(instance, dev, &metrics_sender).await
         }
-        Commands::Pull { instance } => commands::pull::run(instance).await,
+        Commands::Sync { instance } => commands::sync::run(instance).await,
         Commands::Start { instance } => commands::start::run(instance).await,
         Commands::Stop { instance } => commands::stop::run(instance).await,
         Commands::Restart { instance } => commands::restart::run(instance).await,
