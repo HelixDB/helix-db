@@ -10,6 +10,7 @@ import chalk from "chalk";
 import ora from "ora";
 import * as fs from "fs";
 import * as path from "path";
+import * as net from "net";
 import { spawnSync } from "child_process";
 import {
   introspectDatabase,
@@ -73,6 +74,7 @@ program
     "HelixDB instance URL for data import",
     "http://localhost:6969"
   )
+  .option("--helix-api-key <key>", "Helix API key (defaults to HELIX_API_KEY from env/.env)")
   .option("--batch-size <n>", "Rows per export batch", "5000")
   .option("--concurrency <n>", "Parallel import requests", "10")
   .option(
@@ -88,6 +90,10 @@ program
     "--exclude-tables <tables>",
     "Comma-separated table blocklist (schema.table or table)"
   )
+  .option("--instance <name>", "Helix instance name for deployment", "dev")
+  .option("--skip-deploy", "Skip `helix push` and use existing Helix instance")
+  .option("--reset-instance", "Delete Helix instance before deploy (fresh run)")
+  .option("-y, --yes", "Auto-confirm destructive operations")
   .option("--non-interactive", "Run without prompts")
   .option("--no-strict", "Allow partial import with warnings/errors")
   .option("--skip-helix-check", "Skip running `helix check` on generated project")
@@ -107,11 +113,16 @@ async function migrateSupabase(options: {
   introspectOnly?: boolean;
   importOnly?: boolean;
   helixUrl: string;
+  helixApiKey?: string;
   batchSize: string;
   concurrency: string;
   bigintMode: string;
   includeTables?: string;
   excludeTables?: string;
+  instance: string;
+  skipDeploy?: boolean;
+  resetInstance?: boolean;
+  yes?: boolean;
   nonInteractive?: boolean;
   strict?: boolean;
   skipHelixCheck?: boolean;
@@ -126,10 +137,27 @@ async function migrateSupabase(options: {
   const concurrency = parsePositiveInteger(options.concurrency, "--concurrency");
   const typeMappingOptions = parseTypeMappingOptions(options.bigintMode);
   const strictMode = options.strict !== false;
+  const instanceName = options.instance?.trim() || "dev";
+  const shouldSkipDeploy = options.skipDeploy === true;
+  const shouldResetInstance = options.resetInstance === true;
+  const autoConfirm = options.yes === true;
   const schemas = options.schemas
     .split(",")
     .map((schema) => schema.trim())
     .filter(Boolean);
+  const outputDir = path.resolve(options.output);
+
+  if (shouldSkipDeploy && shouldResetInstance) {
+    console.error(chalk.red("\n  --reset-instance cannot be used with --skip-deploy."));
+    process.exit(1);
+  }
+
+  if (shouldResetInstance && options.nonInteractive && !autoConfirm) {
+    console.error(
+      chalk.red("\n  --reset-instance in --non-interactive mode requires --yes.")
+    );
+    process.exit(1);
+  }
 
   let connectionString = options.connectionString;
 
@@ -162,13 +190,47 @@ async function migrateSupabase(options: {
     connectionString = response.connectionString;
   }
 
+  if (connectionString) {
+    connectionString = normalizeSupabaseConnectionString(connectionString);
+  }
+
+  let effectiveHelixUrl = options.helixUrl;
+  let helixPort = parseHelixPort(effectiveHelixUrl);
+
+  if (!options.importOnly && !shouldSkipDeploy && isLocalHelixUrl(effectiveHelixUrl)) {
+    const availablePort = await findAvailableLocalPort(helixPort);
+    if (availablePort !== helixPort) {
+      effectiveHelixUrl = withUpdatedUrlPort(effectiveHelixUrl, availablePort);
+      helixPort = availablePort;
+      console.log(
+        chalk.yellow(
+          `  Port ${parseHelixPort(options.helixUrl)} is in use; deploying to ${effectiveHelixUrl} instead.`
+        )
+      );
+      console.log("");
+    }
+  }
+
+  const helixApiKey = resolveHelixApiKey(options.helixApiKey, outputDir);
+  const apiKeyRequired = requiresHelixApiKey(effectiveHelixUrl, outputDir, instanceName);
+  if (apiKeyRequired && !helixApiKey) {
+    console.error(chalk.red("\n  HELIX_API_KEY is required for cloud/prod targets."));
+    console.error(
+      chalk.gray(
+        "  Set HELIX_API_KEY in .env or pass --helix-api-key <key> and rerun."
+      )
+    );
+    process.exit(1);
+  }
+
   if (options.importOnly) {
     await runImport({
       helixUrl: options.helixUrl,
       exportDir: path.resolve(options.exportDir),
-      output: path.resolve(options.output),
+      output: outputDir,
       concurrency,
       strict: strictMode,
+      helixApiKey,
     });
     return;
   }
@@ -266,7 +328,6 @@ async function migrateSupabase(options: {
     `Generated ${generatedSchema.nodes.length} Nodes, ${generatedSchema.edges.length} Edges, ${generatedSchema.vectors.length} Vectors`
   );
 
-  const outputDir = path.resolve(options.output);
   const writeSpinner = ora(`Writing HelixDB project to ${outputDir}...`).start();
 
   try {
@@ -276,7 +337,8 @@ async function migrateSupabase(options: {
       generatedQueries,
       filteredIntrospection,
       userTables,
-      typeMappingOptions
+      typeMappingOptions,
+      helixPort
     );
     writeSpinner.succeed(`HelixDB project written to ${outputDir}`);
   } catch (err) {
@@ -325,28 +387,29 @@ async function migrateSupabase(options: {
       `  3. Import later: ${chalk.cyan(
         `helix-migrate supabase --import-only --output ${outputDir} --export-dir ${path.resolve(
           options.exportDir
-        )} --helix-url ${options.helixUrl}`
+        )} --helix-url ${effectiveHelixUrl}`
       )}`
     );
     console.log("");
     return;
   }
 
-  const proceed = options.nonInteractive
-    ? true
-    : (
-        await prompts({
-          type: "confirm",
-          name: "proceed",
-          message: "Export data from Supabase?",
-          initial: true,
-        })
-      ).proceed;
-
-  if (!proceed) {
-    console.log(chalk.yellow("\n  Data export skipped. You can run it later with --import-only."));
-    printNextSteps(outputDir);
-    return;
+  if (!shouldSkipDeploy) {
+    try {
+      await runHelixDeploy({
+        outputDir,
+        instanceName,
+        resetInstance: shouldResetInstance,
+        autoConfirm,
+        nonInteractive: options.nonInteractive === true,
+      });
+    } catch (err) {
+      console.error(chalk.red(`\n  ${err instanceof Error ? err.message : err}`));
+      process.exit(1);
+    }
+  } else {
+    console.log(chalk.yellow("  --skip-deploy enabled: using existing Helix instance."));
+    console.log("");
   }
 
   const exportDir = path.resolve(options.exportDir);
@@ -378,31 +441,15 @@ async function migrateSupabase(options: {
     process.exit(1);
   }
 
-  const doImport = options.nonInteractive
-    ? true
-    : (
-        await prompts({
-          type: "confirm",
-          name: "doImport",
-          message: `Import data into HelixDB at ${options.helixUrl}?`,
-          initial: false,
-        })
-      ).doImport;
-
-  if (!doImport) {
-    console.log(chalk.yellow("\n  Data import skipped."));
-    printNextSteps(outputDir);
-    return;
-  }
-
   await runImportWithProgress(
-    options.helixUrl,
+    effectiveHelixUrl,
     exportDir,
     generatedSchema,
     userTables,
     concurrency,
     introspection.unsupportedFeatures,
-    strictMode
+    strictMode,
+    helixApiKey
   );
 
   console.log("");
@@ -416,6 +463,7 @@ async function runImport(options: {
   output: string;
   concurrency: number;
   strict: boolean;
+  helixApiKey?: string;
 }) {
   const manifestPath = path.join(options.output, MANIFEST_RELATIVE_PATH);
   if (!fs.existsSync(manifestPath)) {
@@ -462,7 +510,8 @@ async function runImport(options: {
     manifest.tables,
     options.concurrency,
     manifest.unsupportedFeatures,
-    options.strict
+    options.strict,
+    options.helixApiKey
   );
 
   console.log("");
@@ -477,13 +526,15 @@ async function runImportWithProgress(
   tables: TableInfo[],
   concurrency: number,
   unsupportedFeatures: SchemaIntrospection["unsupportedFeatures"],
-  strictMode: boolean
+  strictMode: boolean,
+  helixApiKey?: string
 ) {
   const importSpinner = ora("Importing data into HelixDB...").start();
 
   try {
     const importResult = await importData({
       helixUrl,
+      helixApiKey,
       exportDir,
       schema,
       tables,
@@ -589,7 +640,8 @@ function writeHelixProject(
   queries: GeneratedQueries,
   introspection: SchemaIntrospection,
   userTables: TableInfo[],
-  typeMappingOptions: TypeMappingOptions
+  typeMappingOptions: TypeMappingOptions,
+  helixPort: number
 ) {
   const dbDir = path.join(outputDir, "db");
   fs.mkdirSync(dbDir, { recursive: true });
@@ -600,7 +652,7 @@ name = "${projectName}"
 queries = "db/"
 
 [local.dev]
-port = 6969
+port = ${helixPort}
 build_mode = "dev"
 `;
   fs.writeFileSync(path.join(outputDir, "helix.toml"), helixToml);
@@ -784,6 +836,244 @@ function printNextSteps(outputDir: string) {
   console.log("  5. Clean up import queries after migration:");
   console.log(chalk.cyan(`     rm ${path.join(outputDir, "db", "import.hx")}`));
   console.log("");
+}
+
+async function runHelixDeploy(options: {
+  outputDir: string;
+  instanceName: string;
+  resetInstance: boolean;
+  autoConfirm: boolean;
+  nonInteractive: boolean;
+}) {
+  const { outputDir, instanceName, resetInstance, autoConfirm, nonInteractive } = options;
+
+  if (resetInstance) {
+    const shouldReset = await confirmResetInstance(autoConfirm, nonInteractive, instanceName);
+    if (!shouldReset) {
+      console.error(chalk.red("\n  Aborted: reset confirmation declined."));
+      process.exit(1);
+    }
+
+    const resetSpinner = ora(`Resetting Helix instance '${instanceName}'...`).start();
+    const deleteResult = runHelixCommand(["delete", instanceName], outputDir, "y\n");
+    if (deleteResult.status !== 0) {
+      resetSpinner.fail(`Failed to reset instance '${instanceName}'`);
+      throw new Error((deleteResult.stderr || deleteResult.stdout || "helix delete failed").trim());
+    }
+    resetSpinner.succeed(`Reset instance '${instanceName}'`);
+  }
+
+  const deploySpinner = ora(`Deploying Helix instance '${instanceName}'...`).start();
+  const pushResult = runHelixCommand(["push", instanceName], outputDir);
+  if (pushResult.status !== 0) {
+    deploySpinner.fail(`Failed to deploy instance '${instanceName}'`);
+    throw new Error((pushResult.stderr || pushResult.stdout || "helix push failed").trim());
+  }
+
+  deploySpinner.succeed(`Helix instance '${instanceName}' deployed`);
+}
+
+function runHelixCommand(args: string[], cwd: string, input?: string) {
+  return spawnSync("helix", args, {
+    cwd,
+    input,
+    encoding: "utf-8",
+  });
+}
+
+async function confirmResetInstance(
+  autoConfirm: boolean,
+  nonInteractive: boolean,
+  instanceName: string
+): Promise<boolean> {
+  if (autoConfirm) {
+    return true;
+  }
+
+  if (nonInteractive) {
+    return false;
+  }
+
+  const answer = await prompts({
+    type: "confirm",
+    name: "confirmed",
+    message: `Delete Helix instance '${instanceName}' before deploy? This will remove all instance data.`,
+    initial: false,
+  });
+
+  return answer.confirmed === true;
+}
+
+function normalizeSupabaseConnectionString(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const isPooler = url.hostname.includes("pooler.supabase.com");
+    if (isPooler && !url.searchParams.has("uselibpqcompat")) {
+      url.searchParams.set("uselibpqcompat", "true");
+      console.log(chalk.yellow("  Added uselibpqcompat=true for Supabase pooler SSL compatibility."));
+    }
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function parseHelixPort(helixUrl: string): number {
+  try {
+    const parsed = new URL(helixUrl);
+    const host = parsed.hostname.toLowerCase();
+    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
+    if (!isLocal) {
+      return 6969;
+    }
+    if (parsed.port) {
+      return Number.parseInt(parsed.port, 10);
+    }
+    return 6969;
+  } catch {
+    return 6969;
+  }
+}
+
+function withUpdatedUrlPort(helixUrl: string, port: number): string {
+  try {
+    const parsed = new URL(helixUrl);
+    parsed.port = String(port);
+    return parsed.toString();
+  } catch {
+    return `http://localhost:${port}`;
+  }
+}
+
+async function findAvailableLocalPort(preferredPort: number): Promise<number> {
+  const maxChecks = 25;
+
+  for (let offset = 0; offset < maxChecks; offset += 1) {
+    const candidate = preferredPort + offset;
+    if (await isPortAvailable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return preferredPort;
+}
+
+async function isPortAvailable(port: number): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net
+      .createServer()
+      .once("error", () => resolve(false))
+      .once("listening", () => {
+        server.close(() => resolve(true));
+      })
+      .listen(port, "0.0.0.0");
+  });
+}
+
+function requiresHelixApiKey(
+  helixUrl: string,
+  outputDir: string,
+  instanceName: string
+): boolean {
+  if (!isLocalHelixUrl(helixUrl)) {
+    return true;
+  }
+
+  return helixTomlHasProdCloudInstance(outputDir, instanceName);
+}
+
+function isLocalHelixUrl(helixUrl: string): boolean {
+  try {
+    const parsed = new URL(helixUrl);
+    const host = parsed.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function helixTomlHasProdCloudInstance(outputDir: string, instanceName: string): boolean {
+  const tomlPath = path.join(outputDir, "helix.toml");
+  if (!fs.existsSync(tomlPath)) {
+    return false;
+  }
+
+  const lines = fs.readFileSync(tomlPath, "utf-8").split(/\r?\n/);
+  let inTargetCloudSection = false;
+  const cloudSectionPrefix = `[cloud.${instanceName}.`;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    if (line.startsWith("[") && line.endsWith("]")) {
+      inTargetCloudSection = line.startsWith(cloudSectionPrefix);
+      continue;
+    }
+
+    if (!inTargetCloudSection) {
+      continue;
+    }
+
+    if (/^build_mode\s*=\s*"release"\s*$/.test(line)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function resolveHelixApiKey(explicitKey: string | undefined, outputDir: string): string | undefined {
+  if (explicitKey?.trim()) {
+    return explicitKey.trim();
+  }
+
+  if (process.env.HELIX_API_KEY?.trim()) {
+    return process.env.HELIX_API_KEY.trim();
+  }
+
+  const cwdEnv = readEnvFile(path.join(process.cwd(), ".env"));
+  if (cwdEnv.HELIX_API_KEY?.trim()) {
+    return cwdEnv.HELIX_API_KEY.trim();
+  }
+
+  const outputEnv = readEnvFile(path.join(outputDir, ".env"));
+  if (outputEnv.HELIX_API_KEY?.trim()) {
+    return outputEnv.HELIX_API_KEY.trim();
+  }
+
+  return undefined;
+}
+
+function readEnvFile(filePath: string): Record<string, string> {
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+
+  const out: Record<string, string> = {};
+  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const idx = line.indexOf("=");
+    if (idx <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, idx).trim();
+    let value = line.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+
+  return out;
 }
 
 async function runHelixCheck(outputDir: string, strictMode: boolean) {

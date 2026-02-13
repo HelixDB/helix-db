@@ -17,6 +17,7 @@ import { exportFileNameForTable, makeTableKey } from "./export-data";
 
 export interface ImportOptions {
   helixUrl: string;
+  helixApiKey?: string;
   exportDir: string;
   schema: GeneratedSchema;
   tables: TableInfo[];
@@ -54,7 +55,7 @@ const HELIX_TIMEOUT_MS = 30_000;
 const HELIX_MAX_ATTEMPTS = 4;
 
 export async function importData(options: ImportOptions): Promise<ImportResult> {
-  const { helixUrl, exportDir, schema, tables, concurrency, onProgress } = options;
+  const { helixUrl, helixApiKey, exportDir, schema, tables, concurrency, onProgress } = options;
 
   const safeConcurrency = Math.max(1, Math.floor(concurrency));
 
@@ -134,7 +135,7 @@ export async function importData(options: ImportOptions): Promise<ImportResult> 
             );
           }
 
-          const response = await callHelix(helixUrl, `Import${node.name}`, body);
+          const response = await callHelix(helixUrl, `Import${node.name}`, body, helixApiKey);
           const newId = extractId(response);
           if (!newId) {
             throw new Error(
@@ -178,7 +179,7 @@ export async function importData(options: ImportOptions): Promise<ImportResult> 
             await callHelix(helixUrl, setterName, {
               id: newId,
               value,
-            });
+            }, helixApiKey);
           }
 
           stats.imported += 1;
@@ -297,7 +298,7 @@ export async function importData(options: ImportOptions): Promise<ImportResult> 
           await callHelix(helixUrl, `Import${edge.name}`, {
             from_id: fromId,
             to_id: toId,
-          });
+          }, helixApiKey);
 
           stats.imported += 1;
           result.edgesImported += 1;
@@ -341,7 +342,7 @@ export async function importData(options: ImportOptions): Promise<ImportResult> 
         await callHelix(helixUrl, `Import${edge.name}`, {
           from_id: fromId,
           to_id: toId,
-        });
+        }, helixApiKey);
 
         stats.imported += 1;
         result.edgesImported += 1;
@@ -425,7 +426,7 @@ export async function importData(options: ImportOptions): Promise<ImportResult> 
             }
           }
 
-          await callHelix(helixUrl, `Import${vector.name}`, body);
+          await callHelix(helixUrl, `Import${vector.name}`, body, helixApiKey);
 
           stats.imported += 1;
           result.vectorsImported += 1;
@@ -451,7 +452,8 @@ export async function importData(options: ImportOptions): Promise<ImportResult> 
 async function callHelix(
   baseUrl: string,
   queryName: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  helixApiKey?: string
 ): Promise<unknown> {
   const url = `${baseUrl.replace(/\/+$/, "")}/${queryName}`;
   let lastError: unknown;
@@ -463,7 +465,10 @@ async function callHelix(
     try {
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(helixApiKey ? { "x-api-key": helixApiKey } : {}),
+        },
         body: JSON.stringify(body),
         signal: controller.signal,
       });

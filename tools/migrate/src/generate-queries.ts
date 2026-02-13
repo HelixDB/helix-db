@@ -129,9 +129,7 @@ function generateEdgeQueries(edge: EdgeSchema): string[] {
   lines.push(
     `QUERY Add${edge.name}(from_id: ID, to_id: ID) =>`
   );
-  lines.push(`    from_node <- N<${edge.fromNode}>(from_id)`);
-  lines.push(`    to_node <- N<${edge.toNode}>(to_id)`);
-  lines.push(`    edge <- AddE<${edge.name}>::From(from_node)::To(to_node)`);
+  lines.push(`    edge <- AddE<${edge.name}>::From(from_id)::To(to_id)`);
   lines.push(`    RETURN edge`);
   lines.push("");
 
@@ -207,9 +205,7 @@ function generateEdgeImportQuery(edge: EdgeSchema): string[] {
   lines.push(
     `QUERY Import${edge.name}(from_id: ID, to_id: ID) =>`
   );
-  lines.push(`    from_node <- N<${edge.fromNode}>(from_id)`);
-  lines.push(`    to_node <- N<${edge.toNode}>(to_id)`);
-  lines.push(`    edge <- AddE<${edge.name}>::From(from_node)::To(to_node)`);
+  lines.push(`    edge <- AddE<${edge.name}>::From(from_id)::To(to_id)`);
   lines.push(`    RETURN edge`);
   lines.push("");
 

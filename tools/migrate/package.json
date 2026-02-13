@@ -3,11 +3,18 @@
   "version": "0.1.0",
   "description": "White-glove migration tool for moving from Supabase to HelixDB",
   "main": "dist/index.js",
+  "files": [
+    "dist/**",
+    "README.md",
+    "BLANK_SLATE_SUPABASE_TO_LOCAL_HELIX_GUIDE.md",
+    "EXISTING_SUPABASE_EXISTING_HELIX_GUIDE.md"
+  ],
   "bin": {
     "helix-migrate": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "test": "npm run build && node --test tests/*.test.js",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts"
@@ -28,6 +35,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "license": "AGPL-3.0"
 }
