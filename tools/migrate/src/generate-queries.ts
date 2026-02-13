@@ -79,13 +79,15 @@ function generateNodeQueries(node: NodeSchema): string[] {
   const fields = node.fields;
 
   // --- Add Node ---
-  const addParams = fields
-    .filter((f) => !f.hasDefault || !f.defaultValue)
+  const requiredCreateFields = fields
+    .filter((f) => !f.isNullable)
+    .filter((f) => !f.hasDefault || !f.defaultValue);
+
+  const addParams = requiredCreateFields
     .map((f) => `${f.name}: ${f.helixType}`)
     .join(", ");
 
-  const addFields = fields
-    .filter((f) => !f.hasDefault || !f.defaultValue)
+  const addFields = requiredCreateFields
     .map((f) => `${f.name}: ${f.name}`)
     .join(", ");
 
@@ -98,7 +100,7 @@ function generateNodeQueries(node: NodeSchema): string[] {
     lines.push(`    RETURN node`);
   } else {
     lines.push(`QUERY Add${name}() =>`);
-    lines.push(`    node <- AddN<${name}>({})`);
+    lines.push(`    node <- AddN<${name}>`);
     lines.push(`    RETURN node`);
   }
   lines.push("");
@@ -111,8 +113,7 @@ function generateNodeQueries(node: NodeSchema): string[] {
 
   // --- Delete ---
   lines.push(`QUERY Delete${name}(id: ID) =>`);
-  lines.push(`    node <- N<${name}>(id)`);
-  lines.push(`    DROP node`);
+  lines.push(`    DROP N<${name}>(id)`);
   lines.push(`    RETURN "deleted"`);
   lines.push("");
 
@@ -162,13 +163,18 @@ function generateVectorQueries(vec: VectorSchema): string[] {
 
 function generateNodeImportQuery(node: NodeSchema): string[] {
   const lines: string[] = [];
-  const fields = node.fields;
+  const requiredFields = node.fields.filter((field) => !field.isNullable);
+  const nullableFields = node.fields.filter((field) => field.isNullable);
 
   // Build parameter list for single-row import
-  const params = fields.map((f) => `${f.name}: ${f.helixType}`).join(", ");
-  const fieldAssign = fields.map((f) => `${f.name}: ${f.name}`).join(", ");
+  const params = requiredFields
+    .map((field) => `${field.name}: ${field.helixType}`)
+    .join(", ");
+  const fieldAssign = requiredFields
+    .map((field) => `${field.name}: ${field.name}`)
+    .join(", ");
 
-  lines.push(`// Import query for ${node.originalTable}`);
+  lines.push(`// Import query for ${node.originalSchema}.${node.originalTable}`);
 
   if (params) {
     lines.push(`QUERY Import${node.name}(${params}) =>`);
@@ -176,10 +182,18 @@ function generateNodeImportQuery(node: NodeSchema): string[] {
     lines.push(`    RETURN node`);
   } else {
     lines.push(`QUERY Import${node.name}() =>`);
-    lines.push(`    node <- AddN<${node.name}>({})`);
+    lines.push(`    node <- AddN<${node.name}>`);
     lines.push(`    RETURN node`);
   }
   lines.push("");
+
+  for (const field of nullableFields) {
+    const setterName = nodeNullableSetterQueryName(node.name, field.name);
+    lines.push(`QUERY ${setterName}(id: ID, value: ${field.helixType}) =>`);
+    lines.push(`    updated <- N<${node.name}>(id)::UPDATE({${field.name}: value})`);
+    lines.push(`    RETURN updated`);
+    lines.push("");
+  }
 
   return lines;
 }
@@ -187,7 +201,9 @@ function generateNodeImportQuery(node: NodeSchema): string[] {
 function generateEdgeImportQuery(edge: EdgeSchema): string[] {
   const lines: string[] = [];
 
-  lines.push(`// Import query for ${edge.originalConstraint}`);
+  lines.push(
+    `// Import query for ${edge.originalConstraint} (${edge.originalColumns.join(", ")} -> ${edge.referencedColumns.join(", ")})`
+  );
   lines.push(
     `QUERY Import${edge.name}(from_id: ID, to_id: ID) =>`
   );
@@ -203,19 +219,45 @@ function generateEdgeImportQuery(edge: EdgeSchema): string[] {
 function generateVectorImportQuery(vec: VectorSchema): string[] {
   const lines: string[] = [];
 
-  const metaParams = vec.metadataFields.map((f) => `${f.name}: ${f.helixType}`).join(", ");
-  const metaFields = vec.metadataFields.map((f) => `${f.name}: ${f.name}`).join(", ");
+  const requiredMetadata = vec.metadataFields.filter((field) => !field.isNullable);
 
-  lines.push(`// Import query for ${vec.originalTable} vectors`);
+  const metaParams = requiredMetadata
+    .map((field) => `${field.name}: ${field.helixType}`)
+    .join(", ");
+  const metaFields = requiredMetadata
+    .map((field) => `${field.name}: ${field.name}`)
+    .join(", ");
+
+  lines.push(`// Import query for ${vec.originalSchema}.${vec.originalTable} vectors`);
   if (metaParams) {
     lines.push(`QUERY Import${vec.name}(vector: [F64], ${metaParams}) =>`);
     lines.push(`    v <- AddV<${vec.name}>(vector, {${metaFields}})`);
   } else {
     lines.push(`QUERY Import${vec.name}(vector: [F64]) =>`);
-    lines.push(`    v <- AddV<${vec.name}>(vector, {})`);
+    lines.push(`    v <- AddV<${vec.name}>(vector)`);
   }
   lines.push(`    RETURN v`);
   lines.push("");
 
   return lines;
+}
+
+export function nodeNullableSetterQueryName(
+  nodeName: string,
+  fieldName: string
+): string {
+  return `ImportSet${nodeName}${toPascalIdentifier(fieldName)}`;
+}
+
+function toPascalIdentifier(value: string): string {
+  const parts = value
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+
+  if (parts.length === 0) {
+    return "Field";
+  }
+
+  return parts.join("");
 }

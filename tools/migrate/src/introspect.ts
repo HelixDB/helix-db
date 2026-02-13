@@ -20,16 +20,17 @@ export interface ColumnInfo {
 
 export interface ForeignKey {
   constraintName: string;
-  columnName: string;
+  columnNames: string[];
   foreignTableSchema: string;
   foreignTableName: string;
-  foreignColumnName: string;
+  foreignColumnNames: string[];
 }
 
 export interface IndexInfo {
   indexName: string;
   columnName: string;
   isUnique: boolean;
+  columnPosition: number;
 }
 
 export interface TableInfo {
@@ -42,9 +43,17 @@ export interface TableInfo {
   rowCount: number;
 }
 
+export interface UnsupportedFeature {
+  kind: "view" | "trigger" | "function" | "policy";
+  schema: string;
+  name: string;
+  detail?: string;
+}
+
 export interface SchemaIntrospection {
   tables: TableInfo[];
   enums: Record<string, string[]>; // enum_name -> values
+  unsupportedFeatures: UnsupportedFeature[];
 }
 
 /**
@@ -58,12 +67,13 @@ export async function introspectDatabase(
   await client.connect();
 
   try {
-    const [tables, enums] = await Promise.all([
+    const [tables, enums, unsupportedFeatures] = await Promise.all([
       getTables(client, schemas),
       getEnums(client, schemas),
+      getUnsupportedFeatures(client, schemas),
     ]);
 
-    return { tables, enums };
+    return { tables, enums, unsupportedFeatures };
   } finally {
     await client.end();
   }
@@ -73,16 +83,16 @@ async function getTables(
   client: Client,
   schemas: string[]
 ): Promise<TableInfo[]> {
-  // Get all tables in the specified schemas
-  const schemaList = schemas.map((s) => `'${s}'`).join(",");
-
-  const tablesResult = await client.query(`
+  const tablesResult = await client.query(
+    `
     SELECT table_schema, table_name
     FROM information_schema.tables
-    WHERE table_schema IN (${schemaList})
+    WHERE table_schema = ANY($1::text[])
       AND table_type = 'BASE TABLE'
     ORDER BY table_schema, table_name
-  `);
+  `,
+    [schemas]
+  );
 
   const tables: TableInfo[] = [];
 
@@ -193,23 +203,41 @@ async function getForeignKeys(
     JOIN information_schema.key_column_usage kcu
       ON tc.constraint_name = kcu.constraint_name
       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage ccu
-      ON tc.constraint_name = ccu.constraint_name
-      AND tc.table_schema = ccu.table_schema
+    JOIN information_schema.referential_constraints rc
+      ON tc.constraint_name = rc.constraint_name
+      AND tc.table_schema = rc.constraint_schema
+    JOIN information_schema.key_column_usage ccu
+      ON ccu.constraint_name = rc.unique_constraint_name
+      AND ccu.constraint_schema = rc.unique_constraint_schema
+      AND ccu.ordinal_position = kcu.position_in_unique_constraint
     WHERE tc.table_schema = $1
       AND tc.table_name = $2
       AND tc.constraint_type = 'FOREIGN KEY'
+    ORDER BY tc.constraint_name, kcu.ordinal_position
   `,
     [schema, tableName]
   );
 
-  return result.rows.map((row) => ({
-    constraintName: row.constraint_name,
-    columnName: row.column_name,
-    foreignTableSchema: row.foreign_table_schema,
-    foreignTableName: row.foreign_table_name,
-    foreignColumnName: row.foreign_column_name,
-  }));
+  const grouped = new Map<string, ForeignKey>();
+
+  for (const row of result.rows) {
+    const existing = grouped.get(row.constraint_name);
+    if (existing) {
+      existing.columnNames.push(row.column_name);
+      existing.foreignColumnNames.push(row.foreign_column_name);
+      continue;
+    }
+
+    grouped.set(row.constraint_name, {
+      constraintName: row.constraint_name,
+      columnNames: [row.column_name],
+      foreignTableSchema: row.foreign_table_schema,
+      foreignTableName: row.foreign_table_name,
+      foreignColumnNames: [row.foreign_column_name],
+    });
+  }
+
+  return Array.from(grouped.values());
 }
 
 async function getIndexes(
@@ -222,16 +250,18 @@ async function getIndexes(
     SELECT
       i.relname AS index_name,
       a.attname AS column_name,
-      ix.indisunique AS is_unique
+      ix.indisunique AS is_unique,
+      key_ord.ordinality AS column_position
     FROM pg_catalog.pg_class t
     JOIN pg_catalog.pg_index ix ON t.oid = ix.indrelid
     JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
-    JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+    JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS key_ord(attnum, ordinality) ON TRUE
+    JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = key_ord.attnum
     JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
     WHERE n.nspname = $1
       AND t.relname = $2
       AND NOT ix.indisprimary
-    ORDER BY i.relname
+    ORDER BY i.relname, key_ord.ordinality
   `,
     [schema, tableName]
   );
@@ -240,6 +270,7 @@ async function getIndexes(
     indexName: row.index_name,
     columnName: row.column_name,
     isUnique: row.is_unique,
+    columnPosition: row.column_position,
   }));
 }
 
@@ -264,7 +295,7 @@ async function getRowCount(
   // If estimate is small or negative (never analyzed), do exact count
   if (estimate < 10000) {
     const countResult = await client.query(
-      `SELECT COUNT(*) AS count FROM "${schema}"."${tableName}"`
+      `SELECT COUNT(*) AS count FROM ${quoteIdent(schema)}.${quoteIdent(tableName)}`
     );
     return parseInt(countResult.rows[0].count, 10);
   }
@@ -276,18 +307,19 @@ async function getEnums(
   client: Client,
   schemas: string[]
 ): Promise<Record<string, string[]>> {
-  const schemaList = schemas.map((s) => `'${s}'`).join(",");
-
-  const result = await client.query(`
+  const result = await client.query(
+    `
     SELECT
       t.typname AS enum_name,
       e.enumlabel AS enum_value
     FROM pg_catalog.pg_type t
     JOIN pg_catalog.pg_enum e ON t.oid = e.enumtypid
     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
-    WHERE n.nspname IN (${schemaList})
+    WHERE n.nspname = ANY($1::text[])
     ORDER BY t.typname, e.enumsortorder
-  `);
+  `,
+    [schemas]
+  );
 
   const enums: Record<string, string[]> = {};
   for (const row of result.rows) {
@@ -298,4 +330,92 @@ async function getEnums(
   }
 
   return enums;
+}
+
+function quoteIdent(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+async function getUnsupportedFeatures(
+  client: Client,
+  schemas: string[]
+): Promise<UnsupportedFeature[]> {
+  const [viewsResult, triggersResult, functionsResult, policiesResult] =
+    await Promise.all([
+      client.query(
+        `
+        SELECT table_schema AS schema_name, table_name
+        FROM information_schema.views
+        WHERE table_schema = ANY($1::text[])
+        ORDER BY table_schema, table_name
+      `,
+        [schemas]
+      ),
+      client.query(
+        `
+        SELECT trigger_schema, trigger_name, event_object_table
+        FROM information_schema.triggers
+        WHERE trigger_schema = ANY($1::text[])
+        ORDER BY trigger_schema, event_object_table, trigger_name
+      `,
+        [schemas]
+      ),
+      client.query(
+        `
+        SELECT routine_schema, routine_name
+        FROM information_schema.routines
+        WHERE routine_schema = ANY($1::text[])
+          AND routine_type = 'FUNCTION'
+        ORDER BY routine_schema, routine_name
+      `,
+        [schemas]
+      ),
+      client.query(
+        `
+        SELECT schemaname, tablename, policyname
+        FROM pg_policies
+        WHERE schemaname = ANY($1::text[])
+        ORDER BY schemaname, tablename, policyname
+      `,
+        [schemas]
+      ),
+    ]);
+
+  const unsupported: UnsupportedFeature[] = [];
+
+  for (const row of viewsResult.rows) {
+    unsupported.push({
+      kind: "view",
+      schema: row.schema_name,
+      name: row.table_name,
+    });
+  }
+
+  for (const row of triggersResult.rows) {
+    unsupported.push({
+      kind: "trigger",
+      schema: row.trigger_schema,
+      name: row.trigger_name,
+      detail: `table ${row.event_object_table}`,
+    });
+  }
+
+  for (const row of functionsResult.rows) {
+    unsupported.push({
+      kind: "function",
+      schema: row.routine_schema,
+      name: row.routine_name,
+    });
+  }
+
+  for (const row of policiesResult.rows) {
+    unsupported.push({
+      kind: "policy",
+      schema: row.schemaname,
+      name: row.policyname,
+      detail: `table ${row.tablename}`,
+    });
+  }
+
+  return unsupported;
 }

@@ -11,6 +11,16 @@ export interface TypeMapping {
   needsSerialization: boolean; // for JSON/JSONB -> String
 }
 
+export type BigIntMode = "string" | "i64";
+
+export interface TypeMappingOptions {
+  bigintMode: BigIntMode;
+}
+
+const DEFAULT_TYPE_MAPPING_OPTIONS: TypeMappingOptions = {
+  bigintMode: "string",
+};
+
 const PG_TO_HELIX: Record<string, TypeMapping> = {
   // Text types
   text: { helixType: "String", isVector: false, needsSerialization: false },
@@ -82,12 +92,30 @@ const PG_TO_HELIX: Record<string, TypeMapping> = {
   ARRAY: { helixType: "String", isVector: false, needsSerialization: true },
 };
 
+const RESERVED_IDENTIFIERS = new Set([
+  "QUERY",
+  "RETURN",
+  "DROP",
+  "FOR",
+  "IN",
+  "UPDATE",
+  "NOW",
+  "EXISTS",
+  "N",
+  "E",
+  "V",
+  "ADDN",
+  "ADDE",
+  "ADDV",
+]);
+
 /**
  * Map a PostgreSQL column type to the corresponding HelixDB type.
  */
 export function mapPgType(
   pgType: string,
-  udtName?: string
+  udtName?: string,
+  options: TypeMappingOptions = DEFAULT_TYPE_MAPPING_OPTIONS
 ): TypeMapping {
   // Normalize
   const normalized = pgType.toLowerCase().trim();
@@ -99,8 +127,13 @@ export function mapPgType(
     if (["float4", "float8", "real", "double precision", "numeric"].includes(baseType)) {
       return { helixType: "[F64]", isVector: false, needsSerialization: false };
     }
-    if (["int4", "int8", "integer", "bigint"].includes(baseType)) {
-      return { helixType: "[I64]", isVector: false, needsSerialization: false };
+    if (["int4", "integer"].includes(baseType)) {
+      return { helixType: "[I32]", isVector: false, needsSerialization: false };
+    }
+    if (["int8", "bigint"].includes(baseType)) {
+      return options.bigintMode === "string"
+        ? { helixType: "[String]", isVector: false, needsSerialization: false }
+        : { helixType: "[I64]", isVector: false, needsSerialization: false };
     }
     if (["text", "varchar", "character varying"].includes(baseType)) {
       return { helixType: "[String]", isVector: false, needsSerialization: false };
@@ -112,6 +145,12 @@ export function mapPgType(
   // Handle vector type from pgvector (udt_name = 'vector')
   if (udtName === "vector") {
     return { helixType: "[F64]", isVector: true, needsSerialization: false };
+  }
+
+  if (["bigint", "int8", "bigserial"].includes(normalized)) {
+    return options.bigintMode === "string"
+      ? { helixType: "String", isVector: false, needsSerialization: false }
+      : { helixType: "I64", isVector: false, needsSerialization: false };
   }
 
   // Direct lookup
@@ -126,6 +165,19 @@ export function mapPgType(
 
   // Fallback: treat unknown types as String with serialization
   return { helixType: "String", isVector: false, needsSerialization: true };
+}
+
+export function resolveTypeMappingOptions(input?: {
+  bigintMode?: string;
+}): TypeMappingOptions {
+  const mode = input?.bigintMode?.toLowerCase();
+  if (!mode || mode === "string") {
+    return { bigintMode: "string" };
+  }
+  if (mode === "i64") {
+    return { bigintMode: "i64" };
+  }
+  throw new Error(`Invalid bigint mode: ${input?.bigintMode}`);
 }
 
 /**
@@ -143,10 +195,16 @@ export function toPascalCase(snakeCase: string): string {
     name = name.slice(0, -1);
   }
 
-  return name
+  const pascal = name
     .split(/[_\-\s]+/)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .map((word) =>
+      word.length === 0
+        ? ""
+        : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+    )
     .join("");
+
+  return sanitizeTypeName(pascal);
 }
 
 /**
@@ -154,5 +212,43 @@ export function toPascalCase(snakeCase: string): string {
  * Keeps snake_case as-is (HelixDB supports it).
  */
 export function toFieldName(pgColumn: string): string {
-  return pgColumn;
+  let value = pgColumn
+    .trim()
+    .replace(/[^A-Za-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!value) {
+    value = "field";
+  }
+
+  if (!/^[A-Za-z]/.test(value)) {
+    value = `field_${value}`;
+  }
+
+  if (RESERVED_IDENTIFIERS.has(value.toUpperCase())) {
+    value = `${value}_value`;
+  }
+
+  return value;
+}
+
+function sanitizeTypeName(rawName: string): string {
+  let value = rawName
+    .replace(/[^A-Za-z0-9]+/g, "")
+    .replace(/^_+|_+$/g, "");
+
+  if (!value) {
+    value = "Type";
+  }
+
+  if (!/^[A-Za-z]/.test(value)) {
+    value = `T${value}`;
+  }
+
+  if (RESERVED_IDENTIFIERS.has(value.toUpperCase())) {
+    value = `${value}Type`;
+  }
+
+  return value;
 }
