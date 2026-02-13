@@ -303,10 +303,10 @@ async fn check_dev_mode_requirement(
         config.save_to_file(&config_path)?;
 
         // Reload the project context and push
-        crate::commands::push::run(Some(instance_name.to_string()), false, &metrics_sender).await?;
+        crate::commands::push::run(Some(instance_name.to_string()), false, false, &metrics_sender).await?;
     } else {
         // For cloud instances, use the --dev flag
-        crate::commands::push::run(Some(instance_name.to_string()), true, &metrics_sender).await?;
+        crate::commands::push::run(Some(instance_name.to_string()), true, false, &metrics_sender).await?;
     }
 
     output::success(&format!(
@@ -369,7 +369,7 @@ async fn check_instance_running(project: &ProjectContext, instance_name: &str) -
         instance_name
     ));
     let metrics_sender = MetricsSender::new()?;
-    crate::commands::push::run(Some(instance_name.to_string()), false, &metrics_sender).await?;
+    crate::commands::push::run(Some(instance_name.to_string()), false, false, &metrics_sender).await?;
     output::success(&format!("Instance '{}' built and started", instance_name));
 
     Ok(())

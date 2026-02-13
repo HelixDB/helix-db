@@ -16,6 +16,7 @@ use std::time::Instant;
 pub async fn run(
     instance_name: Option<String>,
     dev: bool,
+    generate_queries: bool,
     metrics_sender: &MetricsSender,
 ) -> Result<()> {
     let start_time = Instant::now();
@@ -58,13 +59,14 @@ pub async fn run(
     }
 
     let deploy_result = if instance_config.is_local() {
-        push_local_instance(&project, &instance_name, metrics_sender).await
+        push_local_instance(&project, &instance_name, generate_queries, metrics_sender).await
     } else {
         push_cloud_instance(
             &project,
             &instance_name,
             instance_config.clone(),
             dev,
+            generate_queries,
             metrics_sender,
         )
         .await
@@ -123,6 +125,7 @@ pub async fn run(
 async fn push_local_instance(
     project: &ProjectContext,
     instance_name: &str,
+    generate_queries: bool,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
     let op = Operation::new("Deploying", instance_name);
@@ -145,9 +148,15 @@ async fn push_local_instance(
     }
 
     // Build the instance first (this ensures it's up to date) and get metrics data
-    let metrics_data =
-        crate::commands::build::run_build_steps(&op, project, instance_name, None, metrics_sender)
-            .await?;
+    let metrics_data = crate::commands::build::run_build_steps(
+        &op,
+        project,
+        instance_name,
+        None,
+        generate_queries,
+        metrics_sender,
+    )
+    .await?;
 
     // If port changed, regenerate docker-compose with new port
     if port_changed {
@@ -191,6 +200,7 @@ async fn push_cloud_instance(
     instance_name: &str,
     instance_config: InstanceInfo<'_>,
     dev: bool,
+    generate_queries: bool,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
     let op = Operation::new("Deploying", instance_name);
@@ -209,7 +219,13 @@ async fn push_cloud_instance(
 
     let metrics_data = if instance_config.should_build_docker_image() {
         // Build happens, get metrics data from build
-        crate::commands::build::run(Some(instance_name.to_string()), None, metrics_sender).await?
+        crate::commands::build::run(
+            Some(instance_name.to_string()),
+            None,
+            generate_queries,
+            metrics_sender,
+        )
+        .await?
     } else {
         // No build, use lightweight parsing
         parse_queries_for_metrics(project)?

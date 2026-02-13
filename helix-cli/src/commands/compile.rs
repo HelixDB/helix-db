@@ -6,11 +6,12 @@ use crate::{
     output::{Operation, Step},
     project::ProjectContext,
     utils::helixc_utils::{
-        analyze_source, collect_hx_files, generate_content, generate_rust_code, parse_content,
+        analyze_source, collect_hx_files, generate_content, generate_default_queries,
+        generate_rust_code, parse_content,
     },
 };
 
-pub async fn run(output_dir: Option<String>, path: Option<String>) -> Result<()> {
+pub async fn run(output_dir: Option<String>, path: Option<String>, generate_queries: bool) -> Result<()> {
     let op = Operation::new("Compiling", "queries");
 
     // Load project context from the specified path (helix.toml directory) or find it automatically
@@ -21,6 +22,15 @@ pub async fn run(output_dir: Option<String>, path: Option<String>) -> Result<()>
         }
         None => ProjectContext::find_and_load(None)?,
     };
+
+    // Generate CRUD queries from schema if requested
+    if generate_queries {
+        let mut gen_step =
+            Step::with_messages("Generating queries from schema", "Queries generated");
+        gen_step.start();
+        generate_default_queries(&project.root, &project.config.project.queries)?;
+        gen_step.done();
+    }
 
     // Collect all .hx files for validation from the queries directory
     let mut parse_step = Step::with_messages("Parsing queries", "Queries parsed");

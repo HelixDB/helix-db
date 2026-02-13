@@ -258,8 +258,8 @@ async fn run_init_inner(
     print_instructions(
         "Next steps:",
         &[
-            &format!("Customize {queries_path_clean}/schema.hx with your data model"),
-            &format!("Edit {queries_path_clean}/queries.hx or add your own queries"),
+            &format!("Define your data model in {queries_path_clean}/schema.hx"),
+            "Run 'helix build --generate-queries' to generate CRUD queries from your schema",
             "Run 'helix push dev' to start your development instance",
         ],
     );
@@ -318,55 +318,15 @@ E::Authored {
     fs::write(&schema_path, default_schema)?;
     cleanup_tracker.track_file(schema_path);
 
-    // Create default queries.hx with starter queries matching the schema
-    let default_queries = r#"// ─── Node queries ──────────────────────────────────────────
-
-QUERY GetAllUsers() =>
-    users <- N<User>
-    RETURN users
-
-QUERY GetUser(name: String) =>
-    user <- N<User>({name: name})
-    RETURN user
-
-QUERY CreateUser(name: String, email: String, age: I32) =>
-    user <- AddN<User>({name: name, email: email, age: age})
-    RETURN user
-
-QUERY UpdateUser(name: String, email: String) =>
-    user <- N<User>({name: name})::UPDATE({email: email})
-    RETURN user
-
-QUERY DeleteUser(name: String) =>
-    DROP N<User>({name: name})
-    RETURN "success"
-
-// ─── Vector queries ────────────────────────────────────────
-
-QUERY AddDocument(title: String, content: String, source: String) =>
-    doc <- AddV<Document>(
-        Embed(content),
-        {title: title, content: content, source: source}
-    )
-    RETURN doc
-
-QUERY SearchDocuments(query: String, k: I32) =>
-    results <- SearchV<Document>(Embed(query), k)
-    RETURN results
-
-// ─── Edge queries ──────────────────────────────────────────
-
-QUERY LinkUserToDocument(name: String, doc_id: ID, role: String) =>
-    user <- N<User>({name: name})
-    doc <- V<Document>(doc_id)
-    edge <- AddE<Authored>({role: role})::From(user)::To(doc)
-    RETURN edge
-
-QUERY GetUserDocuments(name: String) =>
-    user <- N<User>({name: name})
-    docs <- user::Out<Authored>
-    RETURN docs
-
+    // Create default queries.hx with a minimal example
+    let default_queries = r#"// Write your queries here, or generate CRUD queries from your schema:
+//   helix build --generate-queries
+//
+// Example query:
+//   QUERY GetUser(name: String) =>
+//       user <- N<User>({name: name})
+//       RETURN user
+//
 // For more on HelixQL, see https://docs.helix-db.com
 // or visit https://github.com/HelixDB/helix-db
 "#;

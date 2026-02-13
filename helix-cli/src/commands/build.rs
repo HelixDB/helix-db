@@ -7,7 +7,7 @@ use crate::project::{ProjectContext, get_helix_repo_cache};
 use crate::prompts;
 use crate::utils::{
     copy_dir_recursive_excluding, diagnostic_source,
-    helixc_utils::{collect_hx_contents, collect_hx_files},
+    helixc_utils::{collect_hx_contents, collect_hx_files, generate_default_queries},
     print_confirm, print_error, print_warning,
 };
 use eyre::{Result, eyre};
@@ -42,6 +42,7 @@ const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 pub async fn run(
     instance_name: Option<String>,
     bin: Option<String>,
+    generate_queries: bool,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
     // Load project context
@@ -82,6 +83,7 @@ pub async fn run(
         &project,
         &instance_name,
         bin.as_deref(),
+        generate_queries,
         metrics_sender,
     )
     .await;
@@ -100,6 +102,7 @@ pub async fn run_build_steps(
     project: &ProjectContext,
     instance_name: &str,
     bin: Option<&str>,
+    generate_queries: bool,
     metrics_sender: &MetricsSender,
 ) -> Result<MetricsData> {
     let start_time = Instant::now();
@@ -115,6 +118,15 @@ pub async fn run_build_steps(
 
     // Step 2: Prepare workspace (verbose only shows details)
     prepare_instance_workspace(project, instance_name).await?;
+
+    // Step 2.5: Generate CRUD queries from schema if requested
+    if generate_queries {
+        let mut gen_step =
+            Step::with_messages("Generating queries from schema", "Queries generated");
+        gen_step.start();
+        generate_default_queries(&project.root, &project.config.project.queries)?;
+        gen_step.done();
+    }
 
     // Step 3: Compile project queries
     let mut compile_step = Step::with_messages("Compiling queries", "Queries compiled");

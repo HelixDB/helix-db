@@ -431,6 +431,208 @@ pub mod helixc_utils {
         Ok(())
     }
 
+    /// Convert a FieldType to its HQL string representation.
+    fn field_type_to_hql(ft: &helix_db::helixc::parser::types::FieldType) -> String {
+        use helix_db::helixc::parser::types::FieldType;
+        match ft {
+            FieldType::Array(inner) => format!("[{}]", field_type_to_hql(inner)),
+            FieldType::Object(map) => {
+                let fields: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, field_type_to_hql(v)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    /// Generate CRUD queries from the parsed schema and write them to generated_queries.hx.
+    ///
+    /// For each node type: GetAll, Get (by indexed field), Create, Delete, DeleteAll
+    /// For each vector type: GetAll, Add, Search, DeleteAll
+    /// For each edge type: GetAll, Create, DeleteAll
+    pub fn generate_default_queries(root: &Path, queries_dir: &Path) -> Result<()> {
+        // Parse schema from existing .hx files
+        let hx_files = collect_hx_files(root, queries_dir)?;
+        let content = generate_content(&hx_files)?;
+        let source = parse_content(&content)?;
+
+        let schema = source
+            .get_latest_schema()
+            .map_err(|e| eyre::eyre!("No schema found: {}", e))?;
+
+        // Collect vector type names so we can resolve edge From/To targets
+        let vector_names: std::collections::HashSet<&str> = schema
+            .vector_schemas
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+
+        let mut out = String::new();
+        out.push_str("// Auto-generated CRUD queries from schema.\n");
+        out.push_str("// Re-generate with: helix build --generate-queries\n\n");
+
+        // ── Node queries ────────────────────────────────────────
+        for node in &schema.node_schemas {
+            let name = &node.name.1;
+
+            // GetAll
+            out.push_str(&format!(
+                "QUERY GetAll{name}() =>\n    items <- N<{name}>\n    RETURN items\n\n"
+            ));
+
+            // Get by first indexed field (if any)
+            if let Some(idx_field) = node.fields.iter().find(|f| f.is_indexed()) {
+                let fname = &idx_field.name;
+                let ftype = field_type_to_hql(&idx_field.field_type);
+                out.push_str(&format!(
+                    "QUERY Get{name}({fname}: {ftype}) =>\n    item <- N<{name}>({{{fname}: {fname}}})\n    RETURN item\n\n"
+                ));
+
+                // Delete by indexed field
+                out.push_str(&format!(
+                    "QUERY Delete{name}({fname}: {ftype}) =>\n    DROP N<{name}>({{{fname}: {fname}}})\n    RETURN \"success\"\n\n"
+                ));
+            }
+
+            // Create — include fields without defaults
+            let create_fields: Vec<_> = node
+                .fields
+                .iter()
+                .filter(|f| f.defaults.is_none())
+                .collect();
+            if !create_fields.is_empty() {
+                let params: Vec<String> = create_fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, field_type_to_hql(&f.field_type)))
+                    .collect();
+                let field_assigns: Vec<String> =
+                    create_fields.iter().map(|f| format!("{0}: {0}", f.name)).collect();
+
+                out.push_str(&format!(
+                    "QUERY Create{name}({}) =>\n    item <- AddN<{name}>({{{}}})\n    RETURN item\n\n",
+                    params.join(", "),
+                    field_assigns.join(", ")
+                ));
+            }
+
+            // DeleteAll
+            out.push_str(&format!(
+                "QUERY DeleteAll{name}() =>\n    DROP N<{name}>\n    RETURN \"success\"\n\n"
+            ));
+        }
+
+        // ── Vector queries ──────────────────────────────────────
+        for vector in &schema.vector_schemas {
+            let name = &vector.name;
+
+            // GetAll
+            out.push_str(&format!(
+                "QUERY GetAll{name}() =>\n    items <- V<{name}>\n    RETURN items\n\n"
+            ));
+
+            // Add — vector data + metadata fields
+            let metadata_fields: Vec<_> = vector
+                .fields
+                .iter()
+                .filter(|f| f.defaults.is_none())
+                .collect();
+            if !metadata_fields.is_empty() {
+                let mut params: Vec<String> = vec!["vector: [F64]".to_string()];
+                params.extend(
+                    metadata_fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.name, field_type_to_hql(&f.field_type))),
+                );
+                let field_assigns: Vec<String> = metadata_fields
+                    .iter()
+                    .map(|f| format!("{0}: {0}", f.name))
+                    .collect();
+
+                out.push_str(&format!(
+                    "QUERY Add{name}({}) =>\n    item <- AddV<{name}>(vector, {{{}}})\n    RETURN item\n\n",
+                    params.join(", "),
+                    field_assigns.join(", ")
+                ));
+            }
+
+            // Search
+            out.push_str(&format!(
+                "QUERY Search{name}(query: [F64], k: I32) =>\n    results <- SearchV<{name}>(query, k)\n    RETURN results\n\n"
+            ));
+
+            // DeleteAll
+            out.push_str(&format!(
+                "QUERY DeleteAll{name}() =>\n    DROP V<{name}>\n    RETURN \"success\"\n\n"
+            ));
+        }
+
+        // ── Edge queries ────────────────────────────────────────
+        for edge in &schema.edge_schemas {
+            let name = &edge.name.1;
+            let from_type = &edge.from.1;
+            let to_type = &edge.to.1;
+
+            // GetAll
+            out.push_str(&format!(
+                "QUERY GetAll{name}() =>\n    items <- E<{name}>\n    RETURN items\n\n"
+            ));
+
+            // Create — resolve whether From/To are nodes or vectors
+            let from_prefix = if vector_names.contains(from_type.as_str()) {
+                "V"
+            } else {
+                "N"
+            };
+            let to_prefix = if vector_names.contains(to_type.as_str()) {
+                "V"
+            } else {
+                "N"
+            };
+
+            let mut params: Vec<String> =
+                vec!["from_id: ID".to_string(), "to_id: ID".to_string()];
+            let mut prop_assigns = String::new();
+            if let Some(props) = &edge.properties {
+                let prop_fields: Vec<_> =
+                    props.iter().filter(|f| f.defaults.is_none()).collect();
+                params.extend(
+                    prop_fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.name, field_type_to_hql(&f.field_type))),
+                );
+                let assigns: Vec<String> =
+                    prop_fields.iter().map(|f| format!("{0}: {0}", f.name)).collect();
+                if !assigns.is_empty() {
+                    prop_assigns = format!("{{{}}}", assigns.join(", "));
+                }
+            }
+
+            let add_expr = if prop_assigns.is_empty() {
+                format!("AddE<{name}>")
+            } else {
+                format!("AddE<{name}>({})", prop_assigns)
+            };
+
+            out.push_str(&format!(
+                "QUERY Create{name}({}) =>\n    from_item <- {from_prefix}<{from_type}>(from_id)\n    to_item <- {to_prefix}<{to_type}>(to_id)\n    edge <- {add_expr}::From(from_item)::To(to_item)\n    RETURN edge\n\n",
+                params.join(", ")
+            ));
+
+            // DeleteAll
+            out.push_str(&format!(
+                "QUERY DeleteAll{name}() =>\n    DROP E<{name}>\n    RETURN \"success\"\n\n"
+            ));
+        }
+
+        // Write the generated file
+        let generated_path = root.join(queries_dir).join("generated_queries.hx");
+        fs::write(&generated_path, out.trim_end())?;
+
+        Ok(())
+    }
+
     /// Collect all .hx file contents as a single string with file path headers.
     /// Used for GitHub issue reporting.
     /// Filters out files that only contain comments (no actual schema or query definitions).

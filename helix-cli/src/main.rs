@@ -84,6 +84,10 @@ enum Commands {
         /// Path to output compiled queries
         #[clap(short, long)]
         output: Option<String>,
+
+        /// Generate CRUD queries from schema before compiling
+        #[clap(short = 'g', long = "generate-queries")]
+        generate_queries: bool,
     },
 
     /// Build and compile project for an instance
@@ -94,6 +98,10 @@ enum Commands {
         /// Should build HelixDB into a binary at the specified directory location
         #[clap(long)]
         bin: Option<String>,
+
+        /// Generate CRUD queries from schema before building
+        #[clap(short = 'g', long = "generate-queries")]
+        generate_queries: bool,
     },
 
     /// Deploy/start an instance
@@ -103,6 +111,10 @@ enum Commands {
         /// Use development profile for faster builds (Helix Cloud only)
         #[clap(long)]
         dev: bool,
+
+        /// Generate CRUD queries from schema before deploying
+        #[clap(short = 'g', long = "generate-queries")]
+        generate_queries: bool,
     },
 
     /// Pull .hql files from instance back to local project
@@ -270,13 +282,23 @@ async fn main() -> Result<()> {
             commands::create_cluster::run(&instance, region).await
         }
         Commands::Check { instance } => commands::check::run(instance, &metrics_sender).await,
-        Commands::Compile { output, path } => commands::compile::run(output, path).await,
-        Commands::Build { instance, bin } => commands::build::run(instance, bin, &metrics_sender)
+        Commands::Compile {
+            output,
+            path,
+            generate_queries,
+        } => commands::compile::run(output, path, generate_queries).await,
+        Commands::Build {
+            instance,
+            bin,
+            generate_queries,
+        } => commands::build::run(instance, bin, generate_queries, &metrics_sender)
             .await
             .map(|_| ()),
-        Commands::Push { instance, dev } => {
-            commands::push::run(instance, dev, &metrics_sender).await
-        }
+        Commands::Push {
+            instance,
+            dev,
+            generate_queries,
+        } => commands::push::run(instance, dev, generate_queries, &metrics_sender).await,
         Commands::Pull { instance } => commands::pull::run(instance).await,
         Commands::Start { instance } => commands::start::run(instance).await,
         Commands::Stop { instance } => commands::stop::run(instance).await,
