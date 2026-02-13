@@ -258,8 +258,8 @@ async fn run_init_inner(
     print_instructions(
         "Next steps:",
         &[
-            &format!("Edit {queries_path_clean}/schema.hx to define your data model"),
-            &format!("Add queries to {queries_path_clean}/queries.hx"),
+            &format!("Customize {queries_path_clean}/schema.hx with your data model"),
+            &format!("Edit {queries_path_clean}/queries.hx or add your own queries"),
             "Run 'helix push dev' to start your development instance",
         ],
     );
@@ -281,61 +281,94 @@ fn create_project_structure(
     fs::create_dir_all(&queries_dir)?;
     cleanup_tracker.track_dir(queries_dir);
 
-    // Create default schema.hx with proper Helix syntax
-    let default_schema = r#"// Start building your schema here.
-//
-// The schema is used to to ensure a level of type safety in your queries.
-//
-// The schema is made up of Node types, denoted by N::,
-// and Edge types, denoted by E::
-//
-// Under the Node types you can define fields that
-// will be stored in the database.
-//
-// Under the Edge types you can define what type of node
-// the edge will connect to and from, and also the
-// properties that you want to store on the edge.
-//
-// Example:
-//
-// N::User {
-//     Name: String,
-//     Label: String,
-//     Age: I64,
-//     IsAdmin: Boolean,
-// }
-//
-// E::Knows {
-//     From: User,
-//     To: User,
-//     Properties: {
-//         Since: I64,
-//     }
-// }
+    // Create default schema.hx with starter types
+    let default_schema = r#"// ─── Node types ────────────────────────────────────────────
+// Nodes represent entities in your graph.
+// Use INDEX for fields you want to query by.
+
+N::User {
+    INDEX name: String,
+    email: String,
+    age: I32,
+    created_at: Date DEFAULT NOW,
+}
+
+// ─── Vector types ──────────────────────────────────────────
+// Vectors store embeddings for similarity search.
+// Fields here are metadata stored alongside the vector.
+
+V::Document {
+    title: String,
+    content: String,
+    source: String,
+}
+
+// ─── Edge types ────────────────────────────────────────────
+// Edges connect nodes and can carry properties.
+
+E::Authored {
+    From: User,
+    To: Document,
+    Properties: {
+        role: String,
+    }
+}
 "#;
     let schema_path = project_dir.join(queries_path).join("schema.hx");
     fs::write(&schema_path, default_schema)?;
     cleanup_tracker.track_file(schema_path);
 
-    // Create default queries.hx with proper Helix query syntax in the queries directory
-    let default_queries = r#"// Start writing your queries here.
-//
-// You can use the schema to help you write your queries.
-//
-// Queries take the form:
-//     QUERY {query name}({input name}: {input type}) =>
-//         {variable} <- {traversal}
-//         RETURN {variable}
-//
-// Example:
-//     QUERY GetUserFriends(user_id: String) =>
-//         friends <- N<User>(user_id)::Out<Knows>
-//         RETURN friends
-//
-//
-// For more information on how to write queries,
-// see the documentation at https://docs.helix-db.com
-// or checkout our GitHub at https://github.com/HelixDB/helix-db
+    // Create default queries.hx with starter queries matching the schema
+    let default_queries = r#"// ─── Node queries ──────────────────────────────────────────
+
+QUERY GetAllUsers() =>
+    users <- N<User>
+    RETURN users
+
+QUERY GetUser(name: String) =>
+    user <- N<User>({name: name})
+    RETURN user
+
+QUERY CreateUser(name: String, email: String, age: I32) =>
+    user <- AddN<User>({name: name, email: email, age: age})
+    RETURN user
+
+QUERY UpdateUser(name: String, email: String) =>
+    user <- N<User>({name: name})::UPDATE({email: email})
+    RETURN user
+
+QUERY DeleteUser(name: String) =>
+    DROP N<User>({name: name})
+    RETURN "success"
+
+// ─── Vector queries ────────────────────────────────────────
+
+QUERY AddDocument(title: String, content: String, source: String) =>
+    doc <- AddV<Document>(
+        Embed(content),
+        {title: title, content: content, source: source}
+    )
+    RETURN doc
+
+QUERY SearchDocuments(query: String, k: I32) =>
+    results <- SearchV<Document>(Embed(query), k)
+    RETURN results
+
+// ─── Edge queries ──────────────────────────────────────────
+
+QUERY LinkUserToDocument(name: String, doc_id: ID, role: String) =>
+    user <- N<User>({name: name})
+    doc <- V<Document>(doc_id)
+    edge <- AddE<Authored>({role: role})::From(user)::To(doc)
+    RETURN edge
+
+QUERY GetUserDocuments(name: String) =>
+    user <- N<User>({name: name})
+    docs <- user::Out<Authored>
+    RETURN docs
+
+// For more on HelixQL, see https://docs.helix-db.com
+// or visit https://github.com/HelixDB/helix-db
 "#;
     let queries_path_file = project_dir.join(queries_path).join("queries.hx");
     fs::write(&queries_path_file, default_queries)?;
