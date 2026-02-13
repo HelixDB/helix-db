@@ -1,0 +1,32 @@
+{
+  "name": "@helix-db/migrate",
+  "version": "0.1.0",
+  "description": "White-glove migration tool for moving from Supabase to HelixDB",
+  "main": "dist/index.js",
+  "bin": {
+    "helix-migrate": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "prompts": "^2.4.2",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "@types/prompts": "^2.4.9",
+    "typescript": "^5.6.0",
+    "ts-node": "^10.9.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "AGPL-3.0"
+}
