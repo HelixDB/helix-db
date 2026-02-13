@@ -38,7 +38,11 @@ pub enum TraversalType {
     Ref,
     Mut,
     Empty,
-    Update(Option<Vec<(String, GeneratedValue)>>),
+    Update {
+        source: Option<GenRef<String>>,
+        source_is_plural: bool,
+        properties: Option<Vec<(String, GeneratedValue)>>,
+    },
     /// Upsert - updates existing item if iterator has items, creates new if empty (legacy)
     Upsert {
         source: Option<GenRef<String>>,
@@ -189,21 +193,42 @@ impl Display for Traversal {
                 debug_assert!(false, "TraversalType::Empty should not reach generator");
                 write!(f, "/* ERROR: empty traversal type */")?;
             }
-            TraversalType::Update(properties) => {
-                write!(f, "{{")?;
-                write!(f, "let update_tr = G::new(&db, &txn, &arena)")?;
-                write!(f, "{}", self.source_step)?;
-                for step in &self.steps {
-                    write!(f, "\n{step}")?;
+            TraversalType::Update {
+                source,
+                source_is_plural,
+                properties,
+            } => {
+                match source {
+                    Some(var) => {
+                        if *source_is_plural {
+                            write!(
+                                f,
+                                "G::new_mut_from_iter(&db, &mut txn, {}.iter().cloned(), &arena)",
+                                var
+                            )?;
+                        } else {
+                            write!(f, "G::new_mut_from(&db, &mut txn, {}.clone(), &arena)", var)?;
+                        }
+                    }
+                    None => {
+                        write!(f, "{{")?;
+                        write!(f, "let update_tr = G::new(&db, &txn, &arena)")?;
+                        write!(f, "{}", self.source_step)?;
+                        for step in &self.steps {
+                            write!(f, "\n{step}")?;
+                        }
+                        write!(f, "\n    .collect::<Result<Vec<_>, _>>()?;")?;
+                        write!(
+                            f,
+                            "G::new_mut_from_iter(&db, &mut txn, update_tr.iter().cloned(), &arena)",
+                        )?;
+                    }
                 }
-                write!(f, "\n    .collect::<Result<Vec<_>, _>>()?;")?;
-                write!(
-                    f,
-                    "G::new_mut_from_iter(&db, &mut txn, update_tr.iter().cloned(), &arena)",
-                )?;
                 write!(f, "\n    .update({})", write_properties_slice(properties))?;
                 write!(f, "\n    .collect_to_obj()?")?;
-                write!(f, "}}")?;
+                if source.is_none() {
+                    write!(f, "}}")?;
+                }
             }
             TraversalType::Upsert {
                 source,

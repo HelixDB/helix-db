@@ -1735,6 +1735,13 @@ pub(crate) fn validate_traversal<'a>(
 
                 // Update returns the same type (nodes/edges) it started with.
 
+                // Extract source variable before overwriting traversal type
+                let (source, source_is_plural) = match &gen_traversal.traversal_type {
+                    TraversalType::FromSingle(var) => (Some(var.clone()), false),
+                    TraversalType::FromIter(var) => (Some(var.clone()), true),
+                    _ => (None, true), // Default to plural for inline traversals
+                };
+
                 match &cur_ty {
                     Type::Node(Some(_))
                     | Type::Nodes(Some(_))
@@ -1762,7 +1769,10 @@ pub(crate) fn validate_traversal<'a>(
                         return Some(cur_ty.clone());
                     }
                 }
-                gen_traversal.traversal_type = TraversalType::Update(Some(
+                gen_traversal.traversal_type = TraversalType::Update {
+                    source,
+                    source_is_plural,
+                    properties: Some(
                     update
                         .fields
                         .iter()
@@ -1859,7 +1869,8 @@ pub(crate) fn validate_traversal<'a>(
                             )
                         })
                         .collect(),
-                ));
+                    ),
+                };
                 cur_ty = cur_ty.into_single();
                 gen_traversal.should_collect = ShouldCollect::No;
                 excluded.clear();
@@ -3014,7 +3025,7 @@ pub(crate) fn validate_traversal<'a>(
         previous_step = Some(step.clone());
     }
     match gen_traversal.traversal_type {
-        TraversalType::Mut | TraversalType::Update(_) | TraversalType::Upsert { .. } => {
+        TraversalType::Mut | TraversalType::Update { .. } | TraversalType::Upsert { .. } => {
             gen_query.is_mut = true;
         }
         _ => {}
