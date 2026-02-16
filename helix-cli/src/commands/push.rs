@@ -138,7 +138,19 @@ async fn push_local_instance(
     // Check port availability before building
     let instance_config = project.config.get_instance(instance_name)?;
     let requested_port = instance_config.port().unwrap_or(port::DEFAULT_PORT);
-    let (actual_port, port_changed) = port::ensure_port_available(requested_port)?;
+
+    // If our own container is already running on the requested port, skip the
+    // availability check — docker compose will handle replacing it in place.
+    // Only look for a new port when the port is genuinely held by something else.
+    let own_container_on_port = docker
+        .is_instance_running_on_port(instance_name, requested_port)
+        .unwrap_or(false);
+
+    let (actual_port, port_changed) = if own_container_on_port {
+        (requested_port, false)
+    } else {
+        port::ensure_port_available(requested_port)?
+    };
 
     if port_changed {
         crate::output::warning(&format!(

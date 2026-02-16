@@ -683,6 +683,21 @@ networks:
         Ok(())
     }
 
+    /// Check if an instance is currently running on a specific port.
+    /// This is used to avoid port conflict false positives when redeploying
+    /// an existing container that already holds the requested port.
+    pub fn is_instance_running_on_port(&self, instance_name: &str, port: u16) -> Result<bool> {
+        let statuses = self.get_project_status()?;
+        let target_container_name = self.container_name(instance_name);
+        let port_pattern = format!(":{port}->");
+
+        Ok(statuses.iter().any(|status| {
+            status.container_name == target_container_name
+                && status.status.starts_with("Up")
+                && status.ports.contains(&port_pattern)
+        }))
+    }
+
     /// Check if an instance container exists (running or stopped)
     pub fn instance_exists(&self, instance_name: &str) -> Result<bool> {
         let statuses = self.get_project_status()?;
