@@ -23,6 +23,7 @@ fn run_sync(force: bool) -> Result<()> {
         .bin_name("helix")
         .show_download_progress(true)
         .show_output(false)
+        .no_confirm(true)
         .current_version(cargo_crate_version!())
         .build()?;
 
