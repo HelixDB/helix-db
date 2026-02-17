@@ -8,31 +8,25 @@ authors = ["HelixDB Team"]
 repository = "https://github.com/HelixDB/helix-db"
 
 [dependencies]
-# HelixDB dependencies
-helix-macros = { path = "../helix-macros" }
-helix-metrics = { path = "../metrics" }
-
-# external dependencies
-tokio = { version = "1.44.2", features = ["full"] }
-serde = { version = "1.0.217", features = ["derive"] }
+helix-macros = { workspace = true } #unified
+helix-metrics = { workspace = true } #unified
+tokio = { workspace = true } #unified
+serde = { workspace = true } #unified
 bincode = "1.3.3" # TODO: Figure out bincode 2 impl with current serde impl
 sonic-rs = "0.5.0"
-inventory = "0.3.16"
+inventory = { workspace = true } #unified
 twox-hash = "2.1.0"
-heed3 = "0.22.0"
-uuid = { version = "1.12.1", features = ["serde", "v4", "v6", "fast-rng"] }
-rand = "0.9.0"
-chrono = "0.4.39"
-flume = { version = "0.12.0", default-features = false, features = [
-    "async",
-    "select",
-] }
+heed3 = { workspace = true } #unified
+uuid = { workspace = true, features = ["serde", "v4", "v6", "v7"] } #unified
+rand = { workspace = true } #unified
+chrono = { workspace = true, features = ["serde"] } #unified
+flume = { workspace = true } #unified
 itertools = "0.14.0"
-tempfile = "3.20.0"
+tempfile = { workspace = true } #unified
 paste = "1.0.15"
 rayon = "1.11.0"
 mimalloc = "0.1.48"
-bumpalo = { version = "3.19.0", features = ["collections", "boxed", "serde"] }
+bumpalo = { workspace = true } #unified
 bytemuck = "1.24.0"
 indexmap = { version = "2.7", features = ["serde"] }
 
@@ -40,16 +34,11 @@ indexmap = { version = "2.7", features = ["serde"] }
 pest = { version = "2.7", optional = true }
 pest_derive = { version = "2.7", optional = true }
 ariadne = { version = "0.5", optional = true }
-
-# embedding dependencies
-reqwest = { version = "0.12.15", features = [
-    "json",
-    "blocking",
-], optional = true }
+reqwest = { workspace = true, optional = true } #unified
 url = { version = "2.5", optional = true }
 tokio-util = { version = "0.7.15", features = ["compat"] }
 axum = "0.8.4"
-tracing = "0.1.41"
+tracing = { workspace = true } #unified
 core_affinity = "0.8.3"
 async-trait = "0.1.88"
 thiserror = "2.0.12"
@@ -58,18 +47,18 @@ polars = { version = "0.46.0", features = [
     "lazy",
     "json",
 ], optional = true }
-sha2 = "0.10"
+sha2 = { workspace = true } #unified
 subtle = "2.5"
 
 [dev-dependencies]
-rand = "0.9.0"
+rand = { workspace = true } #unified
 lazy_static = "1.4.0"
-num_cpus = "1.17"     # TODO: write ourselves
+num_cpus = { workspace = true } #unified
 proptest = "1.4"
 criterion = "0.5"
 loom = "0.7"          # Concurrency model checking
 tokio-test = "0.4"    # Tokio testing utilities
-serial_test = "3.2"   # Serialize LMDB stress tests to avoid interference
+serial_test = { workspace = true } #unified
 
 [features]
 debug-output = ["helix-macros/debug-output"]
