@@ -900,10 +900,12 @@ pub(crate) fn validate_traversal<'a>(
                                     traversal: tr,
                                 },
                             )));
-                        // The result type changes to whatever the sub-traversal returns
+                        // INTERSECT feeds its sub-traversal output back into the main
+                        // pipeline, so downstream steps see the sub-traversal element type.
                         cur_ty = ty;
                     }
                     _ => {
+                        // INTERSECT syntax only accepts traversal expressions.
                         generate_error!(
                             ctx,
                             original_query,

@@ -1360,6 +1360,8 @@ pub struct Intersect {
 }
 impl Display for Intersect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `intersect` takes a closure that runs once per upstream value and returns
+        // a materialized Vec for that value's sub-traversal branch.
         write!(
             f,
             "intersect(|val, db, txn, arena| {{\
