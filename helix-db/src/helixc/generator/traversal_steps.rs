@@ -51,6 +51,7 @@ pub enum TraversalType {
         source_is_plural: bool,
         label: String,
         properties: Option<Vec<(String, GeneratedValue)>>,
+        create_defaults: Option<Vec<(String, GeneratedValue)>>,
     },
     /// UpsertE - upsert for edges with From/To connection
     UpsertE {
@@ -58,6 +59,7 @@ pub enum TraversalType {
         source_is_plural: bool,
         label: String,
         properties: Option<Vec<(String, GeneratedValue)>>,
+        create_defaults: Option<Vec<(String, GeneratedValue)>>,
         from: GeneratedValue,
         to: GeneratedValue,
     },
@@ -67,6 +69,7 @@ pub enum TraversalType {
         source_is_plural: bool,
         label: String,
         properties: Option<Vec<(String, GeneratedValue)>>,
+        create_defaults: Option<Vec<(String, GeneratedValue)>>,
         vec_data: Option<VecData>,
     },
     /// Standalone - no G::new wrapper, just the source step (used for plural AddE)
@@ -250,6 +253,7 @@ impl Display for Traversal {
                 source_is_plural,
                 label,
                 properties,
+                create_defaults,
             } => {
                 match source {
                     Some(var) => {
@@ -281,9 +285,10 @@ impl Display for Traversal {
                 }
                 write!(
                     f,
-                    "\n    .upsert_n(\"{}\", {})",
+                    "\n    .upsert_n_with_defaults(\"{}\", {}, {})",
                     label,
-                    write_properties_slice(properties)
+                    write_properties_slice(properties),
+                    write_properties_slice(create_defaults)
                 )?;
                 write!(f, "\n    .collect_to_obj()?")?;
                 if source.is_none() {
@@ -295,6 +300,7 @@ impl Display for Traversal {
                 source_is_plural,
                 label,
                 properties,
+                create_defaults,
                 from,
                 to,
             } => {
@@ -328,11 +334,12 @@ impl Display for Traversal {
                 }
                 write!(
                     f,
-                    "\n    .upsert_e(\"{}\", {}.id(), {}.id(), {})",
+                    "\n    .upsert_e_with_defaults(\"{}\", {}.id(), {}.id(), {}, {})",
                     label,
                     from,
                     to,
-                    write_properties_slice(properties)
+                    write_properties_slice(properties),
+                    write_properties_slice(create_defaults)
                 )?;
                 write!(f, "\n    .collect_to_obj()?")?;
                 if source.is_none() {
@@ -344,6 +351,7 @@ impl Display for Traversal {
                 source_is_plural,
                 label,
                 properties,
+                create_defaults,
                 vec_data,
             } => {
                 match source {
@@ -378,18 +386,20 @@ impl Display for Traversal {
                     Some(vd) => {
                         write!(
                             f,
-                            "\n    .upsert_v({}, \"{}\", {})",
+                            "\n    .upsert_v_with_defaults({}, \"{}\", {}, {})",
                             vd,
                             label,
-                            write_properties_slice(properties)
+                            write_properties_slice(properties),
+                            write_properties_slice(create_defaults)
                         )?;
                     }
                     None => {
                         write!(
                             f,
-                            "\n    .upsert_v(&[], \"{}\", {})",
+                            "\n    .upsert_v_with_defaults(&[], \"{}\", {}, {})",
                             label,
-                            write_properties_slice(properties)
+                            write_properties_slice(properties),
+                            write_properties_slice(create_defaults)
                         )?;
                     }
                 }

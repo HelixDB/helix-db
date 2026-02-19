@@ -39,7 +39,7 @@ use crate::{
 };
 use indexmap::IndexMap;
 use paste::paste;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Check if a property name is a reserved property and return its expected type
 fn get_reserved_property_type(prop_name: &str, item_type: &Type) -> Option<FieldType> {
@@ -549,7 +549,13 @@ pub(crate) fn validate_traversal<'a>(
                     let embed_data = match &e.value {
                         EvaluatesToString::Identifier(i) => {
                             type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str());
-                            validate_embed_string_type(ctx, original_query, sv.loc.clone(), scope, i.as_str());
+                            validate_embed_string_type(
+                                ctx,
+                                original_query,
+                                sv.loc.clone(),
+                                scope,
+                                i.as_str(),
+                            );
                             EmbedData {
                                 data: gen_identifier_or_param(
                                     original_query,
@@ -816,7 +822,9 @@ pub(crate) fn validate_traversal<'a>(
                         // Check that the traversal ends with a boolean operation.
                         // If it doesn't (e.g., ends with Out, In, Where, etc.), it returns
                         // nodes/edges rather than a boolean — user likely needs EXISTS(...).
-                        let last_is_bool_op = tr.steps.last()
+                        let last_is_bool_op = tr
+                            .steps
+                            .last()
                             .is_some_and(|s| matches!(s.inner(), GeneratedStep::BoolOp(_)));
                         if !last_is_bool_op {
                             generate_error!(
@@ -2058,6 +2066,32 @@ pub(crate) fn validate_traversal<'a>(
                     }
                 };
 
+                let explicit_fields: HashSet<&str> = upsert
+                    .fields
+                    .iter()
+                    .map(|field| field.key.as_str())
+                    .collect();
+                let create_defaults = ctx
+                    .output
+                    .nodes
+                    .iter()
+                    .find(|node| node.name == label)
+                    .map(|node| {
+                        node.properties
+                            .iter()
+                            .filter_map(|property| {
+                                property
+                                    .default_value
+                                    .clone()
+                                    .map(|value| (property.name.clone(), value))
+                            })
+                            .filter(|(field_name, _)| {
+                                !explicit_fields.contains(field_name.as_str())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
                 gen_query.is_mut = true;
                 gen_traversal.traversal_type = TraversalType::UpsertN {
                     source,
@@ -2168,6 +2202,7 @@ pub(crate) fn validate_traversal<'a>(
                             })
                             .collect(),
                     ),
+                    create_defaults: Some(create_defaults),
                 };
                 cur_ty = cur_ty.into_single();
                 gen_traversal.should_collect = ShouldCollect::No;
@@ -2257,6 +2292,32 @@ pub(crate) fn validate_traversal<'a>(
                         GeneratedValue::Unknown
                     }
                 };
+
+                let explicit_fields: HashSet<&str> = upsert
+                    .fields
+                    .iter()
+                    .map(|field| field.key.as_str())
+                    .collect();
+                let create_defaults = ctx
+                    .output
+                    .edges
+                    .iter()
+                    .find(|edge| edge.name == label)
+                    .map(|edge| {
+                        edge.properties
+                            .iter()
+                            .filter_map(|property| {
+                                property
+                                    .default_value
+                                    .clone()
+                                    .map(|value| (property.name.clone(), value))
+                            })
+                            .filter(|(field_name, _)| {
+                                !explicit_fields.contains(field_name.as_str())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
                 gen_query.is_mut = true;
                 gen_traversal.traversal_type = TraversalType::UpsertE {
@@ -2368,6 +2429,7 @@ pub(crate) fn validate_traversal<'a>(
                             })
                             .collect(),
                     ),
+                    create_defaults: Some(create_defaults),
                     from: from_val,
                     to: to_val,
                 };
@@ -2478,7 +2540,13 @@ pub(crate) fn validate_traversal<'a>(
                                     scope,
                                     id.as_str(),
                                 );
-                                validate_embed_string_type(ctx, original_query, embed.loc.clone(), scope, id.as_str());
+                                validate_embed_string_type(
+                                    ctx,
+                                    original_query,
+                                    embed.loc.clone(),
+                                    scope,
+                                    id.as_str(),
+                                );
                                 EmbedData {
                                     data: gen_identifier_or_param(
                                         original_query,
@@ -2498,6 +2566,33 @@ pub(crate) fn validate_traversal<'a>(
                     }
                     None => None,
                 };
+
+                let explicit_fields: HashSet<&str> = upsert
+                    .fields
+                    .iter()
+                    .map(|field| field.key.as_str())
+                    .collect();
+                let create_defaults = ctx
+                    .output
+                    .vectors
+                    .iter()
+                    .find(|vector| vector.name == label)
+                    .map(|vector| {
+                        vector
+                            .properties
+                            .iter()
+                            .filter_map(|property| {
+                                property
+                                    .default_value
+                                    .clone()
+                                    .map(|value| (property.name.clone(), value))
+                            })
+                            .filter(|(field_name, _)| {
+                                !explicit_fields.contains(field_name.as_str())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
                 gen_query.is_mut = true;
                 gen_traversal.traversal_type = TraversalType::UpsertV {
@@ -2609,6 +2704,7 @@ pub(crate) fn validate_traversal<'a>(
                             })
                             .collect(),
                     ),
+                    create_defaults: Some(create_defaults),
                     vec_data,
                 };
                 cur_ty = cur_ty.into_single();
@@ -3025,6 +3121,8 @@ pub(crate) fn validate_traversal<'a>(
 #[cfg(test)]
 mod tests {
     use crate::helixc::analyzer::error_codes::ErrorCode;
+    use crate::helixc::generator::statements::Statement as GeneratedStatement;
+    use crate::helixc::generator::traversal_steps::TraversalType;
     use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
@@ -3350,5 +3448,185 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_upsert_n_emits_create_defaults() {
+        let source = r#"
+            N::Email {
+                UNIQUE INDEX email: String,
+                created_at: Date DEFAULT NOW,
+                status: String DEFAULT "pending",
+            }
+
+            QUERY test(email: String) =>
+                existing <- N<Email>::WHERE(_::{email}::EQ(email))
+                node <- existing::UpsertN({email: email})
+                RETURN node
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, output) = result.unwrap();
+        assert!(diagnostics.is_empty());
+
+        let create_defaults = output
+            .queries
+            .first()
+            .expect("expected generated query")
+            .statements
+            .iter()
+            .find_map(|stmt| match stmt {
+                GeneratedStatement::Assignment(assign) => match assign.value.as_ref() {
+                    GeneratedStatement::Traversal(traversal) => match &traversal.traversal_type {
+                        TraversalType::UpsertN {
+                            create_defaults, ..
+                        } => create_defaults.clone(),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("expected UpsertN create defaults");
+
+        assert!(
+            create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "created_at")
+        );
+        assert!(
+            create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "status")
+        );
+        assert!(
+            !create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "email")
+        );
+    }
+
+    #[test]
+    fn test_upsert_e_emits_create_defaults() {
+        let source = r#"
+            N::Person { name: String }
+            N::Company { name: String }
+            E::WorksAt {
+                From: Person,
+                To: Company,
+                Properties: {
+                    since: Date DEFAULT NOW,
+                    role: String DEFAULT "member",
+                }
+            }
+
+            QUERY test(person: ID, company: ID, role: String) =>
+                existing <- E<WorksAt>
+                edge <- existing::UpsertE({role: role})::From(person)::To(company)
+                RETURN edge
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, output) = result.unwrap();
+        assert!(diagnostics.is_empty());
+
+        let create_defaults = output
+            .queries
+            .first()
+            .expect("expected generated query")
+            .statements
+            .iter()
+            .find_map(|stmt| match stmt {
+                GeneratedStatement::Assignment(assign) => match assign.value.as_ref() {
+                    GeneratedStatement::Traversal(traversal) => match &traversal.traversal_type {
+                        TraversalType::UpsertE {
+                            create_defaults, ..
+                        } => create_defaults.clone(),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("expected UpsertE create defaults");
+
+        assert!(
+            create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "since")
+        );
+        assert!(
+            !create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "role")
+        );
+    }
+
+    #[test]
+    fn test_upsert_v_emits_create_defaults() {
+        let source = r#"
+            V::Document {
+                content: String,
+                created_at: Date DEFAULT NOW,
+                category: String DEFAULT "general",
+            }
+
+            QUERY test(vec: [F64], content: String) =>
+                existing <- V<Document>::WHERE(_::{content}::EQ(content))
+                doc <- existing::UpsertV(vec, {content: content})
+                RETURN doc
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, output) = result.unwrap();
+        assert!(diagnostics.is_empty());
+
+        let create_defaults = output
+            .queries
+            .first()
+            .expect("expected generated query")
+            .statements
+            .iter()
+            .find_map(|stmt| match stmt {
+                GeneratedStatement::Assignment(assign) => match assign.value.as_ref() {
+                    GeneratedStatement::Traversal(traversal) => match &traversal.traversal_type {
+                        TraversalType::UpsertV {
+                            create_defaults, ..
+                        } => create_defaults.clone(),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("expected UpsertV create defaults");
+
+        assert!(
+            create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "created_at")
+        );
+        assert!(
+            create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "category")
+        );
+        assert!(
+            !create_defaults
+                .iter()
+                .any(|(field_name, _)| field_name == "content")
+        );
     }
 }
