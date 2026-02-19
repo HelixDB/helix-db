@@ -6,7 +6,10 @@ use crate::{
                 g::G,
                 in_::{in_::InAdapter, in_e::InEdgesAdapter},
                 out::{out::OutAdapter, out_e::OutEdgesAdapter},
-                source::{e_from_type::EFromTypeAdapter, n_from_type::NFromTypeAdapter},
+                source::{
+                    e_from_type::EFromTypeAdapter, n_from_type::NFromTypeAdapter,
+                    v_from_type::VFromTypeAdapter,
+                },
                 util::{order::OrderByAdapter, range::RangeAdapter},
             },
             traversal_iter::RoTraversalIterator,
@@ -55,6 +58,10 @@ pub enum ToolArgs {
     },
     EFromType {
         edge_type: String,
+    },
+    VFromType {
+        vector_type: String,
+        filter: Option<FilterTraversal>,
     },
     FilterItems {
         #[serde(default)]
@@ -301,6 +308,20 @@ where
             Ok(TraversalStream::from_ro_iterator(
                 G::new(storage, txn, arena).e_from_type(label),
             ))
+        }
+        ToolArgs::VFromType {
+            vector_type,
+            filter,
+        } => {
+            let label = arena.alloc_str(vector_type);
+            let transformed = TraversalStream::from_ro_iterator(
+                G::new(storage, txn, arena).v_from_type(label, true),
+            );
+            if let Some(filter) = filter.clone() {
+                apply_filter(transformed, filter)
+            } else {
+                Ok(transformed)
+            }
         }
         ToolArgs::OutStep {
             edge_label,
