@@ -492,7 +492,25 @@ impl HelixParser {
                     });
                 }
                 Rule::pre_filter => {
-                    pre_filter = Some(Box::new(self.parse_expression(p)?));
+                    // Extract the inner expression from PREFILTER(...)
+                    let inner = p.into_inner().next().ok_or_else(|| {
+                        ParserError::from("PREFILTER requires an expression")
+                    })?;
+                    // Handle the inner rule directly (anonymous_traversal or evaluates_to_bool)
+                    let expr = match inner.as_rule() {
+                        Rule::anonymous_traversal => Expression {
+                            loc: inner.loc(),
+                            expr: ExpressionType::Traversal(Box::new(self.parse_anon_traversal(inner)?)),
+                        },
+                        Rule::evaluates_to_bool => {
+                            let bool_inner = inner.into_inner().next().ok_or_else(|| {
+                                ParserError::from("evaluates_to_bool requires inner expression")
+                            })?;
+                            self.parse_expression(bool_inner)?
+                        },
+                        _ => self.parse_expression(inner)?,
+                    };
+                    pre_filter = Some(Box::new(expr));
                 }
                 _ => {
                     return Err(ParserError::from(format!(
