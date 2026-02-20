@@ -1480,7 +1480,7 @@ dependencies = [
  "rand 0.9.1",
  "serde",
  "serde_json",
- "sonic-rs",
+ "sonic-rs 0.5.3",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1522,7 +1522,7 @@ dependencies = [
  "serde",
  "serial_test",
  "sha2",
- "sonic-rs",
+ "sonic-rs 0.5.3",
  "subtle",
  "tempfile",
  "thiserror 2.0.12",
@@ -1533,6 +1533,20 @@ dependencies = [
  "twox-hash",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "helix-lib"
+version = "0.1.0"
+dependencies = [
+ "bumpalo",
+ "bytes",
+ "chrono",
+ "heed3",
+ "helix-db",
+ "helix-macros",
+ "inventory",
+ "sonic-rs 0.3.17",
 ]
 
 [[package]]
@@ -1556,7 +1570,7 @@ dependencies = [
  "num_cpus",
  "reqwest",
  "serde",
- "sonic-rs",
+ "sonic-rs 0.5.3",
  "tokio",
  "uuid",
 ]
@@ -4432,6 +4446,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8a74044c092f4f43ca7a6cfd62854cf9fb5ac8502b131347c990bf22bef1dfe"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "sonic-rs"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0275f9f2f07d47556fe60c2759da8bc4be6083b047b491b2d476aa0bfa558eb1"
+dependencies = [
+ "bumpalo",
+ "bytes",
+ "cfg-if",
+ "faststr",
+ "itoa",
+ "ref-cast",
+ "ryu",
+ "serde",
+ "simdutf8",
+ "sonic-number",
+ "sonic-simd",
+ "thiserror 2.0.12",
 ]
 
 [[package]]

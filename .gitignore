@@ -10,3 +10,5 @@ hack/
 /data
 claude.md
 .cargo/
+*/Cargo.lock
+Cargo.lock
