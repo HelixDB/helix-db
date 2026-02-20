@@ -8,12 +8,12 @@ license = "AGPL-3.0"
 description = "Metrics for HelixDB"
 
 [dependencies]
-reqwest = "0.12.11"
-serde = { version = "1.0", features = ["derive"] }
+reqwest = { workspace = true, features = ["blocking", "json"] } #unified
+serde = { workspace = true } #unified
 sonic-rs = "0.5.3"
-chrono = "0.4"
-uuid = { version = "1.18.0", features = ["v7", "fast-rng"] }
-tokio = { version = "1.39", features = ["full"] }
+chrono = { workspace = true, features = ["serde"] } #unified
+uuid = { workspace = true, features = ["serde", "v4", "v6", "v7"] } #unified
+tokio = { workspace = true } #unified
 async-trait = "0.1.88"
-flume = { version = "0.12.0", default-features = false, features = ["async", "select"] }
-num_cpus = "1.17.0"
+flume = { workspace = true } #unified
+num_cpus = { workspace = true } #unified
