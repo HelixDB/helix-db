@@ -609,6 +609,7 @@ pub enum ExpressionType {
     Or(Vec<Expression>),
     SearchVector(SearchVector),
     BM25Search(BM25Search),
+    SearchHybrid(SearchHybrid),
     MathFunctionCall(MathFunctionCall),
     Empty,
 }
@@ -640,6 +641,7 @@ impl Debug for ExpressionType {
             ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
             ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
             ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
+            ExpressionType::SearchHybrid(sh) => write!(f, "SearchHybrid({sh:?})"),
             ExpressionType::MathFunctionCall(mfc) => write!(f, "MathFunctionCall({mfc:?})"),
             ExpressionType::Empty => write!(f, "Empty"),
         }
@@ -664,6 +666,7 @@ impl Display for ExpressionType {
             ExpressionType::Or(exprs) => write!(f, "Or({exprs:?})"),
             ExpressionType::SearchVector(sv) => write!(f, "SearchVector({sv:?})"),
             ExpressionType::BM25Search(bm25) => write!(f, "BM25Search({bm25:?})"),
+            ExpressionType::SearchHybrid(sh) => write!(f, "SearchHybrid({sh:?})"),
             ExpressionType::MathFunctionCall(mfc) => {
                 write!(f, "{}({:?})", mfc.function.name(), mfc.args)
             }
@@ -702,6 +705,7 @@ pub enum StartNode {
         ids: Option<Vec<IdType>>,
     },
     SearchVector(SearchVector),
+    SearchHybrid(SearchHybrid),
     Identifier(String),
     Anonymous,
 }
@@ -861,6 +865,7 @@ pub enum GraphStepType {
     ShortestPathBFS(ShortestPathBFS),
     ShortestPathAStar(ShortestPathAStar),
     SearchVector(SearchVector),
+    SearchHybrid(SearchHybrid),
 }
 impl GraphStep {
     pub fn get_item_type(&self) -> Option<String> {
@@ -869,7 +874,8 @@ impl GraphStep {
             GraphStepType::In(s) => Some(s.clone()),
             GraphStepType::OutE(s) => Some(s.clone()),
             GraphStepType::InE(s) => Some(s.clone()),
-            GraphStepType::SearchVector(s) => s.vector_type.clone(),
+            GraphStepType::SearchVector(s) => Some(s.vector_type.clone().unwrap()),
+            GraphStepType::SearchHybrid(s) => Some(s.label.clone().unwrap()),
             _ => None,
         }
     }
@@ -979,6 +985,15 @@ pub struct BM25Search {
     pub loc: Loc,
     pub type_arg: Option<String>,
     pub data: Option<ValueType>,
+    pub k: Option<EvaluatesToNumber>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHybrid {
+    pub loc: Loc,
+    pub label: Option<String>,
+    pub vector_data: Option<VectorData>,
+    pub query: Option<ValueType>,
     pub k: Option<EvaluatesToNumber>,
 }
 

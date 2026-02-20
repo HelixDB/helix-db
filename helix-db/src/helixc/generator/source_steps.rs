@@ -38,6 +38,8 @@ pub enum SourceStep {
     SearchVector(SearchVector),
     /// Search for vectors using BM25
     SearchBM25(SearchBM25),
+    /// Search with vectors and BM25
+    SearchHybrid(SearchHybrid),
     Upsert(Upsert),
     /// Traversal starts from an anonymous node
     Anonymous,
@@ -408,6 +410,7 @@ impl Display for SourceStep {
             SourceStep::EFromType(e_from_type) => write!(f, "{e_from_type}"),
             SourceStep::SearchVector(search_vector) => write!(f, "{search_vector}"),
             SourceStep::SearchBM25(search_bm25) => write!(f, "{search_bm25}"),
+            SourceStep::SearchHybrid(search_hybrid) => write!(f, "{search_hybrid}"),
             SourceStep::Upsert(upsert) => write!(f, "upsert({:?})", upsert),
             SourceStep::Anonymous => write!(f, ""),
             SourceStep::Empty => {
@@ -453,6 +456,28 @@ impl Display for SearchVector {
                 self.vec, self.k, self.label,
             ),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchHybrid {
+    /// Label of vector type to search
+    pub label: GenRef<String>,
+    /// Vector data for similarity search
+    pub vec: VecData,
+    /// Query string for BM25 search
+    pub query: GeneratedValue,
+    /// Number of results to return
+    pub k: GeneratedValue,
+}
+
+impl Display for SearchHybrid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "search_hybrid({}, {}, {}, {})?",
+            self.label, self.vec, self.query, self.k
+        )
     }
 }
 

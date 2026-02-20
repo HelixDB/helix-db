@@ -21,7 +21,8 @@ use crate::{
             bool_ops::BoExp,
             queries::Query as GeneratedQuery,
             source_steps::{
-                AddE, AddN, AddV, SearchBM25, SearchVector as GeneratedSearchVector, SourceStep,
+                AddE, AddN, AddV, SearchBM25, SearchHybrid as GeneratedSearchHybrid,
+                SearchVector as GeneratedSearchVector, SourceStep,
             },
             statements::Statement as GeneratedStatement,
             traversal_steps::{
@@ -32,7 +33,7 @@ use crate::{
         },
         parser::types::*,
     },
-    protocol::date::Date,
+    protocol::{date::Date, value::Value},
 };
 use paste::paste;
 use std::collections::HashMap;
@@ -1531,7 +1532,10 @@ pub(crate) fn infer_expr_type<'a>(
             }
             let vec = match &bm25_search.data {
                 Some(ValueType::Literal { value, loc: _ }) => {
-                    GeneratedValue::Literal(GenRef::Std(value.inner_stringify()))
+                    GeneratedValue::Literal(GenRef::Std(match value {
+                        Value::String(s) => format!("\"{s}\""),
+                        other => other.inner_stringify(),
+                    }))
                 }
                 Some(ValueType::Identifier { value: i, loc: _ }) => {
                     is_valid_identifier(ctx, original_query, bm25_search.loc.clone(), i.as_str());
@@ -1643,6 +1647,186 @@ pub(crate) fn infer_expr_type<'a>(
                     steps: vec![],
                     should_collect: ShouldCollect::ToVec,
                     source_step: Separator::Period(SourceStep::SearchBM25(search_bm25)),
+                    ..Default::default()
+                })),
+            )
+        }
+        SearchHybrid(sh) => {
+            if let Some(ref ty) = sh.label
+                && !ctx.vector_set.contains(ty.as_str())
+            {
+                generate_error!(ctx, original_query, sh.loc.clone(), E103, ty.as_str());
+            }
+
+            // Process vector_data (like SearchVector)
+            let vec: VecData = match &sh.vector_data {
+                Some(VectorData::Vector(v)) => {
+                    VecData::Standard(GeneratedValue::Literal(GenRef::Ref(format!(
+                        "[{}]",
+                        v.iter()
+                            .map(|f| f.to_string())
+                            .collect::<Vec<String>>()
+                            .join(",")
+                    ))))
+                }
+                Some(VectorData::Identifier(i)) => {
+                    is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
+                    if let Some(var_type) =
+                        type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str())
+                    {
+                        let expected_type = Type::Array(Box::new(Type::Scalar(FieldType::F64)));
+                        if var_type != expected_type {
+                            generate_error!(
+                                ctx,
+                                original_query,
+                                sh.loc.clone(),
+                                E205,
+                                i.as_str(),
+                                &var_type.to_string(),
+                                "[F64]",
+                                "SearchHybrid",
+                                sh.label.as_deref().unwrap_or("unknown")
+                            );
+                        }
+                    }
+                    VecData::Standard(gen_identifier_or_param(
+                        original_query,
+                        i.as_str(),
+                        true,
+                        false,
+                    ))
+                }
+                Some(VectorData::Embed(e)) => {
+                    let embed_data = match &e.value {
+                        EvaluatesToString::Identifier(i) => {
+                            type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str());
+                            EmbedData {
+                                data: gen_identifier_or_param(
+                                    original_query,
+                                    i.as_str(),
+                                    true,
+                                    false,
+                                ),
+                                model_name: gen_query.embedding_model_to_use.clone(),
+                            }
+                        }
+                        EvaluatesToString::StringLiteral(s) => EmbedData {
+                            data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                            model_name: gen_query.embedding_model_to_use.clone(),
+                        },
+                    };
+                    VecData::Hoisted(gen_query.add_hoisted_embed(embed_data))
+                }
+                _ => {
+                    generate_error!(
+                        ctx,
+                        original_query,
+                        sh.loc.clone(),
+                        E305,
+                        ["vector_data", "SearchHybrid"],
+                        ["vector_data"]
+                    );
+                    VecData::Unknown
+                }
+            };
+
+            // Process query (like BM25Search)
+            let query = match &sh.query {
+                Some(ValueType::Literal { value, loc: _ }) => {
+                    GeneratedValue::Literal(GenRef::Std(match value {
+                        Value::String(s) => format!("\"{s}\""),
+                        other => other.inner_stringify(),
+                    }))
+                }
+                Some(ValueType::Identifier { value: i, loc: _ }) => {
+                    is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
+                    if is_in_scope(scope, i.as_str()) {
+                        gen_identifier_or_param(original_query, i, true, false)
+                    } else {
+                        generate_error!(ctx, original_query, sh.loc.clone(), E301, i.as_str());
+                        GeneratedValue::Unknown
+                    }
+                }
+                _ => {
+                    generate_error!(
+                        ctx,
+                        original_query,
+                        sh.loc.clone(),
+                        E305,
+                        ["query", "SearchHybrid"],
+                        ["query"]
+                    );
+                    GeneratedValue::Unknown
+                }
+            };
+
+            // Process k
+            let k = match &sh.k {
+                Some(k) => match &k.value {
+                    EvaluatesToNumberType::I8(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::I16(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::I32(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::I64(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U8(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U16(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U32(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U64(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U128(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::Identifier(i) => {
+                        is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
+                        type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str());
+                        gen_identifier_or_param(original_query, i, false, false)
+                    }
+                    _ => {
+                        generate_error!(
+                            ctx,
+                            original_query,
+                            sh.loc.clone(),
+                            E305,
+                            ["k", "SearchHybrid"],
+                            ["k"]
+                        );
+                        GeneratedValue::Unknown
+                    }
+                },
+                None => {
+                    generate_error!(ctx, original_query, sh.loc.clone(), E601, &sh.loc.span);
+                    GeneratedValue::Unknown
+                }
+            };
+
+            let search_hybrid = GeneratedSearchHybrid {
+                label: GenRef::Literal(sh.label.clone().unwrap_or_default()),
+                vec,
+                query,
+                k,
+            };
+
+            (
+                Type::Vectors(sh.label.clone()),
+                Some(GeneratedStatement::Traversal(GeneratedTraversal {
+                    traversal_type: TraversalType::Ref,
+                    steps: vec![],
+                    should_collect: ShouldCollect::ToVec,
+                    source_step: Separator::Period(SourceStep::SearchHybrid(search_hybrid)),
                     ..Default::default()
                 })),
             )
