@@ -4,7 +4,7 @@ set -euo pipefail
 # Helix CLI Installer
 # Cross-platform installer for Helix CLI
 
-readonly REPO="HelixDB/helix-db"
+readonly REPO="himanalot/helix-db"
 readonly BINARY_NAME="helix"
 readonly DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
