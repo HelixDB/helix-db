@@ -5,6 +5,7 @@ use crate::project::ProjectContext;
 use crate::sse_client::{SseEvent, SseProgressHandler, parse_sse_event};
 use crate::utils::helixc_utils::{collect_hx_files, generate_content};
 use crate::utils::print_error;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use eyre::{Result, eyre};
 use helix_db::helix_engine::traversal_core::config::Config;
 use reqwest_eventsource::RequestBuilderExt;
@@ -40,6 +41,15 @@ pub fn cloud_base_url() -> String {
 
 pub struct HelixManager<'a> {
     project: &'a ProjectContext,
+}
+
+const QUERY_BIN_VERSION: u32 = 1;
+
+#[derive(serde::Serialize)]
+struct QueryBinEnvelope {
+    version: u32,
+    schema: String,
+    queries: HashMap<String, String>,
 }
 
 impl<'a> HelixManager<'a> {
@@ -211,6 +221,15 @@ impl<'a> HelixManager<'a> {
             }
         }
 
+        let query_bin_payload = QueryBinEnvelope {
+            version: QUERY_BIN_VERSION,
+            schema: schema_content.clone(),
+            queries: queries_map.clone(),
+        };
+        let query_bin_bytes = bincode::serialize(&query_bin_payload)
+            .map_err(|e| eyre!("Failed to serialize queries.bin payload: {e}"))?;
+        let query_bin_b64 = BASE64_STANDARD.encode(&query_bin_bytes);
+
         // Build a pruned HelixConfig containing only [project] and the deployed [cloud.<instance>]
         let helix_toml_content = {
             use crate::config::HelixConfig;
@@ -252,6 +271,7 @@ impl<'a> HelixManager<'a> {
         let payload = json!({
             "schema": schema_content,
             "queries": queries_map,
+            "queries_bin_b64": query_bin_b64,
             "env_vars": cluster_info.env_vars,
             "instance_name": cluster_name,
             "helix_toml": helix_toml_content,

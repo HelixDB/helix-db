@@ -101,6 +101,7 @@ pub async fn run_workspace_project_cluster_flow(
     project_name: &str,
     project_id_hint: Option<&str>,
     credentials: &Credentials,
+    preferred_cluster_name: Option<&str>,
 ) -> Result<WorkspaceProjectClusterFlowResult> {
     let client = reqwest::Client::new();
     let base_url = cloud_base_url();
@@ -138,6 +139,7 @@ pub async fn run_workspace_project_cluster_flow(
                 &base_url,
                 credentials,
                 &resolved_project.id,
+                preferred_cluster_name,
             )
             .await?,
             resolved_project_name: resolved_project.name,
@@ -149,6 +151,7 @@ pub async fn run_workspace_project_cluster_flow(
                 &base_url,
                 credentials,
                 &resolved_project.id,
+                preferred_cluster_name,
             )
             .await?,
             resolved_project_name: resolved_project.name,
@@ -381,9 +384,21 @@ async fn create_standard_cluster_flow(
     base_url: &str,
     credentials: &Credentials,
     project_id: &str,
+    preferred_cluster_name: Option<&str>,
 ) -> Result<ClusterResult> {
-    let cluster_name = prompts::input_cluster_name("prod")?;
-    let build_mode = prompts::select_build_mode()?;
+    let cluster_name = if let Some(name) = preferred_cluster_name {
+        name.to_string()
+    } else if prompts::is_interactive() {
+        prompts::input_cluster_name("prod")?
+    } else {
+        "prod".to_string()
+    };
+
+    let build_mode = if prompts::is_interactive() {
+        prompts::select_build_mode()?
+    } else {
+        BuildMode::Release
+    };
 
     let build_mode_str = match build_mode {
         BuildMode::Dev => "dev",
@@ -428,18 +443,45 @@ async fn create_enterprise_cluster_flow(
     base_url: &str,
     credentials: &Credentials,
     project_id: &str,
+    preferred_cluster_name: Option<&str>,
 ) -> Result<ClusterResult> {
-    let cluster_name = prompts::input_cluster_name("prod")?;
-    let availability_mode = prompts::select_availability_mode()?;
+    let cluster_name = if let Some(name) = preferred_cluster_name {
+        name.to_string()
+    } else if prompts::is_interactive() {
+        prompts::input_cluster_name("prod")?
+    } else {
+        "prod".to_string()
+    };
+
+    let availability_mode = if prompts::is_interactive() {
+        prompts::select_availability_mode()?
+    } else {
+        AvailabilityMode::Dev
+    };
     let is_ha = availability_mode == AvailabilityMode::Ha;
 
-    let gateway_node_type = prompts::select_gateway_node_type(is_ha)?;
-    let db_node_type = prompts::select_db_node_type(is_ha)?;
+    let gateway_node_type = if prompts::is_interactive() {
+        prompts::select_gateway_node_type(is_ha)?
+    } else if is_ha {
+        "GW-40".to_string()
+    } else {
+        "GW-20".to_string()
+    };
 
-    let (min_instances, max_instances) = if is_ha {
+    let db_node_type = if prompts::is_interactive() {
+        prompts::select_db_node_type(is_ha)?
+    } else if is_ha {
+        "HLX-160".to_string()
+    } else {
+        "HLX-40".to_string()
+    };
+
+    let (min_instances, max_instances) = if is_ha && prompts::is_interactive() {
         let min = prompts::input_min_instances()?;
         let max = prompts::input_max_instances(min)?;
         (min, max)
+    } else if is_ha {
+        (3, 3)
     } else {
         (1, 1)
     };
@@ -455,7 +497,7 @@ async fn create_enterprise_cluster_flow(
     }
     println!();
 
-    if !prompts::confirm("Create this enterprise cluster?")? {
+    if prompts::is_interactive() && !prompts::confirm("Create this enterprise cluster?")? {
         return Err(eyre!("Cluster creation cancelled"));
     }
 

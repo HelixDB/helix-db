@@ -8,6 +8,7 @@ use crate::commands::auth::require_auth;
 use crate::commands::feedback::FeedbackType;
 use crate::commands::integrations::fly::VmSize;
 use eyre::Result;
+use std::path::Path;
 
 /// Deployment type options for interactive selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +151,10 @@ pub fn confirm(message: &str) -> Result<bool> {
     Ok(result)
 }
 
+pub fn confirm_overwrite(path: &Path) -> Result<bool> {
+    confirm(&format!("File '{}' exists. Overwrite it?", path.display()))
+}
+
 /// Prompt user to enter an instance name
 pub fn input_instance_name(default: &str) -> Result<String> {
     let name: String = cliclack::input("Instance name")
@@ -225,7 +230,9 @@ pub async fn build_deployment_command(
 
 /// Build a CloudDeploymentTypeCommand for the init command
 /// Returns None for local deployment (the default)
-pub async fn build_init_deployment_command() -> Result<Option<CloudDeploymentTypeCommand>> {
+pub async fn build_init_deployment_command(
+    default_name: &str,
+) -> Result<Option<CloudDeploymentTypeCommand>> {
     let deployment_type = select_deployment_type()?;
 
     if matches!(deployment_type, DeploymentType::HelixCloud) {
@@ -239,23 +246,30 @@ pub async fn build_init_deployment_command() -> Result<Option<CloudDeploymentTyp
         }
         DeploymentType::HelixCloud => {
             let region = select_region()?;
+            let instance_name = input_instance_name(default_name)?;
             Ok(Some(CloudDeploymentTypeCommand::Helix {
                 region: Some(region),
-                name: None,
+                name: Some(instance_name),
             }))
         }
-        DeploymentType::Ecr => Ok(Some(CloudDeploymentTypeCommand::Ecr { name: None })),
+        DeploymentType::Ecr => {
+            let instance_name = input_instance_name(default_name)?;
+            Ok(Some(CloudDeploymentTypeCommand::Ecr {
+                name: Some(instance_name),
+            }))
+        }
         DeploymentType::Fly => {
             let vm_size = select_fly_vm_size()?;
             let volume_size = input_fly_volume_size()?;
             let private = confirm("Make deployment private (internal network only)?")?;
+            let instance_name = input_instance_name(default_name)?;
 
             Ok(Some(CloudDeploymentTypeCommand::Fly {
                 auth: "cli".to_string(),
                 volume_size,
                 vm_size: vm_size.as_str().to_string(),
                 private,
-                name: None,
+                name: Some(instance_name),
             }))
         }
     }
