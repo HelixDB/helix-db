@@ -74,7 +74,7 @@ pub enum DashboardAction {
     Status,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum CloudDeploymentTypeCommand {
     /// Initialize Helix Cloud deployment
     #[command(name = "cloud")]

@@ -1429,6 +1429,8 @@ name = "helix-cli"
 version = "2.3.0"
 dependencies = [
  "async-trait",
+ "base64",
+ "bincode",
  "chrono",
  "clap",
  "cliclack",

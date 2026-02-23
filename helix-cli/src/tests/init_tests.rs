@@ -427,3 +427,68 @@ async fn test_init_multiple_times_in_different_dirs() {
     assert!(project1.join("helix.toml").exists());
     assert!(project2.join("helix.toml").exists());
 }
+
+#[tokio::test]
+async fn test_init_local_name_is_honored() {
+    let temp_dir = setup_test_dir();
+    let project_path = temp_dir.path().to_path_buf();
+
+    let result = run(
+        Some(project_path.to_str().unwrap().to_string()),
+        "default".to_string(),
+        "queries".to_string(),
+        Some(crate::CloudDeploymentTypeCommand::Local {
+            name: Some("localdev".to_string()),
+        }),
+    )
+    .await;
+
+    assert!(result.is_ok(), "Init should succeed");
+
+    let config_content =
+        fs::read_to_string(project_path.join("helix.toml")).expect("Failed to read config");
+
+    assert!(
+        config_content.contains("[local.localdev]"),
+        "Config should contain the requested local instance name"
+    );
+    assert!(
+        !config_content.contains("[local.dev]"),
+        "Default dev instance should be replaced when --name is provided for local init"
+    );
+}
+
+#[tokio::test]
+async fn test_init_preserves_existing_scaffold_files_non_interactive() {
+    let temp_dir = setup_test_dir();
+    let project_path = temp_dir.path().to_path_buf();
+    let queries_dir = project_path.join("queries");
+
+    fs::create_dir_all(&queries_dir).expect("Failed to create queries dir");
+    fs::write(queries_dir.join("schema.hx"), "// custom schema\n").expect("Failed to write schema");
+    fs::write(queries_dir.join("queries.hx"), "// custom queries\n")
+        .expect("Failed to write queries");
+    fs::write(project_path.join(".gitignore"), "custom-ignore\n")
+        .expect("Failed to write gitignore");
+
+    let result = run(
+        Some(project_path.to_str().unwrap().to_string()),
+        "default".to_string(),
+        "queries".to_string(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Init should succeed even with existing files"
+    );
+
+    let schema = fs::read_to_string(queries_dir.join("schema.hx")).expect("Read schema");
+    let queries = fs::read_to_string(queries_dir.join("queries.hx")).expect("Read queries");
+    let gitignore = fs::read_to_string(project_path.join(".gitignore")).expect("Read gitignore");
+
+    assert_eq!(schema, "// custom schema\n");
+    assert_eq!(queries, "// custom queries\n");
+    assert_eq!(gitignore, "custom-ignore\n");
+}

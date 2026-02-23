@@ -110,6 +110,7 @@ async fn run_add_inner(
                 project_name,
                 project_context.config.project.id.as_deref(),
                 &credentials,
+                Some(&instance_name),
             )
             .await?;
 
