@@ -1,5 +1,7 @@
 // CLI test modules
 #[cfg(test)]
+pub mod ai_setup_tests;
+#[cfg(test)]
 pub mod check_tests;
 #[cfg(test)]
 pub mod compile_tests;

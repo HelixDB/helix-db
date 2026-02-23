@@ -17,6 +17,32 @@ pub mod update;
 pub mod utils;
 
 #[derive(Subcommand)]
+pub enum AiAction {
+    /// Generate AI setup files and skills for your project
+    Setup {
+        /// Project directory (defaults to detected project root or current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+
+        /// Comma-separated agent targets: claude,cursor,copilot,codex,all
+        #[arg(long)]
+        agents: Option<String>,
+
+        /// Skip interactive prompts
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Overwrite existing managed files
+        #[arg(long)]
+        force: bool,
+
+        /// Copy the generated setup prompt to clipboard
+        #[arg(long)]
+        copy_prompt: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum AuthAction {
     /// Login to Helix cloud
     Login,

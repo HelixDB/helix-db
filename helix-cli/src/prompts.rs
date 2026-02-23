@@ -8,6 +8,7 @@ use crate::commands::auth::require_auth;
 use crate::commands::feedback::FeedbackType;
 use crate::commands::integrations::fly::VmSize;
 use eyre::Result;
+use std::path::Path;
 
 /// Deployment type options for interactive selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +149,19 @@ pub fn input_fly_volume_size() -> Result<u16> {
 pub fn confirm(message: &str) -> Result<bool> {
     let result = cliclack::confirm(message).interact()?;
     Ok(result)
+}
+
+
+pub fn confirm_overwrite(path: &Path) -> Result<bool> {
+    confirm(&format!("File '{}' exists. Overwrite it?", path.display()))
+}
+
+pub fn confirm_generate_ai_setup() -> Result<bool> {
+    confirm("Generate AI setup files now?")
+}
+
+pub fn confirm_copy_ai_prompt() -> Result<bool> {
+    confirm("Copy AI setup prompt to clipboard?")
 }
 
 /// Prompt user to enter an instance name

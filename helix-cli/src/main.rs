@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use color_eyre::owo_colors::OwoColorize;
 use eyre::Result;
-use helix_cli::{AuthAction, CloudDeploymentTypeCommand, DashboardAction, MetricsAction};
+use helix_cli::{AiAction, AuthAction, CloudDeploymentTypeCommand, DashboardAction, MetricsAction};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use tui_banner::{Align, Banner, ColorMode, Fill, Gradient, Palette};
@@ -52,8 +52,26 @@ enum Commands {
         #[arg(short, long = "queries-path", default_value = "./db/")]
         queries_path: String,
 
+        /// Generate AI onboarding files after init
+        #[arg(long)]
+        ai: bool,
+
+        /// Comma-separated agent targets for --ai: claude,cursor,copilot,codex,all
+        #[arg(long)]
+        ai_agents: Option<String>,
+
+        /// Copy generated AI setup prompt to clipboard
+        #[arg(long)]
+        ai_copy_prompt: bool,
+
         #[command(subcommand)]
         cloud: Option<CloudDeploymentTypeCommand>,
+    },
+
+    /// AI onboarding utilities
+    Ai {
+        #[command(subcommand)]
+        action: AiAction,
     },
 
     /// Add a new instance to an existing Helix project
@@ -309,6 +327,11 @@ fn display_welcome(update_available: Option<String>) {
     );
     print_command("helix build", "Build your project", use_color);
     print_command("helix push", "Deploy/start an instance", use_color);
+    print_command(
+        "helix ai setup",
+        "Generate AI skills and prompts",
+        use_color,
+    );
 
     println!();
     println!(
@@ -402,8 +425,23 @@ async fn main() -> Result<()> {
                 path,
                 template,
                 queries_path,
+                ai,
+                ai_agents,
+                ai_copy_prompt,
                 cloud,
-            } => commands::init::run(path, template, queries_path, cloud).await,
+            } => {
+                commands::init::run_with_ai(
+                    path,
+                    template,
+                    queries_path,
+                    cloud,
+                    ai,
+                    ai_agents,
+                    ai_copy_prompt,
+                )
+                .await
+            }
+            Commands::Ai { action } => commands::ai::run(action).await,
             Commands::Add { cloud } => commands::add::run(cloud).await,
             Commands::Check { instance } => commands::check::run(instance, &metrics_sender).await,
             Commands::Compile { output, path } => commands::compile::run(output, path).await,

@@ -18,11 +18,33 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+#[allow(dead_code)]
 pub async fn run(
+    path: Option<String>,
+    template: String,
+    queries_path: String,
+    deployment_type: Option<CloudDeploymentTypeCommand>,
+) -> Result<()> {
+    run_with_ai(
+        path,
+        template,
+        queries_path,
+        deployment_type,
+        false,
+        None,
+        false,
+    )
+    .await
+}
+
+pub async fn run_with_ai(
     path: Option<String>,
     _template: String,
     queries_path: String,
     deployment_type: Option<CloudDeploymentTypeCommand>,
+    ai: bool,
+    ai_agents: Option<String>,
+    ai_copy_prompt: bool,
 ) -> Result<()> {
     let mut cleanup_tracker = CleanupTracker::new();
 
@@ -32,6 +54,9 @@ pub async fn run(
         _template,
         queries_path,
         deployment_type,
+        ai,
+        ai_agents,
+        ai_copy_prompt,
         &mut cleanup_tracker,
     )
     .await;
@@ -53,6 +78,9 @@ async fn run_init_inner(
     _template: String,
     queries_path: String,
     deployment_type: Option<CloudDeploymentTypeCommand>,
+    ai: bool,
+    ai_agents: Option<String>,
+    ai_copy_prompt: bool,
     cleanup_tracker: &mut CleanupTracker,
 ) -> Result<()> {
     let project_dir = match path {
@@ -260,6 +288,30 @@ async fn run_init_inner(
             "Run 'helix push dev' to start your development instance",
         ],
     );
+
+    let interactive = prompts::is_interactive();
+    let should_run_ai_setup = if ai {
+        true
+    } else if interactive {
+        prompts::confirm_generate_ai_setup()?
+    } else {
+        false
+    };
+
+    if should_run_ai_setup {
+        if let Err(err) = crate::commands::ai::setup(crate::commands::ai::SetupOptions {
+            path: Some(project_dir.to_string_lossy().to_string()),
+            agents: ai_agents,
+            yes: !interactive,
+            force: false,
+            copy_prompt: ai_copy_prompt,
+        }) {
+            crate::output::warning(&format!(
+                "Project initialized, but AI setup failed: {}",
+                err
+            ));
+        }
+    }
 
     Ok(())
 }
