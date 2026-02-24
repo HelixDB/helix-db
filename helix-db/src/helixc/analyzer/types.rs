@@ -227,9 +227,9 @@ impl From<DefaultValue> for GeneratedValue {
             DefaultValue::U64(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
             DefaultValue::U128(i) => GeneratedValue::Primitive(GenRef::Std(i.to_string())),
             DefaultValue::Boolean(b) => GeneratedValue::Primitive(GenRef::Std(b.to_string())),
-            DefaultValue::Now => GeneratedValue::Primitive(GenRef::Std(
-                "chrono::Utc::now()".to_string(),
-            )),
+            DefaultValue::Now => {
+                GeneratedValue::Primitive(GenRef::Std("chrono::Utc::now()".to_string()))
+            }
             DefaultValue::Empty => GeneratedValue::Unknown,
         }
     }

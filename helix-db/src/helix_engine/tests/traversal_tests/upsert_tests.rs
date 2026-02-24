@@ -1309,8 +1309,8 @@ fn test_upsert_e_creates_edge_between_correct_nodes_issue_850() {
         &arena,
     )
     .upsert_e("knows", node_c, node_d, &[("since", Value::from(2024))])
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
 
     assert_eq!(result.len(), 1);
     if let TraversalValue::Edge(edge) = &result[0] {
@@ -1654,12 +1654,7 @@ fn test_upsert_e_idempotent_same_triple_no_duplicate() {
         std::iter::empty::<TraversalValue>(),
         &arena,
     )
-    .upsert_e(
-        "knows",
-        node_a,
-        node_b,
-        &[("version", Value::from(1))],
-    )
+    .upsert_e("knows", node_a, node_b, &[("version", Value::from(1))])
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
     let first_id = first[0].id();
@@ -1671,12 +1666,7 @@ fn test_upsert_e_idempotent_same_triple_no_duplicate() {
         std::iter::empty::<TraversalValue>(),
         &arena,
     )
-    .upsert_e(
-        "knows",
-        node_a,
-        node_b,
-        &[("version", Value::from(2))],
-    )
+    .upsert_e("knows", node_a, node_b, &[("version", Value::from(2))])
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
     let second_id = second[0].id();
@@ -1826,10 +1816,7 @@ fn test_upsert_e_persisted_after_commit() {
         assert_eq!(e.label, "works_with");
         assert_eq!(e.from_node, source_id);
         assert_eq!(e.to_node, target_id);
-        assert_eq!(
-            e.get_property("project").unwrap(),
-            &Value::from("helix")
-        );
+        assert_eq!(e.get_property("project").unwrap(), &Value::from("helix"));
         assert_eq!(e.get_property("role").unwrap(), &Value::from("lead"));
     } else {
         panic!("Expected edge");
@@ -2053,10 +2040,7 @@ fn test_upsert_v_multiple_sequential_upserts() {
     if let TraversalValue::Vector(v) = &v3[0] {
         assert_eq!(v.get_property("model").unwrap(), &Value::from("v2")); // from first upsert
         assert_eq!(v.get_property("dim").unwrap(), &Value::from(3)); // from insert (preserved)
-        assert_eq!(
-            v.get_property("source").unwrap(),
-            &Value::from("anthropic")
-        ); // overwritten
+        assert_eq!(v.get_property("source").unwrap(), &Value::from("anthropic")); // overwritten
         assert_eq!(
             v.get_property("timestamp").unwrap(),
             &Value::from(1700000000)
@@ -2108,7 +2092,10 @@ fn test_upsert_e_between_different_node_labels() {
         "works_at",
         person_id,
         company_id,
-        &[("role", Value::from("engineer")), ("since", Value::from(2023))],
+        &[
+            ("role", Value::from("engineer")),
+            ("since", Value::from(2023)),
+        ],
     )
     .collect::<Result<Vec<_>, _>>()
     .unwrap();

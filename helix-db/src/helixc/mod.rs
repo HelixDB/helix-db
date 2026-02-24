@@ -6,3 +6,6 @@
 pub mod analyzer;
 pub mod generator;
 pub mod parser;
+
+#[cfg(test)]
+mod parity_snapshots;

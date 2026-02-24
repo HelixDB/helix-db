@@ -58,13 +58,10 @@ impl Loc {
 pub trait HasLoc {
     fn loc(&self) -> Loc;
 
-    fn loc_with_filepath(&self, filepath: String) -> Loc {
-        Loc::new(
-            Some(filepath),
-            self.loc().start,
-            self.loc().end,
-            self.loc().span,
-        )
+    fn loc_with_filepath<S: Into<String>>(&self, filepath: S) -> Loc {
+        let mut loc = self.loc();
+        loc.filepath = Some(filepath.into());
+        loc
     }
 }
 impl<'a> HasLoc for Pair<'a, Rule> {
@@ -75,5 +72,40 @@ impl<'a> HasLoc for Pair<'a, Rule> {
             Span::from_pos(&self.as_span().end_pos()),
             self.as_span().as_str().to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HasLoc;
+    use crate::helixc::parser::{HelixParser, Rule};
+    use pest::Parser;
+
+    #[test]
+    fn loc_reports_byte_range_and_span() {
+        let pair = HelixParser::parse(Rule::identifier, "user_name")
+            .expect("identifier should parse")
+            .next()
+            .expect("pair should exist");
+
+        let loc = pair.loc();
+        assert_eq!(loc.byte_range(), 0..9);
+        assert_eq!(loc.span, "user_name");
+        assert!(loc.filepath.is_none());
+    }
+
+    #[test]
+    fn loc_with_filepath_preserves_location_fields() {
+        let pair = HelixParser::parse(Rule::identifier, "hello")
+            .expect("identifier should parse")
+            .next()
+            .expect("pair should exist");
+
+        let loc = pair.loc_with_filepath("query.hx");
+        assert_eq!(loc.filepath.as_deref(), Some("query.hx"));
+        assert_eq!(loc.byte_range(), 0..5);
+        assert_eq!(loc.span, "hello");
+        assert_eq!(loc.start.line, 1);
+        assert_eq!(loc.end.line, 1);
     }
 }

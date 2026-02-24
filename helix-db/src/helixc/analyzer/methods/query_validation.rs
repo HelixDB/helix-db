@@ -19,7 +19,10 @@ use crate::helixc::{
         },
         source_steps::SourceStep,
         statements::Statement as GeneratedStatement,
-        traversal_steps::{ShouldCollect, Traversal as GeneratedTraversal},
+        traversal_steps::{
+            ComputedExpressionInfo, NestedTraversalInfo, ShouldCollect,
+            Traversal as GeneratedTraversal,
+        },
     },
     parser::{location::Loc, types::*},
 };
@@ -35,12 +38,296 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
+struct ProjectionMetadataRef<'a> {
+    has_object_step: bool,
+    object_fields: &'a [String],
+    has_spread: bool,
+    excluded_fields: &'a [String],
+    field_name_mappings: &'a HashMap<String, String>,
+    nested_traversals: &'a HashMap<String, NestedTraversalInfo>,
+    computed_expressions: &'a HashMap<String, ComputedExpressionInfo>,
+}
+
+fn projection_metadata_from_traversal<'a>(
+    traversal: &'a GeneratedTraversal,
+) -> ProjectionMetadataRef<'a> {
+    ProjectionMetadataRef {
+        has_object_step: traversal.has_object_step,
+        object_fields: &traversal.object_fields,
+        has_spread: traversal.has_spread,
+        excluded_fields: &traversal.excluded_fields,
+        field_name_mappings: &traversal.field_name_mappings,
+        nested_traversals: &traversal.nested_traversals,
+        computed_expressions: &traversal.computed_expressions,
+    }
+}
+
+#[derive(Clone)]
+struct ProjectionMetadataOwned {
+    has_object_step: bool,
+    object_fields: Vec<String>,
+    has_spread: bool,
+    excluded_fields: Vec<String>,
+    field_name_mappings: HashMap<String, String>,
+    nested_traversals: HashMap<String, NestedTraversalInfo>,
+    computed_expressions: HashMap<String, ComputedExpressionInfo>,
+}
+
+impl ProjectionMetadataOwned {
+    fn empty() -> Self {
+        Self {
+            has_object_step: false,
+            object_fields: Vec::new(),
+            has_spread: false,
+            excluded_fields: Vec::new(),
+            field_name_mappings: HashMap::new(),
+            nested_traversals: HashMap::new(),
+            computed_expressions: HashMap::new(),
+        }
+    }
+
+    fn as_ref(&self) -> ProjectionMetadataRef<'_> {
+        ProjectionMetadataRef {
+            has_object_step: self.has_object_step,
+            object_fields: &self.object_fields,
+            has_spread: self.has_spread,
+            excluded_fields: &self.excluded_fields,
+            field_name_mappings: &self.field_name_mappings,
+            nested_traversals: &self.nested_traversals,
+            computed_expressions: &self.computed_expressions,
+        }
+    }
+}
+
+impl From<&GeneratedTraversal> for ProjectionMetadataOwned {
+    fn from(value: &GeneratedTraversal) -> Self {
+        Self {
+            has_object_step: value.has_object_step,
+            object_fields: value.object_fields.clone(),
+            has_spread: value.has_spread,
+            excluded_fields: value.excluded_fields.clone(),
+            field_name_mappings: value.field_name_mappings.clone(),
+            nested_traversals: value.nested_traversals.clone(),
+            computed_expressions: value.computed_expressions.clone(),
+        }
+    }
+}
+
+impl From<&VariableInfo> for ProjectionMetadataOwned {
+    fn from(value: &VariableInfo) -> Self {
+        Self {
+            has_object_step: value.has_object_step,
+            object_fields: value.object_fields.clone(),
+            has_spread: value.has_spread,
+            excluded_fields: value.excluded_fields.clone(),
+            field_name_mappings: value.field_name_mappings.clone(),
+            nested_traversals: value.nested_traversals.clone(),
+            computed_expressions: value.computed_expressions.clone(),
+        }
+    }
+}
+
+struct ReturnIr {
+    field_name: String,
+    inferred_type: Type,
+    should_collect: ShouldCollect,
+    source_variable: String,
+    projection: ProjectionMetadataOwned,
+    is_reused_variable: bool,
+    is_collection: bool,
+    closure_param_name: Option<String>,
+    aggregate_properties: Vec<String>,
+    is_count_aggregate: bool,
+    legacy_literal_value: Option<GenRef<String>>,
+}
+
+fn return_ir_from_traversal(
+    field_name: String,
+    inferred_type: &Type,
+    traversal: &GeneratedTraversal,
+    legacy_literal_value: Option<GenRef<String>>,
+) -> ReturnIr {
+    let (aggregate_properties, is_count_aggregate) = match inferred_type {
+        Type::Aggregate(info) => (info.properties.clone(), info.is_count),
+        _ => (Vec::new(), false),
+    };
+
+    ReturnIr {
+        source_variable: field_name.clone(),
+        field_name,
+        inferred_type: inferred_type.clone(),
+        should_collect: traversal.should_collect.clone(),
+        projection: ProjectionMetadataOwned::from(traversal),
+        is_reused_variable: traversal.is_reused_variable,
+        is_collection: matches!(
+            inferred_type,
+            Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_)
+        ),
+        closure_param_name: traversal.closure_param_name.clone(),
+        aggregate_properties,
+        is_count_aggregate,
+        legacy_literal_value,
+    }
+}
+
+fn return_ir_from_identifier(
+    field_name: String,
+    inferred_type: Type,
+    variable_info: Option<&VariableInfo>,
+) -> ReturnIr {
+    ReturnIr {
+        source_variable: field_name.clone(),
+        field_name,
+        should_collect: ShouldCollect::No,
+        inferred_type,
+        projection: variable_info
+            .map(ProjectionMetadataOwned::from)
+            .unwrap_or_else(ProjectionMetadataOwned::empty),
+        is_reused_variable: variable_info.is_some_and(|v| v.reference_count > 1),
+        is_collection: variable_info.is_some_and(|v| !v.is_single),
+        closure_param_name: None,
+        aggregate_properties: Vec::new(),
+        is_count_aggregate: false,
+        legacy_literal_value: None,
+    }
+}
+
+fn emit_return_from_ir(ctx: &Ctx, query: &mut GeneratedQuery, return_ir: ReturnIr) {
+    let (rust_type, fields) = type_to_rust_string_and_fields(
+        &return_ir.inferred_type,
+        &return_ir.should_collect,
+        ctx,
+        &return_ir.field_name,
+    );
+
+    query.return_values.push((
+        return_ir.field_name.clone(),
+        ReturnValue {
+            name: rust_type,
+            fields,
+            literal_value: return_ir.legacy_literal_value.clone(),
+        },
+    ));
+
+    if matches!(
+        return_ir.inferred_type,
+        Type::Boolean | Type::Scalar(_) | Type::Count
+    ) {
+        let mut prim_struct = ReturnValueStruct::new(return_ir.field_name.clone());
+        prim_struct.source_variable = return_ir.source_variable;
+        prim_struct.is_primitive = true;
+        prim_struct.primitive_literal_value = return_ir.legacy_literal_value;
+        query.return_structs.push(prim_struct);
+        return;
+    }
+
+    let struct_name_prefix = format!(
+        "{}{}",
+        capitalize_first(&query.name),
+        capitalize_first(&return_ir.field_name)
+    );
+    let projection = return_ir.projection.as_ref();
+    let return_fields = build_return_fields(
+        ctx,
+        &return_ir.inferred_type,
+        &projection,
+        &struct_name_prefix,
+    );
+    let struct_name = format!("{}ReturnType", struct_name_prefix);
+
+    let (is_aggregate, is_group_by) = match &return_ir.inferred_type {
+        Type::Aggregate(info) => (true, info.is_group_by),
+        _ => (false, false),
+    };
+
+    query
+        .return_structs
+        .push(ReturnValueStruct::from_return_fields(
+            struct_name,
+            return_fields,
+            return_ir.source_variable,
+            return_ir.is_collection,
+            return_ir.is_reused_variable,
+            is_aggregate,
+            is_group_by,
+            return_ir.aggregate_properties,
+            return_ir.is_count_aggregate,
+            return_ir.closure_param_name,
+        ));
+}
+
+fn scalar_property_literal_from_traversal(
+    inferred_type: &Type,
+    traversal: &GeneratedTraversal,
+    field_name: &str,
+) -> Option<GenRef<String>> {
+    if !matches!(inferred_type, Type::Scalar(_)) || traversal.object_fields.is_empty() {
+        return None;
+    }
+
+    let property_name = &traversal.object_fields[0];
+    match traversal.should_collect {
+        ShouldCollect::ToObj => {
+            if property_name == "id" {
+                Some(GenRef::Std(format!(
+                    "uuid_str({}.id(), &arena)",
+                    field_name
+                )))
+            } else if property_name == "label" {
+                Some(GenRef::Std(format!("{}.label()", field_name)))
+            } else {
+                Some(GenRef::Std(format!(
+                    "{}.get_property(\"{}\")",
+                    field_name, property_name
+                )))
+            }
+        }
+        ShouldCollect::ToVec => {
+            let iter_code = if property_name == "id" {
+                format!(
+                    "{}.iter().map(|item| uuid_str(item.id(), &arena)).collect::<Vec<_>>()",
+                    field_name
+                )
+            } else if property_name == "label" {
+                format!(
+                    "{}.iter().map(|item| item.label()).collect::<Vec<_>>()",
+                    field_name
+                )
+            } else {
+                format!(
+                    "{}.iter().map(|item| item.get_property(\"{}\")).collect::<Vec<_>>()",
+                    field_name, property_name
+                )
+            };
+            Some(GenRef::Std(iter_code))
+        }
+        _ => None,
+    }
+}
+
+fn emit_literal_return(query: &mut GeneratedQuery, field_name: String, literal: GenRef<String>) {
+    query.return_values.push((
+        field_name.clone(),
+        ReturnValue {
+            name: "Value".to_string(),
+            fields: vec![],
+            literal_value: Some(literal.clone()),
+        },
+    ));
+
+    let mut prim_struct = ReturnValueStruct::new(field_name.clone());
+    prim_struct.source_variable = field_name;
+    prim_struct.is_primitive = true;
+    prim_struct.primitive_literal_value = Some(literal);
+    query.return_structs.push(prim_struct);
+}
+
 /// Build unified field list for return types
 /// This handles all cases: simple schema, projections, spread, nested traversals
 fn build_return_fields(
     ctx: &Ctx,
     inferred_type: &Type,
-    traversal: &GeneratedTraversal,
+    projection: &ProjectionMetadataRef<'_>,
     struct_name_prefix: &str,
 ) -> Vec<ReturnFieldInfo> {
     let mut fields = Vec::new();
@@ -90,7 +377,7 @@ fn build_return_fields(
             let item_fields = build_return_fields(
                 ctx,
                 info.source_type.as_ref(),
-                traversal,
+                projection,
                 &items_struct_name,
             );
 
@@ -130,8 +417,8 @@ fn build_return_fields(
         // e.g., for property "id", might return Some("file_id") if there's a mapping file_id -> ID
         let find_output_for_property = |property: &str| -> Option<String> {
             // First check if any object_field maps to this property via field_name_mappings
-            for output_name in &traversal.object_fields {
-                if let Some(prop) = traversal.field_name_mappings.get(output_name)
+            for output_name in projection.object_fields {
+                if let Some(prop) = projection.field_name_mappings.get(output_name)
                     && prop.to_lowercase() == property.to_lowercase()
                 {
                     return Some(output_name.clone());
@@ -148,12 +435,12 @@ fn build_return_fields(
         // Otherwise, add all implicit fields (default behavior)
         let should_add_field = |field_name: &str| {
             // Exclude if field is in excluded_fields
-            if traversal.excluded_fields.contains(&field_name.to_string()) {
+            if projection.excluded_fields.contains(&field_name.to_string()) {
                 return false;
             }
             // If has object step, only include if explicitly selected (possibly with remapping) OR has_spread
-            if traversal.has_object_step {
-                find_output_for_property(field_name).is_some() || traversal.has_spread
+            if projection.has_object_step {
+                find_output_for_property(field_name).is_some() || projection.has_spread
             } else {
                 true
             }
@@ -176,7 +463,7 @@ fn build_return_fields(
                         RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
                     ));
                 }
-            } else if !traversal.has_object_step || traversal.has_spread {
+            } else if !projection.has_object_step || projection.has_spread {
                 // No object step or has spread means return all fields
                 fields.push(ReturnFieldInfo::new_implicit(
                     "id".to_string(),
@@ -198,7 +485,7 @@ fn build_return_fields(
                         RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
                     ));
                 }
-            } else if !traversal.has_object_step || traversal.has_spread {
+            } else if !projection.has_object_step || projection.has_spread {
                 fields.push(ReturnFieldInfo::new_implicit(
                     "label".to_string(),
                     RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
@@ -222,7 +509,7 @@ fn build_return_fields(
                             RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
                         ));
                     }
-                } else if !traversal.has_object_step || traversal.has_spread {
+                } else if !projection.has_object_step || projection.has_spread {
                     fields.push(ReturnFieldInfo::new_implicit(
                         "from_node".to_string(),
                         RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
@@ -243,7 +530,7 @@ fn build_return_fields(
                             RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
                         ));
                     }
-                } else if !traversal.has_object_step || traversal.has_spread {
+                } else if !projection.has_object_step || projection.has_spread {
                     fields.push(ReturnFieldInfo::new_implicit(
                         "to_node".to_string(),
                         RustFieldType::Primitive(GenRef::RefLT("a", RustType::Str)),
@@ -265,7 +552,7 @@ fn build_return_fields(
                             RustFieldType::RefArray(RustType::F64),
                         ));
                     }
-                } else if !traversal.has_object_step || traversal.has_spread {
+                } else if !projection.has_object_step || projection.has_spread {
                     fields.push(ReturnFieldInfo::new_implicit(
                         "data".to_string(),
                         RustFieldType::RefArray(RustType::F64),
@@ -286,7 +573,7 @@ fn build_return_fields(
                             RustFieldType::Primitive(GenRef::Std(RustType::F64)),
                         ));
                     }
-                } else if !traversal.has_object_step || traversal.has_spread {
+                } else if !projection.has_object_step || projection.has_spread {
                     fields.push(ReturnFieldInfo::new_implicit(
                         "score".to_string(),
                         RustFieldType::Primitive(GenRef::Std(RustType::F64)),
@@ -313,21 +600,21 @@ fn build_return_fields(
         };
 
         if let Some(schema_fields) = schema_fields {
-            if traversal.has_object_step {
+            if projection.has_object_step {
                 // Projection mode - only include selected fields
-                for field_name in &traversal.object_fields {
+                for field_name in projection.object_fields {
                     // Skip if it's a nested traversal (handled separately)
-                    if traversal.nested_traversals.contains_key(field_name) {
+                    if projection.nested_traversals.contains_key(field_name) {
                         continue;
                     }
 
                     // Skip if it's a computed expression (handled separately)
-                    if traversal.computed_expressions.contains_key(field_name) {
+                    if projection.computed_expressions.contains_key(field_name) {
                         continue;
                     }
 
                     // Look up the actual property name from the mapping
-                    let property_name = traversal
+                    let property_name = projection
                         .field_name_mappings
                         .get(field_name)
                         .unwrap_or(field_name);
@@ -355,17 +642,17 @@ fn build_return_fields(
                 }
 
                 // If has_spread, add all remaining schema fields
-                if traversal.has_spread {
+                if projection.has_spread {
                     for (field_name, _field) in schema_fields.iter() {
                         // Skip if output name already exists
                         let already_exists = fields.iter().any(|f| f.name == *field_name);
                         // Skip if this source property was remapped to a different output name
-                        let already_remapped = traversal
+                        let already_remapped = projection
                             .field_name_mappings
                             .values()
                             .any(|source_prop| source_prop == field_name);
                         let already_covered_by_nested =
-                            traversal.nested_traversals.values().any(|info| {
+                            projection.nested_traversals.values().any(|info| {
                                 info.traversal
                                     .object_fields
                                     .iter()
@@ -375,7 +662,7 @@ fn build_return_fields(
                             continue;
                         }
                         // Skip if excluded
-                        if traversal.excluded_fields.contains(&field_name.to_string()) {
+                        if projection.excluded_fields.contains(&field_name.to_string()) {
                             continue;
                         }
 
@@ -417,7 +704,7 @@ fn build_return_fields(
                         continue;
                     }
                     // Skip if excluded
-                    if traversal.excluded_fields.contains(&field_name.to_string()) {
+                    if projection.excluded_fields.contains(&field_name.to_string()) {
                         continue;
                     }
                     fields.push(ReturnFieldInfo::new_schema(
@@ -430,7 +717,7 @@ fn build_return_fields(
     }
 
     // Step 3: Add nested traversals
-    for (field_name, nested_info) in &traversal.nested_traversals {
+    for (field_name, nested_info) in projection.nested_traversals {
         // For nested traversals, extract the return type and build nested fields
         if let Some(ref return_type) = nested_info.return_type {
             // Check if this is a scalar type or needs a struct
@@ -662,10 +949,12 @@ fn build_return_fields(
                         // Has property access or variable reference - complex types need nested structs
                         let nested_prefix =
                             format!("{}{}", struct_name_prefix, capitalize_first(field_name));
+                        let nested_projection =
+                            projection_metadata_from_traversal(&nested_info.traversal);
                         let nested_fields = build_return_fields(
                             ctx,
                             return_type,
-                            &nested_info.traversal,
+                            &nested_projection,
                             &nested_prefix,
                         );
                         let nested_struct_name = format!("{}ReturnType", nested_prefix);
@@ -740,7 +1029,7 @@ fn build_return_fields(
     }
 
     // Step 4: Add computed expression fields
-    for (field_name, computed_info) in &traversal.computed_expressions {
+    for (field_name, computed_info) in projection.computed_expressions {
         fields.push(ReturnFieldInfo {
             name: field_name.clone(),
             field_type: ReturnFieldType::Simple(RustFieldType::Value),
@@ -756,7 +1045,8 @@ fn build_return_fields(
 /// Process object literal return types and create struct definitions
 /// This handles RETURN { field1: expr1, field2: { ... }, field3: [...] } syntax
 ///
-/// Note: This is a simplified implementation that delegates to analyze_return_expr for each field
+/// Compatibility behavior: complex object/array returns are wrapped under a top-level
+/// `response` key and emitted as a literal JSON expression.
 fn process_object_literal<'a>(
     ctx: &mut Ctx<'a>,
     _original_query: &'a Query,
@@ -764,7 +1054,7 @@ fn process_object_literal<'a>(
     query: &mut GeneratedQuery,
     object_fields: &HashMap<String, ReturnType>,
     _struct_name: String,
-) -> ReturnValueStruct {
+) {
     // Build JSON construction code recursively
     fn build_json_code<'a>(
         ctx: &Ctx<'a>,
@@ -988,40 +1278,11 @@ fn process_object_literal<'a>(
 
     let json_code = build_json_code(ctx, object_fields, scope);
 
-    // Add a single return value with the literal JSON construction code
-    query.return_values.push((
+    emit_literal_return(
+        query,
         "response".to_string(),
-        ReturnValue {
-            name: "serde_json::Value".to_string(),
-            fields: vec![],
-            literal_value: Some(crate::helixc::generator::utils::GenRef::Std(format!(
-                "json!({})",
-                json_code
-            ))),
-        },
-    ));
-
-    // Mark to NOT use struct returns
-    query.use_struct_returns = false;
-
-    // Return a placeholder struct (won't be used)
-    ReturnValueStruct {
-        name: "Unused".to_string(),
-        fields: vec![],
-        has_lifetime: false,
-        is_query_return_type: false,
-        is_collection: false,
-        is_aggregate: false,
-        is_group_by: false,
-        source_variable: String::new(),
-        is_reused_variable: false,
-        is_primitive: false,
-        field_infos: vec![],
-        aggregate_properties: Vec::new(),
-        is_count_aggregate: false,
-        closure_param_name: None,
-        primitive_literal_value: None,
-    }
+        crate::helixc::generator::utils::GenRef::Std(format!("json!({})", json_code)),
+    );
 }
 
 /// Helper function to get Rust type string from analyzer Type and populate return value fields
@@ -1290,130 +1551,19 @@ fn analyze_return_expr<'a>(
 
                             let field_name = v.inner().clone();
 
-                            // Legacy approach
-                            let (rust_type, fields) = type_to_rust_string_and_fields(
+                            let literal_value = scalar_property_literal_from_traversal(
                                 &inferred_type,
-                                &traversal.should_collect,
-                                ctx,
+                                &traversal,
                                 &field_name,
                             );
 
-                            // For Scalar types with field access (e.g., dataset_id::{value} or files::ID),
-                            // generate the property access code
-                            let literal_value = if matches!(inferred_type, Type::Scalar(_))
-                                && !traversal.object_fields.is_empty()
-                            {
-                                let property_name = &traversal.object_fields[0];
-
-                                match traversal.should_collect {
-                                    ShouldCollect::ToObj => {
-                                        // Single item - use literal_value
-                                        if property_name == "id" {
-                                            Some(GenRef::Std(format!(
-                                                "uuid_str({}.id(), &arena)",
-                                                field_name
-                                            )))
-                                        } else if property_name == "label" {
-                                            Some(GenRef::Std(format!("{}.label()", field_name)))
-                                        } else {
-                                            Some(GenRef::Std(format!(
-                                                "{}.get_property(\"{}\")",
-                                                field_name, property_name
-                                            )))
-                                        }
-                                    }
-                                    ShouldCollect::ToVec => {
-                                        // Collection - generate iteration code
-                                        let iter_code = if property_name == "id" {
-                                            format!(
-                                                "{}.iter().map(|item| uuid_str(item.id(), &arena)).collect::<Vec<_>>()",
-                                                field_name
-                                            )
-                                        } else if property_name == "label" {
-                                            format!(
-                                                "{}.iter().map(|item| item.label()).collect::<Vec<_>>()",
-                                                field_name
-                                            )
-                                        } else {
-                                            format!(
-                                                "{}.iter().map(|item| item.get_property(\"{}\")).collect::<Vec<_>>()",
-                                                field_name, property_name
-                                            )
-                                        };
-                                        Some(GenRef::Std(iter_code))
-                                    }
-                                    _ => None,
-                                }
-                            } else {
-                                None
-                            };
-
-                            query.return_values.push((
-                                field_name.clone(),
-                                ReturnValue {
-                                    name: rust_type,
-                                    fields,
-                                    literal_value: literal_value.clone(),
-                                },
-                            ));
-
-                            // New unified approach
-                            if matches!(
-                                inferred_type,
-                                Type::Boolean | Type::Scalar(_) | Type::Count
-                            ) {
-                                // Primitive types: emit variable directly, no struct needed
-                                let mut prim_struct = ReturnValueStruct::new(field_name.clone());
-                                prim_struct.source_variable = field_name.clone();
-                                prim_struct.is_primitive = true;
-                                prim_struct.primitive_literal_value = literal_value;
-                                query.return_structs.push(prim_struct);
-                            } else {
-                                let struct_name_prefix = format!(
-                                    "{}{}",
-                                    capitalize_first(&query.name),
-                                    capitalize_first(&field_name)
-                                );
-                                let return_fields = build_return_fields(
-                                    ctx,
-                                    &inferred_type,
-                                    &traversal,
-                                    &struct_name_prefix,
-                                );
-                                let struct_name = format!("{}ReturnType", struct_name_prefix);
-                                let is_collection = matches!(
-                                    inferred_type,
-                                    Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_)
-                                );
-                                let (
-                                    is_aggregate,
-                                    is_group_by,
-                                    aggregate_properties,
-                                    is_count_aggregate,
-                                ) = match inferred_type {
-                                    Type::Aggregate(info) => (
-                                        true,
-                                        info.is_group_by,
-                                        info.properties.clone(),
-                                        info.is_count,
-                                    ),
-                                    _ => (false, false, Vec::new(), false),
-                                };
-                                query
-                                    .return_structs
-                                    .push(ReturnValueStruct::from_return_fields(
-                                        struct_name.clone(),
-                                        return_fields.clone(),
-                                        field_name.clone(),
-                                        is_collection,
-                                        traversal.is_reused_variable,
-                                        is_aggregate,
-                                        is_group_by,
-                                        aggregate_properties,
-                                        is_count_aggregate,
-                                        traversal.closure_param_name.clone(),
-                                    ));
-                            }
+                            let return_ir = return_ir_from_traversal(
+                                field_name,
+                                &inferred_type,
+                                &traversal,
+                                literal_value,
+                            );
+                            emit_return_from_ir(ctx, query, return_ir);
 
                             // Note: Map closures are no longer injected here.
                             // Mapping will happen at response construction time instead.
@@ -1421,77 +1571,13 @@ fn analyze_return_expr<'a>(
                         _ => {
                             let field_name = "data".to_string();
 
-                            // Legacy approach
-                            let (rust_type, fields) = type_to_rust_string_and_fields(
+                            let return_ir = return_ir_from_traversal(
+                                field_name,
                                 &inferred_type,
-                                &traversal.should_collect,
-                                ctx,
-                                &field_name,
+                                &traversal,
+                                None,
                             );
-                            query.return_values.push((
-                                field_name.clone(),
-                                ReturnValue {
-                                    name: rust_type,
-                                    fields,
-                                    literal_value: None,
-                                },
-                            ));
-
-                            // New unified approach
-                            if matches!(
-                                inferred_type,
-                                Type::Boolean | Type::Scalar(_) | Type::Count
-                            ) {
-                                let mut prim_struct = ReturnValueStruct::new(field_name.clone());
-                                prim_struct.source_variable = field_name.clone();
-                                prim_struct.is_primitive = true;
-                                query.return_structs.push(prim_struct);
-                            } else {
-                                let struct_name_prefix = format!(
-                                    "{}{}",
-                                    capitalize_first(&query.name),
-                                    capitalize_first(&field_name)
-                                );
-                                let return_fields = build_return_fields(
-                                    ctx,
-                                    &inferred_type,
-                                    &traversal,
-                                    &struct_name_prefix,
-                                );
-                                let struct_name = format!("{}ReturnType", struct_name_prefix);
-                                let is_collection = matches!(
-                                    inferred_type,
-                                    Type::Nodes(_) | Type::Edges(_) | Type::Vectors(_)
-                                );
-                                let (
-                                    is_aggregate,
-                                    is_group_by,
-                                    aggregate_properties,
-                                    is_count_aggregate,
-                                ) = match inferred_type {
-                                    Type::Aggregate(info) => (
-                                        true,
-                                        info.is_group_by,
-                                        info.properties.clone(),
-                                        info.is_count,
-                                    ),
-                                    _ => (false, false, Vec::new(), false),
-                                };
-                                query
-                                    .return_structs
-                                    .push(ReturnValueStruct::from_return_fields(
-                                        struct_name.clone(),
-                                        return_fields.clone(),
-                                        field_name.clone(),
-                                        is_collection,
-                                        traversal.is_reused_variable,
-                                        is_aggregate,
-                                        is_group_by,
-                                        aggregate_properties,
-                                        is_count_aggregate,
-                                        traversal.closure_param_name.clone(),
-                                    ));
-                            }
+                            emit_return_from_ir(ctx, query, return_ir);
 
                             // Generate map closure (direct return, no variable assignment to update)
                             // Map closure will be used during return generation phase
@@ -1516,109 +1602,23 @@ fn analyze_return_expr<'a>(
 
                     let field_name = id.inner().clone();
 
-                    // Legacy approach
-                    let (rust_type, fields) = type_to_rust_string_and_fields(
-                        &identifier_end_type,
-                        &ShouldCollect::No,
-                        ctx,
-                        &field_name,
-                    );
-                    query.return_values.push((
-                        field_name.clone(),
-                        ReturnValue {
-                            name: rust_type,
-                            fields,
-                            literal_value: None,
-                        },
-                    ));
-
-                    // New unified approach
-                    if matches!(
+                    let return_ir = return_ir_from_identifier(
+                        field_name,
                         identifier_end_type,
-                        Type::Boolean | Type::Scalar(_) | Type::Count
-                    ) {
-                        // Primitive types: emit variable directly, no struct needed
-                        let mut prim_struct = ReturnValueStruct::new(field_name.clone());
-                        prim_struct.source_variable = field_name.clone();
-                        prim_struct.is_primitive = true;
-                        query.return_structs.push(prim_struct);
-                    } else {
-                        // For identifier returns, we need to create a traversal to build fields from
-                        let var_info = scope.get(id.inner().as_str());
-                        let is_reused = var_info.is_some_and(|v| v.reference_count > 1);
-                        let is_collection = var_info.is_some_and(|v| !v.is_single);
-                        // Copy projection metadata from the original variable's binding
-                        let traversal = if let Some(vi) = var_info {
-                            GeneratedTraversal {
-                                is_reused_variable: is_reused,
-                                has_object_step: vi.has_object_step,
-                                object_fields: vi.object_fields.clone(),
-                                field_name_mappings: vi.field_name_mappings.clone(),
-                                excluded_fields: vi.excluded_fields.clone(),
-                                has_spread: vi.has_spread,
-                                nested_traversals: vi.nested_traversals.clone(),
-                                ..Default::default()
-                            }
-                        } else {
-                            GeneratedTraversal {
-                                is_reused_variable: is_reused,
-                                ..Default::default()
-                            }
-                        };
-                        let struct_name_prefix = format!(
-                            "{}{}",
-                            capitalize_first(&query.name),
-                            capitalize_first(&field_name)
-                        );
-                        let return_fields = build_return_fields(
-                            ctx,
-                            &identifier_end_type,
-                            &traversal,
-                            &struct_name_prefix,
-                        );
-                        let struct_name = format!("{}ReturnType", struct_name_prefix);
-                        let (is_aggregate, is_group_by) = match identifier_end_type {
-                            Type::Aggregate(info) => (true, info.is_group_by),
-                            _ => (false, false),
-                        };
-                        // For GeneratedStatement::Identifier, the variable is already transformed
-                        // (no transformation code needed)
-                        let aggregate_properties = Vec::new();
-                        let is_count_aggregate = false;
-
-                        query
-                            .return_structs
-                            .push(ReturnValueStruct::from_return_fields(
-                                struct_name.clone(),
-                                return_fields.clone(),
-                                field_name.clone(),
-                                is_collection,
-                                is_reused,
-                                is_aggregate,
-                                is_group_by,
-                                aggregate_properties,
-                                is_count_aggregate,
-                                traversal.closure_param_name.clone(),
-                            ));
-                    }
+                        scope.get(id.inner().as_str()),
+                    );
+                    emit_return_from_ir(ctx, query, return_ir);
 
                     // Note: Map closures are no longer injected here.
                     // Mapping will happen at response construction time instead.
-                }  // end GeneratedStatement::Identifier
+                } // end GeneratedStatement::Identifier
                 GeneratedStatement::Literal(l) => {
-                    let field_name = "data".to_string();
-                    let rust_type = "Value".to_string();
-
-                    query.return_values.push((
-                        field_name,
-                        ReturnValue {
-                            name: rust_type,
-                            fields: vec![],
-                            literal_value: Some(l.clone()),
-                        },
-                    ));
+                    emit_literal_return(query, "data".to_string(), l.clone());
                 }
-                GeneratedStatement::Empty => query.return_values = vec![],
+                GeneratedStatement::Empty => {
+                    query.return_values = vec![];
+                    query.return_structs = vec![];
+                }
 
                 // These statement types are not valid in return expressions
                 // ForEach, Drop, Assignment, BoExp, and Array cannot be returned directly
@@ -1659,8 +1659,7 @@ fn analyze_return_expr<'a>(
                     struct_name,
                 );
 
-                // Note: process_object_literal adds to query.return_values
-                // and sets use_struct_returns = false, so no need to push to return_structs
+                // Note: compatibility wrapper handling is emitted via shared literal-return helper
             }
         }
         ReturnType::Object(values) => {
@@ -1680,8 +1679,7 @@ fn analyze_return_expr<'a>(
                 let struct_name = format!("{}ReturnType", capitalize_first(&query.name));
                 process_object_literal(ctx, original_query, scope, query, values, struct_name);
 
-                // Note: process_object_literal adds to query.return_values
-                // and sets use_struct_returns = false, so no need to push to return_structs
+                // Note: compatibility wrapper handling is emitted via shared literal-return helper
             }
         }
         ReturnType::Empty => {}
@@ -1898,9 +1896,19 @@ mod tests {
         let result = crate::helixc::analyzer::analyze(&parsed);
 
         assert!(result.is_ok());
-        let (diagnostics, _) = result.unwrap();
+        let (diagnostics, generated) = result.unwrap();
         // Should not have errors for returning literal
         assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+
+        let query = generated
+            .queries
+            .iter()
+            .find(|q| q.name == "test")
+            .expect("query should be generated");
+        assert_eq!(query.return_values.len(), 1);
+        assert_eq!(query.return_structs.len(), 1);
+        assert!(query.return_structs[0].is_primitive);
+        assert!(query.return_structs[0].primitive_literal_value.is_some());
     }
 
     #[test]
@@ -1940,6 +1948,70 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+    }
+
+    #[test]
+    fn test_complex_return_object_keeps_response_wrapper_compatibility() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN { payload: { person: p, status: "found" } }
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, generated) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+
+        let query = generated
+            .queries
+            .iter()
+            .find(|q| q.name == "test")
+            .expect("query should exist");
+        assert!(query.use_struct_returns);
+        assert_eq!(query.return_values.len(), 1);
+        assert_eq!(query.return_values[0].0, "response");
+        assert_eq!(query.return_structs.len(), 1);
+        assert!(query.return_structs[0].is_primitive);
+        assert_eq!(query.return_structs[0].source_variable, "response");
+        assert!(query.return_structs[0].primitive_literal_value.is_some());
+    }
+
+    #[test]
+    fn test_complex_return_array_keeps_response_wrapper_compatibility() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test() =>
+                p <- N<Person>
+                RETURN [{ person: p }]
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, generated) = result.unwrap();
+        assert!(!diagnostics.iter().any(|d| d.error_code == ErrorCode::E301));
+
+        let query = generated
+            .queries
+            .iter()
+            .find(|q| q.name == "test")
+            .expect("query should exist");
+        assert!(query.use_struct_returns);
+        assert_eq!(query.return_values.len(), 1);
+        assert_eq!(query.return_values[0].0, "response");
+        assert_eq!(query.return_structs.len(), 1);
+        assert!(query.return_structs[0].is_primitive);
+        assert_eq!(query.return_structs[0].source_variable, "response");
+        assert!(query.return_structs[0].primitive_literal_value.is_some());
     }
 
     // ============================================================================

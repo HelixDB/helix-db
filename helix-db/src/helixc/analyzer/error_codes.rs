@@ -143,6 +143,8 @@ pub enum ErrorCode {
 
     /// `W101` - `query has no return`
     W101,
+    /// `W102` - `migration syntax is deprecated`
+    W102,
 }
 impl ErrorCode {
     /// Returns a short human-readable description of the error (e.g. "unknown edge type").
@@ -220,6 +222,7 @@ impl ErrorCode {
             ErrorCode::E660 => "Embed() argument must be a String",
             // Warnings
             ErrorCode::W101 => "query has no return",
+            ErrorCode::W102 => "migration syntax is deprecated",
         }
     }
 }
@@ -289,6 +292,7 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::E659 => write!(f, "E659"),
             ErrorCode::E660 => write!(f, "E660"),
             ErrorCode::W101 => write!(f, "W101"),
+            ErrorCode::W102 => write!(f, "W102"),
         }
     }
 }

@@ -80,7 +80,11 @@ impl Date {
             Err(e) => match value.parse::<NaiveDate>() {
                 Ok(date) => match date.and_hms_opt(0, 0, 0) {
                     Some(date) => date.and_utc(),
-                    None => return Err(DateError::ParseError("invalid hour minute or second".to_string())),
+                    None => {
+                        return Err(DateError::ParseError(
+                            "invalid hour minute or second".to_string(),
+                        ));
+                    }
                 },
                 Err(_) => {
                     return Err(DateError::ParseError(e.to_string()));

@@ -60,6 +60,7 @@ pub(crate) struct Ctx<'a> {
     pub(super) node_fields: IndexMap<&'a str, IndexMap<&'a str, Cow<'a, Field>>>,
     pub(super) edge_fields: IndexMap<&'a str, IndexMap<&'a str, Cow<'a, Field>>>,
     pub(super) vector_fields: IndexMap<&'a str, IndexMap<&'a str, Cow<'a, Field>>>,
+    #[allow(dead_code)]
     pub(super) all_schemas: SchemaVersionMap<'a>,
     pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) output: GeneratedSource,
@@ -70,10 +71,10 @@ impl<'a> Ctx<'a> {
         // Build field look‑ups once
         let all_schemas = build_field_lookups(src);
         let (node_fields, edge_fields, vector_fields) = all_schemas.get_latest();
+        let latest_schema = src.get_latest_schema()?;
 
         // Build secondary indices from indexed fields
-        let secondary_indices: Vec<SecondaryIndex> = src
-            .get_latest_schema()?
+        let secondary_indices: Vec<SecondaryIndex> = latest_schema
             .node_schemas
             .iter()
             .flat_map(|schema| schema.fields.iter().filter(|f| f.is_indexed()))
@@ -83,20 +84,17 @@ impl<'a> Ctx<'a> {
 
         // Create the context first (without output populated)
         let mut ctx = Self {
-            node_set: src
-                .get_latest_schema()?
+            node_set: latest_schema
                 .node_schemas
                 .iter()
                 .map(|n| n.name.1.as_str())
                 .collect(),
-            vector_set: src
-                .get_latest_schema()?
+            vector_set: latest_schema
                 .vector_schemas
                 .iter()
                 .map(|v| v.name.as_str())
                 .collect(),
-            edge_map: src
-                .get_latest_schema()?
+            edge_map: latest_schema
                 .edge_schemas
                 .iter()
                 .map(|e| (e.name.1.as_str(), e))

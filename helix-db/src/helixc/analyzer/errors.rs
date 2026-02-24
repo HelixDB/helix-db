@@ -24,6 +24,24 @@ pub(crate) fn push_schema_err(
         None,
     ));
 }
+
+pub(crate) fn push_schema_warn(
+    ctx: &mut Ctx,
+    loc: Loc,
+    error_code: ErrorCode,
+    msg: String,
+    hint: Option<String>,
+) {
+    ctx.diagnostics.push(Diagnostic::new(
+        loc,
+        msg,
+        DiagnosticSeverity::Warning,
+        error_code,
+        hint,
+        None,
+    ));
+}
+
 pub(crate) fn push_query_err(
     ctx: &mut Ctx,
     q: &Query,

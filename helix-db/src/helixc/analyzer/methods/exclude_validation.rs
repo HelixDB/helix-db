@@ -11,9 +11,8 @@ use crate::{
         parser::{location::Loc, types::*},
     },
 };
-use indexmap::IndexMap;
 use paste::paste;
-use std::{borrow::Cow, collections::HashMap};
+use std::collections::{HashMap, HashSet};
 
 /// Iterates through the fields to exclude and validates that the exist on the type and have not been excluded previously.
 ///
@@ -30,7 +29,7 @@ use std::{borrow::Cow, collections::HashMap};
 pub(crate) fn validate_exclude_fields<'a>(
     ctx: &mut Ctx<'a>,
     ex: &Exclude,
-    field_set: &IndexMap<&str, Cow<'a, Field>>,
+    field_set: &HashSet<&'a str>,
     excluded: &HashMap<&str, Loc>,
     original_query: &'a Query,
     type_name: &str,
@@ -48,7 +47,7 @@ pub(crate) fn validate_exclude_fields<'a>(
                 "remove the exclusion of `{}`",
                 Fix::new(span.clone(), Some(loc.clone()), None),
             );
-        } else if !field_set.contains_key(key.as_str()) {
+        } else if !field_set.contains(key.as_str()) {
             generate_error!(
                 ctx,
                 original_query,
@@ -82,7 +81,11 @@ pub(crate) fn validate_exclude<'a>(
 ) {
     match &cur_ty {
         Type::Nodes(Some(node_ty)) | Type::Node(Some(node_ty)) => {
-            if let Some(field_set) = ctx.node_fields.get(node_ty.as_str()).cloned() {
+            let field_set = ctx
+                .node_fields
+                .get(node_ty.as_str())
+                .map(|fields| fields.keys().copied().collect::<HashSet<_>>());
+            if let Some(field_set) = field_set {
                 validate_exclude_fields(
                     ctx,
                     ex,
@@ -96,7 +99,11 @@ pub(crate) fn validate_exclude<'a>(
             }
         }
         Type::Edges(Some(edge_ty)) | Type::Edge(Some(edge_ty)) => {
-            if let Some(field_set) = ctx.edge_fields.get(edge_ty.as_str()).cloned() {
+            let field_set = ctx
+                .edge_fields
+                .get(edge_ty.as_str())
+                .map(|fields| fields.keys().copied().collect::<HashSet<_>>());
+            if let Some(field_set) = field_set {
                 validate_exclude_fields(
                     ctx,
                     ex,
@@ -110,11 +117,15 @@ pub(crate) fn validate_exclude<'a>(
             }
         }
         Type::Vectors(Some(vector_ty)) | Type::Vector(Some(vector_ty)) => {
-            if let Some(fields) = ctx.vector_fields.get(vector_ty.as_str()).cloned() {
+            let field_set = ctx
+                .vector_fields
+                .get(vector_ty.as_str())
+                .map(|fields| fields.keys().copied().collect::<HashSet<_>>());
+            if let Some(field_set) = field_set {
                 validate_exclude_fields(
                     ctx,
                     ex,
-                    &fields,
+                    &field_set,
                     excluded,
                     original_query,
                     vector_ty,
@@ -361,5 +372,44 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_before_object_projection_is_valid() {
+        let source = r#"
+            N::Person { name: String, email: String }
+
+            QUERY test() =>
+                projected <- N<Person>::!{email}::{name}
+                RETURN projected
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_exclude_before_traversal_step_emits_e644() {
+        let source = r#"
+            N::Person { name: String, email: String }
+            E::Knows { From: Person, To: Person }
+
+            QUERY test(id: ID) =>
+                invalid <- N<Person>(id)::!{email}::Out<Knows>
+                RETURN invalid
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E644));
     }
 }

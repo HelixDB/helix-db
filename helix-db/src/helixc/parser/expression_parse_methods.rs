@@ -3,9 +3,9 @@ use crate::{
         HelixParser, ParserError, Rule,
         location::{HasLoc, Loc},
         types::{
-            Assignment, BM25Search, Embed, EvaluatesToNumber, EvaluatesToNumberType,
-            EvaluatesToString, ExistsExpression, Expression, ExpressionType, ForLoop, ForLoopVars,
-            MathFunction, MathFunctionCall, SearchVector, ValueType, VectorData,
+            Assignment, BM25Search, EvaluatesToNumber, EvaluatesToNumberType, ExistsExpression,
+            Expression, ExpressionType, ForLoop, ForLoopVars, MathFunction, MathFunctionCall,
+            SearchVector, ValueType,
         },
         utils::{PairTools, PairsTools},
     },
@@ -425,54 +425,18 @@ impl HelixParser {
         &self,
         pair: Pair<Rule>,
     ) -> Result<SearchVector, ParserError> {
+        let loc = pair.loc();
         let mut vector_type = None;
         let mut data = None;
         let mut k: Option<EvaluatesToNumber> = None;
         let mut pre_filter = None;
-        for p in pair.clone().into_inner() {
+        for p in pair.into_inner() {
             match p.as_rule() {
                 Rule::identifier_upper => {
                     vector_type = Some(p.as_str().to_string());
                 }
                 Rule::vector_data => {
-                    let vector_data = p.clone().try_inner_next()?;
-                    match vector_data.as_rule() {
-                        Rule::identifier => {
-                            data = Some(VectorData::Identifier(p.as_str().to_string()));
-                        }
-                        Rule::vec_literal => {
-                            data = Some(VectorData::Vector(self.parse_vec_literal(p)?));
-                        }
-                        Rule::embed_method => {
-                            let loc = vector_data.loc();
-                            let inner = vector_data.try_inner_next()?;
-                            data = Some(VectorData::Embed(Embed {
-                                loc,
-                                value: match inner.as_rule() {
-                                    Rule::identifier => {
-                                        EvaluatesToString::Identifier(inner.as_str().to_string())
-                                    }
-                                    Rule::string_literal => {
-                                        EvaluatesToString::StringLiteral(inner.as_str().to_string())
-                                    }
-                                    _ => {
-                                        return Err(ParserError::from(format!(
-                                            "Unexpected rule in SearchV: {:?} => {:?}",
-                                            inner.as_rule(),
-                                            inner,
-                                        )));
-                                    }
-                                },
-                            }));
-                        }
-                        _ => {
-                            return Err(ParserError::from(format!(
-                                "Unexpected rule in SearchV: {:?} => {:?}",
-                                vector_data.as_rule(),
-                                vector_data,
-                            )));
-                        }
-                    }
+                    data = Some(self.parse_vector_data(p, "SearchV")?);
                 }
                 Rule::integer => {
                     k = Some(EvaluatesToNumber {
@@ -505,7 +469,7 @@ impl HelixParser {
         }
 
         Ok(SearchVector {
-            loc: pair.loc(),
+            loc,
             vector_type,
             data,
             k,

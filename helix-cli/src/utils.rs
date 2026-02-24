@@ -304,7 +304,7 @@ impl Template {
 pub mod helixc_utils {
     use eyre::Result;
     use helix_db::helixc::{
-        analyzer::analyze,
+        analyzer::{analyze, diagnostic::DiagnosticSeverity},
         generator::{Source as GeneratedSource, generate},
         parser::{
             HelixParser,
@@ -391,13 +391,27 @@ pub mod helixc_utils {
         let (diagnostics, generated_source) =
             analyze(&source).map_err(|e| eyre::eyre!("Analysis error: {}", e))?;
 
-        if !diagnostics.is_empty() {
+        let (error_diagnostics, warning_diagnostics): (Vec<_>, Vec<_>) = diagnostics
+            .into_iter()
+            .partition(|d| matches!(d.severity, DiagnosticSeverity::Error));
+
+        if !warning_diagnostics.is_empty() {
+            let formatted_warnings =
+                format_diagnostics(&warning_diagnostics, &generated_source.src, files);
+            eprintln!(
+                "Compilation produced {} warning(s):\n\n{}",
+                warning_diagnostics.len(),
+                formatted_warnings
+            );
+        }
+
+        if !error_diagnostics.is_empty() {
             // Format diagnostics properly using the helix-db pretty printer
             let formatted_diagnostics =
-                format_diagnostics(&diagnostics, &generated_source.src, files);
+                format_diagnostics(&error_diagnostics, &generated_source.src, files);
             return Err(eyre::eyre!(
                 "Compilation failed with {} error(s):\n\n{}",
-                diagnostics.len(),
+                error_diagnostics.len(),
                 formatted_diagnostics
             ));
         }

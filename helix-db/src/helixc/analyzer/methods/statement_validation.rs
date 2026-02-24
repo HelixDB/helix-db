@@ -86,10 +86,7 @@ pub(crate) fn validate_statements<'a>(
             if let Some(GeneratedStatement::Traversal(ref tr)) = stmt {
                 var_info.store_projection_metadata(tr);
             }
-            scope.insert(
-                assign.variable.as_str(),
-                var_info,
-            );
+            scope.insert(assign.variable.as_str(), var_info);
 
             stmt.as_ref()?;
 

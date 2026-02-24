@@ -1,7 +1,7 @@
 use crate::helixc::parser::{
     HelixParser, ParserError, Rule,
     location::HasLoc,
-    types::{EdgeConnection, Expression, IdType},
+    types::{EdgeConnection, Embed, EvaluatesToString, Expression, IdType, VectorData},
 };
 use pest::iterators::{Pair, Pairs};
 
@@ -37,6 +37,41 @@ impl HelixParser {
             );
         }
         Ok(vec)
+    }
+
+    pub(super) fn parse_vector_data(
+        &self,
+        pair: Pair<Rule>,
+        context: &str,
+    ) -> Result<VectorData, ParserError> {
+        let vector_data = pair.try_inner_next()?;
+        match vector_data.as_rule() {
+            Rule::identifier => Ok(VectorData::Identifier(vector_data.as_str().to_string())),
+            Rule::vec_literal => Ok(VectorData::Vector(self.parse_vec_literal(vector_data)?)),
+            Rule::embed_method => {
+                let loc = vector_data.loc();
+                let inner = vector_data.try_inner_next()?;
+                let value = match inner.as_rule() {
+                    Rule::identifier => EvaluatesToString::Identifier(inner.as_str().to_string()),
+                    Rule::string_literal => {
+                        EvaluatesToString::StringLiteral(inner.as_str().to_string())
+                    }
+                    _ => {
+                        return Err(ParserError::from(format!(
+                            "Unexpected rule in {context}: {:?} => {:?}",
+                            inner.as_rule(),
+                            inner,
+                        )));
+                    }
+                };
+                Ok(VectorData::Embed(Embed { loc, value }))
+            }
+            _ => Err(ParserError::from(format!(
+                "Unexpected rule in {context}: {:?} => {:?}",
+                vector_data.as_rule(),
+                vector_data,
+            ))),
+        }
     }
 
     pub(super) fn parse_array_literal(

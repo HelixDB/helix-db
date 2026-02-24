@@ -1,0 +1,68 @@
+# Nodes
+pub struct User {
+    pub email: String,
+    pub name: String,
+    pub age: u32,
+}
+
+pub struct Company {
+    pub name: String,
+}
+
+# Edges
+pub struct WorksAt {
+    pub from: User,
+    pub to: Company,
+    pub role: String,
+}
+
+# Vectors
+pub struct Document {
+    pub title: String,
+    pub content: String,
+}
+
+# Queries
+QUERY generatedParity
+  embedding_model=<none>
+  mcp_handler=<none>
+  is_mut=false
+  use_struct_returns=true
+  param[0] id: ID optional=false
+  stmt[0] let user = G::new(&db, &txn, &arena)
+.n_from_id(&data.id).collect_to_obj()?
+  stmt[1] let company = G::from_iter(&db, &txn, std::iter::once(user.clone()), &arena)
+
+.out_node("WorksAt").collect::<Result<Vec<_>, _>>()?
+  stmt[2] let profile = G::from_iter(&db, &txn, std::iter::once(user.clone()), &arena).collect_to_obj()?
+  return_value[0] name=company literal=<none>
+  return_value[1] name=profile literal=<none>
+    field age: U32 implicit=false nested=false nested_name=<none>
+    field email: String implicit=false nested=false nested_name=<none>
+    field id: ID implicit=true nested=false nested_name=<none>
+    field label: String implicit=true nested=false nested_name=<none>
+    field name: String implicit=false nested=false nested_name=<none>
+  return_struct GeneratedParityCompanyReturnType source=company collection=true aggregate=false group_by=false primitive=false
+    struct_field id: &'a str
+    struct_field label: &'a str
+    struct_field name: Option<&'a Value>
+  return_struct GeneratedParityProfileReturnType source=profile collection=false aggregate=false group_by=false primitive=false
+    struct_field email: Option<&'a Value>
+    struct_field name: Option<&'a Value>
+QUERY vectorParity
+  embedding_model=<none>
+  mcp_handler=<none>
+  is_mut=false
+  use_struct_returns=true
+  param[0] q: String optional=false
+  stmt[0] let docs = G::new(&db, &txn, &arena)
+.search_v::<fn(&HVector, &RoTxn) -> bool, _>(&__internal_embed_data_0, 3, "Document", None).collect::<Result<Vec<_>, _>>()?
+  return_value[0] name=docs literal=<none>
+  return_struct VectorParityDocsReturnType source=docs collection=true aggregate=false group_by=false primitive=false
+    struct_field content: Option<&'a Value>
+    struct_field data: &'a [f64]
+    struct_field id: &'a str
+    struct_field label: &'a str
+    struct_field score: f64
+    struct_field title: Option<&'a Value>
+# Migrations

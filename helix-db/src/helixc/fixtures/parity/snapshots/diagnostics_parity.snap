@@ -1,0 +1,21 @@
+[0] code=E202 severity=error
+  file=src/helixc/fixtures/parity/diagnostics_parity.hql
+  start=5:24@117
+  end=5:38@131
+  span=does_not_exist
+  message=given field `does_not_exist` is not a valid field for a given node type `User` (in QUERY named `parityDiagnostics`)
+  hint=check the schema field names
+[1] code=E101 severity=error
+  file=src/helixc/fixtures/parity/diagnostics_parity.hql
+  start=6:15@146
+  end=7:6@163
+  span=N<Ghost>(id)\n    
+  message=unknown node type `Ghost` (in QUERY named `parityDiagnostics`)
+  hint=check the schema field names or declare the node type
+[2] code=E601 severity=error
+  file=src/helixc/fixtures/parity/diagnostics_parity.hql
+  start=6:15@146
+  end=7:6@163
+  span=N<Ghost>(id)\n    
+  message=invalid traversal `N<Ghost>(id)\n    ` (in QUERY named `parityDiagnostics`)
+  hint=ensure the traversal is valid

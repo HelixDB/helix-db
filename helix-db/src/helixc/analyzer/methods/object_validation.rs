@@ -24,9 +24,7 @@ use crate::{
         parser::types::*,
     },
 };
-use indexmap::IndexMap;
 use paste::paste;
-use std::borrow::Cow;
 
 /// Marks all Out/In steps with EdgeType::Vec in the traversal to fetch vector data
 /// This should be called when the 'data' field is accessed on a Vector type
@@ -105,7 +103,7 @@ pub(crate) fn validate_object<'a>(
             original_query,
             gen_traversal,
             cur_ty,
-            ctx.node_fields.get(node_ty.as_str()).cloned(),
+            ctx.node_fields.contains_key(node_ty.as_str()),
             fields_out,
             scope,
             gen_query,
@@ -116,7 +114,7 @@ pub(crate) fn validate_object<'a>(
             original_query,
             gen_traversal,
             cur_ty,
-            ctx.edge_fields.get(edge_ty.as_str()).cloned(),
+            ctx.edge_fields.contains_key(edge_ty.as_str()),
             fields_out,
             scope,
             gen_query,
@@ -127,7 +125,7 @@ pub(crate) fn validate_object<'a>(
             original_query,
             gen_traversal,
             cur_ty,
-            ctx.vector_fields.get(vector_ty.as_str()).cloned(),
+            ctx.vector_fields.contains_key(vector_ty.as_str()),
             fields_out,
             scope,
             gen_query,
@@ -143,12 +141,17 @@ pub(crate) fn validate_object<'a>(
             gen_query,
         ),
         _ => {
+            let object_loc = obj
+                .fields
+                .first()
+                .map(|field| field.value.loc.clone())
+                .unwrap_or_else(|| obj.loc.clone());
             generate_error!(
                 ctx,
                 original_query,
-                obj.fields[0].value.loc.clone(),
+                object_loc.clone(),
                 E203,
-                &obj.fields[0].value.loc.span
+                &object_loc.span
             );
             Ok(Type::Unknown)
         }
@@ -225,13 +228,19 @@ fn validate_property_access<'a>(
     original_query: &'a Query,
     gen_traversal: &mut GeneratedTraversal,
     cur_ty: &Type,
-    fields: Option<IndexMap<&'a str, Cow<'a, Field>>>,
+    has_fields: bool,
     fields_out: &mut Vec<ReturnValueField>,
     scope: &mut std::collections::HashMap<&'a str, crate::helixc::analyzer::utils::VariableInfo>,
     gen_query: &mut crate::helixc::generator::queries::Query,
 ) -> Result<Type, ParserError> {
-    match fields {
-        Some(_) => {
+    let object_loc = obj
+        .fields
+        .first()
+        .map(|field| field.value.loc.clone())
+        .unwrap_or_else(|| obj.loc.clone());
+
+    match has_fields {
+        true => {
             // if there is only one field then it is a single property access
             // e.g. N<User>::{name}
             if obj.fields.len() == 1
@@ -405,7 +414,9 @@ fn validate_property_access<'a>(
                         FieldValueType::Expression(expr) => {
                             // Check if this expression contains a traversal
                             use crate::helixc::analyzer::methods::traversal_validation::validate_traversal;
-                            use crate::helixc::generator::traversal_steps::{ComputedExpressionInfo, NestedTraversalInfo};
+                            use crate::helixc::generator::traversal_steps::{
+                                ComputedExpressionInfo, NestedTraversalInfo,
+                            };
                             use crate::helixc::parser::types::ExpressionType;
 
                             if let ExpressionType::MathFunctionCall(_) = &expr.expr {
@@ -522,15 +533,15 @@ fn validate_property_access<'a>(
                 Ok(cur_ty.clone())
             } else {
                 // error - empty object
-                generate_error!(ctx, original_query, obj.fields[0].value.loc.clone(), E645);
+                generate_error!(ctx, original_query, object_loc.clone(), E645);
                 Ok(Type::Unknown)
             }
         }
-        None => {
+        false => {
             generate_error!(
                 ctx,
                 original_query,
-                obj.fields[0].value.loc.clone(),
+                object_loc,
                 E201,
                 &cur_ty.get_type_name()
             );
@@ -598,6 +609,26 @@ mod tests {
                 person <- N<Person>(id)
                 personId <- person::{id}
                 RETURN personId
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_single_property_access_with_alias() {
+        let source = r#"
+            N::Person { name: String }
+
+            QUERY test(id: ID) =>
+                person <- N<Person>(id)
+                displayName <- person::{display_name: name}
+                RETURN displayName
         "#;
 
         let content = write_to_temp_file(vec![source]);

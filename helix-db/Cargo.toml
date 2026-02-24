@@ -91,3 +91,8 @@ production = ["api-key","server"]
 [[test]]
 name = "capacity_optimization_benches"
 path = "benches/capacity_optimization_benches.rs"
+
+[[bench]]
+name = "helixc_compiler_benches"
+harness = false
+required-features = ["compiler"]

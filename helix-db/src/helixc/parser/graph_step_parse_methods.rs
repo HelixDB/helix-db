@@ -2,11 +2,10 @@ use crate::helixc::parser::{
     HelixParser, ParserError, Rule,
     location::HasLoc,
     types::{
-        Aggregate, BooleanOp, BooleanOpType, Closure, Embed, EvaluatesToString, Exclude,
-        Expression, ExpressionType, FieldAddition, FieldValue, FieldValueType, GraphStep,
-        GraphStepType, GroupBy, IdType, MMRDistance, Object, OrderBy, OrderByType, RerankMMR,
-        RerankRRF, ShortestPath, ShortestPathAStar, ShortestPathBFS, ShortestPathDijkstras, Step,
-        StepType, Update, UpsertE, UpsertN, UpsertV, VectorData,
+        Aggregate, BooleanOp, BooleanOpType, Closure, Exclude, Expression, FieldAddition,
+        FieldValue, FieldValueType, GraphStep, GraphStepType, GroupBy, IdType, MMRDistance, Object,
+        OrderBy, OrderByType, RerankMMR, RerankRRF, ShortestPath, ShortestPathAStar,
+        ShortestPathBFS, ShortestPathDijkstras, Step, StepType, Update, UpsertE, UpsertN, UpsertV,
     },
     utils::{PairTools, PairsTools},
 };
@@ -184,47 +183,14 @@ impl HelixParser {
     /// ::UpsertV(vec, {content: content})
     /// ```
     pub(super) fn parse_upsert_v(&self, pair: Pair<Rule>) -> Result<UpsertV, ParserError> {
+        let loc = pair.loc();
         let mut fields = Vec::new();
         let mut data = None;
 
-        for p in pair.clone().into_inner() {
+        for p in pair.into_inner() {
             match p.as_rule() {
                 Rule::vector_data => {
-                    let vector_data = p.clone().try_inner_next()?;
-                    match vector_data.as_rule() {
-                        Rule::identifier => {
-                            data = Some(VectorData::Identifier(vector_data.as_str().to_string()));
-                        }
-                        Rule::vec_literal => {
-                            data = Some(VectorData::Vector(self.parse_vec_literal(p)?));
-                        }
-                        Rule::embed_method => {
-                            let inner = vector_data.clone().try_inner_next()?;
-                            data = Some(VectorData::Embed(Embed {
-                                loc: vector_data.loc(),
-                                value: match inner.as_rule() {
-                                    Rule::identifier => {
-                                        EvaluatesToString::Identifier(inner.as_str().to_string())
-                                    }
-                                    Rule::string_literal => {
-                                        EvaluatesToString::StringLiteral(inner.as_str().to_string())
-                                    }
-                                    _ => {
-                                        return Err(ParserError::from(format!(
-                                            "Unexpected rule in UpsertV vector_data: {:?}",
-                                            inner.as_rule()
-                                        )));
-                                    }
-                                },
-                            }));
-                        }
-                        _ => {
-                            return Err(ParserError::from(format!(
-                                "Unexpected rule in UpsertV: {:?}",
-                                vector_data.as_rule()
-                            )));
-                        }
-                    }
+                    data = Some(self.parse_vector_data(p, "UpsertV")?);
                 }
                 Rule::update_field => {
                     let field = self.parse_update_field(p)?;
@@ -234,11 +200,7 @@ impl HelixParser {
             }
         }
 
-        Ok(UpsertV {
-            fields,
-            data,
-            loc: pair.loc(),
-        })
+        Ok(UpsertV { fields, data, loc })
     }
 
     /// Parses a single update_field
@@ -637,33 +599,13 @@ impl HelixParser {
                         Err(e) => return Err(e),
                     };
 
-                // Determine weight expression type
-                let (inner_traversal, weight_expr_typed) = if let Some(expr) = weight_expression {
-                    // Check if it's a simple property access or a complex expression
-                    let weight_type = match &expr.expr {
-                        ExpressionType::Traversal(_trav) => {
-                            // For now, keep the traversal and create a Property weight expression
-                            // TODO: Extract property name from traversal for simple cases
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(
-                                Box::new(expr.clone()),
-                            ))
-                        }
-                        ExpressionType::MathFunctionCall(_) => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(
-                                Box::new(expr.clone()),
-                            ))
-                        }
-                        _ => Some(crate::helixc::parser::types::WeightExpression::Expression(
-                            Box::new(expr.clone()),
-                        )),
-                    };
-                    (None, weight_type)
-                } else {
-                    (
-                        None,
-                        Some(crate::helixc::parser::types::WeightExpression::Default),
-                    )
-                };
+                let inner_traversal = None;
+                let weight_expr_typed = Some(match weight_expression {
+                    Some(expr) => {
+                        crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr))
+                    }
+                    None => crate::helixc::parser::types::WeightExpression::Default,
+                });
 
                 GraphStep {
                     loc: pair.loc(),
@@ -776,30 +718,13 @@ impl HelixParser {
                     }
                 }
 
-                // Determine weight expression type
-                let (inner_traversal, weight_expr_typed) = if let Some(expr) = weight_expression {
-                    let weight_type = match &expr.expr {
-                        ExpressionType::Traversal(_trav) => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(
-                                Box::new(expr.clone()),
-                            ))
-                        }
-                        ExpressionType::MathFunctionCall(_) => {
-                            Some(crate::helixc::parser::types::WeightExpression::Expression(
-                                Box::new(expr.clone()),
-                            ))
-                        }
-                        _ => Some(crate::helixc::parser::types::WeightExpression::Expression(
-                            Box::new(expr.clone()),
-                        )),
-                    };
-                    (None, weight_type)
-                } else {
-                    (
-                        None,
-                        Some(crate::helixc::parser::types::WeightExpression::Default),
-                    )
-                };
+                let inner_traversal = None;
+                let weight_expr_typed = Some(match weight_expression {
+                    Some(expr) => {
+                        crate::helixc::parser::types::WeightExpression::Expression(Box::new(expr))
+                    }
+                    None => crate::helixc::parser::types::WeightExpression::Default,
+                });
 
                 GraphStep {
                     loc: pair.loc(),

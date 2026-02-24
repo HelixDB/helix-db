@@ -1,0 +1,2 @@
+QUERY returnCanonical
+  return[0] = {alpha: {a: [id(one), {c: id(three), d: id(two)}], b: {a: id(leaf), y: id(inner)}}, zeta: id(top)}

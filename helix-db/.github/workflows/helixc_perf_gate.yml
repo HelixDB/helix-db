@@ -1,0 +1,42 @@
+name: helixc-perf-gate
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "src/grammar.pest"
+      - "src/helixc/**"
+      - "benches/helixc_compiler_benches.rs"
+      - ".github/workflows/helixc_perf_gate.yml"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "Cargo.toml"
+      - "src/grammar.pest"
+      - "src/helixc/**"
+      - "benches/helixc_compiler_benches.rs"
+      - ".github/workflows/helixc_perf_gate.yml"
+  workflow_dispatch:
+
+jobs:
+  compiler-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run helixc compiler tests
+        run: cargo test --features compiler helixc:: -- --nocapture
+
+  perf-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run helixc compiler benchmark smoke
+        run: cargo bench --features compiler --bench helixc_compiler_benches -- --quick

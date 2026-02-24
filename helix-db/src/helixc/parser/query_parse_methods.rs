@@ -10,10 +10,11 @@ impl HelixParser {
     pub(super) fn parse_query_def(
         &self,
         pair: Pair<Rule>,
-        filepath: String,
+        filepath: &str,
     ) -> Result<Query, ParserError> {
-        let original_query = pair.clone().as_str().to_string();
-        let mut pairs = pair.clone().into_inner();
+        let loc = pair.loc_with_filepath(filepath);
+        let original_query = pair.as_str().to_string();
+        let mut pairs = pair.into_inner();
         let built_in_macro = match pairs.peek() {
             Some(pair) if pair.as_rule() == Rule::built_in_macro => {
                 let built_in_macro = match pair.into_inner().next() {
@@ -63,15 +64,17 @@ impl HelixParser {
             statements,
             return_values,
             original_query,
-            loc: pair.loc_with_filepath(filepath),
+            loc,
         })
     }
 
     pub(super) fn parse_parameters(&self, pair: Pair<Rule>) -> Result<Vec<Parameter>, ParserError> {
         let mut seen = HashSet::new();
-        pair.clone()
-            .into_inner()
+        pair.into_inner()
             .map(|p: Pair<'_, Rule>| -> Result<Parameter, ParserError> {
+                let p_loc = p.loc();
+                let p_line_col = p.line_col();
+                let p_text = p.as_str().to_string();
                 let mut inner = p.into_inner();
                 let name = {
                     let pair = inner
@@ -90,11 +93,9 @@ impl HelixParser {
 
                 // gets param type
                 let param_type_outer = inner
-                    .clone()
                     .next()
                     .ok_or_else(|| ParserError::from("Expected parameter type"))?;
                 let param_type_pair = param_type_outer
-                    .clone()
                     .into_inner()
                     .next()
                     .ok_or_else(|| ParserError::from("Expected parameter type definition"))?;
@@ -110,7 +111,7 @@ impl HelixParser {
                         name,
                         param_type: (param_type_location, param_type),
                         is_optional,
-                        loc: pair.loc(),
+                        loc: p_loc,
                     })
                 } else {
                     Err(ParserError::from(format!(
@@ -119,10 +120,7 @@ impl HelixParser {
 
                             Error happened at line {} column {} here: {}
                         "#,
-                        name.1,
-                        pair.line_col().0,
-                        pair.line_col().1,
-                        pair.as_str(),
+                        name.1, p_line_col.0, p_line_col.1, p_text,
                     )))
                 }
             })

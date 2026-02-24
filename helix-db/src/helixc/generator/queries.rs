@@ -15,7 +15,7 @@ pub struct Query {
     pub sub_parameters: Vec<(String, Vec<Parameter>)>,
     pub return_values: Vec<(String, ReturnValue)>, // Legacy approach
     pub return_structs: Vec<ReturnValueStruct>,    // New struct-based approach
-    pub use_struct_returns: bool,                  // Flag to use new vs old approach
+    pub use_struct_returns: bool, // Legacy flag kept for snapshot/API compatibility
     pub is_mut: bool,
     pub hoisted_embedding_calls: Vec<EmbedData>,
 }
@@ -42,17 +42,14 @@ impl Query {
     }
 
     fn print_return_values(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.use_struct_returns {
-            // Generate struct definitions for new approach (including nested structs)
-            for struct_def in &self.return_structs {
-                if struct_def.is_primitive {
-                    continue; // Primitive types don't need struct definitions
-                }
-                write!(f, "{}", struct_def.generate_all_struct_defs())?;
-                writeln!(f)?;
+        // Generate struct definitions for IR-based approach (including nested structs)
+        for struct_def in &self.return_structs {
+            if struct_def.is_primitive {
+                continue; // Primitive types don't need struct definitions
             }
+            write!(f, "{}", struct_def.generate_all_struct_defs())?;
+            writeln!(f)?;
         }
-        // Legacy approach doesn't need struct generation (uses json! macro)
         Ok(())
     }
 
@@ -161,7 +158,7 @@ impl Query {
         }
 
         // Generate return value
-        if self.use_struct_returns && !self.return_structs.is_empty() {
+        if !self.return_structs.is_empty() {
             // New struct-based approach - map during response construction
             write!(f, "let response = json!({{")?;
             for (i, struct_def) in self.return_structs.iter().enumerate() {
@@ -1154,55 +1151,6 @@ impl Query {
             writeln!(f, "}});")?;
             self.print_txn_commit(f)?;
             writeln!(f, "Ok(input.request.out_fmt.create_response(&response))")?;
-        } else if !self.return_values.is_empty() {
-            // Legacy json! macro approach
-            write!(f, "let response = json!({{")?;
-            for (i, (field_name, ret_val)) in self.return_values.iter().enumerate() {
-                if i > 0 {
-                    write!(f, ",")?;
-                }
-                writeln!(f)?;
-
-                // If this return value has schema fields, extract them into json
-                if !ret_val.fields.is_empty() {
-                    write!(f, "    \"{}\": json!({{", field_name)?;
-                    for (j, field) in ret_val.fields.iter().enumerate() {
-                        if j > 0 {
-                            write!(f, ",")?;
-                        }
-                        writeln!(f)?;
-                        if field.name == "id" {
-                            write!(
-                                f,
-                                "        \"{}\": uuid_str({}.id(), &arena)",
-                                field.name, field_name
-                            )?;
-                        } else if field.name == "label" {
-                            write!(f, "        \"{}\": {}.label()", field.name, field_name)?;
-                        } else {
-                            write!(
-                                f,
-                                "        \"{}\": {}.get_property(\"{}\").unwrap()",
-                                field.name, field_name, field.name
-                            )?;
-                        }
-                    }
-                    writeln!(f)?;
-                    write!(f, "    }})")?;
-                } else {
-                    // For scalar or other types, serialize directly
-                    // If there's a literal value, use it directly
-                    if let Some(ref lit) = ret_val.literal_value {
-                        write!(f, "    \"{}\": {}", field_name, lit)?;
-                    } else {
-                        write!(f, "    \"{}\": {}", field_name, field_name)?;
-                    }
-                }
-            }
-            writeln!(f)?;
-            writeln!(f, "}});")?;
-            self.print_txn_commit(f)?;
-            writeln!(f, "Ok(input.request.out_fmt.create_response(&response))")?;
         } else {
             self.print_txn_commit(f)?;
             writeln!(f, "Ok(input.request.out_fmt.create_response(&()))")?;
@@ -1292,7 +1240,7 @@ impl Query {
         }
 
         // Generate return value - same logic as regular handler
-        if self.use_struct_returns && !self.return_structs.is_empty() {
+        if !self.return_structs.is_empty() {
             // New struct-based approach - map during response construction
             write!(f, "let response = json!({{")?;
             for (i, struct_def) in self.return_structs.iter().enumerate() {
@@ -1301,13 +1249,137 @@ impl Query {
                 }
                 writeln!(f)?;
 
-                if struct_def.is_aggregate {
+                if struct_def.is_primitive {
+                    // Primitive type (Count/Boolean/Scalar) - use literal_value if present (for field access like ::ID)
+                    if let Some(ref lit) = struct_def.primitive_literal_value {
+                        writeln!(f, "    \"{}\": {}", struct_def.source_variable, lit)?;
+                    } else {
+                        writeln!(
+                            f,
+                            "    \"{}\": {}",
+                            struct_def.source_variable, struct_def.source_variable
+                        )?;
+                    }
+                } else if struct_def.is_aggregate {
                     // Aggregate/GroupBy - return the enum directly (it already implements Serialize)
                     writeln!(
                         f,
                         "    \"{}\": {}",
                         struct_def.source_variable, struct_def.source_variable
                     )?;
+                } else if struct_def.source_variable.is_empty() {
+                    // Object literal - construct from multiple sources
+                    // Generate each field from the object literal
+                    for (field_idx, field) in struct_def.fields.iter().enumerate() {
+                        if field_idx > 0 {
+                            write!(f, ",")?;
+                            writeln!(f)?;
+                        }
+
+                        let field_info = &struct_def.field_infos[field_idx];
+
+                        // Determine how to construct this field based on its source
+                        let field_value = match &field_info.source {
+                            crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
+                                closure_source_var: Some(source_var),
+                                accessed_field_name: Some(prop_name),
+                                nested_struct_name: None,
+                                ..
+                            } => {
+                                // Simple property access like app::{name}
+                                if prop_name == "id" {
+                                    format!("uuid_str({}.id(), &arena)", source_var)
+                                } else if prop_name == "label" {
+                                    format!("{}.label()", source_var)
+                                } else {
+                                    format!("{}.get_property(\"{}\")", source_var, prop_name)
+                                }
+                            }
+                            _ if matches!(
+                                field_info.field_type,
+                                crate::helixc::generator::return_values::ReturnFieldType::Nested(_)
+                            ) => {
+                                // Nested struct or object - need to construct recursively
+                                let nested_fields = match &field_info.field_type {
+                                    crate::helixc::generator::return_values::ReturnFieldType::Nested(fields) => fields,
+                                    _ => {
+                                        debug_assert!(false, "Type invariant: expected Nested field type after matches! guard");
+                                        static EMPTY: Vec<crate::helixc::generator::return_values::ReturnFieldInfo> = Vec::new();
+                                        &EMPTY
+                                    }
+                                };
+
+                                // Extract nested struct name and source var from field info
+                                let (nested_struct_name, source_var) = match &field_info.source {
+                                    crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
+                                        closure_source_var: Some(src),
+                                        nested_struct_name: Some(name),
+                                        ..
+                                    } => (Some(name.clone()), Some(src.clone())),
+                                    crate::helixc::generator::return_values::ReturnFieldSource::NestedTraversal {
+                                        closure_source_var: Some(src),
+                                        ..
+                                    } => (None, Some(src.clone())),
+                                    _ => (None, None),
+                                };
+
+                                // Check if this is a collection (Vec)
+                                let is_vec = field.field_type.starts_with("Vec<");
+
+                                if is_vec {
+                                    // Generate construction for each element
+                                    if let Some(src_var) = source_var {
+                                        let struct_name =
+                                            nested_struct_name.as_deref().unwrap_or("UnknownStruct");
+
+                                        format!("vec![{}].into_iter().map(|item| {} {{\n{}            \n}}).collect::<Vec<_>>()",
+                                            src_var,
+                                            struct_name,
+                                            nested_fields.iter().map(|f| {
+                                                let val = if f.name == "id" {
+                                                    "uuid_str(item.id(), &arena)".to_string()
+                                                } else if f.name == "label" {
+                                                    "item.label()".to_string()
+                                                } else {
+                                                    format!("item.get_property(\"{}\")", f.name)
+                                                };
+                                                format!("                {}: {},", f.name, val)
+                                            }).collect::<Vec<_>>().join("\n")
+                                        )
+                                    } else {
+                                        "Vec::new()".to_string()
+                                    }
+                                } else {
+                                    // Single nested object
+                                    if let (Some(struct_name), Some(src_var)) =
+                                        (nested_struct_name.as_ref(), source_var.as_ref())
+                                    {
+                                        format!("{} {{\n{}            \n}}",
+                                            struct_name,
+                                            nested_fields.iter().map(|f| {
+                                                let val = if f.name == "id" {
+                                                    format!("uuid_str({}.id(), &arena)", src_var)
+                                                } else if f.name == "label" {
+                                                    format!("{}.label()", src_var)
+                                                } else {
+                                                    format!("{}.get_property(\"{}\")", src_var, f.name)
+                                                };
+                                                format!("                {}: {},", f.name, val)
+                                            }).collect::<Vec<_>>().join("\n")
+                                        )
+                                    } else {
+                                        "serde_json::Value::Null".to_string()
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Fallback
+                                "serde_json::Value::Null".to_string()
+                            }
+                        };
+
+                        write!(f, "    \"{}\": {}", field.name, field_value)?;
+                    }
                 } else if struct_def.is_collection {
                     // Collection - generate mapping code
                     // Use HQL closure param name if available, otherwise fall back to singular form
@@ -1962,61 +2034,6 @@ impl Query {
                 f,
                 "Ok(helix_db::protocol::format::Format::Json.create_response(&response))"
             )?;
-        } else if !self.return_values.is_empty() {
-            // Legacy json! macro approach
-            write!(f, "let response = json!({{")?;
-            for (i, (field_name, ret_val)) in self.return_values.iter().enumerate() {
-                if i > 0 {
-                    write!(f, ",")?;
-                }
-                writeln!(f)?;
-
-                // If this return value has schema fields, extract them into json
-                if !ret_val.fields.is_empty() {
-                    write!(f, "    \"{}\": json!({{", field_name)?;
-                    for (j, field) in ret_val.fields.iter().enumerate() {
-                        if j > 0 {
-                            write!(f, ",")?;
-                        }
-                        writeln!(f)?;
-                        if field.name == "id" {
-                            write!(
-                                f,
-                                "        \"{}\": uuid_str({}.id(), &arena)",
-                                field.name, field_name
-                            )?;
-                        } else if field.name == "label" {
-                            write!(f, "        \"{}\": {}.label()", field.name, field_name)?;
-                        } else {
-                            write!(
-                                f,
-                                "        \"{}\": {}.get_property(\"{}\").unwrap()",
-                                field.name, field_name, field.name
-                            )?;
-                        }
-                    }
-                    writeln!(f)?;
-                    write!(f, "    }})")?;
-                } else {
-                    // For scalar or other types, serialize directly
-                    // If there's a literal value, use it directly
-                    if let Some(ref lit) = ret_val.literal_value {
-                        write!(f, "    \"{}\": {}", field_name, lit)?;
-                    } else {
-                        write!(f, "    \"{}\": {}", field_name, field_name)?;
-                    }
-                }
-            }
-            writeln!(f)?;
-            writeln!(f, "}});")?;
-            self.print_txn_commit(f)?;
-            writeln!(f, "let mut connections = connections.lock().unwrap();")?;
-            writeln!(f, "connections.add_connection(connection);")?;
-            writeln!(f, "drop(connections);")?;
-            writeln!(
-                f,
-                "Ok(helix_db::protocol::format::Format::Json.create_response(&response))"
-            )?;
         } else {
             self.print_txn_commit(f)?;
             writeln!(f, "let mut connections = connections.lock().unwrap();")?;
@@ -2053,7 +2070,7 @@ impl Default for Query {
             sub_parameters: vec![],
             return_values: vec![],
             return_structs: vec![],
-            use_struct_returns: true, // Enable new struct-based returns
+            use_struct_returns: true,
             is_mut: false,
             hoisted_embedding_calls: vec![],
         }

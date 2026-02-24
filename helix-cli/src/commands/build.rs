@@ -24,7 +24,7 @@ pub struct MetricsData {
 use helix_db::{
     helix_engine::traversal_core::config::Config,
     helixc::{
-        analyzer::analyze,
+        analyzer::{analyze, diagnostic::DiagnosticSeverity},
         generator::Source as GeneratedSource,
         parser::{
             HelixParser,
@@ -498,9 +498,28 @@ fn analyze_source(source: Source, files: &[HxFile]) -> Result<GeneratedSource> {
 
     let (diagnostics, generated_source) =
         analyze(&source).map_err(|e| eyre::eyre!("Analysis error: {}", e))?;
-    if !diagnostics.is_empty() {
+
+    let (error_diagnostics, warning_diagnostics): (Vec<_>, Vec<_>) = diagnostics
+        .into_iter()
+        .partition(|d| matches!(d.severity, DiagnosticSeverity::Error));
+
+    if !warning_diagnostics.is_empty() {
+        let mut warning_msg = String::new();
+        for diag in &warning_diagnostics {
+            let filepath = diag.filepath.clone().unwrap_or("queries.hx".to_string());
+            let snippet_src = diagnostic_source(&filepath, files, &generated_source.src);
+            warning_msg.push_str(&diag.render(snippet_src.as_ref(), &filepath));
+            warning_msg.push('\n');
+        }
+        eprintln!(
+            "Compilation produced {} warning(s):\n{warning_msg}",
+            warning_diagnostics.len()
+        );
+    }
+
+    if !error_diagnostics.is_empty() {
         let mut error_msg = String::new();
-        for diag in diagnostics {
+        for diag in error_diagnostics {
             let filepath = diag.filepath.clone().unwrap_or("queries.hx".to_string());
             let snippet_src = diagnostic_source(&filepath, files, &source.source);
             error_msg.push_str(&diag.render(snippet_src.as_ref(), &filepath));

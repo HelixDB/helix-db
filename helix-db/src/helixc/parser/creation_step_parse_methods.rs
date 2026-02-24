@@ -1,60 +1,24 @@
 use crate::helixc::parser::{
     HelixParser, ParserError, Rule,
     location::HasLoc,
-    types::{AddEdge, AddNode, AddVector, Embed, EvaluatesToString, VectorData},
-    utils::PairTools,
+    types::{AddEdge, AddNode, AddVector},
 };
 use pest::iterators::Pair;
 
 impl HelixParser {
     pub(super) fn parse_add_vector(&self, pair: Pair<Rule>) -> Result<AddVector, ParserError> {
+        let loc = pair.loc();
         let mut vector_type = None;
         let mut data = None;
         let mut fields = None;
 
-        for p in pair.clone().into_inner() {
+        for p in pair.into_inner() {
             match p.as_rule() {
                 Rule::identifier_upper => {
                     vector_type = Some(p.as_str().to_string());
                 }
                 Rule::vector_data => {
-                    let vector_data = p.clone().try_inner_next()?;
-                    match vector_data.as_rule() {
-                        Rule::identifier => {
-                            data = Some(VectorData::Identifier(p.as_str().to_string()));
-                        }
-                        Rule::vec_literal => {
-                            data = Some(VectorData::Vector(self.parse_vec_literal(p)?));
-                        }
-                        Rule::embed_method => {
-                            let inner = vector_data.clone().try_inner_next()?;
-                            data = Some(VectorData::Embed(Embed {
-                                loc: vector_data.loc(),
-                                value: match inner.as_rule() {
-                                    Rule::identifier => {
-                                        EvaluatesToString::Identifier(inner.as_str().to_string())
-                                    }
-                                    Rule::string_literal => {
-                                        EvaluatesToString::StringLiteral(inner.as_str().to_string())
-                                    }
-                                    _ => {
-                                        return Err(ParserError::from(format!(
-                                            "Unexpected rule in SearchV: {:?} => {:?}",
-                                            inner.as_rule(),
-                                            inner,
-                                        )));
-                                    }
-                                },
-                            }));
-                        }
-                        _ => {
-                            return Err(ParserError::from(format!(
-                                "Unexpected rule in SearchV: {:?} => {:?}",
-                                vector_data.as_rule(),
-                                vector_data,
-                            )));
-                        }
-                    }
+                    data = Some(self.parse_vector_data(p, "AddV")?);
                 }
                 Rule::create_field => {
                     fields = Some(self.parse_property_assignments(p)?);
@@ -73,15 +37,16 @@ impl HelixParser {
             vector_type,
             data,
             fields,
-            loc: pair.loc(),
+            loc,
         })
     }
 
     pub(super) fn parse_add_node(&self, pair: Pair<Rule>) -> Result<AddNode, ParserError> {
+        let loc = pair.loc();
         let mut node_type = None;
         let mut fields = None;
 
-        for p in pair.clone().into_inner() {
+        for p in pair.into_inner() {
             match p.as_rule() {
                 Rule::identifier_upper => {
                     node_type = Some(p.as_str().to_string());
@@ -102,7 +67,7 @@ impl HelixParser {
         Ok(AddNode {
             node_type,
             fields,
-            loc: pair.loc(),
+            loc,
         })
     }
 
@@ -111,11 +76,12 @@ impl HelixParser {
         pair: Pair<Rule>,
         from_identifier: bool,
     ) -> Result<AddEdge, ParserError> {
+        let loc = pair.loc();
         let mut edge_type = None;
         let mut fields = None;
         let mut connection = None;
 
-        for p in pair.clone().into_inner() {
+        for p in pair.into_inner() {
             match p.as_rule() {
                 Rule::identifier_upper => {
                     edge_type = Some(p.as_str().to_string());
@@ -145,14 +111,18 @@ impl HelixParser {
             fields,
             connection: connection.ok_or_else(|| ParserError::from("Missing edge connection"))?,
             from_identifier,
-            loc: pair.loc(),
+            loc,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::helixc::parser::{HelixParser, write_to_temp_file};
+    use crate::helixc::parser::{
+        HelixParser,
+        types::{ExpressionType, StatementType, VectorData},
+        write_to_temp_file,
+    };
 
     // ============================================================================
     // AddNode Tests
@@ -340,6 +310,34 @@ mod tests {
         let content = write_to_temp_file(vec![source]);
         let result = HelixParser::parse_source(&content);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_add_vector_with_literal_array() {
+        let source = r#"
+            V::Document { content: String, embedding: [F32] }
+
+            QUERY addDoc() =>
+                doc <- AddV<Document>([0.1, 0.2, 0.3], {content: "literal"})
+                RETURN doc
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).expect("parse should succeed");
+        let statement = &parsed.queries[0].statements[0];
+
+        let StatementType::Assignment(assignment) = &statement.statement else {
+            panic!("expected assignment statement")
+        };
+
+        let ExpressionType::AddVector(add_vector) = &assignment.value.expr else {
+            panic!("expected AddVector expression")
+        };
+
+        assert!(matches!(
+            add_vector.data,
+            Some(VectorData::Vector(ref values)) if values == &vec![0.1, 0.2, 0.3]
+        ));
     }
 
     #[test]

@@ -324,7 +324,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
             };
             for item in iter {
                 let (_, data) = item?;
-                let data = data.decode().map_err(|e| GraphError::DecodeError(e.to_string()))?;
+                let data = data
+                    .decode()
+                    .map_err(|e| GraphError::DecodeError(e.to_string()))?;
                 let (edge_id, node_id) = HelixGraphStorage::unpack_adj_edge_data(data)?;
                 if node_id == to_node {
                     return Ok(Some(self.storage.get_edge(self.txn, &edge_id, self.arena)?));
