@@ -71,6 +71,97 @@ fn test_insert_and_fetch_vector() {
 }
 
 #[test]
+fn test_search_v_with_non_date_properties() {
+    use crate::protocol::value::Value;
+    use std::collections::HashMap;
+
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert("source".to_string(), Value::String("manual".to_string()));
+    properties.insert("rank".to_string(), Value::U32(7));
+    properties.insert("score".to_string(), Value::F64(0.98));
+
+    let props_map = ImmutablePropertiesMap::new(
+        properties.len(),
+        properties
+            .iter()
+            .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+        &arena,
+    );
+
+    let vector = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[0.11, 0.22, 0.33], "search_non_date", Some(props_map))
+        .collect_to_obj()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let results = G::new(&storage, &txn, &arena)
+        .search_v::<Filter, _>(&[0.11, 0.22, 0.33], 10, "search_non_date", None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id(), vector.id());
+    assert_eq!(
+        results[0].get_property("source"),
+        Some(&Value::String("manual".to_string()))
+    );
+    assert_eq!(results[0].get_property("rank"), Some(&Value::U32(7)));
+    assert_eq!(results[0].get_property("score"), Some(&Value::F64(0.98)));
+}
+
+#[test]
+fn test_search_v_with_date_property() {
+    use crate::protocol::{date::Date, value::Value};
+    use std::collections::HashMap;
+
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let created_at = Date::new(&Value::String("2024-01-01T00:00:00Z".to_string())).unwrap();
+    let mut properties = HashMap::new();
+    properties.insert("created_at".to_string(), Value::Date(created_at));
+    properties.insert(
+        "source".to_string(),
+        Value::String("search-test".to_string()),
+    );
+
+    let props_map = ImmutablePropertiesMap::new(
+        properties.len(),
+        properties
+            .iter()
+            .map(|(k, v)| (arena.alloc_str(k) as &str, v.clone())),
+        &arena,
+    );
+
+    let vector = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&[0.7, 0.8, 0.9], "search_date", Some(props_map))
+        .collect_to_obj()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let results = G::new(&storage, &txn, &arena)
+        .search_v::<Filter, _>(&[0.7, 0.8, 0.9], 10, "search_date", None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id(), vector.id());
+    assert_eq!(
+        results[0].get_property("created_at"),
+        Some(&Value::Date(created_at))
+    );
+}
+
+#[test]
 fn test_vector_edges_from_and_to_node() {
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();

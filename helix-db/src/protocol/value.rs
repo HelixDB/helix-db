@@ -2900,6 +2900,7 @@ mod tests {
             Value::F64(3.14),
             Value::Boolean(true),
             Value::U128(u128::MAX),
+            Value::Date(Date::new(&Value::String("2021-01-01T00:00:00Z".to_string())).unwrap()),
             Value::Empty,
             Value::Array(vec![Value::I32(1), Value::I32(2)]),
         ];

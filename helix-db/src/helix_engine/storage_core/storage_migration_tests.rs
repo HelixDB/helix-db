@@ -9,12 +9,12 @@
 //! - Performance tests for large datasets
 
 use super::{
-    HelixGraphStorage,
-    metadata::{NATIVE_VECTOR_ENDIANNESS, StorageMetadata, VectorEndianness},
+    metadata::{StorageMetadata, VectorEndianness, NATIVE_VECTOR_ENDIANNESS},
     storage_migration::{
         convert_all_vector_properties, convert_old_vector_properties_to_new_format,
         convert_vector_endianness, migrate,
     },
+    HelixGraphStorage,
 };
 use crate::{
     helix_engine::{
@@ -889,7 +889,6 @@ fn test_error_corrupted_property_data() {
 }
 
 #[test]
-#[ignore]
 fn test_date_bincode_serialization() {
     // Test that Date values serialize/deserialize correctly with bincode
     use crate::protocol::date::Date;
@@ -901,7 +900,7 @@ fn test_date_bincode_serialization() {
     // Serialize with bincode
     let serialized = bincode::serialize(&value).unwrap();
     println!("\nValue::Date serialized to {} bytes", serialized.len());
-    println!("Format: [variant=12] [i64 timestamp]");
+    println!("Format: [variant=12] [RFC3339 string]");
     println!("Bytes: {:?}", serialized);
 
     // Deserialize
