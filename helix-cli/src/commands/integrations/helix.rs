@@ -12,7 +12,8 @@ use reqwest_eventsource::RequestBuilderExt;
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::LazyLock;
 // use uuid::Uuid;
 
@@ -41,15 +42,6 @@ pub fn cloud_base_url() -> String {
 
 pub struct HelixManager<'a> {
     project: &'a ProjectContext,
-}
-
-const QUERY_BIN_VERSION: u32 = 1;
-
-#[derive(serde::Serialize)]
-struct QueryBinEnvelope {
-    version: u32,
-    schema: String,
-    queries: HashMap<String, String>,
 }
 
 impl<'a> HelixManager<'a> {
@@ -221,15 +213,6 @@ impl<'a> HelixManager<'a> {
             }
         }
 
-        let query_bin_payload = QueryBinEnvelope {
-            version: QUERY_BIN_VERSION,
-            schema: schema_content.clone(),
-            queries: queries_map.clone(),
-        };
-        let query_bin_bytes = bincode::serialize(&query_bin_payload)
-            .map_err(|e| eyre!("Failed to serialize queries.bin payload: {e}"))?;
-        let query_bin_b64 = BASE64_STANDARD.encode(&query_bin_bytes);
-
         // Build a pruned HelixConfig containing only [project] and the deployed [cloud.<instance>]
         let helix_toml_content = {
             use crate::config::HelixConfig;
@@ -271,7 +254,6 @@ impl<'a> HelixManager<'a> {
         let payload = json!({
             "schema": schema_content,
             "queries": queries_map,
-            "queries_bin_b64": query_bin_b64,
             "env_vars": cluster_info.env_vars,
             "instance_name": cluster_name,
             "helix_toml": helix_toml_content,
@@ -537,7 +519,32 @@ impl<'a> HelixManager<'a> {
         ))
     }
 
-    /// Deploy .rs files to an enterprise cluster
+    pub(crate) async fn deploy_enterprise_by_cluster_id(
+        &self,
+        path: Option<String>,
+        cluster_id: &str,
+        cluster_name_hint: &str,
+    ) -> Result<()> {
+        if let Some((instance_name, config)) = self
+            .project
+            .config
+            .enterprise
+            .iter()
+            .find(|(_, config)| config.cluster_id == cluster_id)
+        {
+            return self
+                .deploy_enterprise(path, instance_name.clone(), config)
+                .await;
+        }
+
+        Err(eyre!(
+            "Enterprise cluster '{}' is not configured in helix.toml. Run 'helix sync' to refresh cluster metadata, then retry syncing cluster '{}'.",
+            cluster_id,
+            cluster_name_hint
+        ))
+    }
+
+    /// Deploy an enterprise query bundle and source snapshot to an enterprise cluster
     pub(crate) async fn deploy_enterprise(
         &self,
         path: Option<String>,
@@ -552,30 +559,68 @@ impl<'a> HelixManager<'a> {
             }
         };
 
-        // Collect .rs files from queries directory
-        let queries_dir = path.join(&self.project.config.project.queries);
-        let mut rs_files: HashMap<String, String> = HashMap::new();
-
-        if queries_dir.exists() {
-            for entry in std::fs::read_dir(&queries_dir)? {
-                let entry = entry?;
-                let file_path = entry.path();
-                if file_path.is_file() && file_path.extension().map(|e| e == "rs").unwrap_or(false)
-                {
-                    let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
-                    let content = std::fs::read_to_string(&file_path)
-                        .map_err(|e| eyre!("Failed to read {}: {}", filename, e))?;
-                    rs_files.insert(filename, content);
-                }
-            }
-        }
-
-        if rs_files.is_empty() {
+        let queries_project_dir = path
+            .join(&self.project.config.project.queries)
+            .canonicalize()
+            .unwrap_or_else(|_| path.join(&self.project.config.project.queries));
+        let manifest_path = queries_project_dir.join("Cargo.toml");
+        if !manifest_path.exists() {
             return Err(eyre!(
-                "No .rs files found in queries directory: {}",
-                queries_dir.display()
+                "Enterprise queries project manifest not found: {}",
+                manifest_path.display()
             ));
         }
+
+        output::info("Compiling enterprise query project...");
+        let compile_output = Command::new("cargo")
+            .arg("run")
+            .arg("--manifest-path")
+            .arg(&manifest_path)
+            .current_dir(&queries_project_dir)
+            .output()
+            .map_err(|e| eyre!("Failed to run cargo for enterprise queries: {e}"))?;
+
+        if !compile_output.status.success() {
+            let stderr = String::from_utf8_lossy(&compile_output.stderr);
+            let stdout = String::from_utf8_lossy(&compile_output.stdout);
+            return Err(eyre!(
+                "Enterprise query project compilation failed:\n{}\n{}",
+                stderr,
+                stdout
+            ));
+        }
+
+        let query_bin_path = queries_project_dir.join("queries.bin");
+        if !query_bin_path.exists() {
+            return Err(eyre!(
+                "Enterprise query project did not generate queries.bin at {}",
+                query_bin_path.display()
+            ));
+        }
+
+        let query_bin_bytes = std::fs::read(&query_bin_path).map_err(|e| {
+            eyre!(
+                "Failed to read generated queries.bin ({}): {e}",
+                query_bin_path.display()
+            )
+        })?;
+
+        if query_bin_bytes.is_empty() {
+            return Err(eyre!(
+                "Generated queries.bin is empty ({})",
+                query_bin_path.display()
+            ));
+        }
+
+        let source_files = collect_enterprise_source_files(&queries_project_dir)?;
+        if source_files.is_empty() {
+            return Err(eyre!(
+                "No source files found in enterprise queries project: {}",
+                queries_project_dir.display()
+            ));
+        }
+
+        let query_bin_b64 = BASE64_STANDARD.encode(&query_bin_bytes);
 
         // Build pruned helix.toml
         let helix_toml_content = {
@@ -594,7 +639,9 @@ impl<'a> HelixManager<'a> {
         };
 
         let payload = json!({
-            "rs_files": rs_files,
+            "queries_bin_b64": query_bin_b64,
+            "queries_bin_size_bytes": query_bin_bytes.len(),
+            "source_files": source_files,
             "instance_name": cluster_name,
             "helix_toml": helix_toml_content,
         });
@@ -607,77 +654,28 @@ impl<'a> HelixManager<'a> {
             config.cluster_id
         );
 
-        let mut event_source = client
+        let response = client
             .post(&deploy_url)
             .header("x-api-key", &credentials.helix_admin_key)
             .header("Content-Type", "application/json")
             .json(&payload)
-            .eventsource()?;
+            .send()
+            .await
+            .map_err(|e| eyre!("Enterprise deployment request failed: {e}"))?;
 
-        let progress = SseProgressHandler::new("Deploying enterprise cluster...");
-        let mut deployment_success = false;
-
-        use futures_util::StreamExt;
-
-        while let Some(event) = event_source.next().await {
-            match event {
-                Ok(reqwest_eventsource::Event::Open) => {}
-                Ok(reqwest_eventsource::Event::Message(message)) => {
-                    let sse_event: SseEvent = match parse_sse_event(&message.data) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            output::verbose(&format!(
-                                "Ignoring unrecognized deploy SSE payload: {}",
-                                e
-                            ));
-                            continue;
-                        }
-                    };
-
-                    match sse_event {
-                        SseEvent::Progress {
-                            percentage,
-                            message,
-                        } => {
-                            progress.set_progress(percentage);
-                            if let Some(msg) = message {
-                                progress.set_message(&msg);
-                            }
-                        }
-                        SseEvent::Log { message, .. } => {
-                            progress.println(&message);
-                        }
-                        SseEvent::Success { .. } => {
-                            deployment_success = true;
-                            progress.finish("Enterprise deployment completed!");
-                            event_source.close();
-                            break;
-                        }
-                        SseEvent::Error { error } => {
-                            progress.finish_error(&format!("Error: {}", error));
-                            event_source.close();
-                            return Err(eyre!("Enterprise deployment failed: {}", error));
-                        }
-                        SseEvent::Deployed { url, auth_key } => {
-                            deployment_success = true;
-                            progress.finish("Enterprise deployment completed!");
-                            output::success(&format!("Deployed to: {}", url));
-                            output::info(&format!("Your auth key: {}", auth_key));
-                            event_source.close();
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                Err(err) => {
-                    progress.finish_error(&format!("Stream error: {}", err));
-                    return Err(eyre!("Enterprise deployment stream error: {}", err));
-                }
-            }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(eyre!("Enterprise deployment failed ({}): {}", status, body));
         }
 
-        if !deployment_success {
-            return Err(eyre!("Enterprise deployment did not complete successfully"));
+        let response_payload: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| eyre!("Failed to parse enterprise deploy response: {e}"))?;
+
+        if let Some(s3_key) = response_payload.get("s3_key").and_then(|v| v.as_str()) {
+            output::info(&format!("Uploaded queries.bin to {s3_key}"));
         }
 
         output::success("Enterprise cluster deployed successfully");
@@ -699,6 +697,79 @@ impl<'a> HelixManager<'a> {
         // In the future, this could use a different endpoint or add a "redeploy" flag
         self.deploy(path, cluster_name, Some(build_mode)).await
     }
+}
+
+fn should_skip_enterprise_source_path(relative_path: &Path) -> bool {
+    if relative_path.as_os_str().is_empty() {
+        return true;
+    }
+
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
+    if normalized == "queries.bin" {
+        return true;
+    }
+
+    for component in relative_path.components() {
+        if let Component::Normal(part) = component {
+            if part == "target" || part == ".git" {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn collect_enterprise_source_files(queries_project_dir: &Path) -> Result<HashMap<String, String>> {
+    fn walk(dir: &Path, root: &Path, files: &mut HashMap<String, String>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)
+            .map_err(|e| eyre!("Failed to read directory {}: {}", dir.display(), e))?
+        {
+            let entry = entry.map_err(|e| eyre!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|_| {
+                eyre!(
+                    "Failed to compute relative path for source file {}",
+                    path.display()
+                )
+            })?;
+
+            if should_skip_enterprise_source_path(relative) {
+                continue;
+            }
+
+            if path.is_dir() {
+                walk(&path, root, files)?;
+                continue;
+            }
+
+            let normalized_relative = relative.to_string_lossy().replace('\\', "/");
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    files.insert(normalized_relative, content);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    output::verbose(&format!(
+                        "Skipping non-utf8 source file during enterprise deploy snapshot: {}",
+                        path.display()
+                    ));
+                }
+                Err(e) => {
+                    return Err(eyre!(
+                        "Failed to read source file {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut files = HashMap::new();
+    walk(queries_project_dir, queries_project_dir, &mut files)?;
+    Ok(files)
 }
 
 /// Returns the path or the current working directory if no path is provided

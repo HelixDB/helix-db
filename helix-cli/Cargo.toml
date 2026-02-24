@@ -37,7 +37,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 tui-banner = "0.2.3"
 base64 = "0.22"
-bincode = "1.3.3"
+helix-dsl = { path = "/Users/xav/GitHub/helix-hyperscale/enterprise/helix-dsl" }
 
 
 [dev-dependencies]

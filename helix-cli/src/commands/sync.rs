@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize, Default)]
@@ -39,9 +40,15 @@ struct SyncFileMetadata {
     last_modified_ms: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct EnterpriseSyncResponse {
+    #[serde(default)]
+    source_files: HashMap<String, String>,
+    #[serde(default)]
     rs_files: HashMap<String, String>,
+    #[serde(default)]
+    file_metadata: HashMap<String, SyncFileMetadata>,
+    #[serde(default)]
     helix_toml: Option<String>,
 }
 
@@ -294,6 +301,231 @@ fn build_remote_hx_manifest(sync_response: &SyncResponse) -> HashMap<String, Man
     }
 
     manifest
+}
+
+fn should_skip_enterprise_source_entry(relative_path: &Path) -> bool {
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
+    if normalized == "queries.bin" {
+        return true;
+    }
+
+    for component in relative_path.components() {
+        if let Component::Normal(part) = component {
+            if part == "target" || part == ".git" {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn collect_local_enterprise_manifest(queries_dir: &Path) -> Result<HashMap<String, ManifestEntry>> {
+    fn walk(dir: &Path, root: &Path, manifest: &mut HashMap<String, ManifestEntry>) -> Result<()> {
+        for entry in fs::read_dir(dir)
+            .map_err(|e| eyre!("Failed to read directory {}: {}", dir.display(), e))?
+        {
+            let entry = entry.map_err(|e| eyre!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| eyre!("Failed to compute relative path for {}", path.display()))?;
+
+            if should_skip_enterprise_source_entry(relative) {
+                continue;
+            }
+
+            if path.is_dir() {
+                walk(&path, root, manifest)?;
+                continue;
+            }
+
+            let relative_path = relative.to_string_lossy().replace('\\', "/");
+            let content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    Step::verbose_substep(&format!(
+                        "  Skipping non-utf8 source file during sync: {}",
+                        relative_path
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    return Err(eyre!(
+                        "Failed to read local source file {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            };
+
+            let last_modified_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(system_time_to_ms);
+
+            manifest.insert(
+                relative_path,
+                ManifestEntry {
+                    sha256: compute_sha256(&content),
+                    last_modified_ms,
+                    content,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    let mut manifest = HashMap::new();
+    if !queries_dir.exists() {
+        return Ok(manifest);
+    }
+
+    walk(queries_dir, queries_dir, &mut manifest)?;
+    Ok(manifest)
+}
+
+fn build_remote_enterprise_manifest(
+    sync_response: &EnterpriseSyncResponse,
+) -> HashMap<String, ManifestEntry> {
+    let mut manifest = HashMap::new();
+    let source_files = if !sync_response.source_files.is_empty() {
+        &sync_response.source_files
+    } else {
+        &sync_response.rs_files
+    };
+
+    for (raw_path, content) in source_files {
+        let safe_path = match sanitize_relative_path(Path::new(raw_path)) {
+            Ok(path) => path,
+            Err(e) => {
+                print_warning(&format!(
+                    "Skipping remote enterprise file '{}' due to unsafe path: {}",
+                    raw_path, e
+                ));
+                continue;
+            }
+        };
+        let normalized_path = safe_path.to_string_lossy().replace('\\', "/");
+        if should_skip_enterprise_source_entry(Path::new(&normalized_path)) {
+            continue;
+        }
+
+        let metadata = sync_response
+            .file_metadata
+            .get(raw_path)
+            .or_else(|| sync_response.file_metadata.get(&normalized_path));
+
+        manifest.insert(
+            normalized_path,
+            ManifestEntry {
+                sha256: metadata
+                    .and_then(|entry| entry.sha256.clone())
+                    .unwrap_or_else(|| compute_sha256(content)),
+                last_modified_ms: metadata.and_then(|entry| entry.last_modified_ms),
+                content: content.clone(),
+            },
+        );
+    }
+
+    manifest
+}
+
+async fn fetch_enterprise_sync_response_with_remote_empty_fallback(
+    client: &reqwest::Client,
+    api_key: &str,
+    cluster_id: &str,
+) -> Result<EnterpriseSyncResponse> {
+    let sync_url = format!(
+        "{}/api/cli/enterprise-clusters/{}/sync",
+        cloud_base_url(),
+        cluster_id
+    );
+    let response = client
+        .get(&sync_url)
+        .header("x-api-key", api_key)
+        .send()
+        .await
+        .map_err(|e| eyre!("Failed to connect to Helix Cloud: {}", e))?;
+
+    match response.status() {
+        reqwest::StatusCode::OK => response
+            .json::<EnterpriseSyncResponse>()
+            .await
+            .map_err(|e| eyre!("Failed to parse enterprise sync response: {}", e)),
+        reqwest::StatusCode::NOT_FOUND => {
+            print_warning(&format!(
+                "No remote enterprise source files found for cluster '{}'. Treating cloud changes as empty.",
+                cluster_id
+            ));
+            Ok(EnterpriseSyncResponse::default())
+        }
+        reqwest::StatusCode::UNAUTHORIZED => Err(eyre!(
+            "Authentication failed. Run 'helix auth login' to re-authenticate."
+        )),
+        reqwest::StatusCode::FORBIDDEN => Err(eyre!(
+            "Access denied to enterprise cluster '{}'. Make sure you have permission to access this cluster.",
+            cluster_id
+        )),
+        status => {
+            let error_text = response.text().await.unwrap_or_default();
+            Err(eyre!("Enterprise sync failed ({}): {}", status, error_text))
+        }
+    }
+}
+
+fn regenerate_enterprise_queries_bin(queries_dir: &Path) -> Result<PathBuf> {
+    let manifest_path = queries_dir.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return Err(eyre!(
+            "Enterprise queries Cargo.toml not found at {}",
+            manifest_path.display()
+        ));
+    }
+
+    let compile_output = Command::new("cargo")
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .current_dir(queries_dir)
+        .output()
+        .map_err(|e| eyre!("Failed to run cargo for enterprise queries: {e}"))?;
+
+    if !compile_output.status.success() {
+        let stderr = String::from_utf8_lossy(&compile_output.stderr);
+        let stdout = String::from_utf8_lossy(&compile_output.stdout);
+        return Err(eyre!(
+            "Enterprise query project compilation failed during sync:\n{}\n{}",
+            stderr,
+            stdout
+        ));
+    }
+
+    let query_bin_path = queries_dir.join("queries.bin");
+    if !query_bin_path.exists() {
+        return Err(eyre!(
+            "Enterprise query project did not generate queries.bin at {}",
+            query_bin_path.display()
+        ));
+    }
+
+    let metadata = fs::metadata(&query_bin_path)
+        .map_err(|e| eyre!("Failed to read queries.bin metadata: {}", e))?;
+    if metadata.len() == 0 {
+        return Err(eyre!(
+            "Generated queries.bin is empty ({})",
+            query_bin_path.display()
+        ));
+    }
+
+    Ok(query_bin_path)
+}
+
+fn validate_local_enterprise_queries_for_push(project: &ProjectContext) -> Result<()> {
+    let queries_dir = project.root.join(&project.config.project.queries);
+    regenerate_enterprise_queries_bin(&queries_dir).map(|_| ())
 }
 
 fn compute_manifest_diff(
@@ -682,6 +914,57 @@ async fn push_local_snapshot_to_cluster(
         .await
 }
 
+fn pull_remote_enterprise_snapshot_into_local(
+    project: &ProjectContext,
+    local_manifest: &HashMap<String, ManifestEntry>,
+    remote_manifest: &HashMap<String, ManifestEntry>,
+) -> Result<()> {
+    let queries_dir = project.root.join(&project.config.project.queries);
+    fs::create_dir_all(&queries_dir)?;
+
+    for (relative_path, remote_entry) in remote_manifest {
+        let destination = safe_join_relative(&queries_dir, relative_path)?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&destination, &remote_entry.content)
+            .map_err(|e| eyre!("Failed to write {}: {}", relative_path, e))?;
+    }
+
+    for local_only_path in local_manifest
+        .keys()
+        .filter(|path| !remote_manifest.contains_key(*path))
+    {
+        let local_path = safe_join_relative(&queries_dir, local_only_path)?;
+        if local_path.exists() {
+            fs::remove_file(&local_path).map_err(|e| {
+                eyre!(
+                    "Failed to remove local enterprise file {}: {}",
+                    local_only_path,
+                    e
+                )
+            })?;
+            Step::verbose_substep(&format!("  Removed {}", local_only_path));
+        }
+    }
+
+    Ok(())
+}
+
+async fn push_local_enterprise_snapshot_to_cluster(
+    project: &ProjectContext,
+    cluster_id: &str,
+    cluster_name: &str,
+) -> Result<()> {
+    let refreshed_project = ProjectContext::find_and_load(Some(&project.root))
+        .map_err(|e| eyre!("Failed to reload project context: {}", e))?;
+    let helix = HelixManager::new(&refreshed_project);
+
+    helix
+        .deploy_enterprise_by_cluster_id(None, cluster_id, cluster_name)
+        .await
+}
+
 #[derive(Clone, Copy)]
 enum TieResolutionAction {
     NoOp,
@@ -885,6 +1168,197 @@ async fn reconcile_standard_cluster_snapshot(
 
     if changed {
         crate::output::success("Sync reconciliation applied.");
+    }
+
+    op.success();
+    Ok(())
+}
+
+async fn reconcile_enterprise_cluster_snapshot(
+    project: &ProjectContext,
+    api_key: &str,
+    cluster_id: &str,
+    cluster_name: &str,
+    assume_yes: bool,
+) -> Result<()> {
+    let op = Operation::new("Syncing", cluster_name);
+    let client = reqwest::Client::new();
+
+    let mut fetch_step = Step::with_messages(
+        "Fetching enterprise cloud changes",
+        "Enterprise cloud changes fetched",
+    );
+    fetch_step.start();
+    let sync_response = match fetch_enterprise_sync_response_with_remote_empty_fallback(
+        &client, api_key, cluster_id,
+    )
+    .await
+    {
+        Ok(response) => {
+            fetch_step.done();
+            response
+        }
+        Err(error) => {
+            fetch_step.fail();
+            return Err(error);
+        }
+    };
+
+    let queries_dir = project.root.join(&project.config.project.queries);
+    let local_manifest = collect_local_enterprise_manifest(&queries_dir)?;
+    let remote_manifest = build_remote_enterprise_manifest(&sync_response);
+    let comparison = compare_manifests(&local_manifest, &remote_manifest);
+
+    let apply_pull = || -> Result<()> {
+        pull_remote_enterprise_snapshot_into_local(project, &local_manifest, &remote_manifest)?;
+        let query_bin_path = regenerate_enterprise_queries_bin(&queries_dir)?;
+        Step::verbose_substep(&format!("  Regenerated {}", query_bin_path.display()));
+        Ok(())
+    };
+
+    let mut changed = false;
+
+    match comparison {
+        SnapshotComparison::BothEmpty | SnapshotComparison::InSync => {
+            crate::output::info("Local and enterprise cloud changes are already in sync.");
+        }
+        SnapshotComparison::LocalOnly => {
+            if let Err(error) = validate_local_enterprise_queries_for_push(project) {
+                op.failure();
+                return Err(eyre!(
+                    "enterprise query project failed validation. Fix errors before pushing to cloud.\n\n{}",
+                    error
+                ));
+            }
+
+            if confirm_sync_action(
+                assume_yes,
+                "your enterprise cluster has no source snapshot. Push your local query project to cloud now?",
+            )? {
+                let diff = compute_manifest_diff(&local_manifest, &remote_manifest);
+                print_plan_for_direction(&diff, SyncDirection::Push);
+                push_local_enterprise_snapshot_to_cluster(project, cluster_id, cluster_name)
+                    .await?;
+                changed = true;
+            } else {
+                crate::output::info("Left local and cloud changes unchanged.");
+            }
+        }
+        SnapshotComparison::RemoteOnly => {
+            if confirm_sync_action(
+                assume_yes,
+                "Local enterprise source is empty while cloud has files. Pull cloud files to local?",
+            )? {
+                let diff = compute_manifest_diff(&local_manifest, &remote_manifest);
+                print_plan_for_direction(&diff, SyncDirection::Pull);
+                apply_pull()?;
+                changed = true;
+            } else {
+                crate::output::info("Left local and cloud changes unchanged.");
+            }
+        }
+        SnapshotComparison::Diverged { authority, diff } => match authority {
+            DivergenceAuthority::LocalNewer => {
+                let push_allowed = match validate_local_enterprise_queries_for_push(project) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        print_warning(
+                            "Local enterprise queries failed validation, so pushing local files is unavailable.",
+                        );
+                        print_warning(&error.to_string());
+                        false
+                    }
+                };
+
+                if push_allowed {
+                    if confirm_sync_action(
+                        assume_yes,
+                        "Local enterprise changes are newer. Push your local query project to cloud?",
+                    )? {
+                        print_plan_for_direction(&diff, SyncDirection::Push);
+                        push_local_enterprise_snapshot_to_cluster(
+                            project,
+                            cluster_id,
+                            cluster_name,
+                        )
+                        .await?;
+                        changed = true;
+                    } else if confirm_sync_action(
+                        false,
+                        "Overwrite local enterprise files with cloud changes instead?",
+                    )? {
+                        print_plan_for_direction(&diff, SyncDirection::Pull);
+                        apply_pull()?;
+                        changed = true;
+                    } else {
+                        crate::output::info("Left local and cloud changes unchanged.");
+                    }
+                } else if assume_yes || !prompts::is_interactive() {
+                    crate::output::info(
+                        "Local push skipped because enterprise query project failed validation.",
+                    );
+                    crate::output::info("Left local and cloud changes unchanged.");
+                } else if confirm_sync_action(
+                    false,
+                    "Overwrite local enterprise files with cloud changes instead?",
+                )? {
+                    print_plan_for_direction(&diff, SyncDirection::Pull);
+                    apply_pull()?;
+                    changed = true;
+                } else {
+                    crate::output::info("Left local and cloud changes unchanged.");
+                }
+            }
+            DivergenceAuthority::RemoteNewer => {
+                if confirm_sync_action(
+                    assume_yes,
+                    "Enterprise cloud changes are newer. Pull cloud files to local?",
+                )? {
+                    print_plan_for_direction(&diff, SyncDirection::Pull);
+                    apply_pull()?;
+                    changed = true;
+                } else {
+                    crate::output::info("Left local and cloud changes unchanged.");
+                }
+            }
+            DivergenceAuthority::TieOrUnknown => {
+                let allow_push = match validate_local_enterprise_queries_for_push(project) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        print_warning(
+                            "Local enterprise queries failed validation, so pushing local files is unavailable.",
+                        );
+                        print_warning(&error.to_string());
+                        false
+                    }
+                };
+
+                match resolve_tie_action(assume_yes, allow_push)? {
+                    TieResolutionAction::NoOp => {
+                        crate::output::info("Left local and cloud changes unchanged.");
+                    }
+                    TieResolutionAction::Pull => {
+                        print_plan_for_direction(&diff, SyncDirection::Pull);
+                        apply_pull()?;
+                        changed = true;
+                    }
+                    TieResolutionAction::Push => {
+                        print_plan_for_direction(&diff, SyncDirection::Push);
+                        push_local_enterprise_snapshot_to_cluster(
+                            project,
+                            cluster_id,
+                            cluster_name,
+                        )
+                        .await?;
+                        changed = true;
+                    }
+                }
+            }
+        },
+    }
+
+    if changed {
+        crate::output::success("Enterprise sync reconciliation applied.");
     }
 
     op.success();
@@ -1317,7 +1791,21 @@ async fn run_project_sync_flow(project: &ProjectContext, assume_yes: bool) -> Re
         prompts::select_cluster_from_workspace(&standard_items, &enterprise_items)?;
 
     if is_enterprise {
-        sync_enterprise_from_cluster_id(&credentials.helix_admin_key, &cluster_id).await?;
+        let cluster_name = project_clusters
+            .enterprise
+            .iter()
+            .find(|cluster| cluster.cluster_id == cluster_id)
+            .map(|cluster| cluster.cluster_name.as_str())
+            .unwrap_or(cluster_id.as_str());
+
+        reconcile_enterprise_cluster_snapshot(
+            project,
+            &credentials.helix_admin_key,
+            &cluster_id,
+            cluster_name,
+            assume_yes,
+        )
+        .await?;
     } else {
         let cluster_name = project_clusters
             .standard
@@ -1523,50 +2011,28 @@ async fn sync_from_cluster_id(api_key: &str, cluster_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Sync .rs files from an enterprise cluster by ID (no project context).
+/// Sync enterprise source files from a cluster by ID (no project context).
 async fn sync_enterprise_from_cluster_id(api_key: &str, cluster_id: &str) -> Result<()> {
     let op = Operation::new("Syncing", cluster_id);
 
     let client = reqwest::Client::new();
-    let sync_url = format!(
-        "{}/api/cli/enterprise-clusters/{}/sync",
-        cloud_base_url(),
-        cluster_id
-    );
 
-    let mut sync_step = Step::with_messages("Fetching .rs files", ".rs files fetched");
+    let mut sync_step = Step::with_messages(
+        "Fetching enterprise source files",
+        "Enterprise source files fetched",
+    );
     sync_step.start();
 
-    let response = match client
-        .get(&sync_url)
-        .header("x-api-key", api_key)
-        .send()
-        .await
+    let sync_response = match fetch_enterprise_sync_response_with_remote_empty_fallback(
+        &client, api_key, cluster_id,
+    )
+    .await
     {
         Ok(resp) => resp,
         Err(e) => {
             sync_step.fail();
             op.failure();
-            return Err(eyre!("Failed to connect to Helix Cloud: {}", e));
-        }
-    };
-
-    match response.status() {
-        reqwest::StatusCode::OK => {}
-        status => {
-            let error_text = response.text().await.unwrap_or_default();
-            sync_step.fail();
-            op.failure();
-            return Err(eyre!("Enterprise sync failed ({}): {}", status, error_text));
-        }
-    }
-
-    let sync_response: EnterpriseSyncResponse = match response.json().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            sync_step.fail();
-            op.failure();
-            return Err(eyre!("Failed to parse sync response: {}", e));
+            return Err(e);
         }
     };
 
@@ -1582,21 +2048,39 @@ async fn sync_enterprise_from_cluster_id(api_key: &str, cluster_id: &str) -> Res
         std::fs::create_dir_all(&queries_dir)?;
     }
 
-    let mut write_step = Step::with_messages("Writing .rs files", ".rs files written");
+    let local_manifest = collect_local_enterprise_manifest(&queries_dir)?;
+    let remote_manifest = build_remote_enterprise_manifest(&sync_response);
+
+    let mut write_step = Step::with_messages(
+        "Writing enterprise source files",
+        "Enterprise source files written",
+    );
     write_step.start();
 
     let mut files_written = 0;
-    for (filename, content) in &sync_response.rs_files {
+    for (filename, entry) in &remote_manifest {
         let file_path = safe_join_relative(&queries_dir, filename)?;
         if let Some(parent) = file_path.parent()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&file_path, content)
+        std::fs::write(&file_path, &entry.content)
             .map_err(|e| eyre!("Failed to write {}: {}", filename, e))?;
         files_written += 1;
         Step::verbose_substep(&format!("  Wrote {}", filename));
+    }
+
+    for local_only_path in local_manifest
+        .keys()
+        .filter(|path| !remote_manifest.contains_key(*path))
+    {
+        let local_path = safe_join_relative(&queries_dir, local_only_path)?;
+        if local_path.exists() {
+            std::fs::remove_file(&local_path)
+                .map_err(|e| eyre!("Failed to remove {}: {}", local_only_path, e))?;
+            Step::verbose_substep(&format!("  Removed {}", local_only_path));
+        }
     }
 
     if let Some(remote_config) = remote_config.as_ref()
@@ -1609,11 +2093,16 @@ async fn sync_enterprise_from_cluster_id(api_key: &str, cluster_id: &str) -> Res
         Step::verbose_substep("  Wrote helix.toml");
     }
 
+    if queries_dir.join("Cargo.toml").exists() {
+        let generated = regenerate_enterprise_queries_bin(&queries_dir)?;
+        Step::verbose_substep(&format!("  Regenerated {}", generated.display()));
+    }
+
     write_step.done_with_info(&format!("{} files", files_written));
     op.success();
 
     crate::output::info(&format!(
-        "Synced {} .rs files from enterprise cluster '{}'",
+        "Synced {} source files from enterprise cluster '{}'",
         files_written, cluster_id
     ));
 
@@ -1717,107 +2206,17 @@ async fn pull_from_enterprise_instance(
     project: &ProjectContext,
     instance_name: &str,
     config: &crate::config::EnterpriseInstanceConfig,
-    _assume_yes: bool,
+    assume_yes: bool,
 ) -> Result<()> {
-    let op = Operation::new("Syncing", instance_name);
     let credentials = require_auth().await?;
-
-    Step::verbose_substep(&format!(
-        "Downloading .rs files from enterprise cluster: {}",
-        config.cluster_id
-    ));
-
-    let client = reqwest::Client::new();
-    let sync_url = format!(
-        "{}/api/cli/enterprise-clusters/{}/sync",
-        cloud_base_url(),
-        config.cluster_id
-    );
-
-    let mut sync_step = Step::with_messages("Fetching source files", "Source files fetched");
-    sync_step.start();
-
-    let response = match client
-        .get(&sync_url)
-        .header("x-api-key", &credentials.helix_admin_key)
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            sync_step.fail();
-            op.failure();
-            return Err(eyre!("Failed to connect to Helix Cloud: {}", e));
-        }
-    };
-
-    match response.status() {
-        reqwest::StatusCode::OK => {}
-        status => {
-            let error_text = response.text().await.unwrap_or_default();
-            sync_step.fail();
-            op.failure();
-            return Err(eyre!("Enterprise sync failed ({}): {}", status, error_text));
-        }
-    }
-
-    let sync_response: EnterpriseSyncResponse = match response.json().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            sync_step.fail();
-            op.failure();
-            return Err(eyre!("Failed to parse sync response: {}", e));
-        }
-    };
-
-    sync_step.done();
-
-    let remote_config = sync_response.helix_toml.as_deref().and_then(|remote_toml| {
-        parse_and_sanitize_remote_config(remote_toml, "enterprise instance sync")
-    });
-
-    let queries_dir = project.root.join(&project.config.project.queries);
-    if !queries_dir.exists() {
-        std::fs::create_dir_all(&queries_dir)?;
-    }
-
-    let mut write_step = Step::with_messages("Writing source files", "Source files written");
-    write_step.start();
-
-    let mut files_written = 0;
-    for (filename, content) in &sync_response.rs_files {
-        let file_path = safe_join_relative(&queries_dir, filename)?;
-        if let Some(parent) = file_path.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&file_path, content)
-            .map_err(|e| eyre!("Failed to write {}: {}", filename, e))?;
-        files_written += 1;
-        Step::verbose_substep(&format!("  Wrote {}", filename));
-    }
-
-    if let Some(remote_config) = remote_config.as_ref()
-        && let Some(remote_toml) =
-            serialize_remote_config(remote_config, "enterprise instance sync")
-    {
-        let helix_toml_path = project.root.join("helix.toml");
-        std::fs::write(&helix_toml_path, remote_toml)
-            .map_err(|e| eyre!("Failed to write helix.toml: {}", e))?;
-        files_written += 1;
-        Step::verbose_substep("  Wrote helix.toml");
-    }
-
-    write_step.done_with_info(&format!("{} files", files_written));
-    op.success();
-
-    crate::output::info(&format!(
-        "Synced {} .rs files from enterprise cluster '{}'",
-        files_written, config.cluster_id
-    ));
-
-    Ok(())
+    reconcile_enterprise_cluster_snapshot(
+        project,
+        &credentials.helix_admin_key,
+        &config.cluster_id,
+        instance_name,
+        assume_yes,
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -1430,7 +1430,6 @@ version = "2.3.0"
 dependencies = [
  "async-trait",
  "base64",
- "bincode",
  "chrono",
  "clap",
  "cliclack",
@@ -1443,6 +1442,7 @@ dependencies = [
  "futures-util",
  "heed3",
  "helix-db",
+ "helix-dsl",
  "helix-metrics",
  "indicatif 0.18.3",
  "iota",
@@ -1535,6 +1535,25 @@ dependencies = [
  "twox-hash",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "helix-dsl"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "helix-dsl-macros",
+ "inventory",
+ "serde",
+]
+
+[[package]]
+name = "helix-dsl-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
