@@ -80,7 +80,11 @@ impl Date {
             Err(e) => match value.parse::<NaiveDate>() {
                 Ok(date) => match date.and_hms_opt(0, 0, 0) {
                     Some(date) => date.and_utc(),
-                    None => return Err(DateError::ParseError("invalid hour minute or second".to_string())),
+                    None => {
+                        return Err(DateError::ParseError(
+                            "invalid hour minute or second".to_string(),
+                        ));
+                    }
                 },
                 Err(_) => {
                     return Err(DateError::ParseError(e.to_string()));
@@ -150,7 +154,12 @@ impl<'de> Deserialize<'de> for Date {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(DateVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(DateVisitor)
+        } else {
+            let value = String::deserialize(deserializer)?;
+            Date::parse_from_string(value).map_err(serde::de::Error::custom)
+        }
     }
 }
 
@@ -236,6 +245,14 @@ mod tests {
         let date = Date::new(&Value::String("2021-01-01T00:00:00Z".to_string())).unwrap();
         let serialized = sonic_rs::to_string(&date).unwrap();
         let deserialized: Date = sonic_rs::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, date);
+    }
+
+    #[test]
+    fn test_bincode_roundtrip() {
+        let date = Date::new(&Value::String("2021-01-01T00:00:00Z".to_string())).unwrap();
+        let bytes = bincode::serialize(&date).unwrap();
+        let deserialized: Date = bincode::deserialize(&bytes).unwrap();
         assert_eq!(deserialized, date);
     }
 }
