@@ -11,7 +11,6 @@ use helix_db::helix_engine::traversal_core::config::Config;
 use reqwest_eventsource::RequestBuilderExt;
 use serde_json::json;
 use std::collections::HashMap;
-use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -43,6 +42,9 @@ pub fn cloud_base_url() -> String {
 pub struct HelixManager<'a> {
     project: &'a ProjectContext,
 }
+
+const ENTERPRISE_SOURCE_MAX_FILES: usize = 2_000;
+const ENTERPRISE_SOURCE_MAX_BYTES: usize = 10 * 1024 * 1024;
 
 impl<'a> HelixManager<'a> {
     pub fn new(project: &'a ProjectContext) -> Self {
@@ -142,12 +144,9 @@ impl<'a> HelixManager<'a> {
         build_mode_override: Option<BuildMode>,
     ) -> Result<()> {
         let credentials = require_auth().await?;
-        let path = match get_path_or_cwd(path.as_ref()) {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(eyre!("Error: failed to get path: {e}"));
-            }
-        };
+        let path = path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.project.root.clone());
         let files =
             collect_hx_files(&path, &self.project.config.project.queries).unwrap_or_default();
 
@@ -552,12 +551,9 @@ impl<'a> HelixManager<'a> {
         config: &crate::config::EnterpriseInstanceConfig,
     ) -> Result<()> {
         let credentials = require_auth().await?;
-        let path = match get_path_or_cwd(path.as_ref()) {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(eyre!("Error: failed to get path: {e}"));
-            }
-        };
+        let path = path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.project.root.clone());
 
         let queries_project_dir = path
             .join(&self.project.config.project.queries)
@@ -699,25 +695,37 @@ impl<'a> HelixManager<'a> {
     }
 }
 
-fn should_skip_enterprise_source_path(relative_path: &Path) -> bool {
-    if relative_path.as_os_str().is_empty() {
-        return true;
-    }
-
-    let normalized = relative_path.to_string_lossy().replace('\\', "/");
-    if normalized == "queries.bin" {
-        return true;
-    }
-
+fn should_descend_enterprise_source_dir(relative_path: &Path) -> bool {
     for component in relative_path.components() {
         if let Component::Normal(part) = component {
             if part == "target" || part == ".git" {
-                return true;
+                return false;
             }
         }
     }
 
-    false
+    true
+}
+
+fn should_include_enterprise_source_file(relative_path: &Path) -> bool {
+    if relative_path.as_os_str().is_empty() {
+        return false;
+    }
+
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
+    if normalized == "queries.bin" {
+        return false;
+    }
+
+    if !should_descend_enterprise_source_dir(relative_path) {
+        return false;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "Cargo.toml" | "Cargo.lock" | "build.rs" | "rust-toolchain" | "rust-toolchain.toml"
+    ) || normalized.starts_with("src/")
+        || (normalized.starts_with(".cargo/") && normalized.ends_with(".toml"))
 }
 
 fn collect_enterprise_source_files(queries_project_dir: &Path) -> Result<HashMap<String, String>> {
@@ -734,12 +742,15 @@ fn collect_enterprise_source_files(queries_project_dir: &Path) -> Result<HashMap
                 )
             })?;
 
-            if should_skip_enterprise_source_path(relative) {
+            if path.is_dir() {
+                if !should_descend_enterprise_source_dir(relative) {
+                    continue;
+                }
+                walk(&path, root, files)?;
                 continue;
             }
 
-            if path.is_dir() {
-                walk(&path, root, files)?;
+            if !should_include_enterprise_source_file(relative) {
                 continue;
             }
 
@@ -747,6 +758,12 @@ fn collect_enterprise_source_files(queries_project_dir: &Path) -> Result<HashMap
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     files.insert(normalized_relative, content);
+                    if files.len() > ENTERPRISE_SOURCE_MAX_FILES {
+                        return Err(eyre!(
+                            "Enterprise source snapshot exceeds file limit ({} files). Trim your query project before deploy.",
+                            ENTERPRISE_SOURCE_MAX_FILES
+                        ));
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                     output::verbose(&format!(
@@ -769,13 +786,114 @@ fn collect_enterprise_source_files(queries_project_dir: &Path) -> Result<HashMap
 
     let mut files = HashMap::new();
     walk(queries_project_dir, queries_project_dir, &mut files)?;
+
+    let total_bytes: usize = files.values().map(|content| content.len()).sum();
+    if total_bytes > ENTERPRISE_SOURCE_MAX_BYTES {
+        return Err(eyre!(
+            "Enterprise source snapshot exceeds size limit ({} bytes > {} bytes). Trim your query project before deploy.",
+            total_bytes,
+            ENTERPRISE_SOURCE_MAX_BYTES
+        ));
+    }
+
     Ok(files)
 }
 
-/// Returns the path or the current working directory if no path is provided
-pub fn get_path_or_cwd(path: Option<&String>) -> Result<PathBuf> {
-    match path {
-        Some(p) => Ok(PathBuf::from(p)),
-        None => Ok(env::current_dir()?),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write_text_file(base: &Path, relative: &str, content: &str) {
+        let path = base.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent directory");
+        }
+        fs::write(path, content).expect("write text file");
+    }
+
+    #[test]
+    fn include_rules_allow_only_expected_enterprise_project_files() {
+        assert!(should_include_enterprise_source_file(Path::new("Cargo.toml")));
+        assert!(should_include_enterprise_source_file(Path::new("Cargo.lock")));
+        assert!(should_include_enterprise_source_file(Path::new("build.rs")));
+        assert!(should_include_enterprise_source_file(Path::new("rust-toolchain")));
+        assert!(should_include_enterprise_source_file(Path::new(
+            "rust-toolchain.toml"
+        )));
+        assert!(should_include_enterprise_source_file(Path::new("src/main.rs")));
+        assert!(should_include_enterprise_source_file(Path::new("src/nested/lib.rs")));
+        assert!(should_include_enterprise_source_file(Path::new(
+            ".cargo/config.toml"
+        )));
+
+        assert!(!should_include_enterprise_source_file(Path::new("queries.bin")));
+        assert!(!should_include_enterprise_source_file(Path::new("README.md")));
+        assert!(!should_include_enterprise_source_file(Path::new("src")));
+        assert!(!should_include_enterprise_source_file(Path::new("target/debug/main")));
+        assert!(!should_include_enterprise_source_file(Path::new(".git/config")));
+        assert!(!should_include_enterprise_source_file(Path::new(".cargo/config")));
+    }
+
+    #[test]
+    fn collect_enterprise_source_files_uses_include_allowlist() {
+        let dir = tempdir().expect("create temporary directory");
+        let root = dir.path();
+
+        write_text_file(root, "Cargo.toml", "[package]\nname = \"queries\"\n");
+        write_text_file(root, "Cargo.lock", "# lockfile");
+        write_text_file(root, "src/main.rs", "fn main() {}\n");
+        write_text_file(root, "src/nested/query.rs", "pub fn query() {}\n");
+        write_text_file(root, ".cargo/config.toml", "[build]\nrustflags = []\n");
+        write_text_file(root, "README.md", "ignore me\n");
+        write_text_file(root, "target/debug/generated.rs", "ignore target\n");
+        write_text_file(root, ".git/config", "ignore git\n");
+        fs::write(root.join("queries.bin"), [0_u8, 1, 2, 3]).expect("write binary file");
+
+        let files = collect_enterprise_source_files(root).expect("collect source snapshot");
+
+        assert!(files.contains_key("Cargo.toml"));
+        assert!(files.contains_key("Cargo.lock"));
+        assert!(files.contains_key("src/main.rs"));
+        assert!(files.contains_key("src/nested/query.rs"));
+        assert!(files.contains_key(".cargo/config.toml"));
+
+        assert!(!files.contains_key("README.md"));
+        assert!(!files.contains_key("target/debug/generated.rs"));
+        assert!(!files.contains_key(".git/config"));
+        assert!(!files.contains_key("queries.bin"));
+    }
+
+    #[test]
+    fn collect_enterprise_source_files_skips_non_utf8_sources() {
+        let dir = tempdir().expect("create temporary directory");
+        let root = dir.path();
+
+        write_text_file(root, "Cargo.toml", "[package]\nname = \"queries\"\n");
+        fs::create_dir_all(root.join("src")).expect("create src directory");
+        fs::write(root.join("src/non_utf8.rs"), [0xff_u8, 0xfe, 0xfd])
+            .expect("write invalid utf8 source file");
+
+        let files = collect_enterprise_source_files(root).expect("collect source snapshot");
+        assert!(files.contains_key("Cargo.toml"));
+        assert!(!files.contains_key("src/non_utf8.rs"));
+    }
+
+    #[test]
+    fn collect_enterprise_source_files_rejects_payloads_over_size_limit() {
+        let dir = tempdir().expect("create temporary directory");
+        let root = dir.path();
+
+        write_text_file(root, "Cargo.toml", "[package]\nname = \"queries\"\n");
+        let oversized = "a".repeat(ENTERPRISE_SOURCE_MAX_BYTES + 1);
+        write_text_file(root, "src/main.rs", &oversized);
+
+        let err = collect_enterprise_source_files(root)
+            .expect_err("snapshot larger than max bytes should fail");
+        assert!(
+            err.to_string().contains("exceeds size limit"),
+            "unexpected error: {err}"
+        );
     }
 }

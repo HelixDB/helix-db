@@ -45,8 +45,6 @@ struct EnterpriseSyncResponse {
     #[serde(default)]
     source_files: HashMap<String, String>,
     #[serde(default)]
-    rs_files: HashMap<String, String>,
-    #[serde(default)]
     file_metadata: HashMap<String, SyncFileMetadata>,
     #[serde(default)]
     helix_toml: Option<String>,
@@ -303,21 +301,41 @@ fn build_remote_hx_manifest(sync_response: &SyncResponse) -> HashMap<String, Man
     manifest
 }
 
-fn should_skip_enterprise_source_entry(relative_path: &Path) -> bool {
-    let normalized = relative_path.to_string_lossy().replace('\\', "/");
-    if normalized == "queries.bin" {
+fn should_descend_enterprise_source_dir(relative_path: &Path) -> bool {
+    if relative_path.as_os_str().is_empty() {
         return true;
     }
 
     for component in relative_path.components() {
         if let Component::Normal(part) = component {
             if part == "target" || part == ".git" {
-                return true;
+                return false;
             }
         }
     }
 
-    false
+    true
+}
+
+fn should_include_enterprise_source_file(relative_path: &Path) -> bool {
+    if relative_path.as_os_str().is_empty() {
+        return false;
+    }
+
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
+    if normalized == "queries.bin" {
+        return false;
+    }
+
+    if !should_descend_enterprise_source_dir(relative_path) {
+        return false;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "Cargo.toml" | "Cargo.lock" | "build.rs" | "rust-toolchain" | "rust-toolchain.toml"
+    ) || normalized.starts_with("src/")
+        || (normalized.starts_with(".cargo/") && normalized.ends_with(".toml"))
 }
 
 fn collect_local_enterprise_manifest(queries_dir: &Path) -> Result<HashMap<String, ManifestEntry>> {
@@ -331,12 +349,15 @@ fn collect_local_enterprise_manifest(queries_dir: &Path) -> Result<HashMap<Strin
                 .strip_prefix(root)
                 .map_err(|_| eyre!("Failed to compute relative path for {}", path.display()))?;
 
-            if should_skip_enterprise_source_entry(relative) {
+            if path.is_dir() {
+                if !should_descend_enterprise_source_dir(relative) {
+                    continue;
+                }
+                walk(&path, root, manifest)?;
                 continue;
             }
 
-            if path.is_dir() {
-                walk(&path, root, manifest)?;
+            if !should_include_enterprise_source_file(relative) {
                 continue;
             }
 
@@ -391,13 +412,8 @@ fn build_remote_enterprise_manifest(
     sync_response: &EnterpriseSyncResponse,
 ) -> HashMap<String, ManifestEntry> {
     let mut manifest = HashMap::new();
-    let source_files = if !sync_response.source_files.is_empty() {
-        &sync_response.source_files
-    } else {
-        &sync_response.rs_files
-    };
 
-    for (raw_path, content) in source_files {
+    for (raw_path, content) in &sync_response.source_files {
         let safe_path = match sanitize_relative_path(Path::new(raw_path)) {
             Ok(path) => path,
             Err(e) => {
@@ -409,7 +425,7 @@ fn build_remote_enterprise_manifest(
             }
         };
         let normalized_path = safe_path.to_string_lossy().replace('\\', "/");
-        if should_skip_enterprise_source_entry(Path::new(&normalized_path)) {
+        if !should_include_enterprise_source_file(Path::new(&normalized_path)) {
             continue;
         }
 
@@ -1584,6 +1600,30 @@ async fn fetch_cluster_project(
     Ok(cluster_project)
 }
 
+async fn fetch_enterprise_cluster_project(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    cluster_id: &str,
+) -> Result<CliClusterProject> {
+    let cluster_project: CliClusterProject = client
+        .get(format!(
+            "{}/api/cli/enterprise-clusters/{}/project",
+            base_url, cluster_id
+        ))
+        .header("x-api-key", api_key)
+        .send()
+        .await
+        .map_err(|e| eyre!("Failed to fetch enterprise cluster project: {}", e))?
+        .error_for_status()
+        .map_err(|e| eyre!("Failed to fetch enterprise cluster project: {}", e))?
+        .json()
+        .await
+        .map_err(|e| eyre!("Failed to parse enterprise cluster project response: {}", e))?;
+
+    Ok(cluster_project)
+}
+
 fn build_mode_from_cloud(value: &str) -> BuildMode {
     match value {
         "dev" => BuildMode::Dev,
@@ -2216,7 +2256,28 @@ async fn pull_from_enterprise_instance(
         instance_name,
         assume_yes,
     )
-    .await
+    .await?;
+
+    let client = reqwest::Client::new();
+    let cluster_project = fetch_enterprise_cluster_project(
+        &client,
+        &cloud_base_url(),
+        &credentials.helix_admin_key,
+        &config.cluster_id,
+    )
+    .await?;
+    let project_clusters = fetch_project_clusters(
+        &client,
+        &cloud_base_url(),
+        &credentials.helix_admin_key,
+        &cluster_project.project_id,
+    )
+    .await?;
+
+    reconcile_project_config_from_cloud(project, &project_clusters)?;
+    Step::verbose_substep("  Wrote helix.toml (canonical cloud metadata)");
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2379,5 +2440,79 @@ mod tests {
         assert_eq!(plan.to_create, vec!["local-only.hx".to_string()]);
         assert_eq!(plan.to_change, vec!["changed.hx".to_string()]);
         assert_eq!(plan.to_delete, vec!["remote-only.hx".to_string()]);
+    }
+
+    #[test]
+    fn sanitize_relative_path_normalizes_curdir_components() {
+        let sanitized = sanitize_relative_path(Path::new("./src/./main.rs"))
+            .expect("valid relative path should sanitize");
+        assert_eq!(sanitized, PathBuf::from("src/main.rs"));
+    }
+
+    #[test]
+    fn sanitize_relative_path_rejects_parent_and_absolute_paths() {
+        assert!(sanitize_relative_path(Path::new("../escape.rs")).is_err());
+        assert!(sanitize_relative_path(Path::new("/etc/passwd")).is_err());
+    }
+
+    #[test]
+    fn enterprise_source_allowlist_filters_non_project_files() {
+        assert!(should_include_enterprise_source_file(Path::new("Cargo.toml")));
+        assert!(should_include_enterprise_source_file(Path::new("src/main.rs")));
+        assert!(should_include_enterprise_source_file(Path::new(
+            ".cargo/config.toml"
+        )));
+
+        assert!(!should_include_enterprise_source_file(Path::new("queries.bin")));
+        assert!(!should_include_enterprise_source_file(Path::new("README.md")));
+        assert!(!should_include_enterprise_source_file(Path::new("target/tmp.rs")));
+    }
+
+    #[test]
+    fn build_remote_enterprise_manifest_normalizes_paths_and_uses_metadata() {
+        let mut source_files = HashMap::new();
+        source_files.insert(
+            "Cargo.toml".to_string(),
+            "[package]\nname = \"queries\"\n".to_string(),
+        );
+        source_files.insert("src/main.rs".to_string(), "fn main() {}\n".to_string());
+        source_files.insert(
+            "src\\nested\\query.rs".to_string(),
+            "pub fn query() {}\n".to_string(),
+        );
+        source_files.insert("queries.bin".to_string(), "ignore".to_string());
+        source_files.insert("../escape.rs".to_string(), "ignore".to_string());
+        source_files.insert("README.md".to_string(), "ignore".to_string());
+
+        let mut file_metadata = HashMap::new();
+        file_metadata.insert(
+            "src/main.rs".to_string(),
+            SyncFileMetadata {
+                sha256: Some("remote-sha".to_string()),
+                last_modified_ms: Some(42),
+            },
+        );
+
+        let response = EnterpriseSyncResponse {
+            source_files,
+            file_metadata,
+            helix_toml: None,
+        };
+
+        let manifest = build_remote_enterprise_manifest(&response);
+        assert_eq!(manifest.len(), 3);
+        assert!(manifest.contains_key("Cargo.toml"));
+        assert!(manifest.contains_key("src/main.rs"));
+        assert!(manifest.contains_key("src/nested/query.rs"));
+        assert!(!manifest.contains_key("queries.bin"));
+        assert!(!manifest.contains_key("README.md"));
+        assert!(!manifest.contains_key("../escape.rs"));
+
+        assert_eq!(manifest["src/main.rs"].sha256, "remote-sha");
+        assert_eq!(manifest["src/main.rs"].last_modified_ms, Some(42));
+        assert_eq!(
+            manifest["Cargo.toml"].sha256,
+            compute_sha256("[package]\nname = \"queries\"\n")
+        );
     }
 }
