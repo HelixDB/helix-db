@@ -80,6 +80,46 @@ fn test_add_n() {
 }
 
 #[test]
+fn test_n_from_id_with_date_property() {
+    use crate::protocol::date::Date;
+
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let created_at = Date::new(&Value::String("2024-01-01T00:00:00Z".to_string())).unwrap();
+
+    let node = G::new_mut(&storage, &arena, &mut txn)
+        .add_n(
+            "person",
+            props_option(
+                &arena,
+                props! {
+                    "name" => "date-user",
+                    "created_at" => Value::Date(created_at),
+                },
+            ),
+            None,
+        )
+        .collect_to_obj()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = storage.graph_env.read_txn().unwrap();
+    let results = G::new(&storage, &txn, &arena)
+        .n_from_id(&node.id())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id(), node.id());
+    assert_eq!(
+        results[0].get_property("created_at"),
+        Some(&Value::Date(created_at))
+    );
+}
+
+#[test]
 fn test_out() {
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();

@@ -10,3 +10,5 @@ hack/
 /data
 claude.md
 .cargo/
+**/dist
+**/node_modules

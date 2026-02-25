@@ -12,6 +12,7 @@
 mod integration_tests {
     use super::super::test_utils::*;
     use crate::helix_engine::vector_core::vector::HVector;
+    use crate::protocol::date::Date;
     use crate::protocol::value::Value;
     use crate::utils::items::{Edge, Node};
     use bincode::Options;
@@ -55,6 +56,26 @@ mod integration_tests {
 
         assert!(deserialized.is_ok());
         assert_nodes_semantically_equal(&node, &deserialized.unwrap());
+    }
+
+    #[test]
+    fn test_node_bincode_roundtrip_with_date_property() {
+        let arena = Bump::new();
+        let id = 11111u128;
+        let created_at = Date::new(&Value::String("2024-01-01T00:00:00Z".to_string())).unwrap();
+
+        let props = vec![
+            ("name", Value::String("Alice".to_string())),
+            ("created_at", Value::Date(created_at)),
+        ];
+
+        let node = create_arena_node(&arena, id, "User", 0, props);
+        let bytes = bincode::serialize(&node).unwrap();
+
+        let arena2 = Bump::new();
+        let deserialized = Node::from_bincode_bytes(id, &bytes, &arena2).unwrap();
+
+        assert_nodes_semantically_equal(&node, &deserialized);
     }
 
     #[test]
@@ -163,6 +184,26 @@ mod integration_tests {
     }
 
     #[test]
+    fn test_edge_bincode_roundtrip_with_date_property() {
+        let arena = Bump::new();
+        let id = 565656u128;
+        let created_at = Date::new(&Value::String("2024-01-01T00:00:00Z".to_string())).unwrap();
+
+        let props = vec![
+            ("event", Value::String("watched".to_string())),
+            ("watched_at", Value::Date(created_at)),
+        ];
+
+        let edge = create_arena_edge(&arena, id, "WATCHED", 0, 100, 200, props);
+        let bytes = bincode::serialize(&edge).unwrap();
+
+        let arena2 = Bump::new();
+        let deserialized = Edge::from_bincode_bytes(id, &bytes, &arena2).unwrap();
+
+        assert_edges_semantically_equal(&edge, &deserialized);
+    }
+
+    #[test]
     fn test_edge_json_serialization() {
         let arena = Bump::new();
         let id = 66666u128;
@@ -267,6 +308,29 @@ mod integration_tests {
         ];
 
         let vector = create_arena_vector(&arena, id, "doc_vector", 1, false, 0, &data, props);
+        let props_bytes = bincode::serialize(&vector).unwrap();
+        let data_bytes = vector.vector_data_to_bytes().unwrap();
+
+        let arena2 = Bump::new();
+        let deserialized =
+            HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id).unwrap();
+
+        assert_vectors_semantically_equal(&vector, &deserialized);
+    }
+
+    #[test]
+    fn test_vector_full_roundtrip_with_date_property() {
+        let arena = Bump::new();
+        let id = 778899u128;
+        let data = vec![0.4, 0.5, 0.6];
+        let created_at = Date::new(&Value::String("2024-01-01T00:00:00Z".to_string())).unwrap();
+
+        let props = vec![
+            ("model", Value::String("text-embedding-3-small".to_string())),
+            ("created_at", Value::Date(created_at)),
+        ];
+
+        let vector = create_arena_vector(&arena, id, "date_vec", 1, false, 0, &data, props);
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
