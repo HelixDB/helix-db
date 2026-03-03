@@ -36,7 +36,7 @@ use std::{fmt::Write, fs};
 
 // Development flag - set to true when working on V2 locally
 const DEV_MODE: bool = cfg!(debug_assertions);
-const HELIX_REPO_URL: &str = "https://github.com/helixdb/helix-db.git";
+const HELIX_REPO_URL: &str = "https://github.com/himanalot/helix-db.git";
 
 // Get the cargo workspace root at compile time
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");

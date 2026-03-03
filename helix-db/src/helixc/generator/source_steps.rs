@@ -443,7 +443,7 @@ impl Display for SearchVector {
                 self.label,
                 pre_filter
                     .iter()
-                    .map(|f| format!("|v: &HVector, txn: &RoTxn| {f}"))
+                    .map(|f| format!("|val: &HVector, txn: &RoTxn| {f}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
