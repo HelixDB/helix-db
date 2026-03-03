@@ -62,7 +62,7 @@ optional_param = { "?" }
 // Assignments and traversals
 // ---------------------------------------------------------------------
 get_stmt            = { identifier ~ "<-" ~ evaluates_to_anything }
-traversal           = { (start_node | start_edge | search_vector | start_vector) ~ step* ~ last_step? }
+traversal           = { (start_node | start_edge | search_vector | search_hybrid | start_vector) ~ step* ~ last_step? }
 id_traversal        = { identifier ~ ((step+ ~ last_step?) | last_step) }
 anonymous_traversal = { "_"  ~ ((step+ ~ last_step?) | last_step)? }
 step                = { "::" ~ (graph_step | order_by| aggregate | group_by | where_step | intersect_step | closure_step | object_step | exclude_field | count | ID | range_step | AddE | rerank_rrf | rerank_mmr) }
@@ -93,6 +93,7 @@ evaluates_to_anything = {
   | traversal
   | id_traversal
   | search_vector
+  | search_hybrid
   | bm25_search
   | math_function_call
   | string_literal
@@ -226,6 +227,13 @@ rerank_mmr = { "RerankMMR" ~ "(" ~ "lambda" ~ ":" ~ evaluates_to_number ~ ("," ~
 // ---------------------------------------------------------------------
 search_vector = { "SearchV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ vector_data ~ "," ~ (integer | identifier) ~ ")" }// ~ ("::" ~ pre_filter)? }
 bm25_search = { "SearchBM25" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ (string_literal | identifier) ~ "," ~ (integer | identifier) ~ ")" }
+search_hybrid = {
+    "SearchHybrid" ~ "<" ~ identifier_upper ~ ">" ~ "("
+    ~ vector_data ~ ","
+    ~ (string_literal | identifier) ~ ","
+    ~ (integer | identifier)
+    ~ ")"
+}
 pre_filter = { "PREFILTER" ~ "(" ~ (evaluates_to_bool | anonymous_traversal) ~ ")" }
 BatchAddV = { "BatchAddV" ~ "<" ~ identifier_upper ~ ">" ~ "(" ~ identifier ~ ")" }
 embed_method = { "Embed" ~ "(" ~ (identifier | string_literal) ~ ")" }

@@ -3,7 +3,7 @@ use crate::helixc::analyzer::utils::{
     DEFAULT_VAR_NAME, VariableInfo, check_identifier_is_fieldtype, validate_embed_string_type,
 };
 use crate::helixc::generator::bool_ops::{Contains, IsIn, PropertyEq, PropertyNeq};
-use crate::helixc::generator::source_steps::{SearchVector, VFromID, VFromType};
+use crate::helixc::generator::source_steps::{SearchHybrid, SearchVector, VFromID, VFromType};
 use crate::helixc::generator::traversal_steps::{AggregateBy, GroupBy};
 use crate::helixc::generator::utils::{EmbedData, VecData};
 use crate::{
@@ -517,6 +517,165 @@ pub(crate) fn validate_traversal<'a>(
                 TraversalType::FromSingle(GenRef::Std(DEFAULT_VAR_NAME.to_string()));
             gen_traversal.source_step = Separator::Empty(SourceStep::Anonymous);
             parent
+        }
+        StartNode::SearchHybrid(sh) => {
+            // Validate label exists in vector set
+            if let Some(ref ty) = sh.label
+                && !ctx.vector_set.contains(ty.as_str())
+            {
+                generate_error!(ctx, original_query, sh.loc.clone(), E103, ty.as_str());
+            }
+
+            // Process vector_data (similar to SearchVector)
+            let vec: VecData = match &sh.vector_data {
+                Some(VectorData::Vector(v)) => {
+                    VecData::Standard(GeneratedValue::Literal(GenRef::Ref(format!(
+                        "[{}]",
+                        v.iter()
+                            .map(|f| f.to_string())
+                            .collect::<Vec<String>>()
+                            .join(",")
+                    ))))
+                }
+                Some(VectorData::Identifier(i)) => {
+                    is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
+                    let _ = type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str());
+                    VecData::Standard(gen_identifier_or_param(
+                        original_query,
+                        i.as_str(),
+                        true,
+                        false,
+                    ))
+                }
+                Some(VectorData::Embed(e)) => {
+                    let embed_data = match &e.value {
+                        EvaluatesToString::Identifier(i) => {
+                            type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str());
+                            EmbedData {
+                                data: gen_identifier_or_param(
+                                    original_query,
+                                    i.as_str(),
+                                    true,
+                                    false,
+                                ),
+                                model_name: gen_query.embedding_model_to_use.clone(),
+                            }
+                        }
+                        EvaluatesToString::StringLiteral(s) => EmbedData {
+                            data: GeneratedValue::Literal(GenRef::Ref(s.clone())),
+                            model_name: gen_query.embedding_model_to_use.clone(),
+                        },
+                    };
+                    VecData::Hoisted(gen_query.add_hoisted_embed(embed_data))
+                }
+                _ => {
+                    generate_error!(
+                        ctx,
+                        original_query,
+                        sh.loc.clone(),
+                        E305,
+                        ["vector_data", "SearchHybrid"],
+                        ["vector_data"]
+                    );
+                    VecData::Unknown
+                }
+            };
+
+            // Process query (similar to BM25Search)
+            let query = match &sh.query {
+                Some(ValueType::Literal { value, loc: _ }) => {
+                    GeneratedValue::Literal(GenRef::Std(match value {
+                        Value::String(s) => format!("\"{s}\""),
+                        other => other.inner_stringify(),
+                    }))
+                }
+                Some(ValueType::Identifier { value: i, loc: _ }) => {
+                    is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
+                    if let Some(_) =
+                        type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str())
+                    {
+                        gen_identifier_or_param(original_query, i, true, false)
+                    } else {
+                        generate_error!(ctx, original_query, sh.loc.clone(), E301, i.as_str());
+                        GeneratedValue::Unknown
+                    }
+                }
+                _ => {
+                    generate_error!(
+                        ctx,
+                        original_query,
+                        sh.loc.clone(),
+                        E305,
+                        ["query", "SearchHybrid"],
+                        ["query"]
+                    );
+                    GeneratedValue::Unknown
+                }
+            };
+
+            // Process k
+            let k = match &sh.k {
+                Some(k) => match &k.value {
+                    EvaluatesToNumberType::I8(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::I16(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::I32(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::I64(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U8(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U16(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U32(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U64(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::U128(i) => {
+                        GeneratedValue::Primitive(GenRef::Std(i.to_string()))
+                    }
+                    EvaluatesToNumberType::Identifier(i) => {
+                        is_valid_identifier(ctx, original_query, sh.loc.clone(), i.as_str());
+                        type_in_scope(ctx, original_query, sh.loc.clone(), scope, i.as_str());
+                        gen_identifier_or_param(original_query, i, false, true)
+                    }
+                    _ => {
+                        generate_error!(
+                            ctx,
+                            original_query,
+                            sh.loc.clone(),
+                            E305,
+                            ["k", "SearchHybrid"],
+                            ["k"]
+                        );
+                        GeneratedValue::Unknown
+                    }
+                },
+                None => {
+                    generate_error!(ctx, original_query, sh.loc.clone(), E601, &sh.loc.span);
+                    GeneratedValue::Unknown
+                }
+            };
+
+            gen_traversal.traversal_type = TraversalType::Ref;
+            gen_traversal.should_collect = ShouldCollect::ToVec;
+            gen_traversal.source_step = Separator::Period(SourceStep::SearchHybrid(SearchHybrid {
+                label: GenRef::Literal(sh.label.clone().unwrap_or_default()),
+                vec,
+                query,
+                k,
+            }));
+            // SearchHybrid returns vectors (like SearchVector)
+            Type::Vectors(sh.label.clone())
         }
         StartNode::SearchVector(sv) => {
             if let Some(ref ty) = sv.vector_type
