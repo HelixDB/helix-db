@@ -196,6 +196,98 @@ fn test_upsert_n_updates_existing_node_with_properties() {
 }
 
 #[test]
+fn test_upsert_n_with_defaults_applies_on_create_and_explicit_wins() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let result = G::new_mut_from_iter(
+        &storage,
+        &mut txn,
+        std::iter::empty::<TraversalValue>(),
+        &arena,
+    )
+    .upsert_n_with_defaults(
+        "person",
+        &[
+            ("name", Value::from("Alice")),
+            ("created_at", Value::from("explicit_created_at")),
+        ],
+        &[
+            ("created_at", Value::from("default_created_at")),
+            ("status", Value::from("pending")),
+        ],
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Node(node) = &result[0] {
+        assert_eq!(node.label, "person");
+        assert_eq!(node.get_property("name").unwrap(), &Value::from("Alice"));
+        assert_eq!(
+            node.get_property("created_at").unwrap(),
+            &Value::from("explicit_created_at")
+        );
+        assert_eq!(
+            node.get_property("status").unwrap(),
+            &Value::from("pending")
+        );
+    } else {
+        panic!("Expected node");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_n_with_defaults_does_not_apply_on_update() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let existing_node = G::new_mut(&storage, &arena, &mut txn)
+        .add_n(
+            "person",
+            props_option(
+                &arena,
+                props!("name" => "Alice", "created_at" => "original_created_at"),
+            ),
+            None,
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .clone();
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_node), &arena)
+        .upsert_n_with_defaults(
+            "person",
+            &[("name", Value::from("Alice Updated"))],
+            &[
+                ("created_at", Value::from("default_created_at")),
+                ("status", Value::from("pending")),
+            ],
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Node(node) = &result[0] {
+        assert_eq!(
+            node.get_property("created_at").unwrap(),
+            &Value::from("original_created_at")
+        );
+        assert_eq!(
+            node.get_property("name").unwrap(),
+            &Value::from("Alice Updated")
+        );
+        assert!(node.get_property("status").is_none());
+    } else {
+        panic!("Expected node");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
 fn test_upsert_n_ignores_non_node_values() {
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
@@ -447,6 +539,123 @@ fn test_upsert_e_updates_existing_edge_with_properties() {
 }
 
 #[test]
+fn test_upsert_e_with_defaults_applies_on_create_and_explicit_wins() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let node1 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let node2 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+
+    let result = G::new_mut_from_iter(
+        &storage,
+        &mut txn,
+        std::iter::empty::<TraversalValue>(),
+        &arena,
+    )
+    .upsert_e_with_defaults(
+        "knows",
+        node1,
+        node2,
+        &[
+            ("kind", Value::from("primary")),
+            ("created_at", Value::from("explicit_created_at")),
+        ],
+        &[
+            ("created_at", Value::from("default_created_at")),
+            ("weight", Value::from(1)),
+        ],
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Edge(edge) = &result[0] {
+        assert_eq!(edge.label, "knows");
+        assert_eq!(edge.from_node, node1);
+        assert_eq!(edge.to_node, node2);
+        assert_eq!(edge.get_property("kind").unwrap(), &Value::from("primary"));
+        assert_eq!(
+            edge.get_property("created_at").unwrap(),
+            &Value::from("explicit_created_at")
+        );
+        assert_eq!(edge.get_property("weight").unwrap(), &Value::from(1));
+    } else {
+        panic!("Expected edge");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_e_with_defaults_does_not_apply_on_update() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let node1 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let node2 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+
+    let existing_edge = G::new_mut(&storage, &arena, &mut txn)
+        .add_edge(
+            "knows",
+            props_option(
+                &arena,
+                props!("kind" => "primary", "created_at" => "original_created_at"),
+            ),
+            node1,
+            node2,
+            false,
+            false,
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .clone();
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_edge), &arena)
+        .upsert_e_with_defaults(
+            "knows",
+            node1,
+            node2,
+            &[("kind", Value::from("updated"))],
+            &[
+                ("created_at", Value::from("default_created_at")),
+                ("weight", Value::from(1)),
+            ],
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Edge(edge) = &result[0] {
+        assert_eq!(edge.get_property("kind").unwrap(), &Value::from("updated"));
+        assert_eq!(
+            edge.get_property("created_at").unwrap(),
+            &Value::from("original_created_at")
+        );
+        assert!(edge.get_property("weight").is_none());
+    } else {
+        panic!("Expected edge");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
 fn test_upsert_e_ignores_iterator_content() {
     // After fix for issue #850: upsert_e now looks up edges by from_node/to_node/label
     // directly in the database, ignoring the source iterator content entirely.
@@ -648,6 +857,105 @@ fn test_upsert_v_updates_existing_vector_with_properties() {
             vector.get_property("timestamp").unwrap(),
             &Value::from(1640995200)
         );
+    } else {
+        panic!("Expected vector");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_v_with_defaults_applies_on_create_and_explicit_wins() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let query = [0.2, 0.4, 0.6];
+    let result = G::new_mut_from_iter(
+        &storage,
+        &mut txn,
+        std::iter::empty::<TraversalValue>(),
+        &arena,
+    )
+    .upsert_v_with_defaults(
+        &query,
+        "embedding",
+        &[
+            ("model", Value::from("text-embedding")),
+            ("created_at", Value::from("explicit_created_at")),
+        ],
+        &[
+            ("created_at", Value::from("default_created_at")),
+            ("source", Value::from("default_source")),
+        ],
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Vector(vector) = &result[0] {
+        assert_eq!(vector.label, "embedding");
+        assert_eq!(vector.data, &query);
+        assert_eq!(
+            vector.get_property("model").unwrap(),
+            &Value::from("text-embedding")
+        );
+        assert_eq!(
+            vector.get_property("created_at").unwrap(),
+            &Value::from("explicit_created_at")
+        );
+        assert_eq!(
+            vector.get_property("source").unwrap(),
+            &Value::from("default_source")
+        );
+    } else {
+        panic!("Expected vector");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_v_with_defaults_does_not_apply_on_update() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let existing_vector = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(
+            &[0.1, 0.2, 0.3],
+            "embedding",
+            props_option(
+                &arena,
+                props!("model" => "text-embedding", "created_at" => "original_created_at"),
+            ),
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .clone();
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_vector), &arena)
+        .upsert_v_with_defaults(
+            &[0.9, 0.8, 0.7],
+            "embedding",
+            &[("model", Value::from("text-embedding-updated"))],
+            &[
+                ("created_at", Value::from("default_created_at")),
+                ("source", Value::from("default_source")),
+            ],
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Vector(vector) = &result[0] {
+        assert_eq!(
+            vector.get_property("model").unwrap(),
+            &Value::from("text-embedding-updated")
+        );
+        assert_eq!(
+            vector.get_property("created_at").unwrap(),
+            &Value::from("original_created_at")
+        );
+        assert!(vector.get_property("source").is_none());
     } else {
         panic!("Expected vector");
     }
@@ -1309,8 +1617,8 @@ fn test_upsert_e_creates_edge_between_correct_nodes_issue_850() {
         &arena,
     )
     .upsert_e("knows", node_c, node_d, &[("since", Value::from(2024))])
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
 
     assert_eq!(result.len(), 1);
     if let TraversalValue::Edge(edge) = &result[0] {
@@ -1654,12 +1962,7 @@ fn test_upsert_e_idempotent_same_triple_no_duplicate() {
         std::iter::empty::<TraversalValue>(),
         &arena,
     )
-    .upsert_e(
-        "knows",
-        node_a,
-        node_b,
-        &[("version", Value::from(1))],
-    )
+    .upsert_e("knows", node_a, node_b, &[("version", Value::from(1))])
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
     let first_id = first[0].id();
@@ -1671,12 +1974,7 @@ fn test_upsert_e_idempotent_same_triple_no_duplicate() {
         std::iter::empty::<TraversalValue>(),
         &arena,
     )
-    .upsert_e(
-        "knows",
-        node_a,
-        node_b,
-        &[("version", Value::from(2))],
-    )
+    .upsert_e("knows", node_a, node_b, &[("version", Value::from(2))])
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
     let second_id = second[0].id();
@@ -1826,10 +2124,7 @@ fn test_upsert_e_persisted_after_commit() {
         assert_eq!(e.label, "works_with");
         assert_eq!(e.from_node, source_id);
         assert_eq!(e.to_node, target_id);
-        assert_eq!(
-            e.get_property("project").unwrap(),
-            &Value::from("helix")
-        );
+        assert_eq!(e.get_property("project").unwrap(), &Value::from("helix"));
         assert_eq!(e.get_property("role").unwrap(), &Value::from("lead"));
     } else {
         panic!("Expected edge");
@@ -2053,10 +2348,7 @@ fn test_upsert_v_multiple_sequential_upserts() {
     if let TraversalValue::Vector(v) = &v3[0] {
         assert_eq!(v.get_property("model").unwrap(), &Value::from("v2")); // from first upsert
         assert_eq!(v.get_property("dim").unwrap(), &Value::from(3)); // from insert (preserved)
-        assert_eq!(
-            v.get_property("source").unwrap(),
-            &Value::from("anthropic")
-        ); // overwritten
+        assert_eq!(v.get_property("source").unwrap(), &Value::from("anthropic")); // overwritten
         assert_eq!(
             v.get_property("timestamp").unwrap(),
             &Value::from(1700000000)
@@ -2108,7 +2400,10 @@ fn test_upsert_e_between_different_node_labels() {
         "works_at",
         person_id,
         company_id,
-        &[("role", Value::from("engineer")), ("since", Value::from(2023))],
+        &[
+            ("role", Value::from("engineer")),
+            ("since", Value::from(2023)),
+        ],
     )
     .collect::<Result<Vec<_>, _>>()
     .unwrap();

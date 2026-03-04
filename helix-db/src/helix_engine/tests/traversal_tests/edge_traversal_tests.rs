@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use bumpalo::Bump;
 use tempfile::TempDir;
@@ -114,14 +114,123 @@ fn test_add_edge_creates_unique_relationship() {
         .unwrap();
     assert_eq!(fetched.len(), 1);
     assert_eq!(edge_id(&fetched[0]), edge.id());
+    drop(txn);
 
     // Testing failure on duplicate insert
-    let mut write_txn = storage.graph_env.write_txn().unwrap();
-    let edge = G::new_mut(&storage, &arena, &mut write_txn)
-        .add_edge("knows", None, source_id, target_id, false, true)
-        .collect_to_obj();
+    {
+        let mut write_txn = storage.graph_env.write_txn().unwrap();
+        let edge = G::new_mut(&storage, &arena, &mut write_txn)
+            .add_edge("knows", None, source_id, target_id, false, true)
+            .collect_to_obj();
 
-    assert!(edge.is_err())
+        assert!(edge.is_err());
+    }
+
+    // Ensure no partial/extra writes were persisted
+    let read_txn = storage.graph_env.read_txn().unwrap();
+    let edges = G::new(&storage, &read_txn, &arena)
+        .n_from_id(&source_id)
+        .out_e("knows")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(edges.len(), 1);
+}
+
+#[test]
+fn test_add_edge_unique_allows_multiple_targets_from_same_source() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let source_id = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("service", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let target_1 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("application", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let target_2 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("application", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+
+    G::new_mut(&storage, &arena, &mut txn)
+        .add_edge("part_of", None, source_id, target_1, false, true)
+        .collect_to_obj()
+        .unwrap();
+    G::new_mut(&storage, &arena, &mut txn)
+        .add_edge("part_of", None, source_id, target_2, false, true)
+        .collect_to_obj()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let read_txn = storage.graph_env.read_txn().unwrap();
+    let neighbors = G::new(&storage, &read_txn, &arena)
+        .n_from_id(&source_id)
+        .out_node("part_of")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(neighbors.len(), 2);
+    let neighbor_ids: HashSet<u128> = neighbors.into_iter().map(|n| n.id()).collect();
+    assert!(neighbor_ids.contains(&target_1));
+    assert!(neighbor_ids.contains(&target_2));
+}
+
+#[test]
+fn test_add_edge_unique_allows_multiple_sources_to_same_target() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let source_1 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("service", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let source_2 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("service", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let target_id = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("aws_account", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+
+    G::new_mut(&storage, &arena, &mut txn)
+        .add_edge("service_in_account", None, source_1, target_id, false, true)
+        .collect_to_obj()
+        .unwrap();
+    G::new_mut(&storage, &arena, &mut txn)
+        .add_edge("service_in_account", None, source_2, target_id, false, true)
+        .collect_to_obj()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let read_txn = storage.graph_env.read_txn().unwrap();
+    let inbound_edges = G::new(&storage, &read_txn, &arena)
+        .n_from_id(&target_id)
+        .in_e("service_in_account")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(inbound_edges.len(), 2);
+    let mut from_ids = HashSet::new();
+    for value in inbound_edges {
+        let TraversalValue::Edge(edge) = value else {
+            panic!("expected edge")
+        };
+        assert_eq!(edge.to_node, target_id);
+        from_ids.insert(edge.from_node);
+    }
+    assert!(from_ids.contains(&source_1));
+    assert!(from_ids.contains(&source_2));
 }
 
 #[test]

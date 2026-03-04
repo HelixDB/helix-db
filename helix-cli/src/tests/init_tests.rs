@@ -1,4 +1,5 @@
 use crate::commands::init::run;
+use crate::CloudDeploymentTypeCommand;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -236,6 +237,98 @@ async fn test_init_gitignore_content() {
     assert!(
         gitignore_content.contains("*.log"),
         ".gitignore should ignore log files"
+    );
+}
+
+#[tokio::test]
+async fn test_init_appends_gitignore_with_guard_newline() {
+    let temp_dir = setup_test_dir();
+    let project_path = temp_dir.path().to_path_buf();
+    let gitignore_path = project_path.join(".gitignore");
+    fs::write(&gitignore_path, "node_modules").expect("Failed to seed .gitignore");
+
+    let result = run(
+        Some(project_path.to_str().unwrap().to_string()),
+        "default".to_string(),
+        "queries".to_string(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_ok(), "Init should succeed");
+
+    let gitignore_content = fs::read_to_string(&gitignore_path).expect("Failed to read .gitignore");
+    assert!(
+        gitignore_content.contains("node_modules\n.helix/"),
+        "Expected a newline before appended entries"
+    );
+    assert!(
+        !gitignore_content.contains("node_modules.helix/"),
+        "Last existing line should not be corrupted"
+    );
+}
+
+#[tokio::test]
+async fn test_init_gitignore_does_not_duplicate_existing_entries() {
+    let temp_dir = setup_test_dir();
+    let project_path = temp_dir.path().to_path_buf();
+    let gitignore_path = project_path.join(".gitignore");
+    fs::write(&gitignore_path, ".helix/\ntarget/\n*.log\n").expect("Failed to seed .gitignore");
+
+    let result = run(
+        Some(project_path.to_str().unwrap().to_string()),
+        "default".to_string(),
+        "queries".to_string(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_ok(), "Init should succeed");
+
+    let gitignore_content = fs::read_to_string(&gitignore_path).expect("Failed to read .gitignore");
+    let count_entry = |entry: &str| {
+        gitignore_content
+            .lines()
+            .filter(|line| line.trim() == entry)
+            .count()
+    };
+
+    assert_eq!(count_entry(".helix/"), 1);
+    assert_eq!(count_entry("target/"), 1);
+    assert_eq!(count_entry("*.log"), 1);
+}
+
+#[tokio::test]
+async fn test_init_failure_cleanup_keeps_existing_gitignore() {
+    let temp_dir = setup_test_dir();
+    let project_path = temp_dir.path().to_path_buf();
+    let gitignore_path = project_path.join(".gitignore");
+    fs::write(&gitignore_path, "node_modules\n").expect("Failed to seed .gitignore");
+
+    let result = run(
+        Some(project_path.to_str().unwrap().to_string()),
+        "default".to_string(),
+        "queries".to_string(),
+        Some(CloudDeploymentTypeCommand::Fly {
+            auth: "not-a-valid-auth".to_string(),
+            volume_size: 20,
+            vm_size: "shared-cpu-4x".to_string(),
+            private: false,
+            name: None,
+        }),
+    )
+    .await;
+
+    assert!(result.is_err(), "Init should fail with invalid Fly auth");
+    assert!(
+        gitignore_path.exists(),
+        "Existing .gitignore should not be deleted"
+    );
+
+    let gitignore_content = fs::read_to_string(&gitignore_path).expect("Failed to read .gitignore");
+    assert!(
+        gitignore_content.contains("node_modules"),
+        "Pre-existing .gitignore content should be preserved"
     );
 }
 

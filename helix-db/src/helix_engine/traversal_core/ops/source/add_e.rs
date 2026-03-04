@@ -65,82 +65,61 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
         'txn,
         impl Iterator<Item = Result<TraversalValue<'arena>, GraphError>>,
     > {
-        let version = self.storage.version_info.get_latest(label);
-        let edge = Edge {
-            id: v6_uuid(),
-            label,
-            version,
-            properties,
-            from_node,
-            to_node,
-        };
+        let result = (|| -> Result<TraversalValue<'arena>, GraphError> {
+            let label_hash = hash_label(label, None);
+            let out_key = HelixGraphStorage::out_edge_key(&from_node, &label_hash);
 
-        let mut result: Result<TraversalValue, GraphError> = Ok(TraversalValue::Empty);
-
-        match edge.to_bincode_bytes() {
-            Ok(bytes) => {
-                if let Err(e) = self.storage.edges_db.put_with_flags(
-                    self.txn,
-                    PutFlags::APPEND,
-                    HelixGraphStorage::edge_key(&edge.id),
-                    &bytes,
-                ) {
-                    result = Err(GraphError::from(e));
-                }
-            }
-            Err(e) => result = Err(GraphError::from(e)),
-        }
-
-        // Skip remaining operations if edge insertion failed
-        if result.is_ok() {
-            let label_hash = hash_label(edge.label, None);
-
-            match self.storage.out_edges_db.put_with_flags(
-                self.txn,
-                if is_unique {
-                    PutFlags::NO_OVERWRITE
-                } else {
-                    PutFlags::APPEND_DUP
-                },
-                &HelixGraphStorage::out_edge_key(&from_node, &label_hash),
-                &HelixGraphStorage::pack_edge_data(&edge.id, &to_node),
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!(
-                        "add_e => error adding out edge between {from_node:?} and {to_node:?}: {e:?}"
-                    );
-                    result = Err(GraphError::from(e));
-                }
-            }
-
-            // Skip in_edges if out_edges failed
-            if result.is_ok() {
-                match self.storage.in_edges_db.put_with_flags(
-                    self.txn,
-                    if is_unique {
-                        PutFlags::NO_OVERWRITE
-                    } else {
-                        PutFlags::APPEND_DUP
-                    },
-                    &HelixGraphStorage::in_edge_key(&to_node, &label_hash),
-                    &HelixGraphStorage::pack_edge_data(&edge.id, &from_node),
-                ) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        println!(
-                            "add_e => error adding in edge between {from_node:?} and {to_node:?}: {e:?}"
-                        );
-                        result = Err(GraphError::from(e));
+            if is_unique
+                && let Some(iter) = self
+                    .storage
+                    .out_edges_db
+                    .lazily_decode_data()
+                    .get_duplicates(self.txn, &out_key)?
+            {
+                for item in iter {
+                    let (_, data) = item?;
+                    let data = data.decode().map_err(|e| GraphError::DecodeError(e.to_string()))?;
+                    let (_, existing_to_node) = HelixGraphStorage::unpack_adj_edge_data(data)?;
+                    if existing_to_node == to_node {
+                        return Err(GraphError::DuplicateKey(format!(
+                            "{label}:{from_node}->{to_node}"
+                        )));
                     }
                 }
             }
-        }
 
-        let result = match result {
-            Ok(_) => Ok(TraversalValue::Edge(edge)),
-            Err(e) => Err(e),
-        };
+            let version = self.storage.version_info.get_latest(label);
+            let edge = Edge {
+                id: v6_uuid(),
+                label,
+                version,
+                properties,
+                from_node,
+                to_node,
+            };
+
+            let bytes = edge.to_bincode_bytes()?;
+            self.storage.edges_db.put_with_flags(
+                self.txn,
+                PutFlags::APPEND,
+                HelixGraphStorage::edge_key(&edge.id),
+                &bytes,
+            )?;
+            self.storage.out_edges_db.put_with_flags(
+                self.txn,
+                PutFlags::APPEND_DUP,
+                &out_key,
+                &HelixGraphStorage::pack_edge_data(&edge.id, &to_node),
+            )?;
+            self.storage.in_edges_db.put_with_flags(
+                self.txn,
+                PutFlags::APPEND_DUP,
+                &HelixGraphStorage::in_edge_key(&to_node, &label_hash),
+                &HelixGraphStorage::pack_edge_data(&edge.id, &from_node),
+            )?;
+
+            Ok(TraversalValue::Edge(edge))
+        })();
 
         RwTraversalIterator {
             arena: self.arena,
