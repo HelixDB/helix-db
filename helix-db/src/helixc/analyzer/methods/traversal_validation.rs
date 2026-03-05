@@ -633,56 +633,56 @@ pub(crate) fn validate_traversal<'a>(
                 }
             };
 
-            // let pre_filter: Option<Vec<BoExp>> = match &sv.pre_filter {
-            //     Some(expr) => {
-            //         let (_, stmt) = infer_expr_type(
-            //             ctx,
-            //             expr,
-            //             scope,
-            //             original_query,
-            //             Some(Type::Vector(sv.vector_type.clone())),
-            //             gen_query,
-            //         );
-            //         // Where/boolean ops don't change the element type,
-            //         // so `cur_ty` stays the same.
-            //         assert!(stmt.is_some());
-            //         let stmt = stmt.unwrap();
-            //         let mut gen_traversal = GeneratedTraversal {
-            //             traversal_type: TraversalType::NestedFrom(GenRef::Std("v".to_string())),
-            //             steps: vec![],
-            //             should_collect: ShouldCollect::ToVec,
-            //             source_step: Separator::Empty(SourceStep::Anonymous),
-            //         };
-            //         match stmt {
-            //             GeneratedStatement::Traversal(tr) => {
-            //                 gen_traversal
-            //                     .steps
-            //                     .push(Separator::Period(GeneratedStep::Where(Where::Ref(
-            //                         WhereRef {
-            //                             expr: BoExp::Expr(tr),
-            //                         },
-            //                     ))));
-            //             }
-            //             GeneratedStatement::BoExp(expr) => {
-            //                 gen_traversal
-            //                     .steps
-            //                     .push(Separator::Period(GeneratedStep::Where(match expr {
-            //                         BoExp::Exists(mut traversal) => {
-            //                             traversal.should_collect = ShouldCollect::No;
-            //                             Where::Ref(WhereRef {
-            //                                 expr: BoExp::Exists(traversal),
-            //                             })
-            //                         }
-            //                         _ => Where::Ref(WhereRef { expr }),
-            //                     })));
-            //             }
-            //             _ => unreachable!(),
-            //         }
-            //         Some(vec![BoExp::Expr(gen_traversal)])
-            //     }
-            //     None => None,
-            // };
-            let pre_filter = None;
+            let pre_filter: Option<Vec<BoExp>> = match &sv.pre_filter {
+                Some(expr) => {
+                    let (_, stmt) = infer_expr_type(
+                        ctx,
+                        expr,
+                        scope,
+                        original_query,
+                        Some(Type::Vector(sv.vector_type.clone())),
+                        gen_query,
+                    );
+                    // Where/boolean ops don't change the element type,
+                    // so `cur_ty` stays the same.
+                    if stmt.is_none() {
+                        generate_error!(
+                            ctx,
+                            original_query,
+                            sv.loc.clone(),
+                            E601,
+                            "invalid pre_filter expression"
+                        );
+                        return None;
+                    }
+                    let stmt = stmt.unwrap();
+                    match stmt {
+                        GeneratedStatement::Traversal(tr) => {
+                            Some(vec![BoExp::Expr(tr)])
+                        }
+                        GeneratedStatement::BoExp(expr) => {
+                            match expr {
+                                BoExp::Exists(mut traversal) => {
+                                    traversal.should_collect = ShouldCollect::No;
+                                    Some(vec![BoExp::Exists(traversal)])
+                                }
+                                _ => Some(vec![expr]),
+                            }
+                        }
+                        _ => {
+                            generate_error!(
+                                ctx,
+                                original_query,
+                                sv.loc.clone(),
+                                E601,
+                                "pre_filter must be a boolean expression"
+                            );
+                            return None;
+                        }
+                    }
+                }
+                None => None,
+            };
 
             gen_traversal.traversal_type = TraversalType::Ref;
             gen_traversal.should_collect = ShouldCollect::ToVec;
