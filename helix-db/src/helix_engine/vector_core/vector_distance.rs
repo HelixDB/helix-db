@@ -28,11 +28,13 @@ pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
     let len = from.len();
     let other_len = to.len();
 
+    if len == 0 || other_len == 0 {
+        return Err(VectorError::InvalidVectorData);
+    }
+
     if len != other_len {
-        println!("mis-match in vector dimensions!\n{len} != {other_len}");
         return Err(VectorError::InvalidVectorLength);
     }
-    //debug_assert_eq!(len, other.data.len(), "Vectors must have the same length");
 
     #[cfg(target_feature = "avx2")]
     {
@@ -78,11 +80,17 @@ pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
         magnitude_b += b_val * b_val;
     }
 
-    if magnitude_a.abs() == 0.0 || magnitude_b.abs() == 0.0 {
-        return Ok(-1.0);
+    if magnitude_a == 0.0 || magnitude_b == 0.0 {
+        return Err(VectorError::InvalidVectorData);
     }
 
-    Ok(dot_product / (magnitude_a.sqrt() * magnitude_b.sqrt()))
+    let similarity = dot_product / (magnitude_a.sqrt() * magnitude_b.sqrt());
+
+    if similarity.is_nan() || similarity.is_infinite() {
+        return Err(VectorError::InvalidVectorData);
+    }
+
+    Ok(similarity)
 }
 
 // SIMD implementation using AVX2 (256-bit vectors)
