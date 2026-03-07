@@ -173,3 +173,10 @@ fn test_hvector_distance_zero_vector_returns_error() {
     let v2 = alloc_vector(&arena, &[3.0, 4.0]);
     assert!(v1.distance_to(&v2).is_err());
 }
+
+#[test]
+fn test_cosine_similarity_near_zero_magnitude_returns_error() {
+    let tiny = f64::EPSILON * 0.1;
+    let result = cosine_similarity(&[tiny, 0.0], &[1.0, 2.0]);
+    assert!(result.is_err());
+}

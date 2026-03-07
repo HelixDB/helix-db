@@ -80,7 +80,7 @@ pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
         magnitude_b += b_val * b_val;
     }
 
-    if magnitude_a == 0.0 || magnitude_b == 0.0 {
+    if magnitude_a < f64::EPSILON || magnitude_b < f64::EPSILON {
         return Err(VectorError::InvalidVectorData);
     }
 
