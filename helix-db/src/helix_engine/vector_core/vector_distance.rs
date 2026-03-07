@@ -96,7 +96,7 @@ pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
 // SIMD implementation using AVX2 (256-bit vectors)
 #[cfg(target_feature = "avx2")]
 #[inline(always)]
-pub fn cosine_similarity_avx2(a: &[f64], b: &[f64]) -> f64 {
+pub fn cosine_similarity_avx2(a: &[f64], b: &[f64]) -> Result<f64, VectorError> {
     use std::arch::x86_64::*;
 
     let len = a.len();
@@ -141,10 +141,20 @@ pub fn cosine_similarity_avx2(a: &[f64], b: &[f64]) -> f64 {
 
         // Combine SIMD and scalar results
         let dot_product_total = dot_sum + dot_remainder;
-        let magnitude_a_total = (mag_a_sum + mag_a_remainder).sqrt();
-        let magnitude_b_total = (mag_b_sum + mag_b_remainder).sqrt();
+        let mag_a_total = mag_a_sum + mag_a_remainder;
+        let mag_b_total = mag_b_sum + mag_b_remainder;
 
-        dot_product_total / (magnitude_a_total * magnitude_b_total)
+        if mag_a_total < f64::EPSILON || mag_b_total < f64::EPSILON {
+            return Err(VectorError::InvalidVectorData);
+        }
+
+        let similarity = dot_product_total / (mag_a_total.sqrt() * mag_b_total.sqrt());
+
+        if similarity.is_nan() || similarity.is_infinite() {
+            return Err(VectorError::InvalidVectorData);
+        }
+
+        Ok(similarity)
     }
 }
 
