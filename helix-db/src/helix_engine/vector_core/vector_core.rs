@@ -7,6 +7,7 @@ use crate::{
             hnsw::HNSW,
             utils::{Candidate, HeapOps, VectorFilter},
             vector::HVector,
+            vector_distance::distance_from_stored_bytes,
             vector_without_data::VectorWithoutData,
         },
     },
@@ -19,13 +20,19 @@ use heed3::{
 };
 use rand::prelude::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
 const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
 const DB_HNSW_EDGES: &str = "hnsw_out_nodes"; // for hnsw out node data
 const VECTOR_PREFIX: &[u8] = b"v:";
 pub const ENTRY_POINT_KEY: &[u8] = b"entry_point";
+
+#[derive(Clone, Copy, Debug)]
+struct InsertEntryPoint {
+    id: u128,
+    level: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HNSWConfig {
@@ -144,6 +151,91 @@ impl VectorCore {
         Ok(())
     }
 
+    #[inline]
+    fn get_entry_point_for_insert<'db: 'txn, 'txn>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+    ) -> Result<InsertEntryPoint, VectorError> {
+        let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY)?;
+        if let Some(ep_id) = ep_id {
+            let mut arr = [0u8; 16];
+            let len = std::cmp::min(ep_id.len(), 16);
+            arr[..len].copy_from_slice(&ep_id[..len]);
+            Ok(InsertEntryPoint {
+                id: u128::from_be_bytes(arr),
+                level: 0,
+            })
+        } else {
+            Err(VectorError::EntryPointNotFound)
+        }
+    }
+
+    #[inline(always)]
+    fn get_vector_bytes<'db: 'txn, 'txn>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        id: u128,
+    ) -> Result<&'txn [u8], VectorError> {
+        self.vectors_db
+            .get(txn, &Self::vector_key(id, 0))?
+            .ok_or_else(|| VectorError::VectorNotFound(id.to_string()))
+    }
+
+    #[inline(always)]
+    fn get_or_compute_distance<'db: 'txn, 'txn>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        id: u128,
+        query: &[f64],
+        distance_cache: &mut HashMap<u128, f64>,
+    ) -> Result<f64, VectorError> {
+        if let Some(distance) = distance_cache.get(&id) {
+            return Ok(*distance);
+        }
+
+        let distance = distance_from_stored_bytes(query, self.get_vector_bytes(txn, id)?)?;
+        distance_cache.insert(id, distance);
+        Ok(distance)
+    }
+
+    #[inline(always)]
+    fn for_each_neighbor_id<'db: 'txn, 'txn, C>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        id: u128,
+        level: usize,
+        mut callback: C,
+    ) -> Result<(), VectorError>
+    where
+        C: FnMut(u128) -> Result<(), VectorError>,
+    {
+        let out_key = Self::out_edges_key(id, level, None);
+        let prefix_len = out_key.len();
+        let iter = self
+            .edges_db
+            .lazily_decode_data()
+            .prefix_iter(txn, &out_key)?;
+
+        for result in iter {
+            let (key, _) = result?;
+            if key.len() < prefix_len + 16 {
+                continue;
+            }
+
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&key[prefix_len..prefix_len + 16]);
+            let neighbor_id = u128::from_be_bytes(arr);
+
+            if neighbor_id == id {
+                continue;
+            }
+
+            callback(neighbor_id)?;
+        }
+
+        Ok(())
+    }
+
     #[inline(always)]
     pub fn put_vector<'arena>(
         &self,
@@ -215,13 +307,16 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    fn set_neighbours<'db: 'arena, 'arena: 'txn, 'txn, 's>(
+    fn set_neighbours_from_ids<'db, 'txn, I>(
         &'db self,
         txn: &'txn mut RwTxn<'db>,
         id: u128,
-        neighbors: &BinaryHeap<'arena, HVector<'arena>>,
+        neighbors: I,
         level: usize,
-    ) -> Result<(), VectorError> {
+    ) -> Result<(), VectorError>
+    where
+        I: IntoIterator<Item = u128>,
+    {
         let prefix = Self::out_edges_key(id, level, None);
 
         let mut keys_to_delete: HashSet<Vec<u8>> = self
@@ -230,10 +325,7 @@ impl VectorCore {
             .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
             .collect();
 
-        neighbors
-            .iter()
-            .try_for_each(|neighbor| -> Result<(), VectorError> {
-                let neighbor_id = neighbor.id;
+        neighbors.into_iter().try_for_each(|neighbor_id| -> Result<(), VectorError> {
                 if neighbor_id == id {
                     return Ok(());
                 }
@@ -256,6 +348,7 @@ impl VectorCore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn select_neighbors<'db: 'arena, 'arena: 'txn, 'txn, 's, F>(
         &'db self,
         txn: &'txn RoTxn<'db>,
@@ -303,6 +396,70 @@ impl VectorCore {
                     result.push(neighbor);
                 }
             }
+        }
+
+        result.extend(cands);
+        Ok(result.take_inord(m))
+    }
+
+    fn get_neighbor_candidates_for_insert<'db: 'txn, 'txn, 'scratch>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        id: u128,
+        level: usize,
+        query: &[f64],
+        distance_cache: &mut HashMap<u128, f64>,
+        arena: &'scratch bumpalo::Bump,
+    ) -> Result<BinaryHeap<'scratch, Candidate>, VectorError> {
+        let mut neighbors = BinaryHeap::with_capacity(
+            arena,
+            self.config.m_max_0.min(self.config.min_neighbors),
+        );
+
+        self.for_each_neighbor_id(txn, id, level, |neighbor_id| {
+            let distance = self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
+            neighbors.push(Candidate {
+                id: neighbor_id,
+                distance,
+            });
+            Ok(())
+        })?;
+
+        Ok(neighbors)
+    }
+
+    fn select_neighbors_for_insert<'db: 'txn, 'txn, 'scratch>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        query: &[f64],
+        mut cands: BinaryHeap<'scratch, Candidate>,
+        level: usize,
+        should_extend: bool,
+        distance_cache: &mut HashMap<u128, f64>,
+        arena: &'scratch bumpalo::Bump,
+    ) -> Result<BinaryHeap<'scratch, Candidate>, VectorError> {
+        let m = self.config.m;
+
+        if !should_extend {
+            return Ok(cands.take_inord(m));
+        }
+
+        let mut seen: HashSet<u128> = cands.iter().map(|candidate| candidate.id).collect();
+        let mut result = BinaryHeap::with_capacity(arena, m * cands.len());
+
+        for candidate in cands.iter() {
+            self.for_each_neighbor_id(txn, candidate.id, level, |neighbor_id| {
+                if !seen.insert(neighbor_id) {
+                    return Ok(());
+                }
+
+                let distance = self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
+                result.push(Candidate {
+                    id: neighbor_id,
+                    distance,
+                });
+                Ok(())
+            })?;
         }
 
         result.extend(cands);
@@ -377,6 +534,66 @@ impl VectorCore {
                     }
                 });
         }
+        Ok(results)
+    }
+
+    fn search_level_for_insert<'db: 'txn, 'txn, 'scratch>(
+        &self,
+        txn: &'txn RoTxn<'db>,
+        query: &[f64],
+        entry_point: Candidate,
+        ef: usize,
+        level: usize,
+        distance_cache: &mut HashMap<u128, f64>,
+        arena: &'scratch bumpalo::Bump,
+    ) -> Result<BinaryHeap<'scratch, Candidate>, VectorError> {
+        let mut visited: HashSet<u128> = HashSet::new();
+        let mut candidates: BinaryHeap<'scratch, Candidate> =
+            BinaryHeap::with_capacity(arena, self.config.ef_construct);
+        let mut results: BinaryHeap<'scratch, Candidate> = BinaryHeap::new(arena);
+
+        candidates.push(entry_point);
+        results.push(entry_point);
+        visited.insert(entry_point.id);
+
+        while let Some(curr_cand) = candidates.pop() {
+            if results.len() >= ef
+                && results
+                    .get_max()
+                    .is_none_or(|f| curr_cand.distance > f.distance)
+            {
+                break;
+            }
+
+            let max_distance = if results.len() >= ef {
+                results.get_max().map(|f| f.distance)
+            } else {
+                None
+            };
+
+            self.for_each_neighbor_id(txn, curr_cand.id, level, |neighbor_id| {
+                if !visited.insert(neighbor_id) {
+                    return Ok(());
+                }
+
+                let distance = self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
+                if max_distance.is_none_or(|max| distance < max) {
+                    let neighbor = Candidate {
+                        id: neighbor_id,
+                        distance,
+                    };
+                    candidates.push(neighbor);
+                    results.push(neighbor);
+
+                    if results.len() > ef {
+                        results = results.take_inord(ef);
+                    }
+                }
+
+                Ok(())
+            })?;
+        }
+
         Ok(results)
     }
 
@@ -565,7 +782,7 @@ impl HNSW for VectorCore {
         label: &'arena str,
         data: &'arena [f64],
         properties: Option<ImmutablePropertiesMap<'arena>>,
-        arena: &'arena bumpalo::Bump,
+        _arena: &'arena bumpalo::Bump,
     ) -> Result<HVector<'arena>, VectorError>
     where
         F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
@@ -580,7 +797,7 @@ impl HNSW for VectorCore {
 
         query.level = new_level;
 
-        let entry_point = match self.get_entry_point(txn, label, arena) {
+        let entry_point = match self.get_entry_point_for_insert(txn) {
             Ok(ep) => ep,
             Err(_) => {
                 // TODO: use proper error handling
@@ -591,44 +808,79 @@ impl HNSW for VectorCore {
             }
         };
 
+        let insert_arena = bumpalo::Bump::new();
+        let mut distance_cache = HashMap::new();
         let l = entry_point.level;
-        let mut curr_ep = entry_point;
+        let mut curr_ep = Candidate {
+            id: entry_point.id,
+            distance: self.get_or_compute_distance(txn, entry_point.id, data, &mut distance_cache)?,
+        };
+
         for level in (new_level + 1..=l).rev() {
-            let mut nearest =
-                self.search_level::<F>(txn, label, &query, &mut curr_ep, 1, level, None, arena)?;
+            let mut nearest = self.search_level_for_insert(
+                txn,
+                data,
+                curr_ep,
+                1,
+                level,
+                &mut distance_cache,
+                &insert_arena,
+            )?;
             curr_ep = nearest.pop().ok_or(VectorError::VectorCoreError(
                 "emtpy search result".to_string(),
             ))?;
         }
 
         for level in (0..=l.min(new_level)).rev() {
-            let nearest = self.search_level::<F>(
+            let nearest = self.search_level_for_insert(
                 txn,
-                label,
-                &query,
-                &mut curr_ep,
+                data,
+                curr_ep,
                 self.config.ef_construct,
                 level,
-                None,
-                arena,
+                &mut distance_cache,
+                &insert_arena,
             )?;
             curr_ep = *nearest.peek().ok_or(VectorError::VectorCoreError(
                 "emtpy search result".to_string(),
             ))?;
 
-            let neighbors =
-                self.select_neighbors::<F>(txn, label, &query, nearest, level, true, None, arena)?;
-            self.set_neighbours(txn, query.id, &neighbors, level)?;
+            let neighbors = self.select_neighbors_for_insert(
+                txn,
+                data,
+                nearest,
+                level,
+                true,
+                &mut distance_cache,
+                &insert_arena,
+            )?;
+            self.set_neighbours_from_ids(txn, query.id, neighbors.iter().map(|candidate| candidate.id), level)?;
 
-            for e in neighbors {
-                let id = e.id;
-                let e_conns = BinaryHeap::from(
-                    arena,
-                    self.get_neighbors::<F>(txn, label, id, level, None, arena)?,
-                );
-                let e_new_conn = self
-                    .select_neighbors::<F>(txn, label, &query, e_conns, level, true, None, arena)?;
-                self.set_neighbours(txn, id, &e_new_conn, level)?;
+            for neighbor in neighbors {
+                let id = neighbor.id;
+                let e_conns = self.get_neighbor_candidates_for_insert(
+                    txn,
+                    id,
+                    level,
+                    data,
+                    &mut distance_cache,
+                    &insert_arena,
+                )?;
+                let e_new_conn = self.select_neighbors_for_insert(
+                    txn,
+                    data,
+                    e_conns,
+                    level,
+                    true,
+                    &mut distance_cache,
+                    &insert_arena,
+                )?;
+                self.set_neighbours_from_ids(
+                    txn,
+                    id,
+                    e_new_conn.iter().map(|candidate| candidate.id),
+                    level,
+                )?;
             }
         }
 

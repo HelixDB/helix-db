@@ -1,4 +1,5 @@
 use crate::helix_engine::{types::VectorError, vector_core::vector::HVector};
+use core::mem;
 
 pub const MAX_DISTANCE: f64 = 2.0;
 pub const ORTHOGONAL: f64 = 1.0;
@@ -20,6 +21,68 @@ impl<'a> DistanceCalc for HVector<'a> {
     fn distance(from: &HVector, to: &HVector) -> Result<f64, VectorError> {
         cosine_similarity(from.data, to.data).map(|sim| 1.0 - sim)
     }
+}
+
+#[inline]
+pub(crate) fn distance_from_stored_bytes(
+    query: &[f64],
+    stored_bytes: &[u8],
+) -> Result<f64, VectorError> {
+    #[cfg(feature = "cosine")]
+    {
+        let expected_len = query
+            .len()
+            .checked_mul(mem::size_of::<f64>())
+            .ok_or(VectorError::InvalidVectorLength)?;
+
+        if stored_bytes.len() != expected_len {
+            return Err(VectorError::InvalidVectorLength);
+        }
+
+        if let Ok(stored) = bytemuck::try_cast_slice::<u8, f64>(stored_bytes) {
+            return cosine_similarity(query, stored).map(|sim| 1.0 - sim);
+        }
+
+        return cosine_distance_unaligned(query, stored_bytes);
+    }
+
+    #[cfg(not(feature = "cosine"))]
+    {
+        let _ = (query, stored_bytes);
+        Err(VectorError::VectorCoreError(
+            "distance_from_stored_bytes requires the cosine feature".to_string(),
+        ))
+    }
+}
+
+#[cfg(feature = "cosine")]
+#[inline]
+fn cosine_distance_unaligned(query: &[f64], stored_bytes: &[u8]) -> Result<f64, VectorError> {
+    let mut stored_chunks = stored_bytes.chunks_exact(mem::size_of::<f64>());
+    if stored_chunks.len() != query.len() || !stored_chunks.remainder().is_empty() {
+        return Err(VectorError::InvalidVectorLength);
+    }
+
+    let mut dot_product = 0.0;
+    let mut magnitude_query = 0.0;
+    let mut magnitude_stored = 0.0;
+
+    for (query_value, chunk) in query.iter().zip(stored_chunks.by_ref()) {
+        let stored_value = f64::from_ne_bytes(
+            chunk
+                .try_into()
+                .map_err(|_| VectorError::InvalidVectorData)?,
+        );
+        dot_product += query_value * stored_value;
+        magnitude_query += query_value * query_value;
+        magnitude_stored += stored_value * stored_value;
+    }
+
+    if magnitude_query.abs() == 0.0 || magnitude_stored.abs() == 0.0 {
+        return Ok(MAX_DISTANCE);
+    }
+
+    Ok(1.0 - (dot_product / (magnitude_query.sqrt() * magnitude_stored.sqrt())))
 }
 
 #[inline]
@@ -154,4 +217,57 @@ unsafe fn horizontal_sum_pd(__v: __m256d) -> f64 {
 
     // Extract the low 64 bits as a scalar
     _mm_cvtsd_f64(sum)
+}
+
+#[cfg(all(test, feature = "cosine"))]
+mod tests {
+    use super::{cosine_similarity, distance_from_stored_bytes, MAX_DISTANCE};
+
+    #[test]
+    fn test_distance_from_stored_bytes_aligned_matches_slice_distance() {
+        let query = [0.5, -1.0, 2.0, 0.25];
+        let stored = [0.25, -0.5, 1.5, 2.0];
+        let stored_bytes = bytemuck::cast_slice(&stored);
+
+        let expected = 1.0 - cosine_similarity(&query, &stored).unwrap();
+        let actual = distance_from_stored_bytes(&query, stored_bytes).unwrap();
+
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_distance_from_stored_bytes_misaligned_matches_slice_distance() {
+        let query = [0.5, -1.0, 2.0, 0.25];
+        let stored = [0.25, -0.5, 1.5, 2.0];
+        let stored_bytes = bytemuck::cast_slice(&stored);
+        let mut backing = vec![0u8; stored_bytes.len() + 1];
+        backing[1..].copy_from_slice(stored_bytes);
+
+        let expected = 1.0 - cosine_similarity(&query, &stored).unwrap();
+        let actual = distance_from_stored_bytes(&query, &backing[1..]).unwrap();
+
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_distance_from_stored_bytes_rejects_invalid_length() {
+        let query = [1.0, 2.0];
+        let err = distance_from_stored_bytes(&query, &[1, 2, 3]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::helix_engine::types::VectorError::InvalidVectorLength
+        ));
+    }
+
+    #[test]
+    fn test_distance_from_stored_bytes_zero_vector_matches_cosine_behavior() {
+        let query = [0.0, 0.0, 0.0, 0.0];
+        let stored = [0.0, 0.0, 0.0, 0.0];
+        let stored_bytes = bytemuck::cast_slice(&stored);
+
+        let actual = distance_from_stored_bytes(&query, stored_bytes).unwrap();
+
+        assert_eq!(actual, MAX_DISTANCE);
+    }
 }

@@ -576,3 +576,31 @@ fn test_hnsw_search_returns_results() {
         .unwrap();
     assert!(!results.is_empty());
 }
+
+#[test]
+fn test_hnsw_insert_large_vectors_still_searches() {
+    let (env, _temp_dir) = setup_env();
+    let mut txn = env.write_txn().unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+
+    for i in 0..16 {
+        let arena = Bump::new();
+        let vector: Vec<f64> = (0..512)
+            .map(|j| ((j as f64 * 0.001) + (i as f64 * 0.01)).sin())
+            .collect();
+        let data = arena.alloc_slice_copy(&vector);
+        let _ = index
+            .insert::<Filter>(&mut txn, "vector", data, None, &arena)
+            .unwrap();
+    }
+    txn.commit().unwrap();
+
+    let arena = Bump::new();
+    let txn = env.read_txn().unwrap();
+    let query: Vec<f64> = (0..512).map(|j| (j as f64 * 0.001).sin()).collect();
+    let results = index
+        .search::<Filter>(&txn, &query, 5, "vector", None, false, &arena)
+        .unwrap();
+
+    assert!(!results.is_empty());
+}

@@ -5,13 +5,13 @@ use crate::helix_engine::{
     vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
 };
 use heed3::{
-    Database, RoTxn,
     byteorder::BE,
     types::{Bytes, U128},
+    Database, RoTxn,
 };
 use std::cmp::Ordering;
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Candidate {
     pub id: u128,
     pub distance: f64,
