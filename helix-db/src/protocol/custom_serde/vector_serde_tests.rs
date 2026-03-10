@@ -18,6 +18,7 @@ mod vector_serialization_tests {
     use crate::protocol::value::Value;
 
     use bumpalo::Bump;
+    use serde::Serialize;
 
     // ========================================================================
     // BASIC ROUNDTRIP TESTS
@@ -350,6 +351,52 @@ mod vector_serialization_tests {
         let deserialized = result.unwrap();
         assert_eq!(deserialized.id, id);
         assert!(deserialized.properties.is_none());
+    }
+
+    #[derive(Serialize)]
+    struct LegacyVectorWithoutData<'arena> {
+        label: &'arena str,
+        version: u8,
+        deleted: bool,
+        level: usize,
+        properties: Option<crate::utils::properties::ImmutablePropertiesMap<'arena>>,
+    }
+
+    #[test]
+    fn test_vector_without_data_deserializes_legacy_level_metadata() {
+        let arena = Bump::new();
+        let id = 222000u128;
+        let label = arena.alloc_str("legacy_meta");
+        let props = vec![("type", Value::String("embedding".to_string()))];
+        let props_map = crate::utils::properties::ImmutablePropertiesMap::new(
+            props.len(),
+            props.into_iter().map(|(key, value)| {
+                let key: &str = arena.alloc_str(key);
+                (key, value)
+            }),
+            &arena,
+        );
+
+        let bytes = bincode::serialize(&LegacyVectorWithoutData {
+            label,
+            version: 3,
+            deleted: false,
+            level: 7,
+            properties: Some(props_map),
+        })
+        .unwrap();
+
+        let arena2 = Bump::new();
+        let deserialized = VectorWithoutData::from_bincode_bytes(&arena2, &bytes, id).unwrap();
+
+        assert_eq!(deserialized.id, id);
+        assert_eq!(deserialized.label, "legacy_meta");
+        assert_eq!(deserialized.version, 3);
+        assert_eq!(deserialized.level, 0);
+        assert_eq!(
+            deserialized.get_property("type"),
+            Some(&Value::String("embedding".to_string()))
+        );
     }
 
     // ========================================================================

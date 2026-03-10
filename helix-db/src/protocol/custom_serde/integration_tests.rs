@@ -619,19 +619,8 @@ mod integration_tests {
         let props_bytes = bincode::serialize(&vector).unwrap();
         let data_bytes = vector.vector_data_to_bytes().unwrap();
 
-        // Use same bincode options as from_bincode_bytes
         let arena2 = Bump::new();
-        let result = bincode::options()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .deserialize_seed(
-                crate::protocol::custom_serde::vector_serde::VectorDeSeed {
-                    arena: &arena2,
-                    id,
-                    raw_vector_data: data_bytes,
-                },
-                &props_bytes,
-            );
+        let result = HVector::from_bincode_bytes(&arena2, Some(&props_bytes), data_bytes, id);
 
         assert!(result.is_ok());
     }

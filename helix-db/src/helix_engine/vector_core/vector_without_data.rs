@@ -1,11 +1,10 @@
 use crate::{
     helix_engine::types::VectorError,
-    protocol::{custom_serde::vector_serde::VectoWithoutDataDeSeed, value::Value},
+    protocol::{custom_serde::vector_serde::vector_without_data_from_bincode_bytes, value::Value},
     utils::{id::uuid_str_from_buf, properties::ImmutablePropertiesMap},
 };
-use bincode::Options;
 use core::fmt;
-use serde::{Serialize, ser::SerializeMap};
+use serde::{ser::SerializeMap, Serialize};
 use std::fmt::Debug;
 // TODO: make this generic over the type of encoding (f32, f64, etc)
 // TODO: use const param to set dimension
@@ -58,11 +57,10 @@ impl<'arena> Serialize for VectorWithoutData<'arena> {
             state.end()
         } else {
             // Skip id for bincode serialization
-            let mut state = serializer.serialize_struct("VectorWithoutData", 5)?;
+            let mut state = serializer.serialize_struct("VectorWithoutData", 4)?;
             state.serialize_field("label", self.label)?;
             state.serialize_field("version", &self.version)?;
             state.serialize_field("deleted", &self.deleted)?;
-            state.serialize_field("level", &self.level)?;
             state.serialize_field("properties", &self.properties)?;
             state.end()
         }
@@ -103,11 +101,7 @@ impl<'arena> VectorWithoutData<'arena> {
         properties: &'txn [u8],
         id: u128,
     ) -> Result<Self, VectorError> {
-        bincode::options()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .deserialize_seed(VectoWithoutDataDeSeed { arena, id }, properties)
-            .map_err(|e| VectorError::ConversionError(format!("Error deserializing vector: {e}")))
+        vector_without_data_from_bincode_bytes(arena, properties, id)
     }
 
     #[inline(always)]

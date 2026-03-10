@@ -3,15 +3,14 @@ use crate::{
         types::VectorError,
         vector_core::{vector_distance::DistanceCalc, vector_without_data::VectorWithoutData},
     },
-    protocol::{custom_serde::vector_serde::VectorDeSeed, value::Value},
+    protocol::{custom_serde::vector_serde::hvector_from_bincode_bytes, value::Value},
     utils::{
         id::{uuid_str_from_buf, v6_uuid},
         properties::ImmutablePropertiesMap,
     },
 };
-use bincode::Options;
 use core::fmt;
-use serde::{Serialize, Serializer, ser::SerializeMap};
+use serde::{ser::SerializeMap, Serialize, Serializer};
 use std::{alloc, cmp::Ordering, fmt::Debug, mem, ptr, slice};
 
 // TODO: make this generic over the type of encoding (f32, f64, etc)
@@ -147,18 +146,7 @@ impl<'arena> HVector<'arena> {
         raw_vector_data: &'txn [u8],
         id: u128,
     ) -> Result<Self, VectorError> {
-        bincode::options()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .deserialize_seed(
-                VectorDeSeed {
-                    arena,
-                    id,
-                    raw_vector_data,
-                },
-                properties.unwrap_or(&[]),
-            )
-            .map_err(|e| VectorError::ConversionError(format!("Error deserializing vector: {e}")))
+        hvector_from_bincode_bytes(arena, properties, raw_vector_data, id)
     }
 
     #[inline(always)]

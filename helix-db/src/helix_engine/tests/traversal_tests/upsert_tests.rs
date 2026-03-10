@@ -19,7 +19,7 @@ use crate::{
                 out::out_e::OutEdgesAdapter,
                 source::{
                     add_e::AddEAdapter, add_n::AddNAdapter, e_from_id::EFromIdAdapter,
-                    n_from_id::NFromIdAdapter,
+                    n_from_id::NFromIdAdapter, v_from_type::VFromTypeAdapter,
                 },
                 util::upsert::UpsertAdapter,
                 vectors::{insert::InsertVAdapter, search::SearchVAdapter},
@@ -894,6 +894,66 @@ fn test_upsert_v_updates_existing_vector_with_properties() {
         panic!("Expected vector");
     }
     txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_v_from_no_data_traversal_preserves_embedding() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+
+    let vector_id = {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        let vector = G::new_mut(&storage, &arena, &mut txn)
+            .insert_v::<Filter>(&[0.5, 0.6, 0.7], "embedding", None)
+            .collect_to_obj()
+            .unwrap();
+        let vector_id = vector.id();
+        txn.commit().unwrap();
+        vector_id
+    };
+
+    let source_vectors = {
+        let txn = storage.graph_env.read_txn().unwrap();
+        G::new(&storage, &txn, &arena)
+            .v_from_type("embedding", false)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+
+    let mut txn = storage.graph_env.write_txn().unwrap();
+    let result = G::new_mut_from_iter(&storage, &mut txn, source_vectors.into_iter(), &arena)
+        .upsert_v(
+            &[9.0, 9.0, 9.0],
+            "embedding",
+            &[("source", Value::from("openai"))],
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Vector(vector) = &result[0] {
+        assert_eq!(vector.id, vector_id);
+        assert_eq!(
+            vector.get_property("source").unwrap(),
+            &Value::from("openai")
+        );
+        assert_eq!(vector.data, &[0.5, 0.6, 0.7]);
+    } else {
+        panic!("Expected vector");
+    }
+    txn.commit().unwrap();
+
+    let verify_arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let stored = storage
+        .vectors
+        .get_full_vector(&txn, vector_id, &verify_arena)
+        .unwrap();
+    assert_eq!(stored.data, &[0.5, 0.6, 0.7]);
+    assert_eq!(
+        stored.get_property("source").unwrap(),
+        &Value::from("openai")
+    );
 }
 
 #[test]

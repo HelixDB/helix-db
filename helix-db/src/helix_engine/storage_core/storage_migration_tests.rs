@@ -9,24 +9,30 @@
 //! - Performance tests for large datasets
 
 use super::{
-    HelixGraphStorage,
-    metadata::{NATIVE_VECTOR_ENDIANNESS, StorageMetadata, VectorEndianness},
+    metadata::{StorageMetadata, VectorEndianness, NATIVE_VECTOR_ENDIANNESS},
     storage_migration::{
         convert_all_vector_properties, convert_old_vector_properties_to_new_format,
-        convert_vector_endianness, migrate,
+        convert_vector_endianness, migrate, HNSW_SCHEMA_VERSION, HNSW_SCHEMA_VERSION_KEY,
     },
+    HelixGraphStorage,
 };
 use crate::{
     helix_engine::{
         bm25::bm25::{
-            BM25, BM25_SCHEMA_VERSION, BM25_SCHEMA_VERSION_KEY, BM25Metadata, METADATA_KEY,
+            BM25Metadata, BM25, BM25_SCHEMA_VERSION, BM25_SCHEMA_VERSION_KEY, METADATA_KEY,
         },
         storage_core::version_info::VersionInfo,
         traversal_core::{
             config::Config,
-            ops::{g::G, source::add_n::AddNAdapter},
+            ops::{
+                g::G,
+                source::add_n::AddNAdapter,
+                vectors::{insert::InsertVAdapter, search::SearchVAdapter},
+            },
         },
         types::GraphError,
+        vector_core::vector::HVector,
+        vector_core::vector_core::{VectorCore, ENTRY_POINT_KEY},
     },
     protocol::value::Value,
     utils::{items::Node, properties::ImmutablePropertiesMap},
@@ -110,7 +116,7 @@ fn populate_test_vectors(
         storage
             .vectors
             .vectors_db
-            .put(&mut txn, &id.to_be_bytes(), &vector_data)?;
+            .put(&mut txn, &VectorCore::vector_key(id, 0), &vector_data)?;
     }
 
     txn.commit()?;
@@ -163,7 +169,16 @@ fn read_all_vectors(
     let mut all_vectors = Vec::new();
 
     for kv in storage.vectors.vectors_db.iter(&txn)? {
-        let (_, value) = kv?;
+        let (key, value) = kv?;
+        if key == ENTRY_POINT_KEY || !key.starts_with(b"v:") || key.len() != 26 {
+            continue;
+        }
+
+        let level = usize::from_be_bytes(key[18..26].try_into().unwrap());
+        if level != 0 {
+            continue;
+        }
+
         let values = read_f64_values(value, endianness);
         all_vectors.push(values);
     }
@@ -666,10 +681,17 @@ fn test_migrate_cognee_vector_string_dates_error() {
     {
         let mut txn = storage.graph_env.write_txn().unwrap();
         let id = 123u128;
+        let raw_vector_data =
+            create_test_vector_bytes(&[0.1, 0.2, 0.3], VectorEndianness::BigEndian);
         storage
             .vectors
             .vector_properties_db
             .put(&mut txn, &id, &old_bytes)
+            .unwrap();
+        storage
+            .vectors
+            .vectors_db
+            .put(&mut txn, &VectorCore::vector_key(id, 0), &raw_vector_data)
             .unwrap();
         txn.commit().unwrap();
     }
@@ -993,7 +1015,7 @@ fn test_error_handling_graceful_failure() {
         storage
             .vectors
             .vectors_db
-            .put(&mut txn, &bad_id.to_be_bytes(), &bad_data)
+            .put(&mut txn, &VectorCore::vector_key(bad_id, 0), &bad_data)
             .unwrap();
 
         txn.commit().unwrap();
@@ -1218,4 +1240,100 @@ fn test_memory_efficiency_batch_processing() {
 
     let vectors = read_all_vectors(&storage, NATIVE_VECTOR_ENDIANNESS).unwrap();
     assert_eq!(vectors.len(), 5000);
+}
+
+#[test]
+fn test_hnsw_migration_rebuilds_index_and_prunes_legacy_keys() {
+    let (mut storage, _temp_dir) = setup_test_storage();
+    let mut vector_ids = Vec::new();
+
+    {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        for i in 0..16 {
+            let arena = Bump::new();
+            let vector: Vec<f64> = vec![i as f64, i as f64 + 1.0, i as f64 + 2.0];
+            let inserted = G::new_mut(&storage, &arena, &mut txn)
+                .insert_v::<fn(&HVector, &heed3::RoTxn) -> bool>(
+                    arena.alloc_slice_copy(&vector),
+                    "rebuild_test",
+                    None,
+                )
+                .collect_to_obj()
+                .unwrap();
+            vector_ids.push(inserted.id());
+        }
+        txn.commit().unwrap();
+    }
+
+    let victim_id = vector_ids[0];
+    {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        let level_zero_bytes = storage
+            .vectors
+            .vectors_db
+            .get(&txn, &VectorCore::vector_key(victim_id, 0))
+            .unwrap()
+            .unwrap()
+            .to_vec();
+
+        storage
+            .vectors
+            .vectors_db
+            .put(
+                &mut txn,
+                &VectorCore::vector_key(victim_id, 3),
+                &level_zero_bytes,
+            )
+            .unwrap();
+        storage
+            .vectors
+            .vectors_db
+            .put(&mut txn, ENTRY_POINT_KEY, &victim_id.to_be_bytes())
+            .unwrap();
+        storage
+            .metadata_db
+            .delete(&mut txn, HNSW_SCHEMA_VERSION_KEY)
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    migrate(&mut storage).unwrap();
+
+    let txn = storage.graph_env.read_txn().unwrap();
+    let stored_version = storage
+        .metadata_db
+        .get(&txn, HNSW_SCHEMA_VERSION_KEY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        u64::from_le_bytes(stored_version.try_into().unwrap()),
+        HNSW_SCHEMA_VERSION
+    );
+
+    assert!(storage
+        .vectors
+        .vectors_db
+        .get(&txn, &VectorCore::vector_key(victim_id, 3))
+        .unwrap()
+        .is_none());
+
+    let entry_point = storage
+        .vectors
+        .vectors_db
+        .get(&txn, ENTRY_POINT_KEY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry_point.len(), 24);
+
+    let arena = Bump::new();
+    let results = G::new(&storage, &txn, &arena)
+        .search_v::<fn(&HVector, &heed3::RoTxn) -> bool, _>(
+            &[0.0, 1.0, 2.0],
+            5,
+            "rebuild_test",
+            None,
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!results.is_empty());
 }

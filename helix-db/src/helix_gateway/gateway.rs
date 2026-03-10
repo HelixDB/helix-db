@@ -30,7 +30,7 @@ use crate::{
 pub struct GatewayOpts {}
 
 impl GatewayOpts {
-    pub const DEFAULT_WORKERS_PER_CORE: usize = 8;
+    pub const DEFAULT_WORKERS_PER_CORE: usize = 4;
 }
 
 pub struct HelixGateway {
@@ -132,9 +132,7 @@ impl HelixGateway {
 
         let axum_app = axum_app.with_state(Arc::new(AppState {
             worker_pool,
-            schema_json: self
-                .opts
-                .and_then(|o| o.config.schema.map(Bytes::from)),
+            schema_json: self.opts.and_then(|o| o.config.schema.map(Bytes::from)),
             cluster_id: self.cluster_id,
         }));
 

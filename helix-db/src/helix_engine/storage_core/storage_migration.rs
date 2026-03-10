@@ -1,9 +1,9 @@
 use crate::{
     helix_engine::{
-        bm25::bm25::{BM25_SCHEMA_VERSION, HBM25Config},
+        bm25::bm25::{HBM25Config, BM25_SCHEMA_VERSION},
         storage_core::HelixGraphStorage,
         types::GraphError,
-        vector_core::{vector::HVector, vector_core},
+        vector_core::{vector::HVector, vector_core, vector_without_data::VectorWithoutData},
     },
     protocol::value::Value,
     utils::{items::Node, properties::ImmutablePropertiesMap},
@@ -12,7 +12,10 @@ use bincode::Options;
 use itertools::Itertools;
 use std::{collections::HashMap, ops::Bound};
 
-use super::metadata::{NATIVE_VECTOR_ENDIANNESS, StorageMetadata, VectorEndianness};
+use super::metadata::{StorageMetadata, VectorEndianness, NATIVE_VECTOR_ENDIANNESS};
+
+pub(crate) const HNSW_SCHEMA_VERSION_KEY: &[u8] = b"hnsw_schema_version";
+pub(crate) const HNSW_SCHEMA_VERSION: u64 = 1;
 
 pub fn migrate(storage: &mut HelixGraphStorage) -> Result<(), GraphError> {
     let mut metadata = {
@@ -37,9 +40,60 @@ pub fn migrate(storage: &mut HelixGraphStorage) -> Result<(), GraphError> {
         };
     }
 
+    convert_all_vector_properties(storage)?;
     verify_vectors_and_repair(storage)?;
+    migrate_hnsw(storage)?;
     remove_orphaned_vector_edges(storage)?;
     migrate_bm25(storage)?;
+
+    Ok(())
+}
+
+fn read_schema_version(
+    txn: &heed3::RoTxn,
+    metadata_db: &heed3::Database<heed3::types::Bytes, heed3::types::Bytes>,
+    key: &[u8],
+) -> Result<Option<u64>, GraphError> {
+    let Some(bytes) = metadata_db.get(txn, key)? else {
+        return Ok(None);
+    };
+
+    let version_bytes: [u8; std::mem::size_of::<u64>()] = bytes
+        .try_into()
+        .map_err(|e| GraphError::New(format!("schema version key is not a u64: {e:?}")))?;
+
+    Ok(Some(u64::from_le_bytes(version_bytes)))
+}
+
+fn write_schema_version(
+    txn: &mut heed3::RwTxn,
+    metadata_db: &heed3::Database<heed3::types::Bytes, heed3::types::Bytes>,
+    key: &[u8],
+    version: u64,
+) -> Result<(), GraphError> {
+    metadata_db.put(txn, key, &version.to_le_bytes())?;
+    Ok(())
+}
+
+fn migrate_hnsw(storage: &mut HelixGraphStorage) -> Result<(), GraphError> {
+    let current_schema_version = {
+        let txn = storage.graph_env.read_txn()?;
+        read_schema_version(&txn, &storage.metadata_db, HNSW_SCHEMA_VERSION_KEY)?
+    };
+
+    if current_schema_version == Some(HNSW_SCHEMA_VERSION) {
+        return Ok(());
+    }
+
+    let mut txn = storage.graph_env.write_txn()?;
+    storage.vectors.rebuild_hnsw_index(&mut txn)?;
+    write_schema_version(
+        &mut txn,
+        &storage.metadata_db,
+        HNSW_SCHEMA_VERSION_KEY,
+        HNSW_SCHEMA_VERSION,
+    )?;
+    txn.commit()?;
 
     Ok(())
 }
@@ -127,8 +181,6 @@ pub(crate) fn migrate_pre_metadata_to_native_vector_endianness(
         // On little-endian machines, we need to convert from big-endian to little-endian
         convert_all_vectors(VectorEndianness::BigEndian, storage)?;
     }
-
-    convert_all_vector_properties(storage)?;
 
     // Save the metadata
     let mut txn = storage.graph_env.write_txn()?;
@@ -326,7 +378,7 @@ pub(crate) fn convert_all_vector_properties(
             .range_mut(&mut txn, &bounds)?;
 
         while let Some((key, value)) = cursor.next().transpose()? {
-            let value = convert_old_vector_properties_to_new_format(value, &arena)?;
+            let value = normalize_vector_properties_to_canonical_format(value, &arena, key)?;
 
             let success = unsafe { cursor.put_current(&key, &value)? };
             if !success {
@@ -339,6 +391,18 @@ pub(crate) fn convert_all_vector_properties(
     }
 
     Ok(())
+}
+
+pub(crate) fn normalize_vector_properties_to_canonical_format(
+    property_bytes: &[u8],
+    arena: &bumpalo::Bump,
+    id: u128,
+) -> Result<Vec<u8>, GraphError> {
+    if let Ok(vector) = VectorWithoutData::from_bincode_bytes(arena, property_bytes, id) {
+        return vector.to_bincode_bytes().map_err(GraphError::from);
+    }
+
+    convert_old_vector_properties_to_new_format(property_bytes, arena)
 }
 
 pub(crate) fn convert_old_vector_properties_to_new_format(

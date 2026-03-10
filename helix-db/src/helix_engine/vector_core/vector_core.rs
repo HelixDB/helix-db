@@ -27,6 +27,7 @@ const DB_VECTOR_DATA: &str = "vector_data"; // for vector data (v:)
 const DB_HNSW_EDGES: &str = "hnsw_out_nodes"; // for hnsw out node data
 const VECTOR_PREFIX: &[u8] = b"v:";
 pub const ENTRY_POINT_KEY: &[u8] = b"entry_point";
+const ENTRY_POINT_BYTES_LEN: usize = 24;
 
 #[derive(Clone, Copy, Debug)]
 struct InsertEntryPoint {
@@ -126,6 +127,41 @@ impl VectorCore {
     }
 
     #[inline]
+    fn decode_entry_point(bytes: &[u8]) -> Result<InsertEntryPoint, VectorError> {
+        if bytes.len() >= ENTRY_POINT_BYTES_LEN {
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&bytes[..16]);
+
+            let mut level = [0u8; 8];
+            level.copy_from_slice(&bytes[16..ENTRY_POINT_BYTES_LEN]);
+
+            return Ok(InsertEntryPoint {
+                id: u128::from_be_bytes(id),
+                level: u64::from_be_bytes(level) as usize,
+            });
+        }
+
+        if bytes.len() >= 16 {
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&bytes[..16]);
+            return Ok(InsertEntryPoint {
+                id: u128::from_be_bytes(id),
+                level: 0,
+            });
+        }
+
+        Err(VectorError::EntryPointNotFound)
+    }
+
+    #[inline]
+    fn encode_entry_point(entry: &HVector) -> [u8; ENTRY_POINT_BYTES_LEN] {
+        let mut bytes = [0u8; ENTRY_POINT_BYTES_LEN];
+        bytes[..16].copy_from_slice(&entry.id.to_be_bytes());
+        bytes[16..].copy_from_slice(&(entry.level as u64).to_be_bytes());
+        bytes
+    }
+
+    #[inline]
     fn get_entry_point<'db: 'arena, 'arena: 'txn, 'txn>(
         &self,
         txn: &'txn RoTxn<'db>,
@@ -134,10 +170,10 @@ impl VectorCore {
     ) -> Result<HVector<'arena>, VectorError> {
         let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY)?;
         if let Some(ep_id) = ep_id {
-            let mut arr = [0u8; 16];
-            let len = std::cmp::min(ep_id.len(), 16);
-            arr[..len].copy_from_slice(&ep_id[..len]);
-            self.get_raw_vector_data(txn, u128::from_be_bytes(arr), label, arena)
+            let entry = Self::decode_entry_point(ep_id)?;
+            let mut vector = self.get_raw_vector_data(txn, entry.id, label, arena)?;
+            vector.level = entry.level;
+            Ok(vector)
         } else {
             Err(VectorError::EntryPointNotFound)
         }
@@ -145,8 +181,9 @@ impl VectorCore {
 
     #[inline]
     fn set_entry_point(&self, txn: &mut RwTxn, entry: &HVector) -> Result<(), VectorError> {
+        let encoded = Self::encode_entry_point(entry);
         self.vectors_db
-            .put(txn, ENTRY_POINT_KEY, &entry.id.to_be_bytes())
+            .put(txn, ENTRY_POINT_KEY, &encoded)
             .map_err(VectorError::from)?;
         Ok(())
     }
@@ -158,13 +195,7 @@ impl VectorCore {
     ) -> Result<InsertEntryPoint, VectorError> {
         let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY)?;
         if let Some(ep_id) = ep_id {
-            let mut arr = [0u8; 16];
-            let len = std::cmp::min(ep_id.len(), 16);
-            arr[..len].copy_from_slice(&ep_id[..len]);
-            Ok(InsertEntryPoint {
-                id: u128::from_be_bytes(arr),
-                level: 0,
-            })
+            Self::decode_entry_point(ep_id)
         } else {
             Err(VectorError::EntryPointNotFound)
         }
@@ -237,6 +268,18 @@ impl VectorCore {
     }
 
     #[inline(always)]
+    pub(crate) fn put_vector_metadata<S: Serialize + ?Sized>(
+        &self,
+        txn: &mut RwTxn,
+        id: u128,
+        value: &S,
+    ) -> Result<(), VectorError> {
+        self.vector_properties_db
+            .put(txn, &id, bincode::serialize(value)?.as_ref())?;
+        Ok(())
+    }
+
+    #[inline(always)]
     pub fn put_vector<'arena>(
         &self,
         txn: &mut RwTxn,
@@ -245,12 +288,11 @@ impl VectorCore {
         self.vectors_db
             .put(
                 txn,
-                &Self::vector_key(vector.id, vector.level),
+                &Self::vector_key(vector.id, 0),
                 vector.vector_data_to_bytes()?,
             )
             .map_err(VectorError::from)?;
-        self.vector_properties_db
-            .put(txn, &vector.id, bincode::serialize(&vector)?.as_ref())?;
+        self.put_vector_metadata(txn, vector.id, vector)?;
         Ok(())
     }
 
@@ -668,41 +710,202 @@ impl VectorCore {
     ) -> Result<bumpalo::collections::Vec<'arena, HVector<'arena>>, VectorError> {
         let mut vectors = bumpalo::collections::Vec::new_in(arena);
 
-        // Iterate over all vectors in the database
-        let prefix_iter = self.vectors_db.prefix_iter(txn, VECTOR_PREFIX)?;
+        if level.is_some_and(|level| level > 0) {
+            return Ok(vectors);
+        }
 
-        for result in prefix_iter {
-            let (key, _) = result?;
+        for result in self.vector_properties_db.iter(txn)? {
+            let (id, _) = result?;
 
-            // Extract id from the key: v: (2 bytes) + id (16 bytes) + level (8 bytes)
-            if key.len() < VECTOR_PREFIX.len() + 16 {
-                continue; // Skip malformed keys
-            }
-
-            let mut id_bytes = [0u8; 16];
-            id_bytes.copy_from_slice(&key[VECTOR_PREFIX.len()..VECTOR_PREFIX.len() + 16]);
-            let id = u128::from_be_bytes(id_bytes);
-
-            // Get the full vector using the existing method
-            match self.get_full_vector(txn, id, arena) {
-                Ok(vector) => {
-                    // Filter by level if specified
-                    if let Some(lvl) = level {
-                        if vector.level == lvl {
-                            vectors.push(vector);
-                        }
-                    } else {
-                        vectors.push(vector);
-                    }
-                }
-                Err(_) => {
-                    // Skip vectors that can't be loaded (e.g., deleted)
-                    continue;
-                }
+            if let Ok(vector) = self.get_full_vector(txn, id, arena) {
+                vectors.push(vector);
             }
         }
 
         Ok(vectors)
+    }
+
+    pub(crate) fn clear_hnsw_index(&self, txn: &mut RwTxn) -> Result<(), VectorError> {
+        self.edges_db.clear(txn)?;
+        self.vectors_db.delete(txn, ENTRY_POINT_KEY)?;
+
+        let level_offset = VECTOR_PREFIX.len() + 16;
+        let mut nonzero_level_keys = Vec::new();
+
+        for result in self.vectors_db.iter(txn)? {
+            let (key, _) = result?;
+            if !key.starts_with(VECTOR_PREFIX)
+                || key.len() != level_offset + std::mem::size_of::<usize>()
+            {
+                continue;
+            }
+
+            let mut level_bytes = [0u8; std::mem::size_of::<usize>()];
+            level_bytes.copy_from_slice(&key[level_offset..]);
+            if usize::from_be_bytes(level_bytes) > 0 {
+                nonzero_level_keys.push(key.to_vec());
+            }
+        }
+
+        for key in nonzero_level_keys {
+            self.vectors_db.delete(txn, &key)?;
+        }
+
+        Ok(())
+    }
+
+    fn index_existing_vector<'db, 'arena, 'txn>(
+        &'db self,
+        txn: &'txn mut RwTxn<'db>,
+        query: &mut HVector<'arena>,
+    ) -> Result<(), VectorError>
+    where
+        'db: 'arena,
+        'arena: 'txn,
+    {
+        let entry_point = match self.get_entry_point_for_insert(txn) {
+            Ok(ep) => ep,
+            Err(_) => {
+                self.set_entry_point(txn, query)?;
+                query.set_distance(0.0);
+                return Ok(());
+            }
+        };
+
+        let insert_arena = bumpalo::Bump::new();
+        let mut distance_cache = HashMap::new();
+        let l = entry_point.level;
+        let mut curr_ep = Candidate {
+            id: entry_point.id,
+            distance: self.get_or_compute_distance(
+                txn,
+                entry_point.id,
+                query.data,
+                &mut distance_cache,
+            )?,
+        };
+
+        for level in (query.level + 1..=l).rev() {
+            let mut nearest = self.search_level_for_insert(
+                txn,
+                query.data,
+                curr_ep,
+                1,
+                level,
+                &mut distance_cache,
+                &insert_arena,
+            )?;
+            curr_ep = nearest.pop().ok_or(VectorError::VectorCoreError(
+                "emtpy search result".to_string(),
+            ))?;
+        }
+
+        for level in (0..=l.min(query.level)).rev() {
+            let nearest = self.search_level_for_insert(
+                txn,
+                query.data,
+                curr_ep,
+                self.config.ef_construct,
+                level,
+                &mut distance_cache,
+                &insert_arena,
+            )?;
+            curr_ep = *nearest.peek().ok_or(VectorError::VectorCoreError(
+                "emtpy search result".to_string(),
+            ))?;
+
+            let neighbors = self.select_neighbors_for_insert(
+                txn,
+                query.data,
+                nearest,
+                level,
+                true,
+                &mut distance_cache,
+                &insert_arena,
+            )?;
+            self.set_neighbours_from_ids(
+                txn,
+                query.id,
+                neighbors.iter().map(|candidate| candidate.id),
+                level,
+            )?;
+
+            for neighbor in neighbors {
+                let id = neighbor.id;
+                let e_conns = self.get_neighbor_candidates_for_insert(
+                    txn,
+                    id,
+                    level,
+                    query.data,
+                    &mut distance_cache,
+                    &insert_arena,
+                )?;
+                let e_new_conn = self.select_neighbors_for_insert(
+                    txn,
+                    query.data,
+                    e_conns,
+                    level,
+                    true,
+                    &mut distance_cache,
+                    &insert_arena,
+                )?;
+                self.set_neighbours_from_ids(
+                    txn,
+                    id,
+                    e_new_conn.iter().map(|candidate| candidate.id),
+                    level,
+                )?;
+            }
+        }
+
+        if query.level > l {
+            self.set_entry_point(txn, query)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn rebuild_hnsw_index<'db>(
+        &'db self,
+        txn: &mut RwTxn<'db>,
+    ) -> Result<(), VectorError> {
+        let ids = self
+            .vector_properties_db
+            .iter(txn)?
+            .map(|result| result.map(|(id, _)| id))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.clear_hnsw_index(txn)?;
+
+        for id in ids {
+            let arena = bumpalo::Bump::new();
+            let properties_bytes = match self.vector_properties_db.get(txn, &id)? {
+                Some(bytes) => bytes.to_vec(),
+                None => continue,
+            };
+
+            let metadata = VectorWithoutData::from_bincode_bytes(&arena, &properties_bytes, id)?;
+            if metadata.deleted {
+                continue;
+            }
+
+            let raw_bytes = self
+                .vectors_db
+                .get(txn, &Self::vector_key(id, 0))?
+                .ok_or_else(|| VectorError::VectorNotFound(id.to_string()))?
+                .to_vec();
+
+            let mut vector = HVector::from_bincode_bytes(
+                &arena,
+                Some(&properties_bytes),
+                &raw_bytes,
+                id,
+            )?;
+            vector.level = self.get_new_level();
+            self.index_existing_vector(txn, &mut vector)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -791,102 +994,10 @@ impl HNSW for VectorCore {
     {
         let new_level = self.get_new_level();
 
-        let mut query = HVector::from_slice(label, 0, data);
+        let mut query = HVector::from_slice(label, new_level, data);
         query.properties = properties;
         self.put_vector(txn, &query)?;
-
-        query.level = new_level;
-
-        let entry_point = match self.get_entry_point_for_insert(txn) {
-            Ok(ep) => ep,
-            Err(_) => {
-                // TODO: use proper error handling
-                self.set_entry_point(txn, &query)?;
-                query.set_distance(0.0);
-
-                return Ok(query);
-            }
-        };
-
-        let insert_arena = bumpalo::Bump::new();
-        let mut distance_cache = HashMap::new();
-        let l = entry_point.level;
-        let mut curr_ep = Candidate {
-            id: entry_point.id,
-            distance: self.get_or_compute_distance(txn, entry_point.id, data, &mut distance_cache)?,
-        };
-
-        for level in (new_level + 1..=l).rev() {
-            let mut nearest = self.search_level_for_insert(
-                txn,
-                data,
-                curr_ep,
-                1,
-                level,
-                &mut distance_cache,
-                &insert_arena,
-            )?;
-            curr_ep = nearest.pop().ok_or(VectorError::VectorCoreError(
-                "emtpy search result".to_string(),
-            ))?;
-        }
-
-        for level in (0..=l.min(new_level)).rev() {
-            let nearest = self.search_level_for_insert(
-                txn,
-                data,
-                curr_ep,
-                self.config.ef_construct,
-                level,
-                &mut distance_cache,
-                &insert_arena,
-            )?;
-            curr_ep = *nearest.peek().ok_or(VectorError::VectorCoreError(
-                "emtpy search result".to_string(),
-            ))?;
-
-            let neighbors = self.select_neighbors_for_insert(
-                txn,
-                data,
-                nearest,
-                level,
-                true,
-                &mut distance_cache,
-                &insert_arena,
-            )?;
-            self.set_neighbours_from_ids(txn, query.id, neighbors.iter().map(|candidate| candidate.id), level)?;
-
-            for neighbor in neighbors {
-                let id = neighbor.id;
-                let e_conns = self.get_neighbor_candidates_for_insert(
-                    txn,
-                    id,
-                    level,
-                    data,
-                    &mut distance_cache,
-                    &insert_arena,
-                )?;
-                let e_new_conn = self.select_neighbors_for_insert(
-                    txn,
-                    data,
-                    e_conns,
-                    level,
-                    true,
-                    &mut distance_cache,
-                    &insert_arena,
-                )?;
-                self.set_neighbours_from_ids(
-                    txn,
-                    id,
-                    e_new_conn.iter().map(|candidate| candidate.id),
-                    level,
-                )?;
-            }
-        }
-
-        if new_level > l {
-            self.set_entry_point(txn, &query)?;
-        }
+        self.index_existing_vector(txn, &mut query)?;
 
         debug_println!("vector inserted with id {}", query.id);
         Ok(query)
@@ -901,11 +1012,7 @@ impl HNSW for VectorCore {
                 }
 
                 properties.deleted = true;
-                self.vector_properties_db.put(
-                    txn,
-                    &id,
-                    bincode::serialize(&properties)?.as_ref(),
-                )?;
+                self.put_vector_metadata(txn, id, &properties)?;
                 debug_println!("vector deleted with id {}", &id);
                 Ok(())
             }

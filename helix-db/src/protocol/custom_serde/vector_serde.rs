@@ -1,187 +1,118 @@
 use crate::{
-    helix_engine::vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
-    utils::properties::{ImmutablePropertiesMap, ImmutablePropertiesMapDeSeed},
+    helix_engine::{
+        types::VectorError,
+        vector_core::{vector::HVector, vector_without_data::VectorWithoutData},
+    },
+    protocol::value::Value,
+    utils::properties::ImmutablePropertiesMap,
 };
-use serde::de::{DeserializeSeed, Visitor};
-use std::fmt;
+use bincode::Options;
+use serde::Deserialize;
+use std::collections::HashMap;
 
-/// Helper DeserializeSeed for Option<ImmutablePropertiesMap>
-struct OptionPropertiesMapDeSeed<'arena> {
+#[derive(Deserialize)]
+struct StoredVectorMetadata {
+    label: String,
+    version: u8,
+    deleted: bool,
+    properties: Option<HashMap<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct StoredVectorMetadataLegacy {
+    label: String,
+    version: u8,
+    deleted: bool,
+    #[serde(rename = "level")]
+    _level: usize,
+    properties: Option<HashMap<String, Value>>,
+}
+
+fn deserialize_metadata(bytes: &[u8]) -> Result<StoredVectorMetadata, VectorError> {
+    let options = bincode::options()
+        .with_fixint_encoding()
+        .allow_trailing_bytes();
+
+    options
+        .deserialize::<StoredVectorMetadata>(bytes)
+        .or_else(|_| {
+            options
+                .deserialize::<StoredVectorMetadataLegacy>(bytes)
+                .map(|legacy| {
+                    let StoredVectorMetadataLegacy {
+                        label,
+                        version,
+                        deleted,
+                        _level: _,
+                        properties,
+                    } = legacy;
+
+                    StoredVectorMetadata {
+                        label,
+                        version,
+                        deleted,
+                        properties,
+                    }
+                })
+        })
+        .map_err(|e| VectorError::ConversionError(format!("Error deserializing vector: {e}")))
+}
+
+fn alloc_properties<'arena>(
     arena: &'arena bumpalo::Bump,
-}
-
-impl<'de, 'arena> DeserializeSeed<'de> for OptionPropertiesMapDeSeed<'arena> {
-    type Value = Option<ImmutablePropertiesMap<'arena>>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct OptVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
-        }
-
-        impl<'de, 'arena> Visitor<'de> for OptVisitor<'arena> {
-            type Value = Option<ImmutablePropertiesMap<'arena>>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("Option<ImmutablePropertiesMap>")
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(None)
-            }
-
-            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                ImmutablePropertiesMapDeSeed { arena: self.arena }
-                    .deserialize(deserializer)
-                    .map(Some)
-            }
-        }
-
-        deserializer.deserialize_option(OptVisitor { arena: self.arena })
-    }
-}
-
-/// DeserializeSeed for Node that allocates label and properties into the arena
-pub struct VectorDeSeed<'txn, 'arena> {
-    pub arena: &'arena bumpalo::Bump,
-    pub raw_vector_data: &'txn [u8],
-    pub id: u128,
-}
-
-impl<'de, 'txn, 'arena> serde::de::DeserializeSeed<'de> for VectorDeSeed<'txn, 'arena> {
-    type Value = HVector<'arena>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        struct VectorVisitor<'txn, 'arena> {
-            arena: &'arena bumpalo::Bump,
-            raw_vector_data: &'txn [u8],
-            id: u128,
-        }
-
-        impl<'de, 'txn, 'arena> serde::de::Visitor<'de> for VectorVisitor<'txn, 'arena> {
-            type Value = HVector<'arena>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct HVector")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let label_string: &'de str = seq
-                    .next_element()?
-                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
-                let label = self.arena.alloc_str(label_string);
-
-                let version: u8 = seq.next_element()?.unwrap_or(0);
-
-                let deleted: bool = seq.next_element()?.unwrap_or(false);
-
-                // Use our custom DeserializeSeed that handles the Option wrapper
-                let properties: Option<ImmutablePropertiesMap<'arena>> = seq
-                    .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
-                    .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
-
-                let data = HVector::cast_raw_vector_data(self.arena, self.raw_vector_data);
-
-                Ok(HVector {
-                    id: self.id,
-                    label,
-                    deleted,
-                    version,
-                    level: 0,
-                    distance: None,
-                    data,
-                    properties,
-                })
-            }
-        }
-
-        deserializer.deserialize_struct(
-            "HVector",
-            &["label", "version", "deleted", "properties"],
-            VectorVisitor {
-                arena: self.arena,
-                raw_vector_data: self.raw_vector_data,
-                id: self.id,
-            },
+    properties: Option<HashMap<String, Value>>,
+) -> Option<ImmutablePropertiesMap<'arena>> {
+    properties.map(|properties| {
+        let len = properties.len();
+        ImmutablePropertiesMap::new(
+            len,
+            properties.into_iter().map(|(key, value)| {
+                let key: &'arena str = arena.alloc_str(&key);
+                (key, value)
+            }),
+            arena,
         )
-    }
+    })
 }
 
-/// DeserializeSeed for Node that allocates label and properties into the arena
-pub struct VectoWithoutDataDeSeed<'arena> {
-    pub arena: &'arena bumpalo::Bump,
-    pub id: u128,
+pub fn hvector_from_bincode_bytes<'arena>(
+    arena: &'arena bumpalo::Bump,
+    properties: Option<&[u8]>,
+    raw_vector_data: &[u8],
+    id: u128,
+) -> Result<HVector<'arena>, VectorError> {
+    let properties = properties
+        .ok_or_else(|| VectorError::ConversionError("Vector properties missing".to_string()))?;
+    let metadata = deserialize_metadata(properties)?;
+    let label = arena.alloc_str(&metadata.label);
+    let data = HVector::cast_raw_vector_data(arena, raw_vector_data);
+
+    Ok(HVector {
+        id,
+        label,
+        deleted: metadata.deleted,
+        version: metadata.version,
+        level: 0,
+        distance: None,
+        data,
+        properties: alloc_properties(arena, metadata.properties),
+    })
 }
 
-impl<'de, 'arena> serde::de::DeserializeSeed<'de> for VectoWithoutDataDeSeed<'arena> {
-    type Value = VectorWithoutData<'arena>;
+pub fn vector_without_data_from_bincode_bytes<'arena>(
+    arena: &'arena bumpalo::Bump,
+    properties: &[u8],
+    id: u128,
+) -> Result<VectorWithoutData<'arena>, VectorError> {
+    let metadata = deserialize_metadata(properties)?;
+    let label = arena.alloc_str(&metadata.label);
 
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        struct VectorVisitor<'arena> {
-            arena: &'arena bumpalo::Bump,
-            id: u128,
-        }
-
-        impl<'de, 'arena> serde::de::Visitor<'de> for VectorVisitor<'arena> {
-            type Value = VectorWithoutData<'arena>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct VectorWithoutData")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let label_string: &'de str = seq
-                    .next_element()?
-                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
-                let label = self.arena.alloc_str(label_string);
-
-                let version: u8 = seq.next_element()?.unwrap_or(0);
-
-                let deleted: bool = seq.next_element()?.unwrap_or(false);
-
-                // Use our custom DeserializeSeed that handles the Option wrapper
-                let properties: Option<ImmutablePropertiesMap<'arena>> = seq
-                    .next_element_seed(OptionPropertiesMapDeSeed { arena: self.arena })?
-                    .ok_or_else(|| serde::de::Error::custom("Expected properties field"))?;
-
-                Ok(VectorWithoutData {
-                    id: self.id,
-                    label,
-                    version,
-                    deleted,
-                    level: 0,
-                    properties,
-                })
-            }
-        }
-
-        deserializer.deserialize_struct(
-            "VectorWithoutData",
-            &["label", "version", "deleted", "properties"],
-            VectorVisitor {
-                arena: self.arena,
-                id: self.id,
-            },
-        )
-    }
+    Ok(VectorWithoutData {
+        id,
+        label,
+        version: metadata.version,
+        deleted: metadata.deleted,
+        level: 0,
+        properties: alloc_properties(arena, metadata.properties),
+    })
 }

@@ -7,7 +7,7 @@ use crate::{
         storage_core::{HelixGraphStorage, storage_methods::StorageMethods},
         traversal_core::{traversal_iter::RwTraversalIterator, traversal_value::TraversalValue},
         types::GraphError,
-        vector_core::{hnsw::HNSW, vector::HVector},
+        vector_core::{hnsw::HNSW, vector::HVector, vector_core::VectorCore},
     },
     protocol::value::Value,
     utils::{
@@ -685,7 +685,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                         }
                     }
 
-                    self.storage.vectors.put_vector(self.txn, &vector)?;
+                    self.storage
+                        .vectors
+                        .put_vector_metadata(self.txn, vector.id, &vector)?;
                     Ok(TraversalValue::Vector(vector))
                 }
                 None => {
@@ -743,8 +745,13 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 Some(Ok(TraversalValue::VectorNodeWithoutVectorData(vector_without_data))) => {
                     // Convert VectorWithoutData to HVector using From impl
                     let mut vector: HVector = vector_without_data.into();
-                    // Set the vector data from query parameter
-                    vector.data = query;
+                    let raw_vector_data = self
+                        .storage
+                        .vectors
+                        .vectors_db
+                        .get(self.txn, &VectorCore::vector_key(vector.id, 0))?
+                        .ok_or_else(|| GraphError::from(crate::helix_engine::types::VectorError::VectorNotFound(vector.id.to_string())))?;
+                    vector.data = HVector::cast_raw_vector_data(self.arena, raw_vector_data);
 
                     match vector.properties {
                         None => {
@@ -880,7 +887,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                         }
                     }
 
-                    self.storage.vectors.put_vector(self.txn, &vector)?;
+                    self.storage
+                        .vectors
+                        .put_vector_metadata(self.txn, vector.id, &vector)?;
                     Ok(TraversalValue::Vector(vector))
                 }
                 Some(Ok(_)) => Ok(TraversalValue::Empty),

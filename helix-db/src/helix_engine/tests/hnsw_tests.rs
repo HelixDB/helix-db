@@ -8,7 +8,7 @@ use crate::helix_engine::{
     vector_core::{
         hnsw::HNSW,
         vector::HVector,
-        vector_core::{HNSWConfig, VectorCore},
+        vector_core::{HNSWConfig, VectorCore, ENTRY_POINT_KEY},
     },
 };
 
@@ -316,6 +316,9 @@ fn test_get_all_vectors_with_level_filter() {
     // Get vectors at level 0 (all vectors are stored at level 0)
     let level_0_vectors = index.get_all_vectors(&txn, Some(0), &arena).unwrap();
     assert_eq!(level_0_vectors.len(), 10);
+
+    let higher_level_vectors = index.get_all_vectors(&txn, Some(1), &arena).unwrap();
+    assert!(higher_level_vectors.is_empty());
 }
 
 // ============================================================================
@@ -603,4 +606,68 @@ fn test_hnsw_insert_large_vectors_still_searches() {
         .unwrap();
 
     assert!(!results.is_empty());
+}
+
+#[test]
+fn test_entry_point_is_persisted_with_level_bytes() {
+    let (env, _temp_dir) = setup_env();
+    let mut txn = env.write_txn().unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+
+    let arena = Bump::new();
+    let vector = arena.alloc_slice_copy(&[0.1, 0.2, 0.3, 0.4]);
+    let inserted = index
+        .insert::<Filter>(&mut txn, "vector", vector, None, &arena)
+        .unwrap();
+
+    let entry_point = index
+        .vectors_db
+        .get(&txn, ENTRY_POINT_KEY)
+        .unwrap()
+        .unwrap()
+        .to_vec();
+    assert_eq!(entry_point.len(), 24);
+    assert_eq!(&entry_point[..16], &inserted.id.to_be_bytes());
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_search_supports_legacy_entry_point_format() {
+    let (env, _temp_dir) = setup_env();
+    let mut txn = env.write_txn().unwrap();
+    let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+
+    let arena = Bump::new();
+    let inserted = index
+        .insert::<Filter>(
+            &mut txn,
+            "vector",
+            arena.alloc_slice_copy(&[1.0, 0.0, 0.0, 0.0]),
+            None,
+            &arena,
+        )
+        .unwrap();
+
+    index
+        .vectors_db
+        .put(&mut txn, ENTRY_POINT_KEY, &inserted.id.to_be_bytes())
+        .unwrap();
+    txn.commit().unwrap();
+
+    let arena = Bump::new();
+    let txn = env.read_txn().unwrap();
+    let results = index
+        .search::<Filter>(
+            &txn,
+            &[1.0, 0.0, 0.0, 0.0],
+            1,
+            "vector",
+            None,
+            false,
+            &arena,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, inserted.id);
 }
