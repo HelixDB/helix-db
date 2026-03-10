@@ -240,6 +240,58 @@ fn test_brute_force_vector_search_orders_by_distance() {
 }
 
 #[test]
+fn test_brute_force_vector_search_with_lazy_vectors() {
+    use crate::helix_engine::traversal_core::traversal_value::TraversalValue;
+
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let node = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect_to_obj()
+        .unwrap();
+
+    let vectors = vec![
+        vec![1.0, 2.0, 3.0],
+        vec![4.0, 5.0, 6.0],
+        vec![7.0, 8.0, 9.0],
+    ];
+    let mut vector_ids = Vec::new();
+    for vector in vectors {
+        let vec_id = G::new_mut(&storage, &arena, &mut txn)
+            .insert_v::<Filter>(&vector, "vector", None)
+            .collect_to_obj()
+            .unwrap()
+            .id();
+        G::new_mut(&storage, &arena, &mut txn)
+            .add_edge("embedding", None, node.id(), vec_id, false, false)
+            .collect_to_obj()
+            .unwrap();
+        vector_ids.push(vec_id);
+    }
+    txn.commit().unwrap();
+
+    let arena = Bump::new();
+    let txn = storage.graph_env.read_txn().unwrap();
+    let traversal = G::new(&storage, &txn, &arena)
+        .n_from_id(&node.id())
+        .out_vec("embedding", false)
+        .brute_force_search_v(&[1.0, 2.0, 3.0], 10)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(traversal.len(), 3);
+    assert_eq!(traversal[0].id(), vector_ids[0]);
+    for value in traversal {
+        match value {
+            TraversalValue::Vector(vector) => assert_eq!(vector.data.len(), 3),
+            other => panic!("expected full vector result, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn test_drop_vector_removes_edges() {
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();

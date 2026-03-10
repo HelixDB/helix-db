@@ -1,4 +1,5 @@
 //! Semantic analyzer for Helix‑QL.
+use super::object_validation::mark_vector_steps_for_data_fetch;
 use crate::helixc::analyzer::error_codes::ErrorCode;
 use crate::helixc::analyzer::utils::{VariableInfo, type_in_scope, validate_embed_string_type};
 use crate::helixc::generator::traversal_steps::EdgeType;
@@ -773,6 +774,10 @@ pub(crate) fn apply_graph_step<'a>(
             //         GeneratedSearchVector { vec, k, pre_filter },
             //     )),
             // }))
+            // Brute-force SearchV requires actual vector payloads for scoring.
+            // Mark upstream vector traversal steps to fetch vector data.
+            mark_vector_steps_for_data_fetch(traversal);
+
             traversal
                 .steps
                 .push(Separator::Period(GeneratedStep::SearchVector(

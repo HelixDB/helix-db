@@ -9,12 +9,12 @@ use crate::{
     generate_error,
     helixc::{
         analyzer::{
-            Ctx,
             types::Type,
             utils::{
                 gen_property_access, is_valid_identifier,
                 validate_field_name_existence_for_item_type,
             },
+            Ctx,
         },
         generator::{
             return_values::ReturnValueField,
@@ -28,9 +28,12 @@ use indexmap::IndexMap;
 use paste::paste;
 use std::borrow::Cow;
 
-/// Marks all Out/In steps with EdgeType::Vec in the traversal to fetch vector data
-/// This should be called when the 'data' field is accessed on a Vector type
-fn mark_vector_steps_for_data_fetch(gen_traversal: &mut GeneratedTraversal) {
+/// Marks vector-producing traversal steps to fetch full vector payloads.
+///
+/// This is used when downstream operations require vector `data` (for example
+/// selecting `data` in an object projection or running `SearchV` on a vector
+/// stream).
+pub(super) fn mark_vector_steps_for_data_fetch(gen_traversal: &mut GeneratedTraversal) {
     use crate::helixc::generator::traversal_steps::{EdgeType, Step};
     use crate::helixc::generator::utils::Separator;
 
@@ -405,7 +408,9 @@ fn validate_property_access<'a>(
                         FieldValueType::Expression(expr) => {
                             // Check if this expression contains a traversal
                             use crate::helixc::analyzer::methods::traversal_validation::validate_traversal;
-                            use crate::helixc::generator::traversal_steps::{ComputedExpressionInfo, NestedTraversalInfo};
+                            use crate::helixc::generator::traversal_steps::{
+                                ComputedExpressionInfo, NestedTraversalInfo,
+                            };
                             use crate::helixc::parser::types::ExpressionType;
 
                             if let ExpressionType::MathFunctionCall(_) = &expr.expr {
@@ -541,7 +546,7 @@ fn validate_property_access<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::helixc::parser::{HelixParser, write_to_temp_file};
+    use crate::helixc::parser::{write_to_temp_file, HelixParser};
 
     // ============================================================================
     // Property Access Tests

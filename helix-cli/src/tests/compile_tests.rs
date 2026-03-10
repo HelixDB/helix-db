@@ -253,3 +253,69 @@ async fn test_compile_creates_all_required_files() {
         "Generated queries.rs should contain Rust code"
     );
 }
+
+#[tokio::test]
+async fn test_compile_out_to_search_v_fetches_vector_data() {
+    let ctx = TestContext::new();
+
+    // Create helix.toml
+    let config = HelixConfig::default_config("test-project");
+    let config_path = ctx.project_path.join("helix.toml");
+    config
+        .save_to_file(&config_path)
+        .expect("Failed to save config");
+
+    // Create .helix directory
+    fs::create_dir_all(ctx.project_path.join(".helix")).expect("Failed to create .helix");
+
+    // Create queries directory
+    let queries_dir = ctx.project_path.join("db");
+    fs::create_dir_all(&queries_dir).expect("Failed to create queries directory");
+
+    let schema = r#"
+N::Call {
+    INDEX room_id: String,
+}
+
+V::CallTranscriptChunk {
+    content: String,
+}
+
+E::Call_Has_TranscriptChunk {
+    From: Call,
+    To: CallTranscriptChunk,
+}
+"#;
+    fs::write(queries_dir.join("schema.hx"), schema).expect("Failed to write schema.hx");
+
+    let queries = r#"
+QUERY SearchCallTranscriptChunks(room_id: String, query: String, limit: I64) =>
+      call <- N<Call>({room_id: room_id})
+      results <- call::Out<Call_Has_TranscriptChunk>::SearchV<CallTranscriptChunk>(Embed(query), limit)
+      RETURN results
+"#;
+    fs::write(queries_dir.join("queries.hx"), queries).expect("Failed to write queries.hx");
+
+    let result = run(None, Some(ctx.project_path.to_str().unwrap().to_string())).await;
+    assert!(
+        result.is_ok(),
+        "Compile should succeed for Out<...>::SearchV<...>: {:?}",
+        result.err()
+    );
+
+    let query_file = ctx.project_path.join("queries.rs");
+    let query_content = fs::read_to_string(&query_file).expect("Failed to read queries.rs");
+
+    assert!(
+        query_content.contains(".out_vec(\"Call_Has_TranscriptChunk\", true)"),
+        "Out<...>::SearchV<...> should request full vector data"
+    );
+    assert!(
+        query_content.contains(".brute_force_search_v("),
+        "Expected generated SearchV graph step in query code"
+    );
+    assert!(
+        !query_content.contains(".out_vec(\"Call_Has_TranscriptChunk\", false)"),
+        "Out<...>::SearchV<...> should not emit lazy vector fetch"
+    );
+}

@@ -3,7 +3,6 @@ use crate::helix_engine::{
     types::GraphError,
     vector_core::vector_distance::cosine_similarity,
 };
-use itertools::Itertools;
 
 pub trait BruteForceSearchVAdapter<'db, 'arena, 'txn>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>
@@ -40,43 +39,72 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let iter = self
-            .inner
-            .filter_map(|v| match v {
-                Ok(TraversalValue::Vector(mut v)) => {
-                    let d = cosine_similarity(v.data, query).unwrap();
-                    v.set_distance(d);
-                    Some(v)
-                }
-                _ => None,
-            })
-            .sorted_by(|v1, v2| v1.partial_cmp(v2).unwrap())
-            .take(k.try_into().unwrap())
-            .filter_map(move |mut item| {
-                match self
-                    .storage
-                    .vectors
-                    .get_vector_properties(self.txn, *item.id(), self.arena)
-                {
-                    Ok(Some(vector_without_data)) => {
-                        item.expand_from_vector_without_data(vector_without_data);
-                        Some(item)
-                    }
+        let k = k.try_into().unwrap();
+        let mut vectors = Vec::new();
+        let mut errors = Vec::new();
 
-                    Ok(None) => None, // TODO: maybe should be an error?
-                    Err(e) => {
-                        println!("error getting vector data: {e:?}");
-                        None
+        for item in self.inner {
+            let mut vector = match item {
+                Ok(TraversalValue::Vector(vector)) => vector,
+                Ok(TraversalValue::VectorNodeWithoutVectorData(vector_without_data)) => {
+                    match self.storage.vectors.get_full_vector(
+                        self.txn,
+                        *vector_without_data.id(),
+                        self.arena,
+                    ) {
+                        Ok(vector) => vector,
+                        Err(e) => {
+                            errors.push(Err(GraphError::from(e)));
+                            continue;
+                        }
                     }
                 }
-            })
-            .map(|v| Ok(TraversalValue::Vector(v)));
+                Ok(_) => continue,
+                Err(e) => {
+                    errors.push(Err(e));
+                    continue;
+                }
+            };
+
+            match cosine_similarity(vector.data, query) {
+                Ok(distance) => {
+                    vector.set_distance(distance);
+                    vectors.push(vector);
+                }
+                Err(e) => errors.push(Err(GraphError::from(e))),
+            }
+        }
+
+        vectors.sort_by(|v1, v2| v1.partial_cmp(v2).unwrap());
+
+        let mut ranked_results = Vec::new();
+        for mut item in vectors.into_iter().take(k) {
+            match self
+                .storage
+                .vectors
+                .get_vector_properties(self.txn, *item.id(), self.arena)
+            {
+                Ok(Some(vector_without_data)) => {
+                    item.expand_from_vector_without_data(vector_without_data);
+                    ranked_results.push(Ok(TraversalValue::Vector(item)));
+                }
+                Ok(None) => {
+                    ranked_results.push(Err(GraphError::VectorError(format!(
+                        "vector metadata not found for id {}",
+                        item.id()
+                    ))));
+                }
+                Err(e) => ranked_results.push(Err(GraphError::from(e))),
+            }
+        }
+
+        ranked_results.extend(errors);
 
         RoTraversalIterator {
             storage: self.storage,
             arena: self.arena,
             txn: self.txn,
-            inner: iter.into_iter(),
+            inner: ranked_results.into_iter(),
         }
     }
 }
