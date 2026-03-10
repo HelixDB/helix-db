@@ -144,7 +144,8 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
                 Err(e) => result = Err(GraphError::from(e)),
             }
 
-            if let Some(bm25) = &self.storage.bm25
+            if result.is_ok()
+                && let Some(bm25) = &self.storage.bm25
                 && let Some(props) = node.properties.as_ref()
                 && let Err(e) = insert_bm25_node_doc(bm25, self.txn, node.id, props, node.label)
             {
