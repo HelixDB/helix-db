@@ -8,7 +8,7 @@ use regex::Regex;
 use std::collections::HashSet;
 
 /// The base URL for creating new GitHub issues.
-pub const GITHUB_ISSUE_URL: &str = "https://github.com/helixdb/helix-db/issues/new";
+pub const GITHUB_ISSUE_URL: &str = "https://github.com/himanalot/helix-db/issues/new";
 
 /// Maximum URL length to stay within browser limits.
 pub const MAX_URL_LENGTH: usize = 8000;
