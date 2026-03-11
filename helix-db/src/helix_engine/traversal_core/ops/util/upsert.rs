@@ -228,7 +228,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                             &old_serialized,
                                             &node.id,
                                         )?;
-                                        if let Err(e) = update_secondary_index(index, self.txn, k, node.id, v) {
+                                        if let Err(e) =
+                                            update_secondary_index(index, self.txn, k, node.id, v)
+                                        {
                                             // Restore the old index entry since the new one failed
                                             let _ = db.put(self.txn, &old_serialized, &node.id);
                                             return Err(e);
@@ -750,7 +752,13 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                         .vectors
                         .vectors_db
                         .get(self.txn, &VectorCore::vector_key(vector.id, 0))?
-                        .ok_or_else(|| GraphError::from(crate::helix_engine::types::VectorError::VectorNotFound(vector.id.to_string())))?;
+                        .ok_or_else(|| {
+                            GraphError::from(
+                                crate::helix_engine::types::VectorError::VectorNotFound(
+                                    vector.id.to_string(),
+                                ),
+                            )
+                        })?;
                     vector.data = HVector::cast_raw_vector_data(self.arena, raw_vector_data);
 
                     match vector.properties {

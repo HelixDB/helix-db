@@ -1,6 +1,6 @@
 use crate::{
     helix_engine::{
-        bm25::bm25::{HBM25Config, BM25_SCHEMA_VERSION},
+        bm25::bm25::{BM25_SCHEMA_VERSION, HBM25Config},
         storage_core::HelixGraphStorage,
         types::GraphError,
         vector_core::{vector::HVector, vector_core, vector_without_data::VectorWithoutData},
@@ -12,10 +12,12 @@ use bincode::Options;
 use itertools::Itertools;
 use std::{collections::HashMap, ops::Bound};
 
-use super::metadata::{StorageMetadata, VectorEndianness, NATIVE_VECTOR_ENDIANNESS};
+use super::metadata::{NATIVE_VECTOR_ENDIANNESS, StorageMetadata, VectorEndianness};
 
 pub(crate) const HNSW_SCHEMA_VERSION_KEY: &[u8] = b"hnsw_schema_version";
 pub(crate) const HNSW_SCHEMA_VERSION: u64 = 1;
+pub(crate) const VECTOR_PROPERTIES_SCHEMA_VERSION_KEY: &[u8] = b"vector_properties_schema_version";
+pub(crate) const VECTOR_PROPERTIES_SCHEMA_VERSION: u64 = 1;
 
 pub fn migrate(storage: &mut HelixGraphStorage) -> Result<(), GraphError> {
     let mut metadata = {
@@ -40,7 +42,7 @@ pub fn migrate(storage: &mut HelixGraphStorage) -> Result<(), GraphError> {
         };
     }
 
-    convert_all_vector_properties(storage)?;
+    migrate_vector_properties(storage)?;
     verify_vectors_and_repair(storage)?;
     migrate_hnsw(storage)?;
     remove_orphaned_vector_edges(storage)?;
@@ -72,6 +74,43 @@ fn write_schema_version(
     version: u64,
 ) -> Result<(), GraphError> {
     metadata_db.put(txn, key, &version.to_le_bytes())?;
+    Ok(())
+}
+
+fn migrate_vector_properties(storage: &mut HelixGraphStorage) -> Result<(), GraphError> {
+    let current_schema_version = {
+        let txn = storage.graph_env.read_txn()?;
+        read_schema_version(
+            &txn,
+            &storage.metadata_db,
+            VECTOR_PROPERTIES_SCHEMA_VERSION_KEY,
+        )?
+    };
+
+    if let Some(schema_version) = current_schema_version {
+        if schema_version == VECTOR_PROPERTIES_SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        if schema_version > VECTOR_PROPERTIES_SCHEMA_VERSION {
+            return Err(GraphError::New(format!(
+                "vector properties schema version {schema_version} is newer than supported {}",
+                VECTOR_PROPERTIES_SCHEMA_VERSION
+            )));
+        }
+    }
+
+    convert_all_vector_properties(storage)?;
+
+    let mut txn = storage.graph_env.write_txn()?;
+    write_schema_version(
+        &mut txn,
+        &storage.metadata_db,
+        VECTOR_PROPERTIES_SCHEMA_VERSION_KEY,
+        VECTOR_PROPERTIES_SCHEMA_VERSION,
+    )?;
+    txn.commit()?;
+
     Ok(())
 }
 

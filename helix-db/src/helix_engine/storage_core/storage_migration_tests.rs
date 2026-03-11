@@ -9,17 +9,18 @@
 //! - Performance tests for large datasets
 
 use super::{
-    metadata::{StorageMetadata, VectorEndianness, NATIVE_VECTOR_ENDIANNESS},
-    storage_migration::{
-        convert_all_vector_properties, convert_old_vector_properties_to_new_format,
-        convert_vector_endianness, migrate, HNSW_SCHEMA_VERSION, HNSW_SCHEMA_VERSION_KEY,
-    },
     HelixGraphStorage,
+    metadata::{NATIVE_VECTOR_ENDIANNESS, StorageMetadata, VectorEndianness},
+    storage_migration::{
+        HNSW_SCHEMA_VERSION, HNSW_SCHEMA_VERSION_KEY, VECTOR_PROPERTIES_SCHEMA_VERSION,
+        VECTOR_PROPERTIES_SCHEMA_VERSION_KEY, convert_all_vector_properties,
+        convert_old_vector_properties_to_new_format, convert_vector_endianness, migrate,
+    },
 };
 use crate::{
     helix_engine::{
         bm25::bm25::{
-            BM25Metadata, BM25, BM25_SCHEMA_VERSION, BM25_SCHEMA_VERSION_KEY, METADATA_KEY,
+            BM25, BM25_SCHEMA_VERSION, BM25_SCHEMA_VERSION_KEY, BM25Metadata, METADATA_KEY,
         },
         storage_core::version_info::VersionInfo,
         traversal_core::{
@@ -32,7 +33,7 @@ use crate::{
         },
         types::GraphError,
         vector_core::vector::HVector,
-        vector_core::vector_core::{VectorCore, ENTRY_POINT_KEY},
+        vector_core::vector_core::{ENTRY_POINT_KEY, VectorCore},
     },
     protocol::value::Value,
     utils::{items::Node, properties::ImmutablePropertiesMap},
@@ -1032,6 +1033,129 @@ fn test_error_handling_graceful_failure() {
 }
 
 #[test]
+fn test_vector_properties_migration_sets_schema_version() {
+    let (mut storage, _temp_dir) = setup_test_storage();
+    let id = 424242u128;
+
+    {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        let mut extra_props = HashMap::new();
+        extra_props.insert("model".to_string(), Value::from("legacy"));
+        let property_bytes = create_old_properties("legacy_vector", false, extra_props);
+        let vector_data = create_test_vector_bytes(&[1.0, 2.0, 3.0], NATIVE_VECTOR_ENDIANNESS);
+
+        storage
+            .vectors
+            .vectors_db
+            .put(&mut txn, &VectorCore::vector_key(id, 0), &vector_data)
+            .unwrap();
+        storage
+            .vectors
+            .vector_properties_db
+            .put(&mut txn, &id, &property_bytes)
+            .unwrap();
+        storage
+            .metadata_db
+            .delete(&mut txn, VECTOR_PROPERTIES_SCHEMA_VERSION_KEY)
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    migrate(&mut storage).unwrap();
+
+    let txn = storage.graph_env.read_txn().unwrap();
+    let schema_bytes = storage
+        .metadata_db
+        .get(&txn, VECTOR_PROPERTIES_SCHEMA_VERSION_KEY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        u64::from_le_bytes(schema_bytes.try_into().unwrap()),
+        VECTOR_PROPERTIES_SCHEMA_VERSION
+    );
+
+    let migrated_props = storage
+        .vectors
+        .vector_properties_db
+        .get(&txn, &id)
+        .unwrap()
+        .unwrap();
+    let arena = Bump::new();
+    let parsed = crate::helix_engine::vector_core::vector_without_data::VectorWithoutData::
+        from_bincode_bytes(&arena, migrated_props, id)
+        .unwrap();
+    assert!(!parsed.deleted);
+    assert_eq!(parsed.id, id);
+}
+
+#[test]
+fn test_vector_properties_migration_noop_when_schema_current() {
+    let (mut storage, _temp_dir) = setup_test_storage();
+    let bad_id = 999999u128;
+
+    {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        let invalid_bytes = [1u8, 2, 3];
+        storage
+            .vectors
+            .vector_properties_db
+            .put(&mut txn, &bad_id, &invalid_bytes)
+            .unwrap();
+        storage
+            .metadata_db
+            .put(
+                &mut txn,
+                VECTOR_PROPERTIES_SCHEMA_VERSION_KEY,
+                &VECTOR_PROPERTIES_SCHEMA_VERSION.to_le_bytes(),
+            )
+            .unwrap();
+        storage
+            .metadata_db
+            .put(
+                &mut txn,
+                HNSW_SCHEMA_VERSION_KEY,
+                &HNSW_SCHEMA_VERSION.to_le_bytes(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    migrate(&mut storage).unwrap();
+
+    let txn = storage.graph_env.read_txn().unwrap();
+    let stored_invalid = storage
+        .vectors
+        .vector_properties_db
+        .get(&txn, &bad_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_invalid, &[1u8, 2, 3]);
+}
+
+#[test]
+fn test_vector_properties_migration_rejects_newer_schema_version() {
+    let (mut storage, _temp_dir) = setup_test_storage();
+
+    {
+        let mut txn = storage.graph_env.write_txn().unwrap();
+        storage
+            .metadata_db
+            .put(
+                &mut txn,
+                VECTOR_PROPERTIES_SCHEMA_VERSION_KEY,
+                &(VECTOR_PROPERTIES_SCHEMA_VERSION + 1).to_le_bytes(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let result = migrate(&mut storage);
+    assert!(result.is_err());
+    let err = result.err().unwrap().to_string();
+    assert!(err.contains("vector properties schema version"));
+}
+
+#[test]
 fn test_bm25_migration_rerun_is_noop_once_schema_written() {
     let (mut storage, _temp_dir) = setup_test_storage();
     let node_id = add_test_node(&storage, "person", &[("name", Value::from("stable_term"))]);
@@ -1310,12 +1434,14 @@ fn test_hnsw_migration_rebuilds_index_and_prunes_legacy_keys() {
         HNSW_SCHEMA_VERSION
     );
 
-    assert!(storage
-        .vectors
-        .vectors_db
-        .get(&txn, &VectorCore::vector_key(victim_id, 3))
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .vectors
+            .vectors_db
+            .get(&txn, &VectorCore::vector_key(victim_id, 3))
+            .unwrap()
+            .is_none()
+    );
 
     let entry_point = storage
         .vectors

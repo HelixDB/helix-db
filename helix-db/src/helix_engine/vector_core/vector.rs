@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use core::fmt;
-use serde::{ser::SerializeMap, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeMap};
 use std::{alloc, cmp::Ordering, fmt::Debug, mem, ptr, slice};
 
 // TODO: make this generic over the type of encoding (f32, f64, etc)

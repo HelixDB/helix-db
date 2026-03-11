@@ -8,7 +8,7 @@ use crate::helix_engine::{
     vector_core::{
         hnsw::HNSW,
         vector::HVector,
-        vector_core::{HNSWConfig, VectorCore, ENTRY_POINT_KEY},
+        vector_core::{ENTRY_POINT_KEY, HNSWConfig, VectorCore},
     },
 };
 

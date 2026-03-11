@@ -367,7 +367,9 @@ impl VectorCore {
             .filter_map(|result| result.ok().map(|(key, _)| key.to_vec()))
             .collect();
 
-        neighbors.into_iter().try_for_each(|neighbor_id| -> Result<(), VectorError> {
+        neighbors
+            .into_iter()
+            .try_for_each(|neighbor_id| -> Result<(), VectorError> {
                 if neighbor_id == id {
                     return Ok(());
                 }
@@ -453,10 +455,8 @@ impl VectorCore {
         distance_cache: &mut HashMap<u128, f64>,
         arena: &'scratch bumpalo::Bump,
     ) -> Result<BinaryHeap<'scratch, Candidate>, VectorError> {
-        let mut neighbors = BinaryHeap::with_capacity(
-            arena,
-            self.config.m_max_0.min(self.config.min_neighbors),
-        );
+        let mut neighbors =
+            BinaryHeap::with_capacity(arena, self.config.m_max_0.min(self.config.min_neighbors));
 
         self.for_each_neighbor_id(txn, id, level, |neighbor_id| {
             let distance = self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
@@ -495,7 +495,8 @@ impl VectorCore {
                     return Ok(());
                 }
 
-                let distance = self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
+                let distance =
+                    self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
                 result.push(Candidate {
                     id: neighbor_id,
                     distance,
@@ -618,7 +619,8 @@ impl VectorCore {
                     return Ok(());
                 }
 
-                let distance = self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
+                let distance =
+                    self.get_or_compute_distance(txn, neighbor_id, query, distance_cache)?;
                 if max_distance.is_none_or(|max| distance < max) {
                     let neighbor = Candidate {
                         id: neighbor_id,
@@ -895,12 +897,8 @@ impl VectorCore {
                 .ok_or_else(|| VectorError::VectorNotFound(id.to_string()))?
                 .to_vec();
 
-            let mut vector = HVector::from_bincode_bytes(
-                &arena,
-                Some(&properties_bytes),
-                &raw_bytes,
-                id,
-            )?;
+            let mut vector =
+                HVector::from_bincode_bytes(&arena, Some(&properties_bytes), &raw_bytes, id)?;
             vector.level = self.get_new_level();
             self.index_existing_vector(txn, &mut vector)?;
         }

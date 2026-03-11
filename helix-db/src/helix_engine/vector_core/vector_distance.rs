@@ -78,11 +78,27 @@ fn cosine_distance_unaligned(query: &[f64], stored_bytes: &[u8]) -> Result<f64, 
         magnitude_stored += stored_value * stored_value;
     }
 
-    if magnitude_query.abs() == 0.0 || magnitude_stored.abs() == 0.0 {
-        return Ok(MAX_DISTANCE);
+    Ok(1.0 - normalize_cosine_similarity(dot_product, magnitude_query, magnitude_stored))
+}
+
+#[cfg(feature = "cosine")]
+#[inline(always)]
+fn normalize_cosine_similarity(dot_product: f64, magnitude_a: f64, magnitude_b: f64) -> f64 {
+    if magnitude_a.abs() == 0.0 || magnitude_b.abs() == 0.0 {
+        return -1.0;
     }
 
-    Ok(1.0 - (dot_product / (magnitude_query.sqrt() * magnitude_stored.sqrt())))
+    let denominator = magnitude_a.sqrt() * magnitude_b.sqrt();
+    if denominator.abs() == 0.0 || !denominator.is_finite() {
+        return -1.0;
+    }
+
+    let similarity = dot_product / denominator;
+    if !similarity.is_finite() {
+        return -1.0;
+    }
+
+    similarity.clamp(-1.0, 1.0)
 }
 
 #[inline]
@@ -141,17 +157,17 @@ pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
         magnitude_b += b_val * b_val;
     }
 
-    if magnitude_a.abs() == 0.0 || magnitude_b.abs() == 0.0 {
-        return Ok(-1.0);
-    }
-
-    Ok(dot_product / (magnitude_a.sqrt() * magnitude_b.sqrt()))
+    Ok(normalize_cosine_similarity(
+        dot_product,
+        magnitude_a,
+        magnitude_b,
+    ))
 }
 
 // SIMD implementation using AVX2 (256-bit vectors)
 #[cfg(target_feature = "avx2")]
 #[inline(always)]
-pub fn cosine_similarity_avx2(a: &[f64], b: &[f64]) -> f64 {
+pub fn cosine_similarity_avx2(a: &[f64], b: &[f64]) -> Result<f64, VectorError> {
     use std::arch::x86_64::*;
 
     let len = a.len();
@@ -196,10 +212,14 @@ pub fn cosine_similarity_avx2(a: &[f64], b: &[f64]) -> f64 {
 
         // Combine SIMD and scalar results
         let dot_product_total = dot_sum + dot_remainder;
-        let magnitude_a_total = (mag_a_sum + mag_a_remainder).sqrt();
-        let magnitude_b_total = (mag_b_sum + mag_b_remainder).sqrt();
+        let magnitude_a_total = mag_a_sum + mag_a_remainder;
+        let magnitude_b_total = mag_b_sum + mag_b_remainder;
 
-        dot_product_total / (magnitude_a_total * magnitude_b_total)
+        Ok(normalize_cosine_similarity(
+            dot_product_total,
+            magnitude_a_total,
+            magnitude_b_total,
+        ))
     }
 }
 
@@ -221,7 +241,13 @@ unsafe fn horizontal_sum_pd(__v: __m256d) -> f64 {
 
 #[cfg(all(test, feature = "cosine"))]
 mod tests {
-    use super::{cosine_similarity, distance_from_stored_bytes, MAX_DISTANCE};
+    use super::{MAX_DISTANCE, cosine_similarity, distance_from_stored_bytes};
+
+    #[test]
+    fn test_cosine_similarity_zero_vector_returns_negative_one() {
+        let similarity = cosine_similarity(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(similarity, -1.0);
+    }
 
     #[test]
     fn test_distance_from_stored_bytes_aligned_matches_slice_distance() {

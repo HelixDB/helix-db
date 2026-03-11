@@ -4,7 +4,7 @@ use crate::{
     utils::{id::uuid_str_from_buf, properties::ImmutablePropertiesMap},
 };
 use core::fmt;
-use serde::{ser::SerializeMap, Serialize};
+use serde::{Serialize, ser::SerializeMap};
 use std::fmt::Debug;
 // TODO: make this generic over the type of encoding (f32, f64, etc)
 // TODO: use const param to set dimension
