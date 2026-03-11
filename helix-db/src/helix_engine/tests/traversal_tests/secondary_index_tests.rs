@@ -193,7 +193,12 @@ fn test_unique_index_rejects_duplicate() {
         .n_from_index("person", "name", &"John".to_string())
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(nodes.len(), 1, "Expected exactly one node, but found {}", nodes.len());
+    assert_eq!(
+        nodes.len(),
+        1,
+        "Expected exactly one node, but found {}",
+        nodes.len()
+    );
 }
 
 #[test]
@@ -595,5 +600,9 @@ fn test_unique_index_add_n_no_partial_state_on_failure() {
         .n_from_index("person", "name", &"John".to_string())
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(nodes.len(), 1, "Expected exactly one John node after failed add");
+    assert_eq!(
+        nodes.len(),
+        1,
+        "Expected exactly one John node after failed add"
+    );
 }

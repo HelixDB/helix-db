@@ -74,15 +74,27 @@ fn test_intersect_user_scenario() {
 
     // Create target nodes
     let tgt4 = G::new_mut(&storage, &arena, &mut txn)
-        .add_n("target", props_option(&arena, props! { "name" => "T4" }), None)
+        .add_n(
+            "target",
+            props_option(&arena, props! { "name" => "T4" }),
+            None,
+        )
         .collect_to_obj()
         .unwrap();
     let tgt5 = G::new_mut(&storage, &arena, &mut txn)
-        .add_n("target", props_option(&arena, props! { "name" => "T5" }), None)
+        .add_n(
+            "target",
+            props_option(&arena, props! { "name" => "T5" }),
+            None,
+        )
         .collect_to_obj()
         .unwrap();
     let tgt6 = G::new_mut(&storage, &arena, &mut txn)
-        .add_n("target", props_option(&arena, props! { "name" => "T6" }), None)
+        .add_n(
+            "target",
+            props_option(&arena, props! { "name" => "T6" }),
+            None,
+        )
         .collect_to_obj()
         .unwrap();
 

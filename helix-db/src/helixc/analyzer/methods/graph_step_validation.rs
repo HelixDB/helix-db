@@ -652,10 +652,25 @@ pub(crate) fn apply_graph_step<'a>(
                     cur_ty.kind_str()
                 );
             }
-            if let Some(ref ty) = sv.vector_type
-                && !ctx.vector_set.contains(ty.as_str())
-            {
-                generate_error!(ctx, original_query, sv.loc.clone(), E103, ty.as_str());
+            if let Some(ref ty) = sv.vector_type {
+                if !ctx.vector_set.contains(ty.as_str()) {
+                    generate_error!(ctx, original_query, sv.loc.clone(), E103, ty.as_str());
+                } else if ty.as_str() != vector_ty.as_str() {
+                    let step_name = format!("SearchV<{ty}>");
+                    let reason = format!(
+                        "type argument `{}` does not match current vector type `{}`",
+                        ty, vector_ty
+                    );
+                    generate_error!(
+                        ctx,
+                        original_query,
+                        sv.loc.clone(),
+                        E602,
+                        [step_name.as_str(), vector_ty.as_str()],
+                        [reason.as_str()]
+                    );
+                    return None;
+                }
             }
             let vec = match &sv.data {
                 Some(VectorData::Vector(v)) => {
@@ -678,9 +693,20 @@ pub(crate) fn apply_graph_step<'a>(
                     let embed_data = match &e.value {
                         EvaluatesToString::Identifier(i) => {
                             type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str());
-                            validate_embed_string_type(ctx, original_query, sv.loc.clone(), scope, i.as_str());
+                            validate_embed_string_type(
+                                ctx,
+                                original_query,
+                                sv.loc.clone(),
+                                scope,
+                                i.as_str(),
+                            );
                             EmbedData {
-                                data: gen_identifier_or_param(original_query, i.as_str(), true, false),
+                                data: gen_identifier_or_param(
+                                    original_query,
+                                    i.as_str(),
+                                    true,
+                                    false,
+                                ),
                                 model_name: gen_query.embedding_model_to_use.clone(),
                             }
                         }
@@ -1062,5 +1088,38 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_search_v_type_arg_must_match_current_vector_type() {
+        let source = r#"
+            N::Call { room_id: String }
+
+            V::ChunkA {
+                content: String,
+            }
+
+            V::ChunkB {
+                content: String,
+            }
+
+            E::CallHasChunkA {
+                From: Call,
+                To: ChunkA,
+            }
+
+            QUERY test(id: ID, query: [f64], k: I32) =>
+                call <- N<Call>(id)
+                results <- call::Out<CallHasChunkA>::SearchV<ChunkB>(query, k)
+                RETURN results
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let parsed = HelixParser::parse_source(&content).unwrap();
+        let result = crate::helixc::analyzer::analyze(&parsed);
+
+        assert!(result.is_ok());
+        let (diagnostics, _) = result.unwrap();
+        assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E602));
     }
 }

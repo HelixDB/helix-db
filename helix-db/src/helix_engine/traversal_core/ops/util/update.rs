@@ -108,7 +108,8 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             Some(old) => {
                                 let mut index_error = false;
                                 for (k, v) in props.iter() {
-                                    let Some((db, secondary_index)) = self.storage.secondary_indices.get(*k)
+                                    let Some((db, secondary_index)) =
+                                        self.storage.secondary_indices.get(*k)
                                     else {
                                         continue;
                                     };
@@ -132,11 +133,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                         }
                                     };
 
-                                    if let Err(e) = db.delete_one_duplicate(
-                                        self.txn,
-                                        &old_serialized,
-                                        &node.id,
-                                    ) {
+                                    if let Err(e) =
+                                        db.delete_one_duplicate(self.txn, &old_serialized, &node.id)
+                                    {
                                         results.push(Err(GraphError::from(e)));
                                         index_error = true;
                                         break;
@@ -162,7 +161,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                             if let Err(_e) = put_result {
                                                 // Restore the old index entry since the new one failed
                                                 let _ = db.put(self.txn, &old_serialized, &node.id);
-                                                results.push(Err(GraphError::DuplicateKey(k.to_string())));
+                                                results.push(Err(GraphError::DuplicateKey(
+                                                    k.to_string(),
+                                                )));
                                                 index_error = true;
                                                 break;
                                             }

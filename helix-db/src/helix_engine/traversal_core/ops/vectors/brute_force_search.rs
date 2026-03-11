@@ -3,6 +3,7 @@ use crate::helix_engine::{
     types::GraphError,
     vector_core::vector_distance::cosine_similarity,
 };
+use itertools::Itertools;
 
 pub trait BruteForceSearchVAdapter<'db, 'arena, 'txn>:
     Iterator<Item = Result<TraversalValue<'arena>, GraphError>>

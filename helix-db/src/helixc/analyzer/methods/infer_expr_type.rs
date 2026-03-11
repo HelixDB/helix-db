@@ -1074,7 +1074,13 @@ pub(crate) fn infer_expr_type<'a>(
                                         scope,
                                         i.as_str(),
                                     );
-                                    validate_embed_string_type(ctx, original_query, add.loc.clone(), scope, i.as_str());
+                                    validate_embed_string_type(
+                                        ctx,
+                                        original_query,
+                                        add.loc.clone(),
+                                        scope,
+                                        i.as_str(),
+                                    );
                                     EmbedData {
                                         data: gen_identifier_or_param(
                                             original_query,
@@ -1182,7 +1188,13 @@ pub(crate) fn infer_expr_type<'a>(
                     let embed_data = match &e.value {
                         EvaluatesToString::Identifier(i) => {
                             type_in_scope(ctx, original_query, sv.loc.clone(), scope, i.as_str());
-                            validate_embed_string_type(ctx, original_query, sv.loc.clone(), scope, i.as_str());
+                            validate_embed_string_type(
+                                ctx,
+                                original_query,
+                                sv.loc.clone(),
+                                scope,
+                                i.as_str(),
+                            );
                             EmbedData {
                                 data: gen_identifier_or_param(
                                     original_query,

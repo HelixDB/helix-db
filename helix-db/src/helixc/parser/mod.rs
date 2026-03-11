@@ -181,9 +181,15 @@ impl HelixParser {
                     .schema
                     .entry(version)
                     .and_modify(|existing| {
-                        existing.node_schemas.extend(new_schema.node_schemas.clone());
-                        existing.edge_schemas.extend(new_schema.edge_schemas.clone());
-                        existing.vector_schemas.extend(new_schema.vector_schemas.clone());
+                        existing
+                            .node_schemas
+                            .extend(new_schema.node_schemas.clone());
+                        existing
+                            .edge_schemas
+                            .extend(new_schema.edge_schemas.clone());
+                        existing
+                            .vector_schemas
+                            .extend(new_schema.vector_schemas.clone());
                     })
                     .or_insert(new_schema);
             }

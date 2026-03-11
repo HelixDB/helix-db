@@ -78,7 +78,9 @@ impl<'db, 'arena, 'txn, 's, I: Iterator<Item = Result<TraversalValue<'arena>, Gr
             {
                 for item in iter {
                     let (_, data) = item?;
-                    let data = data.decode().map_err(|e| GraphError::DecodeError(e.to_string()))?;
+                    let data = data
+                        .decode()
+                        .map_err(|e| GraphError::DecodeError(e.to_string()))?;
                     let (_, existing_to_node) = HelixGraphStorage::unpack_adj_edge_data(data)?;
                     if existing_to_node == to_node {
                         return Err(GraphError::DuplicateKey(format!(

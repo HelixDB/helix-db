@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap};
 use indexmap::IndexMap;
 
 use crate::helixc::{
-    analyzer::{error_codes::ErrorCode, errors::push_schema_err, Ctx},
+    analyzer::{Ctx, error_codes::ErrorCode, errors::push_schema_err},
     parser::{
         errors::ParserError,
         location::Loc,
@@ -473,7 +473,7 @@ const RESERVED_TYPE_NAMES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helixc::parser::{write_to_temp_file, HelixParser};
+    use crate::helixc::parser::{HelixParser, write_to_temp_file};
 
     // ============================================================================
     // Duplicate Schema Definition Tests
@@ -497,9 +497,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E107));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("duplicate node definition")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate node definition"))
+        );
     }
 
     #[test]
@@ -521,9 +523,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E107));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("duplicate edge definition")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate edge definition"))
+        );
     }
 
     #[test]
@@ -544,9 +548,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E107));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("duplicate vector definition")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate vector definition"))
+        );
     }
 
     // ============================================================================
@@ -571,10 +577,12 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E106));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("undeclared node or vector type")
-                && d.message.contains("Company")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("undeclared node or vector type")
+                    && d.message.contains("Company"))
+        );
     }
 
     #[test]
@@ -595,10 +603,12 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E106));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("undeclared node or vector type")
-                && d.message.contains("Product")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("undeclared node or vector type")
+                    && d.message.contains("Product"))
+        );
     }
 
     #[test]
@@ -641,9 +651,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         // Should not error - vectors can be referenced in edges
-        assert!(!diagnostics
-            .iter()
-            .any(|d| d.error_code == ErrorCode::E106 && d.message.contains("Document")));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E106 && d.message.contains("Document"))
+        );
     }
 
     // ============================================================================
@@ -667,9 +679,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("reserved field name") && d.message.contains("id")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved field name") && d.message.contains("id"))
+        );
     }
 
     #[test]
@@ -690,9 +704,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E204));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("reserved field name") && d.message.contains("label")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved field name") && d.message.contains("label"))
+        );
     }
 
     #[test]
@@ -903,9 +919,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         // Should not error - multiple edges between same types is valid
-        assert!(!diagnostics
-            .iter()
-            .any(|d| d.error_code == ErrorCode::E106 || d.error_code == ErrorCode::E107));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.error_code == ErrorCode::E106 || d.error_code == ErrorCode::E107)
+        );
     }
 
     #[test]
@@ -947,9 +965,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("duplicate field") && d.message.contains("name")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate field") && d.message.contains("name"))
+        );
     }
 
     #[test]
@@ -970,9 +990,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("duplicate field") && d.message.contains("since")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate field") && d.message.contains("since"))
+        );
     }
 
     #[test]
@@ -992,9 +1014,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E109));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("duplicate field") && d.message.contains("content")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("duplicate field") && d.message.contains("content"))
+        );
     }
 
     #[test]
@@ -1084,9 +1108,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("reserved type name") && d.message.contains("Node")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("Node"))
+        );
     }
 
     #[test]
@@ -1107,9 +1133,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("reserved type name") && d.message.contains("Edge")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("Edge"))
+        );
     }
 
     #[test]
@@ -1129,9 +1157,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("reserved type name") && d.message.contains("HVector")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("HVector"))
+        );
     }
 
     #[test]
@@ -1151,9 +1181,11 @@ mod tests {
         assert!(result.is_ok());
         let (diagnostics, _) = result.unwrap();
         assert!(diagnostics.iter().any(|d| d.error_code == ErrorCode::E110));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("reserved type name") && d.message.contains("Value")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved type name") && d.message.contains("Value"))
+        );
     }
 
     #[test]

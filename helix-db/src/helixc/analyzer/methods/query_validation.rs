@@ -1604,7 +1604,7 @@ fn analyze_return_expr<'a>(
 
                     // Note: Map closures are no longer injected here.
                     // Mapping will happen at response construction time instead.
-                }  // end GeneratedStatement::Identifier
+                } // end GeneratedStatement::Identifier
                 GeneratedStatement::Literal(l) => {
                     let field_name = "data".to_string();
                     let rust_type = "Value".to_string();

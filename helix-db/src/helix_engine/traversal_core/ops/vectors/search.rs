@@ -48,15 +48,26 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let vectors = self.storage.vectors.search(
-            self.txn,
-            query,
-            k.try_into().unwrap(),
-            label,
-            filter,
-            false,
-            self.arena,
-        );
+        let k = match k.try_into() {
+            Ok(k) => k,
+            Err(_) => {
+                return RoTraversalIterator {
+                    storage: self.storage,
+                    arena: self.arena,
+                    txn: self.txn,
+                    inner: once(Err(GraphError::VectorError(
+                        "k must be a non-negative integer".to_string(),
+                    )))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                };
+            }
+        };
+
+        let vectors = self
+            .storage
+            .vectors
+            .search(self.txn, query, k, label, filter, false, self.arena);
 
         let iter = match vectors {
             Ok(vectors) => vectors

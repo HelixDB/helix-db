@@ -178,13 +178,7 @@ pub(super) fn validate_embed_string_type(
     if let Some(var_info) = scope.get(identifier_name)
         && var_info.ty != Type::Scalar(FieldType::String)
     {
-        generate_error!(
-            ctx,
-            original_query,
-            loc,
-            E660,
-            &var_info.ty.to_string()
-        );
+        generate_error!(ctx, original_query, loc, E660, &var_info.ty.to_string());
     }
 }
 
@@ -320,7 +314,10 @@ pub(super) struct VariableInfo {
     pub field_name_mappings: std::collections::HashMap<String, String>,
     pub excluded_fields: Vec<String>,
     pub has_spread: bool,
-    pub nested_traversals: std::collections::HashMap<String, crate::helixc::generator::traversal_steps::NestedTraversalInfo>,
+    pub nested_traversals: std::collections::HashMap<
+        String,
+        crate::helixc::generator::traversal_steps::NestedTraversalInfo,
+    >,
 }
 
 impl VariableInfo {
@@ -373,7 +370,10 @@ impl VariableInfo {
     }
 
     /// Store projection metadata from a GeneratedTraversal
-    pub fn store_projection_metadata(&mut self, traversal: &crate::helixc::generator::traversal_steps::Traversal) {
+    pub fn store_projection_metadata(
+        &mut self,
+        traversal: &crate::helixc::generator::traversal_steps::Traversal,
+    ) {
         self.has_object_step = traversal.has_object_step;
         self.object_fields = traversal.object_fields.clone();
         self.field_name_mappings = traversal.field_name_mappings.clone();

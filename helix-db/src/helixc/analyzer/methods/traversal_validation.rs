@@ -1781,54 +1781,24 @@ pub(crate) fn validate_traversal<'a>(
                     source,
                     source_is_plural,
                     properties: Some(
-                    update
-                        .fields
-                        .iter()
-                        .map(|field| {
-                            (
-                                field.key.clone(),
-                                match &field.value.value {
-                                    FieldValueType::Identifier(i) => {
-                                        is_valid_identifier(
-                                            ctx,
-                                            original_query,
-                                            field.value.loc.clone(),
-                                            i.as_str(),
-                                        );
-                                        type_in_scope(
-                                            ctx,
-                                            original_query,
-                                            field.value.loc.clone(),
-                                            scope,
-                                            i.as_str(),
-                                        );
-                                        gen_identifier_or_param(
-                                            original_query,
-                                            i.as_str(),
-                                            true,
-                                            true,
-                                        )
-                                    }
-                                    FieldValueType::Literal(l) => match l {
-                                        Value::String(s) => {
-                                            GeneratedValue::Literal(GenRef::Literal(s.clone()))
-                                        }
-                                        other => GeneratedValue::Primitive(GenRef::Std(
-                                            other.inner_stringify(),
-                                        )),
-                                    },
-                                    FieldValueType::Expression(e) => match &e.expr {
-                                        ExpressionType::Identifier(i) => {
+                        update
+                            .fields
+                            .iter()
+                            .map(|field| {
+                                (
+                                    field.key.clone(),
+                                    match &field.value.value {
+                                        FieldValueType::Identifier(i) => {
                                             is_valid_identifier(
                                                 ctx,
                                                 original_query,
-                                                e.loc.clone(),
+                                                field.value.loc.clone(),
                                                 i.as_str(),
                                             );
                                             type_in_scope(
                                                 ctx,
                                                 original_query,
-                                                e.loc.clone(),
+                                                field.value.loc.clone(),
                                                 scope,
                                                 i.as_str(),
                                             );
@@ -1839,44 +1809,82 @@ pub(crate) fn validate_traversal<'a>(
                                                 true,
                                             )
                                         }
-                                        ExpressionType::StringLiteral(i) => {
-                                            GeneratedValue::Literal(GenRef::Literal(i.to_string()))
-                                        }
+                                        FieldValueType::Literal(l) => match l {
+                                            Value::String(s) => {
+                                                GeneratedValue::Literal(GenRef::Literal(s.clone()))
+                                            }
+                                            other => GeneratedValue::Primitive(GenRef::Std(
+                                                other.inner_stringify(),
+                                            )),
+                                        },
+                                        FieldValueType::Expression(e) => match &e.expr {
+                                            ExpressionType::Identifier(i) => {
+                                                is_valid_identifier(
+                                                    ctx,
+                                                    original_query,
+                                                    e.loc.clone(),
+                                                    i.as_str(),
+                                                );
+                                                type_in_scope(
+                                                    ctx,
+                                                    original_query,
+                                                    e.loc.clone(),
+                                                    scope,
+                                                    i.as_str(),
+                                                );
+                                                gen_identifier_or_param(
+                                                    original_query,
+                                                    i.as_str(),
+                                                    true,
+                                                    true,
+                                                )
+                                            }
+                                            ExpressionType::StringLiteral(i) => {
+                                                GeneratedValue::Literal(GenRef::Literal(
+                                                    i.to_string(),
+                                                ))
+                                            }
 
-                                        ExpressionType::IntegerLiteral(i) => {
-                                            GeneratedValue::Primitive(GenRef::Std(i.to_string()))
-                                        }
-                                        ExpressionType::FloatLiteral(i) => {
-                                            GeneratedValue::Primitive(GenRef::Std(i.to_string()))
-                                        }
-                                        ExpressionType::BooleanLiteral(i) => {
-                                            GeneratedValue::Primitive(GenRef::Std(i.to_string()))
-                                        }
+                                            ExpressionType::IntegerLiteral(i) => {
+                                                GeneratedValue::Primitive(GenRef::Std(
+                                                    i.to_string(),
+                                                ))
+                                            }
+                                            ExpressionType::FloatLiteral(i) => {
+                                                GeneratedValue::Primitive(GenRef::Std(
+                                                    i.to_string(),
+                                                ))
+                                            }
+                                            ExpressionType::BooleanLiteral(i) => {
+                                                GeneratedValue::Primitive(GenRef::Std(
+                                                    i.to_string(),
+                                                ))
+                                            }
+                                            other => {
+                                                generate_error!(
+                                                    ctx,
+                                                    original_query,
+                                                    e.loc.clone(),
+                                                    E206,
+                                                    &format!("{:?}", other)
+                                                );
+                                                GeneratedValue::Unknown
+                                            }
+                                        },
                                         other => {
                                             generate_error!(
                                                 ctx,
                                                 original_query,
-                                                e.loc.clone(),
+                                                field.value.loc.clone(),
                                                 E206,
                                                 &format!("{:?}", other)
                                             );
                                             GeneratedValue::Unknown
                                         }
                                     },
-                                    other => {
-                                        generate_error!(
-                                            ctx,
-                                            original_query,
-                                            field.value.loc.clone(),
-                                            E206,
-                                            &format!("{:?}", other)
-                                        );
-                                        GeneratedValue::Unknown
-                                    }
-                                },
-                            )
-                        })
-                        .collect(),
+                                )
+                            })
+                            .collect(),
                     ),
                 };
                 cur_ty = cur_ty.into_single();
