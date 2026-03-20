@@ -541,6 +541,112 @@ fn test_upsert_e_updates_existing_edge_with_properties() {
 }
 
 #[test]
+fn test_upsert_e_noop_when_all_properties_identical() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let node1 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let node2 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+
+    let existing_edge = G::new_mut(&storage, &arena, &mut txn)
+        .add_edge(
+            "relates",
+            props_option(&arena, props!("kind" => "friend", "weight" => 2)),
+            node1,
+            node2,
+            false,
+            false,
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let edge_id = if let TraversalValue::Edge(ref e) = existing_edge {
+        e.id
+    } else {
+        panic!("Expected edge");
+    };
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_edge), &arena)
+        .upsert_e(
+            "relates",
+            node1,
+            node2,
+            &[("kind", Value::from("friend")), ("weight", Value::from(2))],
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Edge(edge) = &result[0] {
+        assert_eq!(edge.id, edge_id);
+        assert_eq!(edge.label, "relates");
+        assert_eq!(edge.get_property("kind").unwrap(), &Value::from("friend"));
+        assert_eq!(edge.get_property("weight").unwrap(), &Value::from(2));
+    } else {
+        panic!("Expected edge");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_e_noop_when_no_properties_and_empty_props() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let node1 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+    let node2 = G::new_mut(&storage, &arena, &mut txn)
+        .add_n("person", None, None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()[0]
+        .id();
+
+    let existing_edge = G::new_mut(&storage, &arena, &mut txn)
+        .add_edge("plain", None, node1, node2, false, false)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let edge_id = if let TraversalValue::Edge(ref e) = existing_edge {
+        e.id
+    } else {
+        panic!("Expected edge");
+    };
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_edge), &arena)
+        .upsert_e("plain", node1, node2, &[])
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Edge(edge) = &result[0] {
+        assert_eq!(edge.id, edge_id);
+        assert!(edge.properties.is_none());
+    } else {
+        panic!("Expected edge");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
 fn test_upsert_e_with_defaults_applies_on_create_and_explicit_wins() {
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
@@ -890,6 +996,87 @@ fn test_upsert_v_updates_existing_vector_with_properties() {
             vector.get_property("timestamp").unwrap(),
             &Value::from(1640995200)
         );
+    } else {
+        panic!("Expected vector");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_v_noop_when_all_properties_identical() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let query = [0.1_f64, 0.2, 0.3];
+    let existing_vector = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(
+            &query,
+            "embedding",
+            props_option(
+                &arena,
+                props!("model" => "gpt3", "version" => 1, "accuracy" => 0.95),
+            ),
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let vector_id = existing_vector.id();
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_vector), &arena)
+        .upsert_v(
+            &query,
+            "embedding",
+            &[
+                ("model", Value::from("gpt3")),
+                ("version", Value::from(1)),
+                ("accuracy", Value::from(0.95)),
+            ],
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Vector(vector) = &result[0] {
+        assert_eq!(vector.id, vector_id);
+        assert_eq!(vector.get_property("model").unwrap(), &Value::from("gpt3"));
+        assert_eq!(vector.get_property("version").unwrap(), &Value::from(1));
+        assert_eq!(vector.get_property("accuracy").unwrap(), &Value::from(0.95));
+    } else {
+        panic!("Expected vector");
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_upsert_v_noop_when_no_properties_and_empty_props() {
+    let (_temp_dir, storage) = setup_test_db();
+    let arena = Bump::new();
+    let mut txn = storage.graph_env.write_txn().unwrap();
+
+    let query = [0.5_f64, 0.6, 0.7];
+    let existing_vector = G::new_mut(&storage, &arena, &mut txn)
+        .insert_v::<Filter>(&query, "embedding", None)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let vector_id = existing_vector.id();
+
+    let result = G::new_mut_from_iter(&storage, &mut txn, std::iter::once(existing_vector), &arena)
+        .upsert_v(&query, "embedding", &[])
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    if let TraversalValue::Vector(vector) = &result[0] {
+        assert_eq!(vector.id, vector_id);
+        assert!(vector.properties.is_none());
     } else {
         panic!("Expected vector");
     }
