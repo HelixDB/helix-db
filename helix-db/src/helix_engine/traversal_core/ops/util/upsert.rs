@@ -228,7 +228,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                             &old_serialized,
                                             &node.id,
                                         )?;
-                                        if let Err(e) = update_secondary_index(index, self.txn, k, node.id, v) {
+                                        if let Err(e) =
+                                            update_secondary_index(index, self.txn, k, node.id, v)
+                                        {
                                             // Restore the old index entry since the new one failed
                                             let _ = db.put(self.txn, &old_serialized, &node.id);
                                             return Err(e);
@@ -420,6 +422,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     // Update existing edge - merge properties
                     match edge.properties {
                         None => {
+                            if props.is_empty() {
+                                return Ok(TraversalValue::Edge(edge));
+                            }
+
                             let map = ImmutablePropertiesMap::new(
                                 props.len(),
                                 props.iter().map(|(k, v)| (*k, v.clone())),
@@ -428,6 +434,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             edge.properties = Some(map);
                         }
                         Some(old) => {
+                            if props.iter().all(|(k, v)| old.get(k) == Some(v)) {
+                                return Ok(TraversalValue::Edge(edge));
+                            }
+
                             let diff: Vec<_> = props
                                 .iter()
                                 .filter(|(k, _)| !old.iter().map(|(old_k, _)| old_k).contains(k))
@@ -553,6 +563,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 Some(Ok(TraversalValue::Vector(mut vector))) => {
                     match vector.properties {
                         None => {
+                            if props.is_empty() {
+                                return Ok(TraversalValue::Vector(vector));
+                            }
+
                             // Insert secondary indices
                             for (k, v) in props.iter() {
                                 let Some((db, secondary_index)) =
@@ -590,6 +604,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             vector.properties = Some(map);
                         }
                         Some(old) => {
+                            if props.iter().all(|(k, v)| old.get(k) == Some(v)) {
+                                return Ok(TraversalValue::Vector(vector));
+                            }
+
                             for (k, v) in props.iter() {
                                 let Some((db, secondary_index)) =
                                     self.storage.secondary_indices.get(*k)
