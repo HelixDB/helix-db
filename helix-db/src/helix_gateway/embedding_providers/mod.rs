@@ -45,6 +45,9 @@ pub enum EmbeddingProvider {
         resource_name: String,
         deployment_id: String,
     },
+    MiniMax {
+        embedding_type: String,
+    },
     Local,
 }
 
@@ -83,6 +86,13 @@ impl EmbeddingModelImpl {
                     .map(String::from)
                     .or_else(|| env::var("AZURE_OPENAI_API_KEY").ok())
                     .ok_or_else(|| GraphError::from("AZURE_OPENAI_API_KEY not set"))?;
+                Some(key)
+            }
+            EmbeddingProvider::MiniMax { .. } => {
+                let key = api_key
+                    .map(String::from)
+                    .or_else(|| env::var("MINIMAX_API_KEY").ok())
+                    .ok_or_else(|| GraphError::from("MINIMAX_API_KEY not set"))?;
                 Some(key)
             }
             EmbeddingProvider::Local => None,
@@ -157,6 +167,21 @@ impl EmbeddingModelImpl {
                     },
                     model_name.to_string(),
                 ))
+            }
+            Some(m) if m.starts_with("minimax:") => {
+                let parts: Vec<&str> = m.splitn(2, ':').collect();
+                let model_and_type = parts.get(1).unwrap_or(&"embo-01");
+                let (model_name, embedding_type) = if model_and_type.contains(':') {
+                    let type_parts: Vec<&str> = model_and_type.splitn(2, ':').collect();
+                    (
+                        type_parts[0].to_string(),
+                        type_parts.get(1).unwrap_or(&"db").to_string(),
+                    )
+                } else {
+                    (model_and_type.to_string(), "db".to_string())
+                };
+
+                Ok((EmbeddingProvider::MiniMax { embedding_type }, model_name))
             }
             Some("local") => Ok((EmbeddingProvider::Local, "local".to_string())),
 
@@ -365,6 +390,79 @@ impl EmbeddingModel for EmbeddingModelImpl {
                 Ok(embedding)
             }
 
+            EmbeddingProvider::MiniMax { embedding_type } => {
+                let api_key = self.api_key.as_ref().ok_or_else(|| {
+                    GraphError::EmbeddingError("MiniMax API key not set".to_string())
+                })?;
+
+                let response = self
+                    .client
+                    .post("https://api.minimax.io/v1/embeddings")
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "model": &self.model,
+                        "texts": [text],
+                        "type": embedding_type
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        GraphError::EmbeddingError(format!(
+                            "Failed to send request to MiniMax: {e}"
+                        ))
+                    })?;
+
+                let status = response.status();
+                let text_response = response.text().await.map_err(|e| {
+                    GraphError::EmbeddingError(format!("Failed to read MiniMax response: {e}"))
+                })?;
+
+                if !status.is_success() {
+                    return Err(parse_api_error("MiniMax", status.as_u16(), &text_response));
+                }
+
+                let response =
+                    sonic_rs::from_str::<sonic_rs::Value>(&text_response).map_err(|e| {
+                        GraphError::EmbeddingError(format!(
+                            "Failed to parse MiniMax response: {e}"
+                        ))
+                    })?;
+
+                // MiniMax returns HTTP 200 even for errors (e.g. rate limits);
+                // check base_resp.status_code for the real status.
+                if let Some(code) = response["base_resp"]["status_code"].as_i64() {
+                    if code != 0 {
+                        let msg = response["base_resp"]["status_msg"]
+                            .as_str()
+                            .unwrap_or("unknown error");
+                        return Err(GraphError::EmbeddingError(format!(
+                            "MiniMax embedding API error ({}): {}",
+                            code, msg
+                        )));
+                    }
+                }
+
+                let embedding = response["vectors"][0]
+                    .as_array()
+                    .ok_or_else(|| {
+                        GraphError::EmbeddingError(
+                            "Invalid embedding format in MiniMax response".to_string(),
+                        )
+                    })?
+                    .iter()
+                    .map(|v| {
+                        v.as_f64().ok_or_else(|| {
+                            GraphError::EmbeddingError(
+                                "Invalid float value in embedding".to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<f64>, GraphError>>()?;
+
+                Ok(embedding)
+            }
+
             EmbeddingProvider::Local => {
                 let url = self.url.as_ref().ok_or_else(|| {
                     GraphError::EmbeddingError("Local embedding URL not set".to_string())
@@ -451,6 +549,7 @@ pub fn get_embedding_model(
 /// let query = embed!("Hello, world!");
 /// let embedding = embed!("Hello, world!", "text-embedding-ada-002");
 /// let embedding = embed!("Hello, world!", "gemini:gemini-embedding-001:SEMANTIC_SIMILARITY");
+/// let embedding = embed!("Hello, world!", "minimax:embo-01");
 /// let embedding = embed!("Hello, world!", "text-embedding-ada-002", "http://localhost:8699/embed");
 /// ```
 macro_rules! embed {

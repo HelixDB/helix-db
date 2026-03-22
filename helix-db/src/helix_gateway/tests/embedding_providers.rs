@@ -61,6 +61,28 @@ fn test_local_embedding_success() {
     println!("embedding: {:?}", embedding);
 }
 
+#[tokio::test]
+#[ignore] // Requires API key and network
+async fn test_minimax_embedding_success() {
+    let model = get_embedding_model(None, Some("minimax:embo-01"), None).unwrap();
+    let result = model.fetch_embedding_async("test text").await;
+    assert!(result.is_ok(), "MiniMax embedding failed: {:?}", result.err());
+    let embedding = result.unwrap();
+    assert_eq!(embedding.len(), 1536); // embo-01 produces 1536-dimensional embeddings
+    println!("embedding: {embedding:?}");
+}
+
+#[tokio::test]
+#[ignore] // Requires API key and network
+async fn test_minimax_embedding_with_query_type() {
+    let model = get_embedding_model(None, Some("minimax:embo-01:query"), None).unwrap();
+    let result = model.fetch_embedding_async("search query text").await;
+    assert!(result.is_ok());
+    let embedding = result.unwrap();
+    assert_eq!(embedding.len(), 1536);
+    println!("embedding: {embedding:?}");
+}
+
 #[test]
 fn test_local_embedding_invalid_url() {
     let model = get_embedding_model(None, Some("local"), Some("invalid_url"));
@@ -161,6 +183,66 @@ fn test_parse_gemini_provider_empty_model() {
         _ => panic!("Expected Gemini provider"),
     }
     assert_eq!(model, ""); // Returns empty string when no model specified after colon
+}
+
+#[test]
+fn test_parse_minimax_provider_with_model() {
+    let result = EmbeddingModelImpl::parse_provider_and_model(Some("minimax:embo-01"));
+    assert!(result.is_ok());
+    let (provider, model) = result.unwrap();
+    match provider {
+        EmbeddingProvider::MiniMax { embedding_type } => {
+            assert_eq!(embedding_type, "db");
+        }
+        _ => panic!("Expected MiniMax provider"),
+    }
+    assert_eq!(model, "embo-01");
+}
+
+#[test]
+fn test_parse_minimax_provider_with_type() {
+    let result = EmbeddingModelImpl::parse_provider_and_model(Some("minimax:embo-01:query"));
+    assert!(result.is_ok());
+    let (provider, model) = result.unwrap();
+    match provider {
+        EmbeddingProvider::MiniMax { embedding_type } => {
+            assert_eq!(embedding_type, "query");
+        }
+        _ => panic!("Expected MiniMax provider"),
+    }
+    assert_eq!(model, "embo-01");
+}
+
+#[test]
+fn test_parse_minimax_provider_empty_model() {
+    let result = EmbeddingModelImpl::parse_provider_and_model(Some("minimax:"));
+    assert!(result.is_ok());
+    let (provider, model) = result.unwrap();
+    match provider {
+        EmbeddingProvider::MiniMax { embedding_type } => {
+            assert_eq!(embedding_type, "db");
+        }
+        _ => panic!("Expected MiniMax provider"),
+    }
+    assert_eq!(model, "");
+}
+
+#[test]
+fn test_new_minimax_without_api_key_fails() {
+    unsafe {
+        std::env::remove_var("MINIMAX_API_KEY");
+    }
+    let result = EmbeddingModelImpl::new(None, Some("minimax:embo-01"), None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_new_minimax_with_api_key() {
+    let result = EmbeddingModelImpl::new(Some("test-key"), Some("minimax:embo-01"), None);
+    assert!(result.is_ok());
+    let model = result.unwrap();
+    assert!(matches!(model.provider, EmbeddingProvider::MiniMax { .. }));
+    assert_eq!(model.model, "embo-01");
 }
 
 #[test]
