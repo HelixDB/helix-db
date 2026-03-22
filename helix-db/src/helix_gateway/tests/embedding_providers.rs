@@ -66,7 +66,11 @@ fn test_local_embedding_success() {
 async fn test_minimax_embedding_success() {
     let model = get_embedding_model(None, Some("minimax:embo-01"), None).unwrap();
     let result = model.fetch_embedding_async("test text").await;
-    assert!(result.is_ok(), "MiniMax embedding failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "MiniMax embedding failed: {:?}",
+        result.err()
+    );
     let embedding = result.unwrap();
     assert_eq!(embedding.len(), 1536); // embo-01 produces 1536-dimensional embeddings
     println!("embedding: {embedding:?}");

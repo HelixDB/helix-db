@@ -424,9 +424,7 @@ impl EmbeddingModel for EmbeddingModelImpl {
 
                 let response =
                     sonic_rs::from_str::<sonic_rs::Value>(&text_response).map_err(|e| {
-                        GraphError::EmbeddingError(format!(
-                            "Failed to parse MiniMax response: {e}"
-                        ))
+                        GraphError::EmbeddingError(format!("Failed to parse MiniMax response: {e}"))
                     })?;
 
                 // MiniMax returns HTTP 200 even for errors (e.g. rate limits);
