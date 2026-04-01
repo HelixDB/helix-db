@@ -53,11 +53,39 @@ pub trait HNSW {
         'db: 'arena,
         'arena: 'txn;
 
-    /// Delete a vector from the index
+    /// Delete a vector from the index (soft delete - marks as deleted)
     ///
     /// # Arguments
     ///
     /// * `txn` - The transaction to use
     /// * `id` - The id of the vector
     fn delete(&self, txn: &mut RwTxn, id: u128, arena: &bumpalo::Bump) -> Result<(), VectorError>;
+
+    /// Hard delete a vector - completely removes it from all databases
+    /// Use this to permanently remove soft-deleted vectors and free up space
+    ///
+    /// # Arguments
+    ///
+    /// * `txn` - The transaction to use
+    /// * `id` - The id of the vector to permanently remove
+    fn hard_delete(&self, txn: &mut RwTxn, id: u128) -> Result<(), VectorError>;
+
+    /// Reconnect an existing vector to the HNSW graph without changing its ID.
+    /// Used for index rebuilding after deletions cause graph fragmentation.
+    ///
+    /// # Arguments
+    ///
+    /// * `txn` - The write transaction to use
+    /// * `vector` - The vector to reconnect (with existing ID and level)
+    /// * `arena` - The bump allocator for temporary allocations
+    fn reconnect_vector<'db, 'arena, 'txn, F>(
+        &'db self,
+        txn: &'txn mut RwTxn<'db>,
+        vector: &HVector<'arena>,
+        arena: &'arena bumpalo::Bump,
+    ) -> Result<(), VectorError>
+    where
+        F: Fn(&HVector<'arena>, &RoTxn<'db>) -> bool,
+        'db: 'arena,
+        'arena: 'txn;
 }
