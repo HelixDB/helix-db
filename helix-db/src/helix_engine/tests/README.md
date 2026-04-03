@@ -143,6 +143,8 @@
 - `test_openai_embedding_success` - Tests OpenAI embedding success
 - `test_gemini_embedding_success` - Tests Gemini embedding success
 - `test_gemini_embedding_with_task_type` - Tests Gemini embedding with task types
+- `test_minimax_embedding_success` - Tests MiniMax embedding success
+- `test_minimax_embedding_with_query_type` - Tests MiniMax embedding with query type
 - `test_local_embedding_success` - Tests local embedding success
 - `test_local_embedding_invalid_url` - Tests invalid URL handling for local embeddings
 
