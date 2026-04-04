@@ -228,7 +228,9 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                                             &old_serialized,
                                             &node.id,
                                         )?;
-                                        if let Err(e) = update_secondary_index(index, self.txn, k, node.id, v) {
+                                        if let Err(e) =
+                                            update_secondary_index(index, self.txn, k, node.id, v)
+                                        {
                                             // Restore the old index entry since the new one failed
                                             let _ = db.put(self.txn, &old_serialized, &node.id);
                                             return Err(e);
@@ -420,6 +422,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                     // Update existing edge - merge properties
                     match edge.properties {
                         None => {
+                            if props.is_empty() {
+                                return Ok(TraversalValue::Edge(edge));
+                            }
+
                             let map = ImmutablePropertiesMap::new(
                                 props.len(),
                                 props.iter().map(|(k, v)| (*k, v.clone())),
@@ -428,6 +434,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             edge.properties = Some(map);
                         }
                         Some(old) => {
+                            if props.iter().all(|(k, v)| old.get(k) == Some(v)) {
+                                return Ok(TraversalValue::Edge(edge));
+                            }
+
                             let diff: Vec<_> = props
                                 .iter()
                                 .filter(|(k, _)| !old.iter().map(|(old_k, _)| old_k).contains(k))
@@ -553,6 +563,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                 Some(Ok(TraversalValue::Vector(mut vector))) => {
                     match vector.properties {
                         None => {
+                            if props.is_empty() {
+                                return Ok(TraversalValue::Vector(vector));
+                            }
+
                             // Insert secondary indices
                             for (k, v) in props.iter() {
                                 let Some((db, secondary_index)) =
@@ -590,6 +604,10 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
                             vector.properties = Some(map);
                         }
                         Some(old) => {
+                            if props.iter().all(|(k, v)| old.get(k) == Some(v)) {
+                                return Ok(TraversalValue::Vector(vector));
+                            }
+
                             for (k, v) in props.iter() {
                                 let Some((db, secondary_index)) =
                                     self.storage.secondary_indices.get(*k)
@@ -748,135 +766,141 @@ impl<'db, 'arena, 'txn, I: Iterator<Item = Result<TraversalValue<'arena>, GraphE
 
                     match vector.properties {
                         None => {
-                            // Insert secondary indices
-                            for (k, v) in props.iter() {
-                                let Some((db, secondary_index)) =
-                                    self.storage.secondary_indices.get(*k)
-                                else {
-                                    continue;
-                                };
+                            if !props.is_empty() {
+                                // Insert secondary indices
+                                for (k, v) in props.iter() {
+                                    let Some((db, secondary_index)) =
+                                        self.storage.secondary_indices.get(*k)
+                                    else {
+                                        continue;
+                                    };
 
-                                let v_serialized = bincode::serialize(v)?;
-                                match secondary_index {
-                                    crate::helix_engine::types::SecondaryIndex::Unique(_) => db
-                                        .put_with_flags(
-                                            self.txn,
-                                            PutFlags::NO_OVERWRITE,
-                                            &v_serialized,
-                                            &vector.id,
-                                        )
-                                        .map_err(|_| GraphError::DuplicateKey(k.to_string()))?,
-                                    crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                        db.put(self.txn, &v_serialized, &vector.id)?
-                                    }
-                                    crate::helix_engine::types::SecondaryIndex::None => {
-                                        unreachable!()
+                                    let v_serialized = bincode::serialize(v)?;
+                                    match secondary_index {
+                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                            .put_with_flags(
+                                                self.txn,
+                                                PutFlags::NO_OVERWRITE,
+                                                &v_serialized,
+                                                &vector.id,
+                                            )
+                                            .map_err(|_| GraphError::DuplicateKey(k.to_string()))?,
+                                        crate::helix_engine::types::SecondaryIndex::Index(_) => {
+                                            db.put(self.txn, &v_serialized, &vector.id)?
+                                        }
+                                        crate::helix_engine::types::SecondaryIndex::None => {
+                                            unreachable!()
+                                        }
                                     }
                                 }
+
+                                // Create properties map and insert node
+                                let map = ImmutablePropertiesMap::new(
+                                    props.len(),
+                                    props.iter().map(|(k, v)| (*k, v.clone())),
+                                    self.arena,
+                                );
+
+                                vector.properties = Some(map);
                             }
-
-                            // Create properties map and insert node
-                            let map = ImmutablePropertiesMap::new(
-                                props.len(),
-                                props.iter().map(|(k, v)| (*k, v.clone())),
-                                self.arena,
-                            );
-
-                            vector.properties = Some(map);
                         }
                         Some(old) => {
-                            for (k, v) in props.iter() {
-                                let Some((db, secondary_index)) =
-                                    self.storage.secondary_indices.get(*k)
-                                else {
-                                    continue;
-                                };
+                            if !props.iter().all(|(k, v)| old.get(k) == Some(v)) {
+                                for (k, v) in props.iter() {
+                                    let Some((db, secondary_index)) =
+                                        self.storage.secondary_indices.get(*k)
+                                    else {
+                                        continue;
+                                    };
 
-                                // delete secondary indexes for the props changed
-                                let Some(old_value) = old.get(k) else {
-                                    continue;
-                                };
+                                    // delete secondary indexes for the props changed
+                                    let Some(old_value) = old.get(k) else {
+                                        continue;
+                                    };
 
-                                let old_serialized = bincode::serialize(old_value)?;
-                                db.delete_one_duplicate(self.txn, &old_serialized, &vector.id)?;
+                                    let old_serialized = bincode::serialize(old_value)?;
+                                    db.delete_one_duplicate(self.txn, &old_serialized, &vector.id)?;
 
-                                // create new secondary indexes for the props changed
-                                let v_serialized = bincode::serialize(v)?;
-                                match secondary_index {
-                                    crate::helix_engine::types::SecondaryIndex::Unique(_) => db
-                                        .put_with_flags(
-                                            self.txn,
-                                            PutFlags::NO_OVERWRITE,
-                                            &v_serialized,
-                                            &vector.id,
-                                        )
-                                        .map_err(|_| GraphError::DuplicateKey(k.to_string()))?,
-                                    crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                        db.put(self.txn, &v_serialized, &vector.id)?
-                                    }
-                                    crate::helix_engine::types::SecondaryIndex::None => {
-                                        unreachable!()
-                                    }
-                                }
-                            }
-
-                            let diff: Vec<_> = props
-                                .iter()
-                                .filter(|(k, _)| !old.iter().map(|(old_k, _)| old_k).contains(k))
-                                .cloned()
-                                .collect();
-
-                            // Add secondary indices for NEW properties (not in old)
-                            for (k, v) in &diff {
-                                let Some((db, secondary_index)) =
-                                    self.storage.secondary_indices.get(*k)
-                                else {
-                                    continue;
-                                };
-
-                                let v_serialized = bincode::serialize(v)?;
-                                match secondary_index {
-                                    crate::helix_engine::types::SecondaryIndex::Unique(_) => db
-                                        .put_with_flags(
-                                            self.txn,
-                                            PutFlags::NO_OVERWRITE,
-                                            &v_serialized,
-                                            &vector.id,
-                                        )
-                                        .map_err(|_| GraphError::DuplicateKey(k.to_string()))?,
-                                    crate::helix_engine::types::SecondaryIndex::Index(_) => {
-                                        db.put(self.txn, &v_serialized, &vector.id)?
-                                    }
-                                    crate::helix_engine::types::SecondaryIndex::None => {
-                                        unreachable!()
+                                    // create new secondary indexes for the props changed
+                                    let v_serialized = bincode::serialize(v)?;
+                                    match secondary_index {
+                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                            .put_with_flags(
+                                                self.txn,
+                                                PutFlags::NO_OVERWRITE,
+                                                &v_serialized,
+                                                &vector.id,
+                                            )
+                                            .map_err(|_| GraphError::DuplicateKey(k.to_string()))?,
+                                        crate::helix_engine::types::SecondaryIndex::Index(_) => {
+                                            db.put(self.txn, &v_serialized, &vector.id)?
+                                        }
+                                        crate::helix_engine::types::SecondaryIndex::None => {
+                                            unreachable!()
+                                        }
                                     }
                                 }
+
+                                let diff: Vec<_> = props
+                                    .iter()
+                                    .filter(|(k, _)| {
+                                        !old.iter().map(|(old_k, _)| old_k).contains(k)
+                                    })
+                                    .cloned()
+                                    .collect();
+
+                                // Add secondary indices for NEW properties (not in old)
+                                for (k, v) in &diff {
+                                    let Some((db, secondary_index)) =
+                                        self.storage.secondary_indices.get(*k)
+                                    else {
+                                        continue;
+                                    };
+
+                                    let v_serialized = bincode::serialize(v)?;
+                                    match secondary_index {
+                                        crate::helix_engine::types::SecondaryIndex::Unique(_) => db
+                                            .put_with_flags(
+                                                self.txn,
+                                                PutFlags::NO_OVERWRITE,
+                                                &v_serialized,
+                                                &vector.id,
+                                            )
+                                            .map_err(|_| GraphError::DuplicateKey(k.to_string()))?,
+                                        crate::helix_engine::types::SecondaryIndex::Index(_) => {
+                                            db.put(self.txn, &v_serialized, &vector.id)?
+                                        }
+                                        crate::helix_engine::types::SecondaryIndex::None => {
+                                            unreachable!()
+                                        }
+                                    }
+                                }
+
+                                // find out how many new properties we'll need space for
+                                let len_diff = diff.len();
+
+                                let merged = old
+                                    .iter()
+                                    .map(|(old_k, old_v)| {
+                                        props
+                                            .iter()
+                                            .find_map(|(k, v)| old_k.eq(*k).then_some(v))
+                                            .map_or_else(
+                                                || (old_k, old_v.clone()),
+                                                |v| (old_k, v.clone()),
+                                            )
+                                    })
+                                    .chain(diff);
+
+                                // make new props, updated by current props
+                                let new_map = ImmutablePropertiesMap::new(
+                                    old.len() + len_diff,
+                                    merged,
+                                    self.arena,
+                                );
+
+                                vector.properties = Some(new_map);
                             }
-
-                            // find out how many new properties we'll need space for
-                            let len_diff = diff.len();
-
-                            let merged = old
-                                .iter()
-                                .map(|(old_k, old_v)| {
-                                    props
-                                        .iter()
-                                        .find_map(|(k, v)| old_k.eq(*k).then_some(v))
-                                        .map_or_else(
-                                            || (old_k, old_v.clone()),
-                                            |v| (old_k, v.clone()),
-                                        )
-                                })
-                                .chain(diff);
-
-                            // make new props, updated by current props
-                            let new_map = ImmutablePropertiesMap::new(
-                                old.len() + len_diff,
-                                merged,
-                                self.arena,
-                            );
-
-                            vector.properties = Some(new_map);
                         }
                     }
 
