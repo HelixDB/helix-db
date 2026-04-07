@@ -288,18 +288,10 @@ impl VectorCore {
 
                 neighbor.set_distance(neighbor.distance_to(query)?);
 
-                /*
-                let passes_filters = match filter {
-                    Some(filter_slice) => filter_slice.iter().all(|f| f(&neighbor, txn)),
-                    None => true,
-                };
-
-                if passes_filters {
-                    result.push(neighbor);
-                }
-                */
-
-                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, txn)) {
+                if filter
+                    .as_ref()
+                    .map_or(true, |f| f.iter().all(|f| f(&neighbor, txn)))
+                {
                     result.push(neighbor);
                 }
             }
@@ -458,7 +450,7 @@ impl VectorCore {
             let (key, _) = result?;
 
             // Extract id from the key: v: (2 bytes) + id (16 bytes) + level (8 bytes)
-            if key.len() < VECTOR_PREFIX.len() + 16 {
+            if key.len() < VECTOR_PREFIX.len() + 16 + 8 {
                 continue; // Skip malformed keys
             }
 
@@ -505,6 +497,10 @@ impl HNSW for VectorCore {
         'db: 'arena,
         'arena: 'txn,
     {
+        if query.is_empty() {
+            return Err(VectorError::InvalidVectorData);
+        }
+
         let query = HVector::from_slice(label, 0, query);
         // let temp_arena = bumpalo::Bump::new();
 
@@ -572,6 +568,10 @@ impl HNSW for VectorCore {
         'db: 'arena,
         'arena: 'txn,
     {
+        if data.is_empty() {
+            return Err(VectorError::InvalidVectorData);
+        }
+
         let new_level = self.get_new_level();
 
         let mut query = HVector::from_slice(label, 0, data);
@@ -597,7 +597,7 @@ impl HNSW for VectorCore {
             let mut nearest =
                 self.search_level::<F>(txn, label, &query, &mut curr_ep, 1, level, None, arena)?;
             curr_ep = nearest.pop().ok_or(VectorError::VectorCoreError(
-                "emtpy search result".to_string(),
+                "empty search result".to_string(),
             ))?;
         }
 
@@ -613,7 +613,7 @@ impl HNSW for VectorCore {
                 arena,
             )?;
             curr_ep = *nearest.peek().ok_or(VectorError::VectorCoreError(
-                "emtpy search result".to_string(),
+                "empty search result".to_string(),
             ))?;
 
             let neighbors =

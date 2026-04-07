@@ -772,7 +772,7 @@ fn test_upsert_v_creates_new_vector_when_none_exists() {
 }
 
 #[test]
-fn test_upsert_v_creates_vector_with_default_data_when_none_provided() {
+fn test_upsert_v_rejects_empty_vector_data() {
     let (_temp_dir, storage) = setup_test_db();
     let arena = Bump::new();
     let mut txn = storage.graph_env.write_txn().unwrap();
@@ -784,21 +784,9 @@ fn test_upsert_v_creates_vector_with_default_data_when_none_provided() {
         &arena,
     )
     .upsert_v(&[], "placeholder", &[("status", Value::from("pending"))])
-    .collect::<Result<Vec<_>, _>>()
-    .unwrap();
+    .collect::<Result<Vec<_>, _>>();
 
-    assert_eq!(result.len(), 1);
-    if let TraversalValue::Vector(vector) = &result[0] {
-        assert_eq!(vector.label, "placeholder");
-        assert!(vector.data.is_empty()); // Default empty data
-        assert_eq!(
-            vector.get_property("status").unwrap(),
-            &Value::from("pending")
-        );
-    } else {
-        panic!("Expected vector");
-    }
-    txn.commit().unwrap();
+    assert!(result.is_err());
 }
 
 #[test]
