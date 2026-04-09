@@ -656,6 +656,15 @@ pub(crate) fn apply_graph_step<'a>(
             {
                 generate_error!(ctx, original_query, sv.loc.clone(), E103, ty.as_str());
             }
+            if sv.pre_filter.is_some() {
+                generate_error!(
+                    ctx,
+                    original_query,
+                    sv.loc.clone(),
+                    E601,
+                    "PREFILTER is only supported on root SearchV calls, not graph-step SearchV"
+                );
+            }
             let vec = match &sv.data {
                 Some(VectorData::Vector(v)) => {
                     VecData::Standard(GeneratedValue::Literal(GenRef::Ref(format!(
