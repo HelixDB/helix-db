@@ -1,58 +1,12 @@
-# name: CLI Tests
+name: CLI Tests
 
-# on:
-#   pull_request:
-#     branches: [main, dev]
-#     paths:
-#       - 'helix-cli/**'
-#       - 'helix-macros/**'
-#       - 'helix-container/**'
-#       - 'helix-db/**'
-#       - 'Cargo.toml'
-#       - 'Cargo.lock'
+on:
+  workflow_dispatch:
 
-# env:
-#   CARGO_TERM_COLOR: always
-#   RUST_BACKTRACE: 1
-
-# jobs:
-#   test:
-#     name: Test (${{ matrix.os }})
-#     runs-on: ${{ matrix.os }}
-#     strategy:
-#       fail-fast: false
-#       matrix:
-#         os: [ubuntu-latest, macos-latest, windows-latest]
-
-#     steps:
-#       - name: Checkout repository
-#         uses: actions/checkout@v4
-
-#       - name: Setup Rust toolchain
-#         uses: dtolnay/rust-toolchain@stable
-
-#       - name: Cache cargo registry
-#         uses: actions/cache@v4
-#         with:
-#           path: |
-#             ~/.cargo/registry
-#             ~/.cargo/git
-#             target
-#           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-#           restore-keys: |
-#             ${{ runner.os }}-cargo-
-
-#       - name: Run helix-cli unit tests
-#         run: cargo test --release --package helix-cli
-#         env:
-#           # Use a unique temp directory for test isolation
-#           HELIX_CACHE_DIR: ${{ runner.temp }}/helix-test-cache-${{ github.run_id }}
-
-#       - name: Run helix-macros tests
-#         run: cargo test --release --package helix-macros
-
-#       # Integration tests that require repo cloning run serially
-#       - name: Run helix-cli integration tests (ignored tests)
-#         run: cargo test --release --package helix-cli -- --ignored --test-threads=1
-#         env:
-#           HELIX_CACHE_DIR: ${{ runner.temp }}/helix-test-cache-ignored-${{ github.run_id }}
+jobs:
+  noop:
+    name: Workflow Placeholder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder
+        run: echo "CLI tests workflow is valid and can be enabled for pull_request when ready."
