@@ -1044,6 +1044,21 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_parse_vector_search_with_prefilter() {
+        let source = r#"
+            V::Document { content: String, category: String, embedding: [F32] }
+
+            QUERY searchSimilar(queryVec: [F32]) =>
+                docs <- SearchV<Document>(queryVec, 10)::PREFILTER(_::{category}::EQ("tech"))
+                RETURN docs
+        "#;
+
+        let content = write_to_temp_file(vec![source]);
+        let result = HelixParser::parse_source(&content);
+        assert!(result.is_ok());
+    }
+
     // ============================================================================
     // Assignment Tests
     // ============================================================================

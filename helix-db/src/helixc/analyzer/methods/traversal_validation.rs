@@ -14,7 +14,8 @@ use crate::{
             errors::push_query_err,
             methods::{
                 exclude_validation::validate_exclude, graph_step_validation::apply_graph_step,
-                infer_expr_type::infer_expr_type, object_validation::validate_object,
+                infer_expr_type::{build_search_vector_pre_filter, infer_expr_type},
+                object_validation::validate_object,
             },
             types::{AggregateInfo, Type},
             utils::{
@@ -639,56 +640,16 @@ pub(crate) fn validate_traversal<'a>(
                 }
             };
 
-            // let pre_filter: Option<Vec<BoExp>> = match &sv.pre_filter {
-            //     Some(expr) => {
-            //         let (_, stmt) = infer_expr_type(
-            //             ctx,
-            //             expr,
-            //             scope,
-            //             original_query,
-            //             Some(Type::Vector(sv.vector_type.clone())),
-            //             gen_query,
-            //         );
-            //         // Where/boolean ops don't change the element type,
-            //         // so `cur_ty` stays the same.
-            //         assert!(stmt.is_some());
-            //         let stmt = stmt.unwrap();
-            //         let mut gen_traversal = GeneratedTraversal {
-            //             traversal_type: TraversalType::NestedFrom(GenRef::Std("v".to_string())),
-            //             steps: vec![],
-            //             should_collect: ShouldCollect::ToVec,
-            //             source_step: Separator::Empty(SourceStep::Anonymous),
-            //         };
-            //         match stmt {
-            //             GeneratedStatement::Traversal(tr) => {
-            //                 gen_traversal
-            //                     .steps
-            //                     .push(Separator::Period(GeneratedStep::Where(Where::Ref(
-            //                         WhereRef {
-            //                             expr: BoExp::Expr(tr),
-            //                         },
-            //                     ))));
-            //             }
-            //             GeneratedStatement::BoExp(expr) => {
-            //                 gen_traversal
-            //                     .steps
-            //                     .push(Separator::Period(GeneratedStep::Where(match expr {
-            //                         BoExp::Exists(mut traversal) => {
-            //                             traversal.should_collect = ShouldCollect::No;
-            //                             Where::Ref(WhereRef {
-            //                                 expr: BoExp::Exists(traversal),
-            //                             })
-            //                         }
-            //                         _ => Where::Ref(WhereRef { expr }),
-            //                     })));
-            //             }
-            //             _ => unreachable!(),
-            //         }
-            //         Some(vec![BoExp::Expr(gen_traversal)])
-            //     }
-            //     None => None,
-            // };
-            let pre_filter = None;
+            let pre_filter = sv.pre_filter.as_ref().and_then(|expr| {
+                build_search_vector_pre_filter(
+                    ctx,
+                    expr,
+                    scope,
+                    original_query,
+                    sv.vector_type.clone(),
+                    gen_query,
+                )
+            });
 
             gen_traversal.traversal_type = TraversalType::Ref;
             gen_traversal.should_collect = ShouldCollect::ToVec;
