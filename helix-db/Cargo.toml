@@ -21,7 +21,7 @@ inventory = "0.3.16"
 twox-hash = "2.1.0"
 heed3 = "0.22.0"
 uuid = { version = "1.12.1", features = ["serde", "v4", "v6", "fast-rng"] }
-rand = "0.9.0"
+rand = "0.9.3"
 chrono = "0.4.39"
 flume = { version = "0.12.0", default-features = false, features = [
     "async",
@@ -62,7 +62,7 @@ sha2 = "0.10"
 subtle = "2.5"
 
 [dev-dependencies]
-rand = "0.9.0"
+rand = "0.9.3"
 lazy_static = "1.4.0"
 num_cpus = "1.17"     # TODO: write ourselves
 proptest = "1.4"

@@ -8,7 +8,7 @@ helix-db = { path = "../helix-db" }
 helix-macros = { path = "../helix-macros" }
 
 inventory = "0.3.16"
-rand = "0.9.1"
+rand = "0.9.3"
 dirs = "5.0.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
