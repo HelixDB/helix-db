@@ -5,7 +5,7 @@ edition = "2024"
 description = "HelixDB is a powerful, open-source, graph-vector database built in Rust for intelligent data storage for RAG and AI."
 license = "AGPL-3.0"
 authors = ["HelixDB Team"]
-repository = "https://github.com/HelixDB/helix-db"
+repository = "https://github.com/CloudForge-Solutions/openhelix"
 
 [dependencies]
 # HelixDB dependencies

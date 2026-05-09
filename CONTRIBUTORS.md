@@ -8,7 +8,7 @@ We welcome contributions from the community! This guide will help you get starte
 ## How to Contribute
 
 ### Reporting Issues
-- Check existing [GitHub Issues](https://github.com/HelixDB/helix-db/issues) to avoid duplicates
+- Check existing [GitHub Issues](https://github.com/CloudForge-Solutions/openhelix/issues) to avoid duplicates
 - Use a clear, descriptive title
 - Include steps to reproduce for bugs
 - Provide system information (OS, Rust version, HelixDB version)
@@ -60,7 +60,7 @@ We welcome contributions from the community! This guide will help you get starte
 ### Building the Project
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/HelixDB/helix-db.git
+   git clone https://github.com/CloudForge-Solutions/openhelix.git
    cd helix-db
    ```
 
@@ -358,7 +358,7 @@ cargo test --benches
 
 ### Getting Help
 - **Discord**: Join our [Discord community](https://discord.gg/2stgMPr5BD) for real-time discussions, questions, and support
-- **GitHub Issues**: Report bugs or request features at [github.com/HelixDB/helix-db/issues](https://github.com/HelixDB/helix-db/issues)
+- **GitHub Issues**: Report bugs or request features at [github.com/CloudForge-Solutions/openhelix/issues](https://github.com/CloudForge-Solutions/openhelix/issues)
 - **Documentation**: Check [docs.helix-db.com](https://docs.helix-db.com) for comprehensive guides
 - **Twitter/X**: Follow [@helixdb](https://x.com/helixdb) for updates and announcements
 

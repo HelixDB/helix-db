@@ -15,7 +15,7 @@
 //
 // For more information on how to write queries,
 // see the documentation at https://docs.helix-db.com
-// or checkout our GitHub at https://github.com/HelixDB/helix-db
+// or checkout our GitHub at https://github.com/CloudForge-Solutions/openhelix
 
 
 N::User {}

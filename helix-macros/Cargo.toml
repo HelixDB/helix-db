@@ -3,7 +3,7 @@ name = "helix-macros"
 version = "0.1.7"
 edition = "2024"
 authors = ["HelixDB Team"]
-repository = "https://github.com/HelixDB/helix-db"
+repository = "https://github.com/CloudForge-Solutions/openhelix"
 license = "AGPL-3.0"
 description = "Proc macros for HelixDB"
 
