@@ -26,11 +26,12 @@ pub use memory::{
     SimpleTokenCounter, TokenCounter, Transition, TransitionTrigger,
 };
 pub use objects::{
-    Author, Blob, Commit, CommitMetadata, CommitSource, MemoryScope, ObjectId, ObjectStore,
+    Author, Blob, Commit, CommitMetadata, CommitSource, MemoryScope, ObjectId, ObjectStore, Tag,
     Tree, TreeEntry,
 };
 pub use store::{MessageIndexEntry, SessionStore};
 pub use types::{
-    Content, ContentPart, Manifest, MemoryItem, MemoryQuery, MemoryTier, MemoryType, Message,
-    Operation, OperationQuery, OperationType, Role, SessionMetadata, SessionSummary,
+    Content, ContentPart, Manifest, MemoryId, MemoryItem, MemoryQuery, MemoryTier, MemoryType,
+    Message, Operation, OperationQuery, OperationType, Role, SessionId, SessionMetadata,
+    SessionSummary,
 };
