@@ -39,6 +39,7 @@ indexmap = { version = "2.7", features = ["serde"] }
 # memst integration: tiered memory management & file/session store
 blake3 = "1.5"
 fs2 = "0.4"
+serde_json = "1.0"
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }
