@@ -22,7 +22,7 @@ twox-hash = "2.1.0"
 heed3 = "0.22.0"
 uuid = { version = "1.12.1", features = ["serde", "v4", "v6", "fast-rng"] }
 rand = "0.9.0"
-chrono = "0.4.39"
+chrono = { version = "0.4.39", features = ["serde"] }
 flume = { version = "0.12.0", default-features = false, features = [
     "async",
     "select",
@@ -35,6 +35,10 @@ mimalloc = "0.1.48"
 bumpalo = { version = "3.19.0", features = ["collections", "boxed", "serde"] }
 bytemuck = "1.24.0"
 indexmap = { version = "2.7", features = ["serde"] }
+
+# memst integration: tiered memory management & file/session store
+blake3 = "1.5"
+fs2 = "0.4"
 
 # compiler dependencies
 pest = { version = "2.7", optional = true }
