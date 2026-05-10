@@ -229,6 +229,23 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Branch an instance's database
+    Branch {
+        /// Source instance to branch from
+        source: String,
+
+        /// New branch name (also used as new instance name if deployed)
+        branch_name: String,
+
+        /// Automatically deploy a new instance with the branched data
+        #[arg(short, long)]
+        deploy: bool,
+
+        /// Port for the new instance (only used with --deploy)
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
+
     /// Send feedback to the Helix team
     Feedback {
         /// Feedback message (opens interactive prompt if not provided)
@@ -445,6 +462,12 @@ async fn main() -> Result<()> {
                     .await
             }
             Commands::Backup { instance, output } => commands::backup::run(output, instance).await,
+            Commands::Branch {
+                source,
+                branch_name,
+                deploy,
+                port,
+            } => commands::branch::run(source, branch_name, deploy, port).await,
             Commands::Feedback { message } => commands::feedback::run(message).await,
         },
     };
