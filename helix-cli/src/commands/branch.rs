@@ -1,3 +1,4 @@
+use crate::cleanup::CleanupTracker;
 use crate::output::{Operation, Step, Verbosity};
 use crate::project::ProjectContext;
 use crate::utils::{print_confirm, print_instructions, print_warning};
@@ -121,6 +122,11 @@ pub async fn run(
 
     Step::verbose_substep(&format!("Copying {:?} → {:?}", &data_file, &branch_volumes_dir));
 
+    // Note: LMDB environments consist of two files: data.mdb and lock.mdb.
+    // heed3::Env::copy_to_path naturally copies the data file with an atomic snapshot 
+    // and inherently skips lock.mdb since the destination doesn't need the source's lock state.
+    // When the destination environment is subsequently opened, LMDB safely auto-generates 
+    // a fresh lock.mdb matching the destination.
     env.copy_to_path(branch_data_file, CompactionOption::Disabled)?;
 
     copy_step.done();
@@ -128,15 +134,34 @@ pub async fn run(
     let mut deployed_port = None;
 
     if deploy {
+        let mut cleanup_tracker = CleanupTracker::new();
+
         let mut config_step = Step::with_messages(
             &format!("Configuring new instance '{}'", branch_name), 
             "Instance configured successfully"
         );
         config_step.start();
 
+        let config_path = project.root.join("helix.toml");
+        cleanup_tracker.backup_config(&project.config, config_path.clone());
+
         let source_db_config = project.config.get_instance(&source)?.db_config().clone();
         
-        let branch_port = port.or(Some(6969));
+        let branch_port = port.or_else(|| {
+            // Find an unused port starting from 6969 to avoid collision
+            let mut p = 6969;
+            let mut used_ports = std::collections::HashSet::new();
+            for instance in project.config.local.values() {
+                if let Some(port) = instance.port {
+                    used_ports.insert(port);
+                }
+            }
+            while used_ports.contains(&p) {
+                p += 1;
+            }
+            Some(p)
+        });
+        
         deployed_port = branch_port;
 
         let mut new_config = project.config.clone();
@@ -150,7 +175,7 @@ pub async fn run(
         );
 
         project.config = new_config; // update project config
-        project.config.save_to_file(&project.root.join("helix.toml"))?;
+        project.config.save_to_file(&config_path)?;
 
         config_step.done();
 
@@ -159,10 +184,18 @@ pub async fn run(
         let metrics_sender = crate::metrics_sender::MetricsSender::new()?;
         
         // Build instance
-        crate::commands::build::run(Some(branch_name.clone()), None, &metrics_sender).await?;
+        if let Err(e) = crate::commands::build::run(Some(branch_name.clone()), None, &metrics_sender).await {
+            op.failure();
+            cleanup_tracker.cleanup().log_summary();
+            return Err(e);
+        }
         
         // Start instance
-        crate::commands::start::run(Some(branch_name.clone())).await?;
+        if let Err(e) = crate::commands::start::run(Some(branch_name.clone())).await {
+            op.failure();
+            cleanup_tracker.cleanup().log_summary();
+            return Err(e);
+        }
     }
 
     op.success();
