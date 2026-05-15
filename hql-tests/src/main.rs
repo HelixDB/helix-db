@@ -606,6 +606,12 @@ async fn process_test_directory(
     if cargo_toml_src.exists() {
         // Read the Cargo.toml and remove hql-tests from workspace members
         let cargo_content = fs::read_to_string(&cargo_toml_src).await?;
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
         let modified_content = cargo_content.replace("    \"hql-tests\",\n", "");
         fs::write(&cargo_toml_dst, modified_content).await?;
     }
