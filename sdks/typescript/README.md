@@ -1,13 +1,13 @@
-# @helixdb/enterprise-ql
+# @helix-db/helix-db
 
-TypeScript query DSL for Helix Enterprise. This package builds the same JSON AST shape as the Rust `helix-enterprise-ql` crate.
+TypeScript query DSL for HelixDB. This package builds the same JSON AST shape as the Rust `helix-db` crate.
 
 The compatibility target is structural JSON equality with the Rust DSL. Object formatting and key order are not part of the contract, but enum tags, field names, omitted fields, explicit `null` fields, bundle metadata, and dynamic request payloads are intended to match Rust serde output.
 
 ## Quick Start
 
 ```ts
-import { defineParams, g, param, readBatch } from "@helixdb/enterprise-ql";
+import { defineParams, g, param, readBatch } from "@helix-db/helix-db";
 
 const params = defineParams({
   tenantId: param.string(),

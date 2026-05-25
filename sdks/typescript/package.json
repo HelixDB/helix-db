@@ -1,7 +1,7 @@
 {
   "name": "@helix-db/helix-db",
   "version": "2.0.0",
-  "description": "TypeScript library for working with  HelixDB",
+  "description": "TypeScript library for working with HelixDB",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
