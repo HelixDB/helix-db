@@ -1,5 +1,5 @@
 use crate::config::InstanceInfo;
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::output::Operation;
 use crate::project::ProjectContext;
 use crate::prompts;
@@ -15,7 +15,7 @@ pub async fn run(instance: Option<String>) -> Result<()> {
         return Err(eyre!("'{instance}' is not a local v2 instance"));
     }
     let op = Operation::new("Stopping", &instance);
-    if LocalRuntime::new(&project).stop(&instance)? {
+    if Runtime::for_project(&project).stop(&instance)? {
         op.success();
     } else {
         crate::output::info(&format!("Instance '{instance}' was not running"));

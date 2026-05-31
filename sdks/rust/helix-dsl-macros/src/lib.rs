@@ -294,13 +294,12 @@ fn parse_param_type(ty: &Type) -> syn::Result<ParamTypeSpec> {
         }
         "Vec" => {
             let inner = single_type_arg(segment, ty)?;
-            if let Type::Path(inner_path) = inner {
-                if let Some(inner_seg) = inner_path.path.segments.last() {
-                    if inner_seg.ident == "u8" && matches!(inner_seg.arguments, PathArguments::None)
-                    {
-                        return Ok(ParamTypeSpec::Bytes);
-                    }
-                }
+            if let Type::Path(inner_path) = inner
+                && let Some(inner_seg) = inner_path.path.segments.last()
+                && inner_seg.ident == "u8"
+                && matches!(inner_seg.arguments, PathArguments::None)
+            {
+                return Ok(ParamTypeSpec::Bytes);
             }
             Ok(ParamTypeSpec::Array(Box::new(parse_param_type(inner)?)))
         }

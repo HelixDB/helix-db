@@ -1,7 +1,7 @@
 use crate::commands::auth::require_auth;
 use crate::config::InstanceInfo;
 use crate::enterprise_cloud::cloud_base_url;
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::project::ProjectContext;
 use crate::prompts;
 use chrono::{DateTime, Duration, Utc};
@@ -34,7 +34,7 @@ pub async fn run(
                     "--range, --start, and --end are only supported for Enterprise logs; local logs use docker/podman logs"
                 ));
             }
-            LocalRuntime::new(&project).logs(&instance, follow)?;
+            Runtime::for_project(&project).logs(&instance, follow)?;
         }
         InstanceInfo::Enterprise(config) => {
             if follow {

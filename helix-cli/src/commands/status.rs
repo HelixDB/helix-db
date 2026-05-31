@@ -1,5 +1,5 @@
 use crate::config::InstanceInfo;
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::project::ProjectContext;
 use crate::prompts::{self, StatusSelection};
 use crate::utils::{print_field, print_header, print_newline};
@@ -13,7 +13,7 @@ pub async fn run(instance: Option<String>) -> Result<()> {
     print_field("Root", &project.root.display().to_string());
     print_newline();
 
-    let runtime = LocalRuntime::new(&project);
+    let runtime = Runtime::for_project(&project);
     print_header("Instances");
     match resolve_status_selection(&project, instance)? {
         StatusSelection::All => {
@@ -21,7 +21,9 @@ pub async fn run(instance: Option<String>) -> Result<()> {
                 print_instance(&project, &runtime, name)?;
             }
         }
-        StatusSelection::Instance(instance) => print_instance(&project, &runtime, &instance)?,
+        StatusSelection::Instance(instance) => {
+            print_instance(&project, &runtime, &instance)?
+        }
     }
 
     Ok(())
@@ -41,7 +43,7 @@ fn resolve_status_selection(
     Ok(StatusSelection::All)
 }
 
-fn print_instance(project: &ProjectContext, runtime: &LocalRuntime, name: &str) -> Result<()> {
+fn print_instance(project: &ProjectContext, runtime: &Runtime, name: &str) -> Result<()> {
     match project.config.get_instance(name)? {
         InstanceInfo::Local(config) => {
             let status = runtime.status(name)?;

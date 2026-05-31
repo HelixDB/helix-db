@@ -1,5 +1,5 @@
 use crate::config::InstanceInfo;
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::output::Operation;
 use crate::project::ProjectContext;
 use crate::utils::{print_confirm, print_warning};
@@ -24,7 +24,7 @@ pub async fn run(instance: String, yes: bool) -> Result<()> {
 
     let op = Operation::new("Deleting", &instance);
     if matches!(info, InstanceInfo::Local(_)) {
-        let _ = LocalRuntime::new(&project).prune_instance(&instance);
+        let _ = Runtime::for_project(&project).prune(&instance);
     }
 
     project.config.local.remove(&instance);

@@ -1,5 +1,5 @@
 use crate::config::{InstanceInfo, LocalStorageMode};
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::output::{Operation, Verbosity};
 use crate::project::ProjectContext;
 use crate::prompts;
@@ -36,18 +36,18 @@ pub async fn run(
     }
 
     project.ensure_instance_dir(&instance)?;
-    let runtime = LocalRuntime::new(&project);
+    let runtime = Runtime::for_project(&project);
     if foreground {
         crate::output::info("Running in foreground. Press Ctrl-C to stop.");
-        runtime.run_foreground(&instance, &config).await?;
+        runtime.start_foreground(&instance, &config).await?;
         op.success();
     } else {
-        runtime.run_detached(&instance, &config)?;
+        runtime.start(&instance, &config)?;
         op.success();
         if Verbosity::current().show_normal() {
             Operation::print_details(&[
                 ("URL", &format!("http://localhost:{}", config.port)),
-                ("Container", &runtime.container_name(&instance)),
+                ("Container", &runtime.display_name(&instance)),
             ]);
         }
     }

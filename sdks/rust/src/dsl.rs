@@ -1431,21 +1431,25 @@ impl Expr {
     }
 
     /// Addition: self + other
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Expr) -> Self {
         Expr::Add(Box::new(self), Box::new(other))
     }
 
     /// Subtraction: self - other
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, other: Expr) -> Self {
         Expr::Sub(Box::new(self), Box::new(other))
     }
 
     /// Multiplication: self * other
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, other: Expr) -> Self {
         Expr::Mul(Box::new(self), Box::new(other))
     }
 
     /// Division: self / other
+    #[allow(clippy::should_implement_trait)]
     pub fn div(self, other: Expr) -> Self {
         Expr::Div(Box::new(self), Box::new(other))
     }
@@ -1456,6 +1460,7 @@ impl Expr {
     }
 
     /// Negation: -self
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(self) -> Self {
         Expr::Neg(Box::new(self))
     }
@@ -1914,6 +1919,7 @@ impl Predicate {
     }
 
     /// Negate a predicate
+    #[allow(clippy::should_implement_trait)]
     pub fn not(predicate: Predicate) -> Self {
         Predicate::Not(Box::new(predicate))
     }
@@ -2046,24 +2052,20 @@ impl From<ExprProjection> for Projection {
 }
 
 /// Sort order for ordering steps
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Order {
     /// Ascending order (smallest first)
+    #[default]
     Asc,
     /// Descending order (largest first)
     Desc,
 }
 
-impl Default for Order {
-    fn default() -> Self {
-        Order::Asc
-    }
-}
-
 /// Emit behavior for repeat steps
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EmitBehavior {
     /// Don't emit intermediate results.
+    #[default]
     None,
     /// Emit the current node stream before each repeat iteration.
     Before,
@@ -2071,12 +2073,6 @@ pub enum EmitBehavior {
     After,
     /// Emit both before and after each repeat iteration.
     All,
-}
-
-impl Default for EmitBehavior {
-    fn default() -> Self {
-        EmitBehavior::None
-    }
 }
 
 /// Aggregation function for reduce operations

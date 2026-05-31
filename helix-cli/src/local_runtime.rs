@@ -5,8 +5,9 @@ use crate::project::ProjectContext;
 use eyre::{Result, eyre};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Output, Stdio};
-use std::thread;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::{fs, thread};
 use std::time::{Duration, Instant};
 use tokio::process::Command as TokioCommand;
 
@@ -20,17 +21,100 @@ const LOCAL_S3_REGION: &str = "us-east-1";
 const LOCAL_DB_PATH: &str = "db/";
 
 #[derive(Debug, Clone)]
-pub struct LocalRuntime {
-    runtime: ContainerRuntime,
-    project_name: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct LocalStatus {
     pub instance_name: String,
     pub container_name: String,
     pub status: String,
     pub ports: String,
+}
+
+// ---------------------------------------------------------------------------
+// Enum-based runtime dispatch
+// ---------------------------------------------------------------------------
+
+pub enum Runtime<'a> {
+    Container(LocalRuntime),
+    Native(NativeManager<'a>),
+}
+
+impl<'a> Runtime<'a> {
+    pub fn for_project(project: &'a ProjectContext) -> Self {
+        if project.config.project.container_runtime.is_native() {
+            Self::Native(NativeManager::new(project))
+        } else {
+            Self::Container(LocalRuntime::new(project))
+        }
+    }
+
+    pub async fn start_foreground(
+        &self,
+        instance_name: &str,
+        config: &LocalInstanceConfig,
+    ) -> Result<()> {
+        match self {
+            Self::Container(r) => r.start_foreground(instance_name, config).await,
+            Self::Native(r) => r.start_foreground(instance_name, config).await,
+        }
+    }
+
+    pub fn start(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
+        match self {
+            Self::Container(r) => r.start(instance_name, config),
+            Self::Native(r) => r.start(instance_name, config),
+        }
+    }
+
+    pub fn stop(&self, instance_name: &str) -> Result<bool> {
+        match self {
+            Self::Container(r) => r.stop(instance_name),
+            Self::Native(r) => r.stop(instance_name),
+        }
+    }
+
+    pub fn restart(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
+        match self {
+            Self::Container(r) => r.restart(instance_name, config),
+            Self::Native(r) => r.restart(instance_name, config),
+        }
+    }
+
+    pub fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
+        match self {
+            Self::Container(r) => r.logs(instance_name, follow),
+            Self::Native(r) => r.logs(instance_name, follow),
+        }
+    }
+
+    pub fn status(&self, instance_name: &str) -> Result<Option<LocalStatus>> {
+        match self {
+            Self::Container(r) => r.status(instance_name),
+            Self::Native(r) => r.status(instance_name),
+        }
+    }
+
+    pub fn prune(&self, instance_name: &str) -> Result<bool> {
+        match self {
+            Self::Container(r) => r.prune(instance_name),
+            Self::Native(r) => r.prune(instance_name),
+        }
+    }
+
+    pub fn display_name(&self, instance_name: &str) -> String {
+        match self {
+            Self::Container(r) => r.display_name(instance_name),
+            Self::Native(r) => r.display_name(instance_name),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Container-based runtime (Docker / Podman)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LocalRuntime {
+    runtime: ContainerRuntime,
+    project_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +160,7 @@ impl LocalRuntime {
         format!("helix-{}-{}", self.project_name, instance_name)
     }
 
-    pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
+    fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
         self.pull_image_ref(&config.image_ref())
     }
 
@@ -105,201 +189,6 @@ impl LocalRuntime {
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
-    }
-
-    pub fn run_detached(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
-        Self::check_available(self.runtime)?;
-        self.pull_image(config)?;
-
-        let name = self.container_name(instance_name);
-        let image = config.image_ref();
-        let _ = self.remove_container(&name);
-        let disk_resources = if config.storage.is_disk() {
-            Some(self.start_disk_dependencies(instance_name)?)
-        } else {
-            let _ = self.remove_disk_resources(instance_name, false);
-            None
-        };
-
-        let args = helix_run_args(&name, &image, config.port, true, disk_resources.as_ref());
-        let output = Command::new(self.runtime.binary())
-            .args(&args)
-            .output()
-            .map_err(|e| eyre!("Failed to start {name}: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eyre!("Failed to start {name}:\n{stderr}"));
-        }
-
-        self.wait_ready(config.port)?;
-        Ok(())
-    }
-
-    pub async fn run_foreground(
-        &self,
-        instance_name: &str,
-        config: &LocalInstanceConfig,
-    ) -> Result<()> {
-        Self::check_available(self.runtime)?;
-        self.pull_image(config)?;
-
-        let name = self.container_name(instance_name);
-        let image = config.image_ref();
-        let _ = self.remove_container(&name);
-        let disk_resources = if config.storage.is_disk() {
-            Some(self.start_disk_dependencies(instance_name)?)
-        } else {
-            let _ = self.remove_disk_resources(instance_name, false);
-            None
-        };
-        let args = helix_run_args(&name, &image, config.port, false, disk_resources.as_ref());
-
-        let mut child = TokioCommand::new(self.runtime.binary())
-            .args(&args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| eyre!("Failed to run {name}: {e}"))?;
-
-        let mut wait = Box::pin(child.wait());
-        tokio::select! {
-            status = &mut wait => {
-                let status = status?;
-                if !status.success() {
-                    if config.storage.is_disk() {
-                        let _ = self.remove_disk_resources(instance_name, false);
-                    }
-                    return Err(eyre!("{name} exited with status {status}"));
-                }
-            }
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                crate::output::info("Stopping foreground local Helix instance");
-                let _ = self.remove_container(&name);
-                if config.storage.is_disk() {
-                    let _ = self.remove_disk_resources(instance_name, false);
-                }
-                match tokio::time::timeout(Duration::from_secs(10), &mut wait).await {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => return Err(eyre!("Failed to wait for {name} to stop: {e}")),
-                    Err(_) => return Err(eyre!("Timed out waiting for {name} to stop")),
-                }
-            }
-        }
-
-        if config.storage.is_disk() {
-            let _ = self.remove_disk_resources(instance_name, false);
-        }
-
-        Ok(())
-    }
-
-    pub fn stop(&self, instance_name: &str) -> Result<bool> {
-        let name = self.container_name(instance_name);
-        let removed_helix = self.remove_container(&name)?;
-        let removed_disk_resources = self.remove_disk_resources(instance_name, false)?;
-        Ok(removed_helix || removed_disk_resources)
-    }
-
-    pub fn restart(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
-        if config.storage.is_disk() {
-            return self.run_detached(instance_name, config);
-        }
-
-        let name = self.container_name(instance_name);
-        let output = Command::new(self.runtime.binary())
-            .args(["restart", &name])
-            .output()
-            .map_err(|e| eyre!("Failed to restart {name}: {e}"))?;
-
-        if output.status.success() {
-            self.wait_ready(config.port)?;
-            return Ok(());
-        }
-
-        self.run_detached(instance_name, config)
-    }
-
-    pub fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
-        let name = self.container_name(instance_name);
-        let mut command = Command::new(self.runtime.binary());
-        command.arg("logs");
-        if follow {
-            command.arg("-f");
-        }
-        command.arg(&name);
-        let status = command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .map_err(|e| eyre!("Failed to read logs for {name}: {e}"))?;
-
-        if !status.success() {
-            return Err(eyre!(
-                "{} logs exited with status {status}",
-                self.runtime.binary()
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn status(&self, instance_name: &str) -> Result<Option<LocalStatus>> {
-        let name = self.container_name(instance_name);
-        let output = Command::new(self.runtime.binary())
-            .args([
-                "ps",
-                "-a",
-                "--format",
-                "{{.Names}}\t{{.Status}}\t{{.Ports}}",
-                "--filter",
-                &format!("name=^{name}$"),
-            ])
-            .output()
-            .map_err(|e| eyre!("Failed to inspect {name}: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eyre!("Failed to inspect {name}:\n{stderr}"));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let Some(line) = stdout.lines().find(|line| !line.trim().is_empty()) else {
-            return Ok(None);
-        };
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
-            return Ok(None);
-        }
-
-        Ok(Some(LocalStatus {
-            instance_name: instance_name.to_string(),
-            container_name: parts[0].to_string(),
-            status: parts[1].to_string(),
-            ports: parts[2].to_string(),
-        }))
-    }
-
-    pub fn prune_instance(&self, instance_name: &str) -> Result<bool> {
-        let name = self.container_name(instance_name);
-        let removed_helix = self.remove_container(&name)?;
-        let removed_disk_resources = self.remove_disk_resources(instance_name, true)?;
-        Ok(removed_helix || removed_disk_resources)
-    }
-
-    pub fn run_command(&self, args: &[&str]) -> Result<Output> {
-        Command::new(self.runtime.binary())
-            .args(args)
-            .output()
-            .map_err(|e| {
-                eyre!(
-                    "Failed to run {} {}: {e}",
-                    self.runtime.binary(),
-                    args.join(" ")
-                )
-            })
     }
 
     fn disk_resources(&self, instance_name: &str) -> DiskRuntimeResources {
@@ -468,48 +357,541 @@ impl LocalRuntime {
     }
 
     fn wait_ready(&self, port: u16) -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if self.query_endpoint_ready(port) {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-
-        Err(CliError::new("local Helix did not become ready in time")
-            .with_hint(format!(
-                "check logs with 'helix logs' or verify port {port} is reachable"
-            ))
-            .into())
+        wait_ready(port)
     }
 
-    fn query_endpoint_ready(&self, port: u16) -> bool {
-        let Ok(mut stream) = TcpStream::connect_timeout(
-            &(std::net::Ipv4Addr::LOCALHOST, port).into(),
-            Duration::from_millis(500),
-        ) else {
-            return false;
+    fn start(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
+        Self::check_available(self.runtime)?;
+        self.pull_image(config)?;
+
+        let name = self.container_name(instance_name);
+        let image = config.image_ref();
+        let _ = self.remove_container(&name);
+        let disk_resources = if config.storage.is_disk() {
+            Some(self.start_disk_dependencies(instance_name)?)
+        } else {
+            let _ = self.remove_disk_resources(instance_name, false);
+            None
         };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(750)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(750)));
 
-        let body = r#"{"request_type":"read","query":{"queries":[{"Query":{"name":"readiness","steps":[{"NWhere":{"Eq":["$label",{"String":"__HelixReadiness__"}]}},"Count"],"condition":null}}],"returns":["readiness"]},"parameters":{}}"#;
-        let request = format!(
-            "POST /v1/query HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
+        let args = helix_run_args(&name, &image, config.port, true, disk_resources.as_ref());
+        let output = Command::new(self.runtime.binary())
+            .args(&args)
+            .output()
+            .map_err(|e| eyre!("Failed to start {name}: {e}"))?;
 
-        if stream.write_all(request.as_bytes()).is_err() {
-            return false;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(eyre!("Failed to start {name}:\n{stderr}"));
         }
 
-        let mut response = String::new();
-        if stream.read_to_string(&mut response).is_err() {
-            return false;
-        }
-
-        response.starts_with("HTTP/1.1 2") || response.starts_with("HTTP/1.0 2")
+        self.wait_ready(config.port)?;
+        Ok(())
     }
+
+    async fn start_foreground(
+        &self,
+        instance_name: &str,
+        config: &LocalInstanceConfig,
+    ) -> Result<()> {
+        Self::check_available(self.runtime)?;
+        self.pull_image(config)?;
+
+        let name = self.container_name(instance_name);
+        let image = config.image_ref();
+        let _ = self.remove_container(&name);
+        let disk_resources = if config.storage.is_disk() {
+            Some(self.start_disk_dependencies(instance_name)?)
+        } else {
+            let _ = self.remove_disk_resources(instance_name, false);
+            None
+        };
+        let args = helix_run_args(&name, &image, config.port, false, disk_resources.as_ref());
+
+        let mut child = TokioCommand::new(self.runtime.binary())
+            .args(&args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| eyre!("Failed to run {name}: {e}"))?;
+
+        let mut wait = Box::pin(child.wait());
+        tokio::select! {
+            status = &mut wait => {
+                let status = status?;
+                if !status.success() {
+                    if config.storage.is_disk() {
+                        let _ = self.remove_disk_resources(instance_name, false);
+                    }
+                    return Err(eyre!("{name} exited with status {status}"));
+                }
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                crate::output::info("Stopping foreground local Helix instance");
+                let _ = self.remove_container(&name);
+                if config.storage.is_disk() {
+                    let _ = self.remove_disk_resources(instance_name, false);
+                }
+                match tokio::time::timeout(Duration::from_secs(10), &mut wait).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => return Err(eyre!("Failed to wait for {name} to stop: {e}")),
+                    Err(_) => return Err(eyre!("Timed out waiting for {name} to stop")),
+                }
+            }
+        }
+
+        if config.storage.is_disk() {
+            let _ = self.remove_disk_resources(instance_name, false);
+        }
+
+        Ok(())
+    }
+
+    fn stop(&self, instance_name: &str) -> Result<bool> {
+        let name = self.container_name(instance_name);
+        let removed_helix = self.remove_container(&name)?;
+        let removed_disk_resources = self.remove_disk_resources(instance_name, false)?;
+        Ok(removed_helix || removed_disk_resources)
+    }
+
+    fn restart(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
+        if config.storage.is_disk() {
+            return self.start(instance_name, config);
+        }
+
+        let name = self.container_name(instance_name);
+        let output = Command::new(self.runtime.binary())
+            .args(["restart", &name])
+            .output()
+            .map_err(|e| eyre!("Failed to restart {name}: {e}"))?;
+
+        if output.status.success() {
+            self.wait_ready(config.port)?;
+            return Ok(());
+        }
+
+        self.start(instance_name, config)
+    }
+
+    fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
+        let name = self.container_name(instance_name);
+        let mut command = Command::new(self.runtime.binary());
+        command.arg("logs");
+        if follow {
+            command.arg("-f");
+        }
+        command.arg(&name);
+        let status = command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| eyre!("Failed to read logs for {name}: {e}"))?;
+
+        if !status.success() {
+            return Err(eyre!(
+                "{} logs exited with status {status}",
+                self.runtime.binary()
+            ));
+        }
+        Ok(())
+    }
+
+    fn status(&self, instance_name: &str) -> Result<Option<LocalStatus>> {
+        let name = self.container_name(instance_name);
+        let output = Command::new(self.runtime.binary())
+            .args([
+                "ps",
+                "-a",
+                "--format",
+                "{{.Names}}\t{{.Status}}\t{{.Ports}}",
+                "--filter",
+                &format!("name=^{name}$"),
+            ])
+            .output()
+            .map_err(|e| eyre!("Failed to inspect {name}: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(eyre!("Failed to inspect {name}:\n{stderr}"));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = stdout.lines().find(|line| !line.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            return Ok(None);
+        }
+
+        Ok(Some(LocalStatus {
+            instance_name: instance_name.to_string(),
+            container_name: parts[0].to_string(),
+            status: parts[1].to_string(),
+            ports: parts[2].to_string(),
+        }))
+    }
+
+    fn prune(&self, instance_name: &str) -> Result<bool> {
+        let name = self.container_name(instance_name);
+        let removed_helix = self.remove_container(&name)?;
+        let removed_disk_resources = self.remove_disk_resources(instance_name, true)?;
+        Ok(removed_helix || removed_disk_resources)
+    }
+
+    fn display_name(&self, instance_name: &str) -> String {
+        self.container_name(instance_name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native process-based runtime
+// ---------------------------------------------------------------------------
+
+pub struct NativeManager<'a> {
+    project: &'a ProjectContext,
+}
+
+impl<'a> NativeManager<'a> {
+    pub fn new(project: &'a ProjectContext) -> Self {
+        Self { project }
+    }
+
+    fn pid_file(&self, instance_name: &str) -> PathBuf {
+        self.project
+            .instance_workspace(instance_name)
+            .join("helix.pid")
+    }
+
+    fn log_file(&self, instance_name: &str) -> PathBuf {
+        self.project
+            .instance_workspace(instance_name)
+            .join("helix.log")
+    }
+
+    fn binary_path(&self, instance_name: &str) -> PathBuf {
+        self.project
+            .instance_workspace(instance_name)
+            .join("helix-container")
+            .join("target")
+            .join("release")
+            .join("helix-container")
+    }
+
+    fn save_pid(&self, instance_name: &str, pid: u32) -> Result<()> {
+        let pid_file = self.pid_file(instance_name);
+        if let Some(parent) = pid_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pid_file, pid.to_string())
+            .map_err(|e| eyre!("Failed to write PID file: {e}"))
+    }
+
+    fn read_pid(&self, instance_name: &str) -> Result<Option<u32>> {
+        let pid_file = self.pid_file(instance_name);
+        if !pid_file.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&pid_file)
+            .map_err(|e| eyre!("Failed to read PID file: {e}"))?;
+        let pid = content
+            .trim()
+            .parse::<u32>()
+            .map_err(|e| eyre!("Invalid PID in file: {e}"))?;
+        Ok(Some(pid))
+    }
+
+    fn remove_pid_file(&self, instance_name: &str) {
+        let _ = fs::remove_file(self.pid_file(instance_name));
+    }
+
+    fn remove_log_file(&self, instance_name: &str) {
+        let _ = fs::remove_file(self.log_file(instance_name));
+    }
+
+    fn is_process_running(pid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            PathBuf::from(format!("/proc/{pid}")).exists()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+    }
+
+    fn stop_process(&self, instance_name: &str) -> Result<bool> {
+        let Some(pid) = self.read_pid(instance_name)? else {
+            return Ok(false);
+        };
+
+        if !Self::is_process_running(pid) {
+            self.remove_pid_file(instance_name);
+            return Ok(false);
+        }
+
+        let output = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output()
+            .map_err(|e| eyre!("Failed to send SIGTERM to process {pid}: {e}"))?;
+
+        if !output.status.success() {
+            self.remove_pid_file(instance_name);
+            return Ok(false);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !Self::is_process_running(pid) {
+                self.remove_pid_file(instance_name);
+                return Ok(true);
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .output();
+        self.remove_pid_file(instance_name);
+        Ok(true)
+    }
+
+    fn start(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
+        let binary = self.binary_path(instance_name);
+        if !binary.exists() {
+            return Err(CliError::new(format!(
+                "native binary not found at {}",
+                binary.display()
+            ))
+            .with_hint(format!(
+                "run 'helix build {instance_name}' first to compile the instance"
+            ))
+            .into());
+        }
+
+        let data_dir = self.project.instance_volume(instance_name);
+        fs::create_dir_all(&data_dir)?;
+        let port = config.port;
+
+        let log_file = self.log_file(instance_name);
+        if let Some(parent) = log_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let log = fs::File::create(&log_file)
+            .map_err(|e| eyre!("Failed to create log file: {e}"))?;
+
+        let mut cmd = Command::new(&binary);
+        cmd.env("HELIX_PORT", port.to_string())
+            .env("HELIX_DATA_DIR", &data_dir)
+            .current_dir(&data_dir)
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log));
+
+        if config.storage.is_disk() {
+            cmd.env("S3_BUCKET", LOCAL_S3_BUCKET)
+                .env("S3_REGION", LOCAL_S3_REGION)
+                .env("DB_PATH", LOCAL_DB_PATH);
+        }
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| eyre!("Failed to start native process: {e}"))?;
+
+        self.save_pid(instance_name, child.id())?;
+
+        wait_ready(port)?;
+        Ok(())
+    }
+
+    async fn start_foreground(
+        &self,
+        instance_name: &str,
+        config: &LocalInstanceConfig,
+    ) -> Result<()> {
+        let binary = self.binary_path(instance_name);
+        if !binary.exists() {
+            return Err(CliError::new(format!(
+                "native binary not found at {}",
+                binary.display()
+            ))
+            .with_hint(format!(
+                "run 'helix build {instance_name}' first to compile the instance"
+            ))
+            .into());
+        }
+
+        let data_dir = self.project.instance_volume(instance_name);
+        fs::create_dir_all(&data_dir)?;
+        let port = config.port;
+
+        let mut cmd = TokioCommand::new(&binary);
+        cmd.env("HELIX_PORT", port.to_string())
+            .env("HELIX_DATA_DIR", &data_dir)
+            .current_dir(&data_dir)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        if config.storage.is_disk() {
+            cmd.env("S3_BUCKET", LOCAL_S3_BUCKET)
+                .env("S3_REGION", LOCAL_S3_REGION)
+                .env("DB_PATH", LOCAL_DB_PATH);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| eyre!("Failed to start native process: {e}"))?;
+
+        let mut wait = Box::pin(child.wait());
+        tokio::select! {
+            status = &mut wait => {
+                let status = status?;
+                if !status.success() {
+                    return Err(eyre!("Native process exited with status {status}"));
+                }
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                crate::output::info("Stopping foreground local Helix instance");
+                match tokio::time::timeout(Duration::from_secs(10), &mut wait).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => return Err(eyre!("Failed to wait for process to stop: {e}")),
+                    Err(_) => return Err(eyre!("Timed out waiting for process to stop")),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn stop(&self, instance_name: &str) -> Result<bool> {
+        self.stop_process(instance_name)
+    }
+
+    fn restart(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
+        let _ = self.stop_process(instance_name);
+        self.start(instance_name, config)
+    }
+
+    fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
+        let log_file = self.log_file(instance_name);
+        if !log_file.exists() {
+            return Err(eyre!("No log file found for instance '{instance_name}'"));
+        }
+
+        if follow {
+            let status = Command::new("tail")
+                .args(["-f", &log_file.to_string_lossy()])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map_err(|e| eyre!("Failed to follow logs: {e}"))?;
+
+            if !status.success() {
+                return Err(eyre!("tail exited with status {status}"));
+            }
+        } else {
+            let content = fs::read_to_string(&log_file)
+                .map_err(|e| eyre!("Failed to read log file: {e}"))?;
+            print!("{content}");
+        }
+        Ok(())
+    }
+
+    fn status(&self, instance_name: &str) -> Result<Option<LocalStatus>> {
+        let Some(pid) = self.read_pid(instance_name)? else {
+            return Ok(None);
+        };
+
+        if Self::is_process_running(pid) {
+            let port = self
+                .project
+                .config
+                .local
+                .get(instance_name)
+                .map(|c| c.port)
+                .unwrap_or(0);
+            Ok(Some(LocalStatus {
+                instance_name: instance_name.to_string(),
+                container_name: format!("native-{pid}"),
+                status: "Up (native)".to_string(),
+                ports: format!("0.0.0.0:{port}->8080/tcp"),
+            }))
+        } else {
+            self.remove_pid_file(instance_name);
+            Ok(None)
+        }
+    }
+
+    fn prune(&self, instance_name: &str) -> Result<bool> {
+        let removed = self.stop_process(instance_name)?;
+        self.remove_pid_file(instance_name);
+        self.remove_log_file(instance_name);
+        Ok(removed)
+    }
+
+    fn display_name(&self, instance_name: &str) -> String {
+        match self.read_pid(instance_name) {
+            Ok(Some(pid)) => format!("native process {pid}"),
+            _ => format!("native:{instance_name}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+fn wait_ready(port: u16) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if query_endpoint_ready(port) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    Err(CliError::new("local Helix did not become ready in time")
+        .with_hint(format!(
+            "check logs with 'helix logs' or verify port {port} is reachable"
+        ))
+        .into())
+}
+
+fn query_endpoint_ready(port: u16) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &(std::net::Ipv4Addr::LOCALHOST, port).into(),
+        Duration::from_millis(500),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(750)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(750)));
+
+    let body = r#"{"request_type":"read","query":{"queries":[{"Query":{"name":"readiness","steps":[{"NWhere":{"Eq":["$label",{"String":"__HelixReadiness__"}]}},"Count"],"condition":null}}],"returns":["readiness"]},"parameters":{}}"#;
+    let request = format!(
+        "POST /v1/query HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+
+    response.starts_with("HTTP/1.1 2") || response.starts_with("HTTP/1.0 2")
 }
 
 fn helix_run_args(
