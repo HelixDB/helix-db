@@ -586,22 +586,32 @@ impl<'a> NativeManager<'a> {
         if let Some(parent) = pid_file.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&pid_file, pid.to_string())
+        let start_time = Self::process_start_time(pid).unwrap_or(0);
+        fs::write(&pid_file, format!("{pid}\n{start_time}\n"))
             .map_err(|e| eyre!("Failed to write PID file: {e}"))
     }
 
-    fn read_pid(&self, instance_name: &str) -> Result<Option<u32>> {
+    fn read_pid(&self, instance_name: &str) -> Result<Option<(u32, u64)>> {
         let pid_file = self.pid_file(instance_name);
         if !pid_file.exists() {
             return Ok(None);
         }
         let content = fs::read_to_string(&pid_file)
             .map_err(|e| eyre!("Failed to read PID file: {e}"))?;
-        let pid = content
+        let mut lines = content.lines();
+        let pid = lines
+            .next()
+            .unwrap_or("")
             .trim()
             .parse::<u32>()
             .map_err(|e| eyre!("Invalid PID in file: {e}"))?;
-        Ok(Some(pid))
+        let start_time = lines
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+        Ok(Some((pid, start_time)))
     }
 
     fn remove_pid_file(&self, instance_name: &str) {
@@ -627,12 +637,41 @@ impl<'a> NativeManager<'a> {
         }
     }
 
+    /// Returns the process start time as jiffies since boot (Linux) or 0 on other platforms.
+    fn process_start_time(pid: u32) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // Field 22 (0-indexed: 21) is starttime in jiffies since boot
+            let fields: Vec<&str> = stat.splitn(22, ' ').collect();
+            let start_str = fields.get(21)?;
+            start_str.trim().parse::<u64>().ok()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pid;
+            None
+        }
+    }
+
+    /// Verify that the PID still refers to the same process we started.
+    fn verify_pid(&self, _instance_name: &str, pid: u32, saved_start_time: u64) -> bool {
+        if !Self::is_process_running(pid) {
+            return false;
+        }
+        if saved_start_time == 0 {
+            // Can't verify on this platform; assume it's the same process
+            return true;
+        }
+        Self::process_start_time(pid) == Some(saved_start_time)
+    }
+
     fn stop_process(&self, instance_name: &str) -> Result<bool> {
-        let Some(pid) = self.read_pid(instance_name)? else {
+        let Some((pid, start_time)) = self.read_pid(instance_name)? else {
             return Ok(false);
         };
 
-        if !Self::is_process_running(pid) {
+        if !self.verify_pid(instance_name, pid, start_time) {
             self.remove_pid_file(instance_name);
             return Ok(false);
         }
@@ -700,11 +739,15 @@ impl<'a> NativeManager<'a> {
                 .env("DB_PATH", LOCAL_DB_PATH);
         }
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| eyre!("Failed to start native process: {e}"))?;
 
-        self.save_pid(instance_name, child.id())?;
+        if let Err(e) = self.save_pid(instance_name, child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
 
         wait_ready(port)?;
         Ok(())
@@ -749,9 +792,9 @@ impl<'a> NativeManager<'a> {
             .spawn()
             .map_err(|e| eyre!("Failed to start native process: {e}"))?;
 
-        let mut wait = Box::pin(child.wait());
+        let pid = child.id();
         tokio::select! {
-            status = &mut wait => {
+            status = child.wait() => {
                 let status = status?;
                 if !status.success() {
                     return Err(eyre!("Native process exited with status {status}"));
@@ -760,10 +803,18 @@ impl<'a> NativeManager<'a> {
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 crate::output::info("Stopping foreground local Helix instance");
-                match tokio::time::timeout(Duration::from_secs(10), &mut wait).await {
+                match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => return Err(eyre!("Failed to wait for process to stop: {e}")),
-                    Err(_) => return Err(eyre!("Timed out waiting for process to stop")),
+                    Err(_) => {
+                        // Timeout expired — force-kill by PID
+                        if let Some(pid) = pid {
+                            let _ = Command::new("kill")
+                                .args(["-KILL", &pid.to_string()])
+                                .output();
+                        }
+                        return Err(eyre!("Timed out waiting for process to stop"));
+                    }
                 }
             }
         }
@@ -807,11 +858,11 @@ impl<'a> NativeManager<'a> {
     }
 
     fn status(&self, instance_name: &str) -> Result<Option<LocalStatus>> {
-        let Some(pid) = self.read_pid(instance_name)? else {
+        let Some((pid, start_time)) = self.read_pid(instance_name)? else {
             return Ok(None);
         };
 
-        if Self::is_process_running(pid) {
+        if self.verify_pid(instance_name, pid, start_time) {
             let port = self
                 .project
                 .config
@@ -840,7 +891,7 @@ impl<'a> NativeManager<'a> {
 
     fn display_name(&self, instance_name: &str) -> String {
         match self.read_pid(instance_name) {
-            Ok(Some(pid)) => format!("native process {pid}"),
+            Ok(Some((pid, _))) => format!("native process {pid}"),
             _ => format!("native:{instance_name}"),
         }
     }

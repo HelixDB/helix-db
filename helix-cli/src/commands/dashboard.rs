@@ -7,8 +7,6 @@ use crate::utils::command_exists;
 use eyre::{Result, eyre};
 use std::process::{Command, Stdio};
 
-// The dashboard is always a container (Docker/Podman), never native.
-
 const DASHBOARD_IMAGE: &str = "public.ecr.aws/p8l2s5f1/helix-dashboard:latest";
 const DASHBOARD_CONTAINER_NAME: &str = "helix-dashboard";
 
@@ -45,6 +43,7 @@ async fn start(
         match runtime {
             ContainerRuntime::Docker => "host.docker.internal".to_string(),
             ContainerRuntime::Podman => "host.containers.internal".to_string(),
+            // detect_runtime never returns Native; fallback for completeness
             ContainerRuntime::Native => "localhost".to_string(),
         }
     } else {
