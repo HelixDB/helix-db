@@ -42,6 +42,8 @@ async fn start(
         match runtime {
             ContainerRuntime::Docker => "host.docker.internal".to_string(),
             ContainerRuntime::Podman => "host.containers.internal".to_string(),
+            // detect_runtime never returns Native; fallback for completeness
+            ContainerRuntime::Native => "localhost".to_string(),
         }
     } else {
         host

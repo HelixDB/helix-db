@@ -33,6 +33,14 @@ impl ProjectContext {
         self.helix_dir.join(instance_name)
     }
 
+    pub fn volumes_dir(&self) -> PathBuf {
+        self.helix_dir.join(".volumes")
+    }
+
+    pub fn instance_volume(&self, instance_name: &str) -> PathBuf {
+        self.volumes_dir().join(instance_name)
+    }
+
     pub fn ensure_instance_dir(&self, instance_name: &str) -> Result<(), ProjectError> {
         let workspace = self.instance_workspace(instance_name);
         std::fs::create_dir_all(&workspace).map_err(|source| ProjectError::CreateDir {

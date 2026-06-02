@@ -86,6 +86,7 @@ pub enum ContainerRuntime {
     #[default]
     Docker,
     Podman,
+    Native,
 }
 
 impl ContainerRuntime {
@@ -93,6 +94,7 @@ impl ContainerRuntime {
         match self {
             Self::Docker => "docker",
             Self::Podman => "podman",
+            Self::Native => "native",
         }
     }
 
@@ -100,7 +102,12 @@ impl ContainerRuntime {
         match self {
             Self::Docker => "Docker",
             Self::Podman => "Podman",
+            Self::Native => "Native",
         }
+    }
+
+    pub const fn is_native(&self) -> bool {
+        matches!(self, Self::Native)
     }
 }
 

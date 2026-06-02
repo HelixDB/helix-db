@@ -1,5 +1,5 @@
 use crate::config::InstanceInfo;
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::output::Operation;
 use crate::project::ProjectContext;
 use crate::prompts;
@@ -12,7 +12,7 @@ pub async fn run(instance: Option<String>) -> Result<()> {
         return Err(eyre!("'{instance}' is not a local v2 instance"));
     };
     let op = Operation::new("Restarting", &instance);
-    LocalRuntime::new(&project).restart(&instance, config)?;
+    Runtime::for_project(&project).restart(&instance, config)?;
     op.success();
     Ok(())
 }

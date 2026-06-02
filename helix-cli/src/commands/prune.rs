@@ -1,4 +1,4 @@
-use crate::local_runtime::LocalRuntime;
+use crate::local_runtime::Runtime;
 use crate::output::Operation;
 use crate::project::ProjectContext;
 use crate::prompts::{self, PruneSelection};
@@ -26,7 +26,7 @@ pub async fn run(instance: Option<String>, all: bool, yes: bool) -> Result<()> {
 
 async fn prune_one(project: &ProjectContext, instance: &str) -> Result<()> {
     let op = Operation::new("Pruning", instance);
-    let removed_container = LocalRuntime::new(project).prune_instance(instance)?;
+    let removed_container = Runtime::for_project(project).prune(instance)?;
     let workspace = project.instance_workspace(instance);
     let removed_workspace = workspace.exists();
     if workspace.exists() {
