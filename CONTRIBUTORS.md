@@ -190,7 +190,7 @@ The v3 CLI is a runtime orchestrator — there is no `helix compile`/`helix chec
 
 1. Scaffold a project with `helix init` (writes `helix.toml` and a `.helix/` workspace).
 2. Start a local instance with `helix start` — a Docker/Podman container running the `enterprise-dev` image (in-memory by default, on-disk with `--disk`).
-3. Author queries with the Rust or TypeScript DSL; they serialize to JSON "dynamic queries".
+3. Author queries with the Rust, TypeScript, Go, or Python DSL; they serialize to JSON "dynamic queries".
 4. Send queries to a running instance via `POST /v1/query` (`helix query`); validation happens server-side.
 5. For production, deploy an Enterprise Cloud instance with `helix push`, managing auth/metadata via `helix auth`, `helix sync`, and the `workspace`/`project`/`cluster` commands.
 
@@ -201,6 +201,7 @@ Client libraries that build HelixDB queries and send them to a running instance.
 - `rust/` - Rust DSL builder (crate `helix-db`), with the `helix-dsl-macros` procedural-macro crate
 - `typescript/` - TypeScript DSL (`@helix-db/helix-db`)
 - `go/` - Go client and DSL
+- `python/` - Python client and DSL (`helix-db`, imported as `helixdb`)
 - `tests/` - Cross-SDK parity tests and metadata registration tests
 
 #### `/metrics/` - Metrics
@@ -212,7 +213,7 @@ Logos and images used in the README and docs.
 ## Key Concepts
 
 ### Query Language
-Queries are authored with the Rust or TypeScript DSL (in `sdks/`) and serialized to JSON "dynamic queries" sent to a running instance. The legacy HelixQL `.hx` form below is still supported for reference and translation:
+Queries are authored with the Rust, TypeScript, Go, or Python DSL (in `sdks/`) and serialized to JSON "dynamic queries" sent to a running instance. The legacy HelixQL `.hx` form below is still supported for reference and translation:
 ```
 QUERY addUser(name: String, age: I64) =>
    user <- AddN<User({name: name, age: age})
@@ -232,7 +233,7 @@ QUERY addUser(name: String, age: I64) =>
 
 ## Architecture Flow
 
-1. **Definition**: Author queries with the Rust or TypeScript DSL
+1. **Definition**: Author queries with a Rust, TypeScript, Go, or Python DSL
 2. **Serialization**: The DSL produces a JSON dynamic-query AST (`POST /v1/query` body)
 3. **Execution**: Send to a running instance with `helix query`; the gateway validates and runs it server-side
 4. **Storage**: LMDB handles persistence with ACID guarantees

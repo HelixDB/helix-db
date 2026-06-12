@@ -641,6 +641,13 @@ const (
 	EmitAll    EmitBehavior = "All"
 )
 
+type RangeIndexDirection string
+
+const (
+	RangeIndexAsc  RangeIndexDirection = "Asc"
+	RangeIndexDesc RangeIndexDirection = "Desc"
+)
+
 type RepeatConfig struct {
 	Traversal     SubTraversal `json:"traversal"`
 	Times         *int         `json:"times"`
@@ -677,13 +684,25 @@ func NodeUniqueEqualityIndex(label, property string) IndexSpec {
 	return IndexSpec{kind: "NodeEquality", value: map[string]any{"label": label, "property": property, "unique": true}}
 }
 func NodeRangeIndex(label, property string) IndexSpec {
-	return IndexSpec{kind: "NodeRange", value: map[string]any{"label": label, "property": property}}
+	return NodeRangeIndexWithDirection(label, property, RangeIndexAsc)
+}
+func NodeRangeDescIndex(label, property string) IndexSpec {
+	return NodeRangeIndexWithDirection(label, property, RangeIndexDesc)
+}
+func NodeRangeIndexWithDirection(label, property string, direction RangeIndexDirection) IndexSpec {
+	return IndexSpec{kind: "NodeRange", value: rangeIndexFields(label, property, direction)}
 }
 func EdgeEqualityIndex(label, property string) IndexSpec {
 	return IndexSpec{kind: "EdgeEquality", value: map[string]any{"label": label, "property": property}}
 }
 func EdgeRangeIndex(label, property string) IndexSpec {
-	return IndexSpec{kind: "EdgeRange", value: map[string]any{"label": label, "property": property}}
+	return EdgeRangeIndexWithDirection(label, property, RangeIndexAsc)
+}
+func EdgeRangeDescIndex(label, property string) IndexSpec {
+	return EdgeRangeIndexWithDirection(label, property, RangeIndexDesc)
+}
+func EdgeRangeIndexWithDirection(label, property string, direction RangeIndexDirection) IndexSpec {
+	return IndexSpec{kind: "EdgeRange", value: rangeIndexFields(label, property, direction)}
 }
 func NodeVectorIndex(label, property string, tenantProperty ...string) IndexSpec {
 	return tenantIndex("NodeVector", label, property, tenantProperty...)
@@ -696,6 +715,14 @@ func EdgeVectorIndex(label, property string, tenantProperty ...string) IndexSpec
 }
 func EdgeTextIndex(label, property string, tenantProperty ...string) IndexSpec {
 	return tenantIndex("EdgeText", label, property, tenantProperty...)
+}
+
+func rangeIndexFields(label, property string, direction RangeIndexDirection) map[string]any {
+	value := map[string]any{"label": label, "property": property}
+	if direction != RangeIndexAsc {
+		value["direction"] = direction
+	}
+	return value
 }
 
 func tenantIndex(kind, label, property string, tenantProperty ...string) IndexSpec {

@@ -21,6 +21,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  HELIX_NO_UPDATE_CHECK: "1"
+  HELIX_DISABLE_UPDATE_CHECK: "1"
+  NO_COLOR: "1"
 
 jobs:
   test:
@@ -66,3 +69,43 @@ jobs:
 
       - name: Clippy helix-cli
         run: cargo clippy -p helix-cli -- -D warnings
+
+  runtime-e2e:
+    name: CLI Runtime E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-runtime-e2e-${{ hashFiles('**/Cargo.lock') || 'fallback' }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Verify Docker daemon
+        run: docker info
+
+      - name: Run Docker-backed CLI e2e
+        env:
+          HELIX_E2E_KEEP_TMP: "1"
+        run: cargo test -p helix-cli --test e2e_runtime -- --ignored --nocapture
+
+      - name: Upload runtime e2e artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-runtime-e2e-artifacts
+          path: /tmp/helix-cli-e2e-*
+          if-no-files-found: ignore

@@ -60,6 +60,45 @@ func TestReturningEmptySerializesSequence(t *testing.T) {
 	}
 }
 
+func TestRangeIndexDirectionJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec IndexSpec
+		want string
+	}{
+		{
+			name: "node asc",
+			spec: NodeRangeIndex("User", "age"),
+			want: `{"NodeRange":{"label":"User","property":"age"}}`,
+		},
+		{
+			name: "node explicit asc",
+			spec: NodeRangeIndexWithDirection("User", "age", RangeIndexAsc),
+			want: `{"NodeRange":{"label":"User","property":"age"}}`,
+		},
+		{
+			name: "node desc",
+			spec: NodeRangeDescIndex("User", "age"),
+			want: `{"NodeRange":{"direction":"Desc","label":"User","property":"age"}}`,
+		},
+		{
+			name: "edge desc",
+			spec: EdgeRangeDescIndex("FOLLOWS", "weight"),
+			want: `{"EdgeRange":{"direction":"Desc","label":"FOLLOWS","property":"weight"}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != tc.want {
+				t.Fatalf("unexpected JSON: %s", body)
+			}
+		})
+	}
+}
+
 func TestClientExec(t *testing.T) {
 	var capturedPath string
 	var capturedAuth string

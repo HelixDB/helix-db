@@ -526,6 +526,17 @@ export enum Order {
   Asc = "Asc",
   Desc = "Desc",
 }
+
+export enum RangeIndexDirection {
+  Asc = "Asc",
+  Desc = "Desc",
+}
+
+function rangeIndexFields(label: string, property: string, direction: RangeIndexDirection): Record<string, unknown> {
+  const fields: Record<string, unknown> = { label, property };
+  if (direction !== RangeIndexDirection.Asc) fields.direction = direction;
+  return fields;
+}
 export enum EmitBehavior {
   None = "None",
   Before = "Before",
@@ -986,13 +997,25 @@ export class IndexSpec implements Encodable {
     return new IndexSpec("NodeEquality", { label, property, unique: true });
   }
   static nodeRange(label: string, property: string): IndexSpec {
-    return new IndexSpec("NodeRange", { label, property });
+    return IndexSpec.nodeRangeWithDirection(label, property, RangeIndexDirection.Asc);
+  }
+  static nodeRangeDesc(label: string, property: string): IndexSpec {
+    return IndexSpec.nodeRangeWithDirection(label, property, RangeIndexDirection.Desc);
+  }
+  static nodeRangeWithDirection(label: string, property: string, direction: RangeIndexDirection): IndexSpec {
+    return new IndexSpec("NodeRange", rangeIndexFields(label, property, direction));
   }
   static edgeEquality(label: string, property: string): IndexSpec {
     return new IndexSpec("EdgeEquality", { label, property });
   }
   static edgeRange(label: string, property: string): IndexSpec {
-    return new IndexSpec("EdgeRange", { label, property });
+    return IndexSpec.edgeRangeWithDirection(label, property, RangeIndexDirection.Asc);
+  }
+  static edgeRangeDesc(label: string, property: string): IndexSpec {
+    return IndexSpec.edgeRangeWithDirection(label, property, RangeIndexDirection.Desc);
+  }
+  static edgeRangeWithDirection(label: string, property: string, direction: RangeIndexDirection): IndexSpec {
+    return new IndexSpec("EdgeRange", rangeIndexFields(label, property, direction));
   }
   static nodeVector(label: string, property: string, tenantProperty?: string | null): IndexSpec {
     return new IndexSpec("NodeVector", { label, property, tenant_property: tenantProperty ?? undefined });
@@ -2595,6 +2618,7 @@ export const prelude = {
   AggregateFunction,
   RepeatConfig,
   IndexSpec,
+  RangeIndexDirection,
   Traversal,
   SubTraversal,
   ReadBatch,

@@ -32,8 +32,11 @@ export class HelixError extends Error {
     this.details = details;
   }
 
-  static network(message: string): HelixError {
-    return new HelixError("Network", `error communicating with server: ${message}`, message);
+  static network(message: string, url?: string): HelixError {
+    const hint = url
+      ? ` Cannot reach Helix at ${url} — start a local instance with \`helix start\`, or pass the URL of a running instance to \`new Client(url)\`.`
+      : "";
+    return new HelixError("Network", `error communicating with server: ${message}.${hint}`, message);
   }
 
   static remote(details: string): HelixError {
@@ -197,7 +200,7 @@ export class QueryRequest<R = unknown> {
     try {
       response = await fetch(url, { method: "POST", headers: requestHeaders, body: payload });
     } catch (error) {
-      throw HelixError.network(error instanceof Error ? error.message : String(error));
+      throw HelixError.network(error instanceof Error ? error.message : String(error), url);
     }
 
     // Mirror the Rust client: only HTTP 200 is treated as success.

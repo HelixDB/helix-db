@@ -2082,6 +2082,25 @@ impl Default for Order {
     }
 }
 
+/// Physical ordering for range-index storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RangeIndexDirection {
+    /// Store values in ascending order.
+    Asc,
+    /// Store values in descending order.
+    Desc,
+}
+
+impl Default for RangeIndexDirection {
+    fn default() -> Self {
+        RangeIndexDirection::Asc
+    }
+}
+
+fn is_default_range_index_direction(direction: &RangeIndexDirection) -> bool {
+    *direction == RangeIndexDirection::Asc
+}
+
 /// Emit behavior for repeat steps
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EmitBehavior {
@@ -2444,6 +2463,9 @@ pub enum IndexSpec {
         label: String,
         /// Indexed property name.
         property: String,
+        /// Physical range-index ordering.
+        #[serde(default, skip_serializing_if = "is_default_range_index_direction")]
+        direction: RangeIndexDirection,
     },
     /// Equality index over edge properties.
     EdgeEquality {
@@ -2458,6 +2480,9 @@ pub enum IndexSpec {
         label: String,
         /// Indexed property name.
         property: String,
+        /// Physical range-index ordering.
+        #[serde(default, skip_serializing_if = "is_default_range_index_direction")]
+        direction: RangeIndexDirection,
     },
     /// Vector index over node properties.
     NodeVector {
@@ -2522,9 +2547,24 @@ impl IndexSpec {
 
     /// Build a node range index declaration.
     pub fn node_range(label: impl Into<String>, property: impl Into<String>) -> Self {
+        Self::node_range_with_direction(label, property, RangeIndexDirection::Asc)
+    }
+
+    /// Build a descending node range index declaration.
+    pub fn node_range_desc(label: impl Into<String>, property: impl Into<String>) -> Self {
+        Self::node_range_with_direction(label, property, RangeIndexDirection::Desc)
+    }
+
+    /// Build a node range index declaration with explicit physical ordering.
+    pub fn node_range_with_direction(
+        label: impl Into<String>,
+        property: impl Into<String>,
+        direction: RangeIndexDirection,
+    ) -> Self {
         Self::NodeRange {
             label: label.into(),
             property: property.into(),
+            direction,
         }
     }
 
@@ -2538,9 +2578,24 @@ impl IndexSpec {
 
     /// Build an edge range index declaration.
     pub fn edge_range(label: impl Into<String>, property: impl Into<String>) -> Self {
+        Self::edge_range_with_direction(label, property, RangeIndexDirection::Asc)
+    }
+
+    /// Build a descending edge range index declaration.
+    pub fn edge_range_desc(label: impl Into<String>, property: impl Into<String>) -> Self {
+        Self::edge_range_with_direction(label, property, RangeIndexDirection::Desc)
+    }
+
+    /// Build an edge range index declaration with explicit physical ordering.
+    pub fn edge_range_with_direction(
+        label: impl Into<String>,
+        property: impl Into<String>,
+        direction: RangeIndexDirection,
+    ) -> Self {
         Self::EdgeRange {
             label: label.into(),
             property: property.into(),
+            direction,
         }
     }
 
@@ -5426,9 +5481,41 @@ mod tests {
         assert!(matches!(
             &drop.steps[0],
             Step::DropIndex {
-                spec: IndexSpec::EdgeRange { label, property },
+                spec: IndexSpec::EdgeRange {
+                    label,
+                    property,
+                    direction,
+                },
             } if label == "FOLLOWS" && property == "weight"
+                && *direction == RangeIndexDirection::Asc
         ));
+    }
+
+    #[test]
+    fn test_range_index_direction_serialization() {
+        let asc = IndexSpec::node_range("User", "age");
+        let asc_json = sonic_rs::to_string(&asc).unwrap();
+        assert_eq!(
+            asc_json,
+            r#"{"NodeRange":{"label":"User","property":"age"}}"#
+        );
+
+        let decoded: IndexSpec = sonic_rs::from_str(&asc_json).unwrap();
+        assert_eq!(decoded, asc);
+
+        let old_json = r#"{"EdgeRange":{"label":"FOLLOWS","property":"weight"}}"#;
+        let decoded_old: IndexSpec = sonic_rs::from_str(old_json).unwrap();
+        assert_eq!(decoded_old, IndexSpec::edge_range("FOLLOWS", "weight"));
+
+        let desc = IndexSpec::node_range_desc("User", "age");
+        let desc_json = sonic_rs::to_string(&desc).unwrap();
+        assert_eq!(
+            desc_json,
+            r#"{"NodeRange":{"label":"User","property":"age","direction":"Desc"}}"#
+        );
+
+        let decoded_desc: IndexSpec = sonic_rs::from_str(&desc_json).unwrap();
+        assert_eq!(decoded_desc, desc);
     }
 
     #[test]

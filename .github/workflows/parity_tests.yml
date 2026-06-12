@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: [main, dev]
     paths:
+      - 'helix-cli/**'
+      - 'metrics/**'
       - 'sdks/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -11,6 +13,8 @@ on:
   push:
     branches: [main, dev]
     paths:
+      - 'helix-cli/**'
+      - 'metrics/**'
       - 'sdks/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -19,6 +23,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  HELIX_NO_UPDATE_CHECK: "1"
+  HELIX_DISABLE_UPDATE_CHECK: "1"
+  NO_COLOR: "1"
 
 jobs:
   parity:
@@ -54,14 +61,12 @@ jobs:
           go-version: '1.22'
           cache-dependency-path: sdks/go/go.mod
 
-      # --- helix CLI (released binary) ---
-      # install.sh lives under helix-cli/ on main (not the repo root); installs to ~/.local/bin
-      # and is non-interactive on Linux (the Docker Desktop prompt is macOS-only).
-      - name: Install helix CLI
+      # --- helix CLI (this checkout) ---
+      - name: Build helix CLI from this checkout
         working-directory: .
         run: |
-          curl -fsSL https://raw.githubusercontent.com/HelixDB/helix-db/main/helix-cli/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cargo build -p helix-cli
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
       - name: Verify toolchain
         run: |

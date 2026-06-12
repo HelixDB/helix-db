@@ -26,11 +26,12 @@ pub async fn run(
 
     validate_dynamic_request(&request_json, warm)?;
     let client = reqwest::Client::new();
-    let mut request = match project.config.get_instance(&instance)? {
+    let (mut request, endpoint, is_local) = match project.config.get_instance(&instance)? {
         InstanceInfo::Local(config) => {
             let host = host.unwrap_or_else(|| "localhost".to_string());
             let port = port.unwrap_or(config.port);
-            client.post(format!("http://{host}:{port}/v1/query"))
+            let endpoint = format!("http://{host}:{port}/v1/query");
+            (client.post(&endpoint), endpoint, true)
         }
         InstanceInfo::Enterprise(config) => {
             let gateway_url = config.gateway_url.as_deref().ok_or_else(|| {
@@ -50,9 +51,14 @@ pub async fn run(
                 .into()
             })?;
             let header_name = HeaderName::from_bytes(config.query_auth_header.as_bytes())?;
-            client
-                .post(format!("{}/v1/query", gateway_url.trim_end_matches('/')))
-                .header(header_name, HeaderValue::from_str(&auth_value)?)
+            let endpoint = format!("{}/v1/query", gateway_url.trim_end_matches('/'));
+            (
+                client
+                    .post(&endpoint)
+                    .header(header_name, HeaderValue::from_str(&auth_value)?),
+                endpoint,
+                false,
+            )
         }
     };
 
@@ -61,7 +67,17 @@ pub async fn run(
         request = request.header("X-Helix-Warm", "true");
     }
 
-    let response = request.json(&request_json).send().await?;
+    let response = request
+        .json(&request_json)
+        .send()
+        .await
+        .map_err(|e| -> Report {
+            if e.is_connect() || e.is_timeout() {
+                connect_error(&instance, &endpoint, is_local, &e.to_string()).into()
+            } else {
+                e.into()
+            }
+        })?;
     let status = response.status();
     if status == reqwest::StatusCode::NO_CONTENT {
         return Ok(());
@@ -83,6 +99,29 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// Error for a query that never reached a Helix instance (connection refused,
+/// DNS failure, timeout). The raw reqwest error doesn't tell an agent or user
+/// what to do next, so spell out the recovery path for each instance kind.
+fn connect_error(instance: &str, endpoint: &str, is_local: bool, cause: &str) -> CliError {
+    let hint = if is_local {
+        format!(
+            "No Helix instance is listening there. Start it with `helix start {instance}` and \
+             check it with `helix status {instance}`. If it runs on another host/port, pass \
+             --host/--port."
+        )
+    } else {
+        format!(
+            "Check the gateway_url for '{instance}' in helix.toml and your network connection. \
+             `helix sync {instance}` refreshes the gateway metadata from Helix Cloud."
+        )
+    };
+    CliError::new(format!(
+        "cannot reach Helix instance '{instance}' at {endpoint}"
+    ))
+    .with_context(cause.to_string())
+    .with_hint(hint)
 }
 
 fn parse_query_request(
@@ -185,6 +224,25 @@ mod tests {
         .to_string();
 
         assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn connect_error_local_points_at_helix_start() {
+        let err = connect_error("dev", "http://localhost:8080/v1/query", true, "refused");
+
+        assert!(err.message.contains("'dev'"));
+        assert!(err.message.contains("http://localhost:8080/v1/query"));
+        let hint = err.hint.expect("hint should be set");
+        assert!(hint.contains("helix start dev"));
+    }
+
+    #[test]
+    fn connect_error_enterprise_points_at_gateway_config() {
+        let err = connect_error("prod", "https://gw.example.com/v1/query", false, "timeout");
+
+        let hint = err.hint.expect("hint should be set");
+        assert!(hint.contains("gateway_url"));
+        assert!(hint.contains("helix sync prod"));
     }
 
     #[test]

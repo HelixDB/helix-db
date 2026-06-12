@@ -78,7 +78,7 @@ If you'd rather wire things up yourself:
 
 ## Writing queries with the SDKs
 
-Queries are authored with the Rust or TypeScript DSL and sent straight to a running instance as dynamic requests against `POST /v1/query` — no build or deploy step. Both SDKs produce the same JSON AST. The examples below talk to a local instance on `http://localhost:6969` (the default `helix start dev` port). See the [Querying Guide](https://docs.helix-db.com/database/querying-guide/overview) for the full builder catalog and the dynamic-query wire format.
+Queries are authored with the Rust, TypeScript, Go, or Python DSL and sent straight to a running instance as dynamic requests against `POST /v1/query` — no build or deploy step. The SDKs produce the same JSON AST. The examples below talk to a local instance on `http://localhost:6969` (the default `helix start dev` port). See the [Querying Guide](https://docs.helix-db.com/database/querying-guide/overview) for the full builder catalog and the dynamic-query wire format.
 
 ### Rust
 
@@ -195,6 +195,52 @@ const user = await fetch(HELIX_URL, {
   body: getUser().toDynamicJson(getUserParams, { name: "John Doe" }),
 }).then((r) => r.json());
 console.log("user:", user);
+```
+
+### Python
+
+Install the package from this repository:
+
+```bash
+pip install -e sdks/python
+```
+
+Build dynamic requests with snake_case builders, then send them with the client:
+
+```python
+from helixdb import Client, Predicate, g, param, define_params, read_batch, write_batch
+
+add_user_params = define_params({"name": param.string()})
+add_user = (
+    write_batch()
+    .var_as("user", g().add_n("User", {"name": add_user_params.name}))
+    .returning(["user"])
+)
+
+get_user_params = define_params({"name": param.string()})
+get_user = (
+    read_batch()
+    .var_as(
+        "user",
+        g()
+        .n_with_label("User")
+        .where(Predicate.eq("name", get_user_params.name))
+        .value_map(["name"]),
+    )
+    .returning(["user"])
+)
+
+client = Client("http://localhost:6969")
+
+new_user = client.query().dynamic(
+    add_user.to_dynamic_request(add_user_params, {"name": "John Doe"})
+).send()
+print("new user:", new_user)
+
+user = client.query().dynamic(
+    get_user.to_dynamic_request(get_user_params, {"name": "John Doe"})
+).send()
+print("user:", user)
 ```
 
 ## HelixDB Cloud

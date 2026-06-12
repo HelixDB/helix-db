@@ -11,6 +11,8 @@ claude.md
 .cargo/
 **/dist
 **/node_modules
+**/.env*
+**/*.egg-info
 
 **/target
 **/dist

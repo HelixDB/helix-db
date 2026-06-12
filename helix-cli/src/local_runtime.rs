@@ -60,11 +60,7 @@ impl LocalRuntime {
             // The binary itself couldn't be spawned — the runtime isn't installed,
             // so there's nothing for us to auto-start.
             Err(e) => {
-                return Err(eyre!(
-                    "{} is not available. Install/start {} and try again: {e}",
-                    runtime.label(),
-                    runtime.binary()
-                ));
+                return Err(not_installed_error(runtime, &e.to_string(), command_exists).into());
             }
         };
 
@@ -604,6 +600,47 @@ impl LocalRuntime {
     }
 }
 
+/// Build the error for a container runtime whose binary is missing from PATH.
+///
+/// Pure helper — the installed-probe is injected so it can be unit-tested. If
+/// the *other* supported runtime is installed, the hint points at switching
+/// `container_runtime` in helix.toml (the cheapest recovery); otherwise it
+/// gives per-platform install commands.
+fn not_installed_error(
+    runtime: ContainerRuntime,
+    cause: &str,
+    is_installed: impl Fn(&str) -> bool,
+) -> CliError {
+    let other = match runtime {
+        ContainerRuntime::Docker => ContainerRuntime::Podman,
+        ContainerRuntime::Podman => ContainerRuntime::Docker,
+    };
+    let hint = if is_installed(other.binary()) {
+        format!(
+            "{} is installed — set `container_runtime = \"{}\"` under [project] in helix.toml \
+             to use it instead, or install {}.",
+            other.label(),
+            other.binary(),
+            runtime.label()
+        )
+    } else {
+        "Install a container runtime first. macOS: `brew install --cask docker` (Docker \
+         Desktop) or `brew install colima docker && colima start`. Linux: `curl -fsSL \
+         https://get.docker.com | sh`, or `apt-get install -y podman` plus \
+         `container_runtime = \"podman\"` in helix.toml. Restricted sandboxes/CI without \
+         root usually cannot run containers — run Helix on a host where Docker works, or \
+         point `helix query --host/--port` at a reachable instance."
+            .to_string()
+    };
+    CliError::new(format!(
+        "{} is not installed (`{}` not found on PATH)",
+        runtime.label(),
+        runtime.binary()
+    ))
+    .with_context(cause.to_string())
+    .with_hint(hint)
+}
+
 /// A command that starts a container runtime daemon, e.g. `open -a Docker`.
 struct StartCommand {
     program: &'static str,
@@ -903,5 +940,26 @@ mod tests {
     fn no_launcher_for_linux_podman_or_unknown_os() {
         assert_eq!(start_cmd("linux", ContainerRuntime::Podman, false), None);
         assert_eq!(start_cmd("windows", ContainerRuntime::Docker, false), None);
+    }
+
+    #[test]
+    fn not_installed_error_suggests_other_runtime_when_present() {
+        let err = not_installed_error(ContainerRuntime::Docker, "spawn failed", |bin| {
+            bin == "podman"
+        });
+
+        assert!(err.message.contains("Docker is not installed"));
+        let hint = err.hint.expect("hint should be set");
+        assert!(hint.contains("container_runtime = \"podman\""));
+    }
+
+    #[test]
+    fn not_installed_error_gives_install_commands_when_nothing_present() {
+        let err = not_installed_error(ContainerRuntime::Podman, "spawn failed", |_| false);
+
+        assert!(err.message.contains("Podman is not installed"));
+        let hint = err.hint.expect("hint should be set");
+        assert!(hint.contains("get.docker.com"));
+        assert!(hint.contains("sandboxes"));
     }
 }

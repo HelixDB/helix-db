@@ -39,3 +39,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "helix"
 path = "src/main.rs"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"

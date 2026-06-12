@@ -76,6 +76,7 @@ pub async fn run(
                 },
             );
             write_example_request(&project_dir)?;
+            write_agents_md(&project_dir, &instance_name)?;
             local_next_steps(&instance_name)
         }
         InitTarget::Enterprise {
@@ -209,6 +210,66 @@ fn write_example_request(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Scaffold an `AGENTS.md` so coding agents picking up the project find the
+/// Helix workflow and the install/recovery path without fetching docs first.
+/// Never overwrites an existing `AGENTS.md` — many projects already have one.
+fn write_agents_md(project_dir: &Path, instance_name: &str) -> Result<()> {
+    let agents_path = project_dir.join("AGENTS.md");
+    if agents_path.exists() {
+        return Ok(());
+    }
+    fs::write(&agents_path, agents_md_content(instance_name))?;
+    Ok(())
+}
+
+fn agents_md_content(instance_name: &str) -> String {
+    format!(
+        r#"# Working with this HelixDB project
+
+This project uses [HelixDB](https://docs.helix-db.com). `helix.toml` holds the project
+config; `.helix/` holds instance state (gitignored). The full docs index for agents is at
+<https://docs.helix-db.com/llms.txt>.
+
+## Workflow
+
+```bash
+helix start {instance_name}                                  # start the local instance (Docker/Podman)
+helix query {instance_name} --file examples/request.json     # send a dynamic JSON query
+helix query {instance_name} -e 'readBatch().varAs("users", g().nWithLabel("User")).returning(["users"])'
+helix status                                  # instance state
+helix logs {instance_name}                                   # container logs
+helix stop {instance_name}                                   # stop (in-memory data is lost; use --disk to persist)
+```
+
+There is no `helix compile` or `helix check` — queries are validated by the running
+instance. `helix query -e` evaluates a TypeScript DSL expression and needs Node 20+.
+
+## If `helix` is not installed
+
+```bash
+curl -sSL "https://install.helix-db.com" | bash
+```
+
+## If the container runtime is unavailable
+
+`helix start` needs a working Docker or Podman:
+
+- macOS: `brew install --cask docker`, or `brew install colima docker && colima start`.
+- Linux: `curl -fsSL https://get.docker.com | sh`, or `apt-get install -y podman` and set
+  `container_runtime = "podman"` under `[project]` in `helix.toml`.
+- Daemon installed but stopped: `open -a Docker` (macOS) or `sudo systemctl start docker` /
+  `sudo dockerd &` (Linux). `helix start` also tries this automatically.
+- Restricted sandboxes without root usually cannot run containers. Use a host where Docker
+  works, or point queries at a reachable instance with `helix query --host <h> --port <p>`.
+
+## Query syntax
+
+- TypeScript DSL: <https://docs.helix-db.com/database/querying-guide/overview>
+- Dynamic JSON request shape: <https://docs.helix-db.com/cli/command-reference/query>
+"#
+    )
+}
+
 fn append_gitignore(project_dir: &Path) -> Result<()> {
     let gitignore_path = project_dir.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
@@ -257,6 +318,39 @@ mod tests {
 
         assert!(steps[0].get("NWhere").is_some());
         assert_eq!(steps[1], "Count");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agents_md_uses_instance_name_and_covers_recovery() {
+        let content = agents_md_content("qa");
+
+        assert!(content.contains("helix start qa"));
+        assert!(content.contains("helix query qa --file examples/request.json"));
+        assert!(content.contains("install.helix-db.com"));
+        assert!(content.contains("container_runtime = \"podman\""));
+        assert!(content.contains("llms.txt"));
+    }
+
+    #[test]
+    fn write_agents_md_does_not_overwrite_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-agents-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = "# My project rules\n";
+        std::fs::write(dir.join("AGENTS.md"), existing).unwrap();
+
+        write_agents_md(&dir, "dev").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+            existing
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

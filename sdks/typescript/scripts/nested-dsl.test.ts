@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import {
   Expr,
+  IndexSpec,
   Order,
   Predicate,
   Projection,
   PropertyInput,
+  RangeIndexDirection,
   SourcePredicate,
   g,
   readBatch,
@@ -83,5 +85,18 @@ assert.deepEqual(parsed(genericEdgeFilters).steps, [
   { Where: { Gt: ["weight", { I64: 5 }] } },
   "EdgeProperties",
 ]);
+
+assert.deepEqual(parsed(IndexSpec.nodeRange("User", "age")), {
+  NodeRange: { label: "User", property: "age" },
+});
+assert.deepEqual(parsed(IndexSpec.nodeRangeWithDirection("User", "age", RangeIndexDirection.Asc)), {
+  NodeRange: { label: "User", property: "age" },
+});
+assert.deepEqual(parsed(IndexSpec.nodeRangeDesc("User", "age")), {
+  NodeRange: { label: "User", property: "age", direction: "Desc" },
+});
+assert.deepEqual(parsed(IndexSpec.edgeRangeDesc("FOLLOWS", "weight")), {
+  EdgeRange: { label: "FOLLOWS", property: "weight", direction: "Desc" },
+});
 
 console.log("nested-dsl.test.ts passed");

@@ -7,9 +7,11 @@ use crate::output::Operation;
 use crate::project::ProjectContext;
 use crate::prompts;
 use eyre::{Result, eyre};
+use std::path::PathBuf;
 
-pub async fn run(target: Option<AddTarget>) -> Result<()> {
-    let mut project = ProjectContext::find_and_load_allow_no_instances(None)?;
+pub async fn run(path: Option<String>, target: Option<AddTarget>) -> Result<()> {
+    let start_dir = path.map(PathBuf::from);
+    let mut project = ProjectContext::find_and_load_allow_no_instances(start_dir.as_deref())?;
     let config_path = project.root.join("helix.toml");
     let target = match target {
         Some(target) => target,
