@@ -2,6 +2,11 @@ syntax = "proto3";
 
 package helix.v1;
 
+option go_package = "github.com/HelixDB/helix-db/helix-protocol/gen/go/helix/v1;helixv1";
+option java_multiple_files = true;
+option java_outer_classname = "HelixProto";
+option java_package = "com.helixdb.helix.v1";
+
 // Helix exposes the database's primary query, mutation, and vector-search
 // operations over HTTP/2. JSON payload fields intentionally preserve parity
 // with the existing /v1/query HTTP contract while giving SDKs a stable typed
@@ -26,6 +31,8 @@ service Helix {
 }
 
 message QueryRequest {
+  reserved 3 to 9;
+
   oneof target {
     DynamicQuery dynamic = 1;
     StoredQuery stored = 2;
@@ -43,15 +50,15 @@ message StoredQuery {
   string name = 1;
 
   // Optional UTF-8 JSON parameters/body for the stored query.
-  bytes parameters_json = 2;
+  optional bytes parameters_json = 2;
 }
 
 message RequestOptions {
-  // Mirrors x-helix-require-writer.
-  bool require_writer = 1;
+  // Mirrors x-helix-require-writer. Absence lets the server use its default.
+  optional bool require_writer = 1;
 
-  // Mirrors x-helix-warm.
-  bool warm_only = 2;
+  // Mirrors x-helix-warm. Absence lets the server use its default.
+  optional bool warm_only = 2;
 
   // Mirrors x-helix-await-durable. Absence lets the server use its default.
   optional bool await_durability = 3;
@@ -63,17 +70,18 @@ message QueryResponse {
 }
 
 message QueryChunk {
+  reserved 3;
+
   // Monotonic sequence number assigned by the server.
   uint64 sequence = 1;
 
   // UTF-8 JSON fragment or row payload.
   bytes json = 2;
-
-  // True when this is the final chunk for the stream.
-  bool terminal = 3;
 }
 
 message InsertRequest {
+  reserved 3 to 9;
+
   // Logical collection, label, or table name chosen by the server runtime.
   string collection = 1;
 
@@ -91,10 +99,12 @@ message MutationResponse {
   uint64 affected = 2;
 
   // Optional UTF-8 JSON payload with server-specific mutation details.
-  bytes json = 3;
+  optional bytes json = 3;
 }
 
 message SearchRequest {
+  reserved 5 to 9;
+
   // Logical vector index or collection/label to search.
   string index = 1;
 
@@ -106,7 +116,7 @@ message SearchRequest {
   uint32 limit = 3;
 
   // Optional UTF-8 JSON filter expression.
-  bytes filter_json = 4;
+  optional bytes filter_json = 4;
 
   RequestOptions options = 10;
 }

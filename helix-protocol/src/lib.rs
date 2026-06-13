@@ -26,8 +26,8 @@ mod tests {
                 json: br#"{"request_type":"read"}"#.to_vec(),
             })),
             options: Some(RequestOptions {
-                require_writer: true,
-                warm_only: false,
+                require_writer: Some(true),
+                warm_only: Some(false),
                 await_durability: Some(true),
             }),
         };
@@ -45,7 +45,7 @@ mod tests {
             index: "Document".to_string(),
             vector: vec![0.25, -0.5, 0.75],
             limit: 10,
-            filter_json: br#"{"tenant":"acme"}"#.to_vec(),
+            filter_json: Some(br#"{"tenant":"acme"}"#.to_vec()),
             options: None,
         };
 

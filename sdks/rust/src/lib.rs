@@ -307,7 +307,6 @@ impl<'hlx, 'a, R> QueryBuilder<'hlx, 'a, R> {
     ///
     /// Returns [`HelixError::SerializationError`] if `data` cannot be serialized
     /// to JSON.
-    #[must_use]
     pub fn body<T: Serialize + Sync>(mut self, data: &T) -> Result<Self, HelixError> {
         self.body = Some(sonic_rs::to_vec(data)?);
         Ok(self)
