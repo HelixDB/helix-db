@@ -1421,6 +1421,7 @@ pub enum Expr {
     },
 }
 
+#[allow(clippy::should_implement_trait)]
 impl Expr {
     /// Create a property reference expression
     pub fn prop(name: impl Into<String>) -> Self {
@@ -1809,6 +1810,7 @@ impl From<SourcePredicate> for Predicate {
     }
 }
 
+#[allow(clippy::should_implement_trait)]
 impl Predicate {
     /// Create an equality predicate.
     ///
@@ -2068,24 +2070,20 @@ impl From<ExprProjection> for Projection {
 }
 
 /// Sort order for ordering steps
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Order {
     /// Ascending order (smallest first)
+    #[default]
     Asc,
     /// Descending order (largest first)
     Desc,
 }
 
-impl Default for Order {
-    fn default() -> Self {
-        Order::Asc
-    }
-}
-
 /// Emit behavior for repeat steps
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EmitBehavior {
     /// Don't emit intermediate results.
+    #[default]
     None,
     /// Emit the current node stream before each repeat iteration.
     Before,
@@ -2093,12 +2091,6 @@ pub enum EmitBehavior {
     After,
     /// Emit both before and after each repeat iteration.
     All,
-}
-
-impl Default for EmitBehavior {
-    fn default() -> Self {
-        EmitBehavior::None
-    }
 }
 
 /// Aggregation function for reduce operations
