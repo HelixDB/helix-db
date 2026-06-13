@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "helix-cli",
+    "helix-protocol",
     "metrics",
     "sdks/rust",
 ]

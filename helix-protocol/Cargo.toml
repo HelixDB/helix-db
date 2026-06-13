@@ -1,0 +1,23 @@
+[package]
+name = "helix-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Protobuf and gRPC contract for HelixDB"
+license = "Apache-2.0"
+repository = "https://github.com/helixdb/helix-db"
+readme = "README.md"
+keywords = ["helixdb", "grpc", "protobuf", "database"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+prost = "0.13"
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost"] }
+
+[features]
+default = ["transport"]
+transport = ["tonic/transport"]
+
+[build-dependencies]
+protoc-bin-vendored = "3.1"
+tonic-build = "0.12"

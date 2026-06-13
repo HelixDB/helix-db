@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package helix.v1;
+
+// Helix exposes the database's primary query, mutation, and vector-search
+// operations over HTTP/2. JSON payload fields intentionally preserve parity
+// with the existing /v1/query HTTP contract while giving SDKs a stable typed
+// transport surface.
+service Helix {
+  // Query executes either an inline dynamic query or a named stored query and
+  // returns the complete JSON response body.
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // QueryStream executes a query and streams ordered JSON chunks. Servers can
+  // use this for large result sets and long-running graph traversals.
+  rpc QueryStream(QueryRequest) returns (stream QueryChunk);
+
+  // Insert writes a JSON document into a logical collection/label.
+  rpc Insert(InsertRequest) returns (MutationResponse);
+
+  // Search performs vector search and streams ranked matches in score order.
+  rpc Search(SearchRequest) returns (stream SearchResult);
+
+  // Health gives clients and load balancers a cheap readiness probe.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message QueryRequest {
+  oneof target {
+    DynamicQuery dynamic = 1;
+    StoredQuery stored = 2;
+  }
+
+  RequestOptions options = 10;
+}
+
+message DynamicQuery {
+  // UTF-8 JSON matching the current DynamicQueryRequest HTTP payload.
+  bytes json = 1;
+}
+
+message StoredQuery {
+  string name = 1;
+
+  // Optional UTF-8 JSON parameters/body for the stored query.
+  bytes parameters_json = 2;
+}
+
+message RequestOptions {
+  // Mirrors x-helix-require-writer.
+  bool require_writer = 1;
+
+  // Mirrors x-helix-warm.
+  bool warm_only = 2;
+
+  // Mirrors x-helix-await-durable. Absence lets the server use its default.
+  optional bool await_durability = 3;
+}
+
+message QueryResponse {
+  // UTF-8 JSON response body.
+  bytes json = 1;
+}
+
+message QueryChunk {
+  // Monotonic sequence number assigned by the server.
+  uint64 sequence = 1;
+
+  // UTF-8 JSON fragment or row payload.
+  bytes json = 2;
+
+  // True when this is the final chunk for the stream.
+  bool terminal = 3;
+}
+
+message InsertRequest {
+  // Logical collection, label, or table name chosen by the server runtime.
+  string collection = 1;
+
+  // UTF-8 JSON document body.
+  bytes document_json = 2;
+
+  RequestOptions options = 10;
+}
+
+message MutationResponse {
+  // Server-assigned primary identifier when one is available.
+  string id = 1;
+
+  // Number of records/nodes/edges affected by the mutation.
+  uint64 affected = 2;
+
+  // Optional UTF-8 JSON payload with server-specific mutation details.
+  bytes json = 3;
+}
+
+message SearchRequest {
+  // Logical vector index or collection/label to search.
+  string index = 1;
+
+  // Query vector. float is the common embedding precision and maps cleanly to
+  // SDK types across Rust, Go, Python, Java, and TypeScript.
+  repeated float vector = 2;
+
+  // Maximum number of results. Zero lets the server choose its default.
+  uint32 limit = 3;
+
+  // Optional UTF-8 JSON filter expression.
+  bytes filter_json = 4;
+
+  RequestOptions options = 10;
+}
+
+message SearchResult {
+  string id = 1;
+  float score = 2;
+
+  // UTF-8 JSON document or projection payload.
+  bytes json = 3;
+
+  uint64 sequence = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  HealthStatus status = 1;
+  string version = 2;
+  string message = 3;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_SERVING = 1;
+  HEALTH_STATUS_NOT_SERVING = 2;
+}
