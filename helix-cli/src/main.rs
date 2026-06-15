@@ -159,6 +159,7 @@ enum Commands {
     #[command(disable_help_flag = true)]
     #[command(after_help = r#"Examples:
   helix query --file examples/request.json
+  helix query --file examples/request.json --dry-run
   helix query -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
 Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
@@ -206,6 +207,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         /// Print compact single-line JSON
         #[arg(long, help_heading = "Output")]
         compact: bool,
+        /// Print the dynamic query request JSON without sending it
+        #[arg(long, help_heading = "Output")]
+        dry_run: bool,
     },
 
     /// Deploy an Enterprise Cloud instance
@@ -693,9 +697,13 @@ async fn main() -> Result<()> {
             host,
             port,
             compact,
+            dry_run,
             ..
         }) => {
-            commands::query::run(instance, file, json, ts, ts_file, warm, host, port, compact).await
+            commands::query::run(
+                instance, file, json, ts, ts_file, warm, host, port, compact, dry_run,
+            )
+            .await
         }
         Some(Commands::Push { instance, dev }) => {
             commands::push::run(instance, dev, &metrics_sender).await
@@ -1242,6 +1250,28 @@ mod tests {
             Some(Commands::Query { file, json, .. }) => {
                 assert!(file.is_none());
                 assert_eq!(json.as_deref(), Some(inline_json));
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn query_accepts_dry_run() {
+        let cli = Cli::parse_from([
+            "helix",
+            "query",
+            "dev",
+            "--json",
+            r#"{"request_type":"read","query":{"queries":[]}}"#,
+            "--dry-run",
+        ]);
+
+        match cli.command {
+            Some(Commands::Query {
+                dry_run, compact, ..
+            }) => {
+                assert!(dry_run);
+                assert!(!compact);
             }
             _ => panic!("expected query command"),
         }
