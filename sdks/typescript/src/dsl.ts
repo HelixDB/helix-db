@@ -612,7 +612,7 @@ export class StreamBound implements Encodable {
   static literal(value: number | bigint): StreamBound {
     const safe = intToJson(value);
     if (typeof safe === "bigint") {
-      if (safe > BigInt(Number.MAX_SAFE_INTEGER)) throw new TypeError(`stream bound exceeds JavaScript safe integer range: ${safe}`);
+      if (safe > BigInt(Number.MAX_SAFE_INTEGER) || safe < BigInt(Number.MIN_SAFE_INTEGER)) throw new TypeError(`stream bound exceeds JavaScript safe integer range: ${safe}`);
       return new StreamBound("Literal", Number(safe));
     }
     return new StreamBound("Literal", safe);
