@@ -16,15 +16,23 @@ pub async fn run(
     host: Option<String>,
     port: Option<u16>,
     compact: bool,
+    dry_run: bool,
 ) -> Result<()> {
-    let project = ProjectContext::find_and_load(None)?;
-    // Load a project-root .env so Enterprise query auth can come from a file
-    // instead of requiring the caller to export it in their shell.
-    let _ = dotenvy::from_path(project.root.join(".env"));
     let instance = instance.unwrap_or_else(|| "dev".to_string());
     let request_json = parse_query_request(file, json, ts, ts_file)?;
 
     validate_dynamic_request(&request_json, warm)?;
+    if dry_run {
+        if crate::output::Verbosity::current().show_normal() {
+            println!("{}", format_query_request(&request_json, compact)?);
+        }
+        return Ok(());
+    }
+
+    let project = ProjectContext::find_and_load(None)?;
+    // Load a project-root .env so Enterprise query auth can come from a file
+    // instead of requiring the caller to export it in their shell.
+    let _ = dotenvy::from_path(project.root.join(".env"));
     let client = reqwest::Client::new();
     let (mut request, endpoint, is_local) = match project.config.get_instance(&instance)? {
         InstanceInfo::Local(config) => {
@@ -122,6 +130,14 @@ fn connect_error(instance: &str, endpoint: &str, is_local: bool, cause: &str) ->
     ))
     .with_context(cause.to_string())
     .with_hint(hint)
+}
+
+fn format_query_request(request: &Value, compact: bool) -> Result<String> {
+    if compact {
+        Ok(serde_json::to_string(request)?)
+    } else {
+        Ok(serde_json::to_string_pretty(request)?)
+    }
 }
 
 fn parse_query_request(
@@ -257,5 +273,27 @@ mod tests {
         .to_string();
 
         assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn format_query_request_pretty_prints_dry_run_json() {
+        let request: Value =
+            serde_json::from_str(r#"{"request_type":"read","query":{"queries":[]}}"#).unwrap();
+
+        let output = format_query_request(&request, false).unwrap();
+
+        assert!(output.contains('\n'));
+        assert!(output.contains("\"request_type\": \"read\""));
+        assert!(output.contains("\n  \"query\": {"));
+    }
+
+    #[test]
+    fn format_query_request_compacts_dry_run_json() {
+        let request: Value =
+            serde_json::from_str(r#"{"request_type":"read","query":{"queries":[]}}"#).unwrap();
+
+        let output = format_query_request(&request, true).unwrap();
+
+        assert_eq!(output, r#"{"query":{"queries":[]},"request_type":"read"}"#);
     }
 }

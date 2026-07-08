@@ -1271,6 +1271,7 @@ async fn seed_starter_data() -> Result<()> {
             None,
             None,
             false,
+            false,
         )
     })
     .await

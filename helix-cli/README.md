@@ -10,7 +10,7 @@ Command-line interface for managing v2 Helix projects, local development instanc
 - `run`: run a local v2 instance in the background by default, attached with `--foreground`, or with persistent local storage using `--disk`.
 - `stop` / `restart` / `status`: manage local v2 instances and inspect Enterprise Cloud config.
 - `logs`: view local container logs or query Enterprise Cloud historical logs.
-- `query`: send a dynamic query request JSON file to `POST /v1/query`.
+- `query`: send a dynamic query request JSON file to `POST /v1/query`, or inspect it first with `--dry-run`.
 - `push`: compile and deploy an Enterprise query project to an Enterprise Cloud cluster.
 - `auth`: login, logout, or create an Enterprise Cloud API key.
 - `workspace`: manage active Enterprise Cloud workspace selection.
