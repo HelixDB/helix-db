@@ -1,5 +1,3 @@
-import { readFile, writeFile } from "node:fs/promises";
-
 export type JsonPrimitive = null | boolean | number | string | bigint;
 export type JsonValue = unknown;
 
@@ -33,16 +31,39 @@ function newtype(name: string, value: unknown): JsonValue {
   return { [name]: encode(value) };
 }
 
-function tuple(name: string, values: unknown[]): JsonValue {
-  return { [name]: values.map((value) => encode(value)) };
-}
-
 function struct(name: string, fields: Record<string, unknown>): JsonValue {
   const out: Record<string, JsonValue> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (value !== undefined) out[key] = encode(value);
   }
   return { [name]: out };
+}
+
+function snakeCase(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+}
+
+function astTag(name: string, fields: Record<string, unknown>): JsonValue {
+  return struct(snakeCase(name), fields);
+}
+
+function astNewtype(name: string, value: unknown): JsonValue {
+  return newtype(snakeCase(name), value);
+}
+
+function astUnit(name: string): JsonValue {
+  return unit(snakeCase(name));
+}
+
+function astBoundLiteral(value: unknown): JsonValue {
+  return astNewtype("Literal", value);
+}
+
+function astBoundExpr(value: unknown): JsonValue {
+  return astNewtype("Expr", value);
 }
 
 export function stringifyJson(value: unknown, pretty = false): string {
@@ -52,6 +73,11 @@ export function stringifyJson(value: unknown, pretty = false): string {
 
 export function parseJsonStructural(json: string): unknown {
   return JSON.parse(quoteUnsafeIntegerTokens(json));
+}
+
+/** Parse server JSON while preserving integers outside JavaScript's safe range as `bigint`. */
+export function parseJson(json: string): unknown {
+  return reviveUnsafeIntegers(parseJsonStructural(json));
 }
 
 export function structuralJsonEqual(left: string, right: string): boolean {
@@ -121,6 +147,16 @@ function quoteUnsafeIntegerTokens(json: string): string {
   return out;
 }
 
+function reviveUnsafeIntegers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reviveUnsafeIntegers);
+  if (value === null || typeof value !== "object") return value;
+  const entries = Object.entries(value);
+  if (entries.length === 1 && entries[0]?.[0] === "\u0000helixUnsafeInteger") {
+    return BigInt(entries[0][1] as string);
+  }
+  return Object.fromEntries(entries.map(([key, entry]) => [key, reviveUnsafeIntegers(entry)]));
+}
+
 function stringifyEncoded(value: JsonValue, indent: number | undefined): string {
   const space = indent === undefined ? "" : "  ".repeat(indent);
   const next = indent === undefined ? undefined : indent + 1;
@@ -155,72 +191,38 @@ ${nextSpace}${entries.map(([key, entry]) => `${JSON.stringify(key)}: ${stringify
 ${space}}`;
 }
 
-export class DynamicQueryError extends Error {
+export class QueryError extends Error {
   readonly kind: "Serialize" | "Utf8" | "UnsupportedBytesParameter" | "InvalidDateTimeParameter";
   readonly path?: string;
   readonly millis?: bigint;
 
-  private constructor(kind: DynamicQueryError["kind"], message: string, path?: string, millis?: bigint) {
+  private constructor(kind: QueryError["kind"], message: string, path?: string, millis?: bigint) {
     super(message);
-    this.name = "DynamicQueryError";
+    this.name = "QueryError";
     this.kind = kind;
     this.path = path;
     this.millis = millis;
   }
 
-  static serialize(message: string): DynamicQueryError {
-    return new DynamicQueryError("Serialize", `json serialization error: ${message}`);
+  static serialize(message: string): QueryError {
+    return new QueryError("Serialize", `json serialization error: ${message}`);
   }
 
-  static utf8(message: string): DynamicQueryError {
-    return new DynamicQueryError("Utf8", `utf8 conversion error: ${message}`);
+  static utf8(message: string): QueryError {
+    return new QueryError("Utf8", `utf8 conversion error: ${message}`);
   }
 
-  static unsupportedBytes(path: string): DynamicQueryError {
-    return new DynamicQueryError(
-      "UnsupportedBytesParameter",
-      `parameter '${path}' uses bytes, which the dynamic query JSON route cannot represent`,
-      path,
-    );
+  static unsupportedBytes(path: string): QueryError {
+    return new QueryError("UnsupportedBytesParameter", `parameter '${path}' uses bytes, which the query JSON route cannot represent`, path);
   }
 
-  static invalidDatetime(path: string, millis: bigint): DynamicQueryError {
-    return new DynamicQueryError(
+  static invalidDatetime(path: string, millis: bigint): QueryError {
+    return new QueryError(
       "InvalidDateTimeParameter",
       `parameter '${path}' uses datetime millis '${millis}', which cannot be rendered as RFC3339`,
       path,
       millis,
     );
-  }
-}
-
-export class GenerateError extends Error {
-  readonly kind: "DuplicateQueryName" | "Io" | "Json" | "UnsupportedVersion";
-  readonly found?: number;
-  readonly expected?: number;
-
-  private constructor(kind: GenerateError["kind"], message: string, found?: number, expected?: number) {
-    super(message);
-    this.name = "GenerateError";
-    this.kind = kind;
-    this.found = found;
-    this.expected = expected;
-  }
-
-  static duplicateQueryName(name: string): GenerateError {
-    return new GenerateError("DuplicateQueryName", `duplicate generated query name: ${name}`);
-  }
-
-  static io(message: string): GenerateError {
-    return new GenerateError("Io", `io error: ${message}`);
-  }
-
-  static json(message: string): GenerateError {
-    return new GenerateError("Json", `json error: ${message}`);
-  }
-
-  static unsupportedVersion(found: number, expected: number): GenerateError {
-    return new GenerateError("UnsupportedVersion", `unsupported query bundle version ${found} (expected ${expected})`, found, expected);
   }
 }
 
@@ -265,7 +267,7 @@ export class DateTime {
 function dateTimeToRfc3339(value: DateTime, path: string): string {
   const millis = value.millis();
   const asNumber = Number(millis);
-  if (!Number.isSafeInteger(asNumber)) throw DynamicQueryError.invalidDatetime(path, millis);
+  if (!Number.isSafeInteger(asNumber)) throw QueryError.invalidDatetime(path, millis);
   return new Date(asNumber).toISOString();
 }
 
@@ -423,8 +425,8 @@ export class PropertyValue implements Encodable {
   }
 
   toJSON(): JsonValue {
-    if (this.variant === "Null") return unit("Null");
-    return newtype(this.variant, this.payload);
+    if (this.variant === "Null") return astUnit("Null");
+    return astNewtype(this.variant, this.payload);
   }
 }
 
@@ -452,7 +454,7 @@ export class PropertyInput implements Encodable {
     return this.variant === "Expr" ? (this.payload as Expr) : Expr.val(this.payload as PropertyValue);
   }
   toJSON(): JsonValue {
-    return newtype(this.variant, this.payload);
+    return astNewtype(this.variant, this.payload);
   }
 }
 
@@ -483,15 +485,18 @@ export class NodeRef implements Encodable {
     return NodeRef.id(value);
   }
   toJSON(): JsonValue {
-    return this.variant === "All" ? unit("All") : newtype(this.variant, this.payload);
+    return this.variant === "All" ? astUnit("All") : astNewtype(this.variant, this.payload);
   }
 }
 
 export class EdgeRef implements Encodable {
   private constructor(
-    readonly variant: "Ids" | "Var" | "Param",
-    readonly payload: unknown,
+    readonly variant: "All" | "Ids" | "Var" | "Param",
+    readonly payload?: unknown,
   ) {}
+  static all(): EdgeRef {
+    return new EdgeRef("All");
+  }
   static id(id: EdgeId): EdgeRef {
     return new EdgeRef("Ids", [intToJson(id)]);
   }
@@ -510,46 +515,65 @@ export class EdgeRef implements Encodable {
     return EdgeRef.id(value);
   }
   toJSON(): JsonValue {
-    return newtype(this.variant, this.payload);
+    return this.variant === "All" ? astUnit("All") : astNewtype(this.variant, this.payload);
   }
 }
 
 export enum CompareOp {
-  Eq = "Eq",
-  Neq = "Neq",
-  Gt = "Gt",
-  Gte = "Gte",
-  Lt = "Lt",
-  Lte = "Lte",
+  Eq = "eq",
+  Neq = "neq",
+  Gt = "gt",
+  Gte = "gte",
+  Lt = "lt",
+  Lte = "lte",
 }
 export enum Order {
-  Asc = "Asc",
-  Desc = "Desc",
+  Asc = "asc",
+  Desc = "desc",
+}
+
+export enum ShortestPathDirection {
+  Out = "out",
+  In = "in",
+  Both = "both",
 }
 
 export enum RangeIndexDirection {
-  Asc = "Asc",
-  Desc = "Desc",
+  Asc = "asc",
+  Desc = "desc",
+}
+
+export enum VectorDistanceMetric {
+  Cosine = "cosine",
+  Euclidean = "euclidean",
+  Manhattan = "manhattan",
 }
 
 function rangeIndexFields(label: string, property: string, direction: RangeIndexDirection): Record<string, unknown> {
-  const fields: Record<string, unknown> = { label, property };
-  if (direction !== RangeIndexDirection.Asc) fields.direction = direction;
-  return fields;
+  return { label, property, direction };
 }
 export enum EmitBehavior {
-  None = "None",
-  Before = "Before",
-  After = "After",
-  All = "All",
+  None = "none",
+  Before = "before",
+  After = "after",
+  All = "all",
 }
 export enum AggregateFunction {
-  Count = "Count",
-  Sum = "Sum",
-  Min = "Min",
-  Max = "Max",
-  Mean = "Mean",
+  Count = "count",
+  Sum = "sum",
+  Min = "min",
+  Max = "max",
+  Mean = "mean",
 }
+
+export interface WhenThen {
+  when: Predicate;
+  then: Expr;
+}
+
+export const WhenThen = (when: Predicate, then: Expr): WhenThen => ({ when, then });
+
+type WhenThenInput = WhenThen | readonly [Predicate, Expr];
 
 export class Expr implements Encodable {
   private constructor(
@@ -592,15 +616,27 @@ export class Expr implements Encodable {
   neg(): Expr {
     return new Expr("Neg", this);
   }
-  static case(whenThen: [Predicate, Expr][], elseExpr?: Expr | null): Expr {
-    return new Expr("Case", { when_then: whenThen, else_expr: elseExpr ?? null });
+  static case(whenThen: readonly WhenThenInput[], elseExpr?: Expr | null): Expr {
+    return new Expr("Case", {
+      when_then: whenThen.map((branch) => (Array.isArray(branch) ? { when: branch[0], then: branch[1] } : branch)),
+      else_expr: elseExpr ?? null,
+    });
   }
   toJSON(): JsonValue {
-    if (["Id", "Timestamp", "DateTimeNow"].includes(this.variant)) return unit(this.variant);
-    if (["Add", "Sub", "Mul", "Div", "Mod"].includes(this.variant)) return tuple(this.variant, this.payload as unknown[]);
-    if (this.variant === "Neg") return newtype("Neg", this.payload);
-    if (this.variant === "Case") return struct("Case", this.payload as Record<string, unknown>);
-    return newtype(this.variant, this.payload);
+    if (["Id", "Timestamp", "DateTimeNow"].includes(this.variant)) return astUnit(this.variant);
+    if (["Add", "Sub", "Mul", "Div", "Mod"].includes(this.variant)) {
+      const [left, right] = this.payload as [Expr, Expr];
+      return astTag(this.variant, { left, right });
+    }
+    if (this.variant === "Neg") return astTag("Neg", { expr: this.payload });
+    if (this.variant === "Case") {
+      const payload = this.payload as { when_then: WhenThen[]; else_expr: Expr | null };
+      return astTag("Case", {
+        when_then: payload.when_then,
+        else_expr: payload.else_expr ?? undefined,
+      });
+    }
+    return astNewtype(this.variant, this.payload);
   }
 }
 
@@ -628,7 +664,7 @@ export class StreamBound implements Encodable {
     return StreamBound.literal(value);
   }
   toJSON(): JsonValue {
-    return newtype(this.variant, this.payload);
+    return astNewtype(this.variant, this.payload);
   }
 }
 
@@ -736,128 +772,82 @@ export class Predicate implements Encodable {
     return new Predicate("LteExpr", [property, Expr.param(paramName)]);
   }
   static fromSource(predicate: SourcePredicate): Predicate {
-    return predicate.toPredicate();
+    return predicate;
   }
   toJSON(): JsonValue {
-    if (this.variant === "Compare") return struct("Compare", this.payload as Record<string, unknown>);
-    if (this.variant === "Not") return newtype("Not", this.payload);
-    if (["And", "Or"].includes(this.variant)) return newtype(this.variant, this.payload);
-    if (["HasKey", "IsNull", "IsNotNull"].includes(this.variant)) return newtype(this.variant, this.payload);
-    return tuple(this.variant, this.payload as unknown[]);
+    const propExpr = (property: string) => Expr.prop(property);
+    const asExpr = (value: unknown) => (value instanceof Expr ? value : Expr.val(value as PropertyValue));
+    const binary = (name: string, payload: unknown[]) => astTag(name, { left: propExpr(payload[0] as string), right: asExpr(payload[1]) });
+    switch (this.variant) {
+      case "Eq":
+      case "EqExpr":
+        return binary("Eq", this.payload as unknown[]);
+      case "Neq":
+      case "NeqExpr":
+        return binary("Neq", this.payload as unknown[]);
+      case "Gt":
+      case "GtExpr":
+        return binary("Gt", this.payload as unknown[]);
+      case "Gte":
+      case "GteExpr":
+        return binary("Gte", this.payload as unknown[]);
+      case "Lt":
+      case "LtExpr":
+        return binary("Lt", this.payload as unknown[]);
+      case "Lte":
+      case "LteExpr":
+        return binary("Lte", this.payload as unknown[]);
+      case "Between": {
+        const [property, min, max] = this.payload as unknown[];
+        return astTag("Between", { value: propExpr(property as string), min: asExpr(min), max: asExpr(max) });
+      }
+      case "BetweenExpr": {
+        const [property, min, max] = this.payload as unknown[];
+        return astTag("Between", { value: propExpr(property as string), min, max });
+      }
+      case "HasKey":
+      case "IsNull":
+      case "IsNotNull":
+        return astTag(this.variant, { property: this.payload });
+      case "StartsWith": {
+        const [property, prefix] = this.payload as [string, string];
+        return astTag("StartsWith", { value: propExpr(property), prefix: Expr.val(prefix) });
+      }
+      case "EndsWith": {
+        const [property, suffix] = this.payload as [string, string];
+        return astTag("EndsWith", { value: propExpr(property), suffix: Expr.val(suffix) });
+      }
+      case "Contains": {
+        const [property, substring] = this.payload as [string, string];
+        return astTag("Contains", { value: propExpr(property), substring: Expr.val(substring) });
+      }
+      case "ContainsExpr": {
+        const [property, substring] = this.payload as [string, Expr];
+        return astTag("Contains", { value: propExpr(property), substring });
+      }
+      case "IsIn": {
+        const [property, values] = this.payload as unknown[];
+        return astTag("IsIn", { value: propExpr(property as string), values: Expr.val(values as PropertyValue) });
+      }
+      case "IsInExpr": {
+        const [property, values] = this.payload as [string, Expr];
+        return astTag("IsIn", { value: propExpr(property), values });
+      }
+      case "And":
+      case "Or":
+        return astTag(this.variant, { predicates: this.payload });
+      case "Not":
+        return astTag("Not", { predicate: this.payload });
+      case "Compare":
+        return astTag("Compare", this.payload as Record<string, unknown>);
+      default:
+        throw new Error(`unknown predicate: ${this.variant}`);
+    }
   }
 }
 
-export class SourcePredicate implements Encodable {
-  private constructor(
-    readonly variant: string,
-    readonly payload?: unknown,
-  ) {}
-  // Comparison constructors accept a literal value or an Expr/parameter. Literals keep the existing
-  // variant (e.g. `Eq`); expressions route to the `*Expr` variant (mirrors the Rust DSL).
-  static eq(property: string, value: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const input = PropertyInput.from(value);
-    return input.variant === "Value"
-      ? new SourcePredicate("Eq", [property, input.payload])
-      : new SourcePredicate("EqExpr", [property, input.payload]);
-  }
-  static neq(property: string, value: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const input = PropertyInput.from(value);
-    return input.variant === "Value"
-      ? new SourcePredicate("Neq", [property, input.payload])
-      : new SourcePredicate("NeqExpr", [property, input.payload]);
-  }
-  static gt(property: string, value: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const input = PropertyInput.from(value);
-    return input.variant === "Value"
-      ? new SourcePredicate("Gt", [property, input.payload])
-      : new SourcePredicate("GtExpr", [property, input.payload]);
-  }
-  static gte(property: string, value: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const input = PropertyInput.from(value);
-    return input.variant === "Value"
-      ? new SourcePredicate("Gte", [property, input.payload])
-      : new SourcePredicate("GteExpr", [property, input.payload]);
-  }
-  static lt(property: string, value: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const input = PropertyInput.from(value);
-    return input.variant === "Value"
-      ? new SourcePredicate("Lt", [property, input.payload])
-      : new SourcePredicate("LtExpr", [property, input.payload]);
-  }
-  static lte(property: string, value: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const input = PropertyInput.from(value);
-    return input.variant === "Value"
-      ? new SourcePredicate("Lte", [property, input.payload])
-      : new SourcePredicate("LteExpr", [property, input.payload]);
-  }
-  static between(property: string, min: PropertyValueInput | Expr | ParamRef, max: PropertyValueInput | Expr | ParamRef): SourcePredicate {
-    const lo = PropertyInput.from(min);
-    const hi = PropertyInput.from(max);
-    if (lo.variant === "Value" && hi.variant === "Value") {
-      return new SourcePredicate("Between", [property, lo.payload, hi.payload]);
-    }
-    return new SourcePredicate("BetweenExpr", [property, lo.toExpr(), hi.toExpr()]);
-  }
-  static hasKey(property: string): SourcePredicate {
-    return new SourcePredicate("HasKey", property);
-  }
-  static startsWith(property: string, prefix: string): SourcePredicate {
-    return new SourcePredicate("StartsWith", [property, prefix]);
-  }
-  static and(predicates: SourcePredicate[]): SourcePredicate {
-    return new SourcePredicate("And", predicates);
-  }
-  static or(predicates: SourcePredicate[]): SourcePredicate {
-    return new SourcePredicate("Or", predicates);
-  }
-  toPredicate(): Predicate {
-    const p = this.payload as unknown[];
-    switch (this.variant) {
-      case "Eq":
-        return Predicate.eq(p[0] as string, p[1] as PropertyValue);
-      case "Neq":
-        return Predicate.neq(p[0] as string, p[1] as PropertyValue);
-      case "Gt":
-        return Predicate.gt(p[0] as string, p[1] as PropertyValue);
-      case "Gte":
-        return Predicate.gte(p[0] as string, p[1] as PropertyValue);
-      case "Lt":
-        return Predicate.lt(p[0] as string, p[1] as PropertyValue);
-      case "Lte":
-        return Predicate.lte(p[0] as string, p[1] as PropertyValue);
-      case "Between":
-        return Predicate.between(p[0] as string, p[1] as PropertyValue, p[2] as PropertyValue);
-      case "HasKey":
-        return Predicate.hasKey(this.payload as string);
-      case "StartsWith":
-        return Predicate.startsWith(p[0] as string, p[1] as string);
-      case "And":
-        return Predicate.and((this.payload as SourcePredicate[]).map((entry) => entry.toPredicate()));
-      case "Or":
-        return Predicate.or((this.payload as SourcePredicate[]).map((entry) => entry.toPredicate()));
-      case "EqExpr":
-        return Predicate.eq(p[0] as string, p[1] as Expr);
-      case "NeqExpr":
-        return Predicate.neq(p[0] as string, p[1] as Expr);
-      case "GtExpr":
-        return Predicate.gt(p[0] as string, p[1] as Expr);
-      case "GteExpr":
-        return Predicate.gte(p[0] as string, p[1] as Expr);
-      case "LtExpr":
-        return Predicate.lt(p[0] as string, p[1] as Expr);
-      case "LteExpr":
-        return Predicate.lte(p[0] as string, p[1] as Expr);
-      case "BetweenExpr":
-        return Predicate.between(p[0] as string, p[1] as Expr, p[2] as Expr);
-      default:
-        throw new Error(`unknown source predicate: ${this.variant}`);
-    }
-  }
-  toJSON(): JsonValue {
-    if (["And", "Or", "HasKey"].includes(this.variant)) return newtype(this.variant, this.payload);
-    return tuple(this.variant, this.payload as unknown[]);
-  }
-}
+export type SourcePredicate = Predicate;
+export const SourcePredicate = Predicate;
 
 export class PropertyProjection implements Encodable {
   constructor(
@@ -908,18 +898,18 @@ export class Projection implements Encodable {
     return value instanceof Projection ? value : new Projection(value);
   }
   toJSON(): JsonValue {
-    return this.inner.toJSON();
+    return this.inner instanceof ExprProjection ? astNewtype("Expr", this.inner) : astNewtype("Property", this.inner);
   }
 }
 
-export type BindingTarget = "Current" | { Binding: string };
+export type BindingTarget = "current" | { binding: string };
 
 export const BindingTarget = {
   current(): BindingTarget {
-    return "Current";
+    return "current";
   },
   binding(name: string): BindingTarget {
-    return { Binding: name };
+    return { binding: name };
   },
 };
 
@@ -929,12 +919,12 @@ export type BindingValueRef = {
 };
 
 export type BindingProjection =
-  | { kind: "Property"; target: BindingTarget; source: string; alias: string }
-  | { kind: "Coalesce"; refs: BindingValueRef[]; alias: string };
+  | { property: { target: BindingTarget; source: string; alias: string } }
+  | { coalesce: { refs: BindingValueRef[]; alias: string } };
 
 export const BindingProjection = {
   property(target: BindingTarget, source: string, alias: string): BindingProjection {
-    return { kind: "Property", target, source, alias };
+    return { property: { target, source, alias } };
   },
   current(source: string, alias: string): BindingProjection {
     return BindingProjection.property(BindingTarget.current(), source, alias);
@@ -952,7 +942,7 @@ export const BindingProjection = {
     return BindingProjection.valueRef(BindingTarget.binding(name), source);
   },
   coalesce(refs: BindingValueRef[], alias: string): BindingProjection {
-    return { kind: "Coalesce", refs, alias };
+    return { coalesce: { refs, alias } };
   },
 };
 
@@ -1029,14 +1019,14 @@ export class RepeatConfig implements Encodable {
     return new RepeatConfig(this.traversal, this.timesValue, this.untilValue, this.emitValue, this.emitPredicateValue, depth);
   }
   toJSON(): JsonValue {
-    return {
+    return encode({
       traversal: this.traversal,
-      times: this.timesValue,
-      until: this.untilValue,
+      times: this.timesValue ?? undefined,
+      until: this.untilValue ?? undefined,
       emit: this.emitValue,
-      emit_predicate: this.emitPredicateValue,
+      emit_predicate: this.emitPredicateValue ?? undefined,
       max_depth: this.maxDepthValue,
-    };
+    });
   }
 }
 
@@ -1072,21 +1062,290 @@ export class IndexSpec implements Encodable {
   static edgeRangeWithDirection(label: string, property: string, direction: RangeIndexDirection): IndexSpec {
     return new IndexSpec("EdgeRange", rangeIndexFields(label, property, direction));
   }
-  static nodeVector(label: string, property: string, tenantProperty?: string | null): IndexSpec {
-    return new IndexSpec("NodeVector", { label, property, tenant_property: tenantProperty ?? undefined });
+  static nodeVector(
+    label: string,
+    property: string,
+    dimension: number,
+    metric: VectorDistanceMetric,
+    tenantProperty?: string | null,
+  ): IndexSpec {
+    if (!Number.isSafeInteger(dimension) || dimension <= 0)
+      throw new TypeError(`vector dimension must be a positive safe integer: ${dimension}`);
+    if (!Object.values(VectorDistanceMetric).includes(metric)) throw new TypeError(`unsupported vector distance metric: ${String(metric)}`);
+    return new IndexSpec("NodeVector", { label, property, dimension, metric, tenant_property: tenantProperty ?? undefined });
   }
   static nodeText(label: string, property: string, tenantProperty?: string | null): IndexSpec {
     return new IndexSpec("NodeText", { label, property, tenant_property: tenantProperty ?? undefined });
   }
-  static edgeVector(label: string, property: string, tenantProperty?: string | null): IndexSpec {
-    return new IndexSpec("EdgeVector", { label, property, tenant_property: tenantProperty ?? undefined });
+  static edgeVector(
+    label: string,
+    property: string,
+    dimension: number,
+    metric: VectorDistanceMetric,
+    tenantProperty?: string | null,
+  ): IndexSpec {
+    if (!Number.isSafeInteger(dimension) || dimension <= 0)
+      throw new TypeError(`vector dimension must be a positive safe integer: ${dimension}`);
+    if (!Object.values(VectorDistanceMetric).includes(metric)) throw new TypeError(`unsupported vector distance metric: ${String(metric)}`);
+    return new IndexSpec("EdgeVector", { label, property, dimension, metric, tenant_property: tenantProperty ?? undefined });
   }
   static edgeText(label: string, property: string, tenantProperty?: string | null): IndexSpec {
     return new IndexSpec("EdgeText", { label, property, tenant_property: tenantProperty ?? undefined });
   }
   toJSON(): JsonValue {
-    return struct(this.variant, this.fields);
+    return astTag(this.variant, this.fields);
   }
+}
+
+/** Canonical lowercase non-nil UUID used by index lifecycle controls. */
+export type IndexOperationId = string;
+
+/** CREATE/DROP receipt with decimal-string u64 fields. */
+export type IndexDdlReceipt =
+  | { kind: "accepted"; operation_id: IndexOperationId; index_id: string; generation: string; [key: string]: unknown }
+  | { kind: "existing_operation"; operation_id: IndexOperationId; [key: string]: unknown }
+  | { kind: "already_active"; index_id: string; generation: string; [key: string]: unknown };
+
+/** Durable operation kind returned by lifecycle status. */
+export type IndexOperationKind = "build" | "drop";
+/** Physical family lane returned by lifecycle status. */
+export type IndexFamily = "secondary" | "vector" | "text";
+/** Frozen stage returned by lifecycle status. */
+export type IndexOperationStage =
+  | "scan"
+  | "scan_partitions"
+  | "await_upload"
+  | "catch_up"
+  | "validate"
+  | "validate_descriptor"
+  | "compact"
+  | "prepare_manifests"
+  | "validate_manifests"
+  | "activate"
+  | "begin_drain"
+  | "delete_entries"
+  | "retire_cache"
+  | "delete_physical"
+  | "delete_deltas"
+  | "prepare_candidates"
+  | "acquire_delete_fences"
+  | "retire_manifest"
+  | "retire_artifacts"
+  | "retire_upload_intents"
+  | "mark_reachability"
+  | "delete_blobs"
+  | "delete_entity_state"
+  | "finish_drain"
+  | "finalize"
+  | "aborting_begin_drain"
+  | "aborting_delete_entries"
+  | "aborting_retire_cache"
+  | "aborting_delete_physical"
+  | "aborting_delete_deltas"
+  | "aborting_prepare_candidates"
+  | "aborting_acquire_delete_fences"
+  | "aborting_retire_manifest"
+  | "aborting_retire_artifacts"
+  | "aborting_retire_upload_intents"
+  | "aborting_mark_reachability"
+  | "aborting_delete_blobs"
+  | "aborting_delete_entity_state"
+  | "aborting_finish_drain"
+  | "aborting_finalize";
+/** Stable reason a blocked operation requires explicit control. */
+export type IndexOperationBlockerCode =
+  | "invalid_source_data"
+  | "uniqueness_violation"
+  | "oversized_entity"
+  | "manifest_limit"
+  | "reader_coordination_unavailable"
+  | "object_store_configuration_unavailable"
+  | "blob_publication_coordination_unavailable"
+  | "invariant_violation";
+
+/** Stable machine-readable lifecycle API error. */
+export type IndexErrorCode =
+  | "index_lifecycle_unavailable"
+  | "index_already_exists"
+  | "index_definition_conflict"
+  | "index_busy"
+  | "index_not_found"
+  | "index_operation_not_found"
+  | "index_operation_not_abortable"
+  | "reader_coordination_unavailable"
+  | "index_id_exhausted"
+  | "blob_publication_coordination_unavailable"
+  | "vector_physical_id_exhausted"
+  | "index_generation_exhausted"
+  | "index_revision_exhausted"
+  | "index_operation_revision_exhausted"
+  | "stale_index_generation"
+  | "writer_fenced_commit_outcome_unknown";
+
+/** Decimal-string bounded-work counters. */
+export interface IndexOperationProgress {
+  entities: string;
+  input_bytes: string;
+  output_operations: string;
+  output_bytes: string;
+  [key: string]: unknown;
+}
+
+/** Fields present in every lifecycle status variant. */
+export interface IndexOperationStatusCommon {
+  operation_id: IndexOperationId;
+  index_id: string;
+  generation: string;
+  operation_kind: IndexOperationKind;
+  family: IndexFamily;
+  stage: IndexOperationStage;
+  attempt: number;
+  progress: IndexOperationProgress;
+  [key: string]: unknown;
+}
+
+/** Status union. Additive response fields remain forward-compatible. */
+export type IndexOperationStatus =
+  | (IndexOperationStatusCommon & { status: "queued" })
+  | (IndexOperationStatusCommon & { status: "running" })
+  | (IndexOperationStatusCommon & { status: "blocked"; blocker_code: IndexOperationBlockerCode; message?: string | null })
+  | (IndexOperationStatusCommon & { status: "succeeded" })
+  | (IndexOperationStatusCommon & { status: "aborted" });
+
+/** Validate the frozen lowercase non-nil UUID control identifier. */
+function indexOperationId(value: string): IndexOperationId {
+  if (!/^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))
+    throw new TypeError(`index operation ID must be a canonical lowercase non-nil UUID: ${value}`);
+  return value;
+}
+
+const INDEX_OPERATION_KINDS = new Set<IndexOperationKind>(["build", "drop"]);
+const INDEX_FAMILIES = new Set<IndexFamily>(["secondary", "vector", "text"]);
+const INDEX_OPERATION_BLOCKERS = new Set<IndexOperationBlockerCode>([
+  "invalid_source_data",
+  "uniqueness_violation",
+  "oversized_entity",
+  "manifest_limit",
+  "reader_coordination_unavailable",
+  "object_store_configuration_unavailable",
+  "blob_publication_coordination_unavailable",
+  "invariant_violation",
+]);
+const INDEX_OPERATION_STAGES = new Set<IndexOperationStage>([
+  "scan",
+  "scan_partitions",
+  "await_upload",
+  "catch_up",
+  "validate",
+  "validate_descriptor",
+  "compact",
+  "prepare_manifests",
+  "validate_manifests",
+  "activate",
+  "begin_drain",
+  "delete_entries",
+  "retire_cache",
+  "delete_physical",
+  "delete_deltas",
+  "prepare_candidates",
+  "acquire_delete_fences",
+  "retire_manifest",
+  "retire_artifacts",
+  "retire_upload_intents",
+  "mark_reachability",
+  "delete_blobs",
+  "delete_entity_state",
+  "finish_drain",
+  "finalize",
+  "aborting_begin_drain",
+  "aborting_delete_entries",
+  "aborting_retire_cache",
+  "aborting_delete_physical",
+  "aborting_delete_deltas",
+  "aborting_prepare_candidates",
+  "aborting_acquire_delete_fences",
+  "aborting_retire_manifest",
+  "aborting_retire_artifacts",
+  "aborting_retire_upload_intents",
+  "aborting_mark_reachability",
+  "aborting_delete_blobs",
+  "aborting_delete_entity_state",
+  "aborting_finish_drain",
+  "aborting_finalize",
+]);
+
+/** Require the object shape shared by tagged lifecycle responses. */
+function lifecycleRecord(value: unknown, contract: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`${contract} must be a JSON object`);
+  return value as Record<string, unknown>;
+}
+
+/** Read one required string field without coercing caller data. */
+function lifecycleString(record: Record<string, unknown>, field: string): string {
+  const value = record[field];
+  if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
+  return value;
+}
+
+/** Validate a canonical decimal-string u64 and preserve its wire form. */
+function lifecycleU64(value: unknown, field: string, allowZero: boolean): string {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value))
+    throw new TypeError(`${field} must be a canonical unsigned decimal string`);
+  const parsed = BigInt(value);
+  if ((!allowZero && parsed === 0n) || parsed > 18_446_744_073_709_551_615n) throw new TypeError(`${field} is outside the u64 range`);
+  return value;
+}
+
+/** Decode and validate one CREATE/DROP receipt while ignoring additive fields. */
+export function parseIndexDdlReceipt(value: unknown): IndexDdlReceipt {
+  const receipt = lifecycleRecord(value, "index DDL receipt");
+  const kind = lifecycleString(receipt, "kind");
+  if (kind === "accepted") {
+    indexOperationId(lifecycleString(receipt, "operation_id"));
+    lifecycleU64(receipt.index_id, "index_id", false);
+    lifecycleU64(receipt.generation, "generation", false);
+  } else if (kind === "existing_operation") {
+    indexOperationId(lifecycleString(receipt, "operation_id"));
+  } else if (kind === "already_active") {
+    lifecycleU64(receipt.index_id, "index_id", false);
+    lifecycleU64(receipt.generation, "generation", false);
+  } else {
+    throw new TypeError(`unknown index DDL receipt kind: ${kind}`);
+  }
+  return receipt as IndexDdlReceipt;
+}
+
+/** Decode and validate one lifecycle status while ignoring additive fields. */
+export function parseIndexOperationStatus(value: unknown): IndexOperationStatus {
+  const status = lifecycleRecord(value, "index operation status");
+  const tag = lifecycleString(status, "status");
+  if (!new Set(["queued", "running", "blocked", "succeeded", "aborted"]).has(tag))
+    throw new TypeError(`unknown index operation status: ${tag}`);
+  indexOperationId(lifecycleString(status, "operation_id"));
+  lifecycleU64(status.index_id, "index_id", false);
+  lifecycleU64(status.generation, "generation", false);
+  const operationKind = lifecycleString(status, "operation_kind") as IndexOperationKind;
+  if (!INDEX_OPERATION_KINDS.has(operationKind)) throw new TypeError(`unknown index operation kind: ${operationKind}`);
+  const family = lifecycleString(status, "family") as IndexFamily;
+  if (!INDEX_FAMILIES.has(family)) throw new TypeError(`unknown index family: ${family}`);
+  const stage = lifecycleString(status, "stage") as IndexOperationStage;
+  if (!INDEX_OPERATION_STAGES.has(stage)) throw new TypeError(`unknown index operation stage: ${stage}`);
+  if (!Number.isInteger(status.attempt) || (status.attempt as number) < 0 || (status.attempt as number) > 4_294_967_295)
+    throw new TypeError("attempt must be a u32 JSON number");
+  const progress = lifecycleRecord(status.progress, "index operation progress");
+  lifecycleU64(progress.entities, "progress.entities", true);
+  lifecycleU64(progress.input_bytes, "progress.input_bytes", true);
+  lifecycleU64(progress.output_operations, "progress.output_operations", true);
+  lifecycleU64(progress.output_bytes, "progress.output_bytes", true);
+  if (tag === "blocked") {
+    const blocker = lifecycleString(status, "blocker_code") as IndexOperationBlockerCode;
+    if (!INDEX_OPERATION_BLOCKERS.has(blocker)) throw new TypeError(`unknown index operation blocker: ${blocker}`);
+    if (status.message !== undefined && status.message !== null && typeof status.message !== "string")
+      throw new TypeError("message must be a string or null when present");
+  }
+  if (tag === "aborted" && (operationKind !== "build" || !stage.startsWith("aborting_")))
+    throw new TypeError("aborted status must describe build cleanup");
+  return status as IndexOperationStatus;
 }
 
 type StepStyle = "unit" | "newtype" | "tuple" | "struct";
@@ -1114,6 +1373,20 @@ export class Step implements Encodable {
   }
   static nWhere(predicate: SourcePredicate): Step {
     return Step.newtype("NWhere", predicate);
+  }
+  static shortestPath(
+    source: NodeRef,
+    target: NodeRef,
+    maxDepth: number,
+    options: { label?: string | null; direction?: ShortestPathDirection } = {},
+  ): Step {
+    return Step.struct("ShortestPath", {
+      source,
+      target,
+      label: options.label ?? undefined,
+      direction: options.direction ?? ShortestPathDirection.Out,
+      max_depth: maxDepth,
+    });
   }
   static e(edges: EdgeRef): Step {
     return Step.newtype("E", edges);
@@ -1267,17 +1540,41 @@ export class Step implements Encodable {
   static dropIndex(spec: IndexSpec): Step {
     return Step.struct("DropIndex", { spec });
   }
-  static createVectorIndexNodes(label: string, property: string, tenantProperty?: string | null): Step {
-    return Step.struct("CreateVectorIndexNodes", { label, property, tenant_property: tenantProperty ?? undefined });
+  /** Build the raw AST terminal for an exact-scope operation lookup. */
+  static getIndexOperation(operationId: string): Step {
+    return Step.struct("GetIndexOperation", { operation_id: indexOperationId(operationId) });
   }
-  static createVectorIndexEdges(label: string, property: string, tenantProperty?: string | null): Step {
-    return Step.struct("CreateVectorIndexEdges", { label, property, tenant_property: tenantProperty ?? undefined });
+  /** Build the raw AST terminal for a convergent blocked-operation retry. */
+  static retryIndexOperation(operationId: string): Step {
+    return Step.struct("RetryIndexOperation", { operation_id: indexOperationId(operationId) });
+  }
+  /** Build the raw AST terminal for build-abort cleanup. */
+  static abortIndexOperation(operationId: string): Step {
+    return Step.struct("AbortIndexOperation", { operation_id: indexOperationId(operationId) });
+  }
+  static createVectorIndexNodes(
+    label: string,
+    property: string,
+    dimension: number,
+    metric: VectorDistanceMetric,
+    tenantProperty?: string | null,
+  ): Step {
+    return Step.createIndex(IndexSpec.nodeVector(label, property, dimension, metric, tenantProperty), true);
+  }
+  static createVectorIndexEdges(
+    label: string,
+    property: string,
+    dimension: number,
+    metric: VectorDistanceMetric,
+    tenantProperty?: string | null,
+  ): Step {
+    return Step.createIndex(IndexSpec.edgeVector(label, property, dimension, metric, tenantProperty), true);
   }
   static createTextIndexNodes(label: string, property: string, tenantProperty?: string | null): Step {
-    return Step.struct("CreateTextIndexNodes", { label, property, tenant_property: tenantProperty ?? undefined });
+    return Step.createIndex(IndexSpec.nodeText(label, property, tenantProperty), true);
   }
   static createTextIndexEdges(label: string, property: string, tenantProperty?: string | null): Step {
-    return Step.struct("CreateTextIndexEdges", { label, property, tenant_property: tenantProperty ?? undefined });
+    return Step.createIndex(IndexSpec.edgeText(label, property, tenantProperty), true);
   }
   static addN(label: string, properties: [string, PropertyInput][]): Step {
     return Step.struct("AddN", { label, properties });
@@ -1316,7 +1613,7 @@ export class Step implements Encodable {
     return Step.newtype("Union", traversals);
   }
   static choose(condition: Predicate, thenTraversal: SubTraversal, elseTraversal?: SubTraversal | null): Step {
-    return Step.struct("Choose", { condition, then_traversal: thenTraversal, else_traversal: elseTraversal ?? null });
+    return Step.struct("Choose", { condition, then_traversal: thenTraversal, else_traversal: elseTraversal ?? undefined });
   }
   static coalesce(traversals: SubTraversal[]): Step {
     return Step.newtype("Coalesce", traversals);
@@ -1360,12 +1657,171 @@ export class Step implements Encodable {
   static inject(name: string): Step {
     return Step.newtype("Inject", name);
   }
-  toJSON(): JsonValue {
-    if (this.style === "unit") return unit(this.variant);
-    if (this.style === "newtype") return newtype(this.variant, this.payload);
-    if (this.style === "tuple") return tuple(this.variant, this.payload as unknown[]);
-    return struct(this.variant, this.payload as Record<string, unknown>);
+  toAst(input?: JsonValue | null): JsonValue {
+    const hasExplicitInput = arguments.length > 0;
+    const current = hasExplicitInput ? input : "context";
+    const requiredInput = (): JsonValue => {
+      if (current == null) throw new TypeError(`step ${this.variant} requires a source AST node`);
+      return current;
+    };
+    const inputField = (): Record<string, unknown> => (current == null ? {} : { input: current });
+    const unary = (name: string, fields: Record<string, unknown> = {}) => astTag(name, { input: requiredInput(), ...fields });
+    switch (this.variant) {
+      case "N":
+        return astTag("Nodes", { reference: this.payload });
+      case "NWhere":
+        return astTag("NodesWhere", { predicate: this.payload });
+      case "ShortestPath":
+        return astTag("ShortestPath", this.payload as Record<string, unknown>);
+      case "E":
+        return astTag("Edges", { reference: this.payload });
+      case "EWhere":
+        return astTag("EdgesWhere", { predicate: this.payload });
+      case "VectorSearchNodes":
+      case "TextSearchNodes":
+      case "VectorSearchEdges":
+      case "TextSearchEdges":
+        return astTag(this.variant, this.payload as Record<string, unknown>);
+      case "Out":
+      case "In":
+      case "Both":
+      case "OutE":
+      case "InE":
+      case "BothE":
+        return unary(this.variant, { label: this.payload ?? undefined });
+      case "OutN":
+      case "InN":
+      case "OtherN":
+      case "Dedup":
+      case "Count":
+      case "Exists":
+      case "Id":
+      case "Label":
+      case "EdgeProperties":
+      case "Fold":
+      case "Unfold":
+      case "Path":
+      case "SimplePath":
+      case "SackGet":
+        return unary(this.variant);
+      case "Has": {
+        const [property, value] = this.payload as [string, PropertyValue];
+        return unary("Has", { property, value });
+      }
+      case "HasLabel":
+        return unary("HasLabel", { label: this.payload });
+      case "HasKey":
+        return unary("HasKey", { property: this.payload });
+      case "Where":
+        return unary("Where", { predicate: this.payload });
+      case "Within":
+        return unary("Within", { variable: this.payload });
+      case "Without":
+        return unary("Without", { variable: this.payload });
+      case "EdgeHas": {
+        const [property, value] = this.payload as [string, PropertyInput];
+        return unary("EdgeHas", { property, value });
+      }
+      case "EdgeHasLabel":
+        return unary("EdgeHasLabel", { label: this.payload });
+      case "Limit":
+        return unary("Limit", { count: astBoundLiteral(this.payload) });
+      case "LimitBy":
+        return unary("Limit", { count: astBoundExpr(this.payload) });
+      case "Skip":
+        return unary("Skip", { count: astBoundLiteral(this.payload) });
+      case "SkipBy":
+        return unary("Skip", { count: astBoundExpr(this.payload) });
+      case "Range": {
+        const [start, end] = this.payload as unknown[];
+        return unary("Range", { start: astBoundLiteral(start), end: astBoundLiteral(end) });
+      }
+      case "RangeBy": {
+        const [start, end] = this.payload as [StreamBound, StreamBound];
+        return unary("Range", { start, end });
+      }
+      case "As":
+      case "Store":
+      case "Select":
+      case "Bind":
+        return unary(this.variant, { name: this.payload });
+      case "Inject":
+        return astTag("Inject", { ...inputField(), variable: this.payload });
+      case "Values":
+        return unary("Values", { properties: this.payload });
+      case "ValueMap":
+        return unary("ValueMap", { properties: this.payload ?? undefined });
+      case "Project":
+        return unary("Project", { projections: this.payload });
+      case "ProjectBindings":
+        return unary("ProjectBindings", this.payload as Record<string, unknown>);
+      case "CreateIndex":
+      case "DropIndex":
+      case "GetIndexOperation":
+      case "RetryIndexOperation":
+      case "AbortIndexOperation":
+        return astTag(this.variant, this.payload as Record<string, unknown>);
+      case "AddN":
+        return astTag("AddN", { ...inputField(), ...(this.payload as Record<string, unknown>) });
+      case "AddE":
+        return unary("AddE", this.payload as Record<string, unknown>);
+      case "SetProperty": {
+        const [name, value] = this.payload as [string, PropertyInput];
+        return unary("SetProperty", { name, value });
+      }
+      case "RemoveProperty":
+        return unary("RemoveProperty", { name: this.payload });
+      case "Drop":
+        return unary("Drop");
+      case "DropEdge":
+        return unary("DropEdge", { to: this.payload });
+      case "DropEdgeLabeled":
+        return unary("DropEdgeLabeled", this.payload as Record<string, unknown>);
+      case "DropEdgeById":
+        return astTag("DropEdgeById", { ...inputField(), edges: this.payload });
+      case "OrderBy": {
+        const [property, order] = this.payload as [string, Order];
+        return unary("OrderBy", { property, order });
+      }
+      case "OrderByMultiple":
+        return unary("OrderByMultiple", { orderings: this.payload });
+      case "Repeat":
+        return unary("Repeat", { config: this.payload });
+      case "Union":
+        return unary("Union", { traversals: this.payload });
+      case "Choose":
+        return unary("Choose", this.payload as Record<string, unknown>);
+      case "Coalesce":
+        return unary("Coalesce", { traversals: this.payload });
+      case "Optional":
+        return unary("Optional", { traversal: this.payload });
+      case "Group":
+        return unary("Group", { property: this.payload });
+      case "GroupCount":
+        return unary("GroupCount", { property: this.payload });
+      case "AggregateBy": {
+        const [fn, property] = this.payload as [AggregateFunction, string];
+        return unary("AggregateBy", { function: fn, property });
+      }
+      case "WithSack":
+        return unary("WithSack", { initial: this.payload });
+      case "SackSet":
+      case "SackAdd":
+        return unary(this.variant, { property: this.payload });
+      default:
+        throw new Error(`unknown step: ${this.variant}`);
+    }
   }
+  toJSON(): JsonValue {
+    return this.toAst();
+  }
+}
+
+function stepsToAst(steps: Step[], initial: JsonValue | null = null): JsonValue {
+  let root = initial;
+  for (const step of steps) root = step.toAst(root);
+  if (root == null) throw new TypeError("traversal must contain at least one AST node before execution");
+  return root;
 }
 
 type PropEntries =
@@ -1396,7 +1852,10 @@ export class Traversal<S extends TraversalState = "nodes", M extends MutationMod
     return new Traversal(steps, state, mode);
   }
   toJSON(): JsonValue {
-    return { steps: this.steps };
+    return { root: this.intoAst() };
+  }
+  intoAst(): JsonValue {
+    return stepsToAst(this.steps);
   }
   intoSteps(): Step[] {
     return this.steps;
@@ -1415,10 +1874,10 @@ export class Traversal<S extends TraversalState = "nodes", M extends MutationMod
         "EdgeProperties",
         "CreateIndex",
         "DropIndex",
-        "CreateVectorIndexNodes",
-        "CreateVectorIndexEdges",
-        "CreateTextIndexNodes",
-        "CreateTextIndexEdges",
+        "GetIndexOperation",
+        "RetryIndexOperation",
+        "AbortIndexOperation",
+        "ShortestPath",
       ].includes(s.variant),
     );
   }
@@ -1436,6 +1895,17 @@ export class Traversal<S extends TraversalState = "nodes", M extends MutationMod
   }
   nWithLabelWhere(label: string, predicate: SourcePredicate): Traversal<"nodes", M> {
     return this.nWhere(SourcePredicate.and([SourcePredicate.eq("$label", label), predicate]));
+  }
+  shortestPath(
+    source: NodeRef | NodeId | NodeId[] | string,
+    target: NodeRef | NodeId | NodeId[] | string,
+    maxDepth: number,
+    options: { label?: string | null; direction?: ShortestPathDirection } = {},
+  ): Traversal<"terminal", M> {
+    return this.push(Step.shortestPath(NodeRef.from(source), NodeRef.from(target), maxDepth, options), "terminal", this.mode) as Traversal<
+      "terminal",
+      M
+    >;
   }
   e(edges: EdgeRef | EdgeId | EdgeId[]): Traversal<"edges", M> {
     return this.push(Step.e(EdgeRef.from(edges)), "edges", this.mode) as Traversal<"edges", M>;
@@ -1579,11 +2049,35 @@ export class Traversal<S extends TraversalState = "nodes", M extends MutationMod
   dropIndex(spec: IndexSpec): Traversal<"terminal", "write"> {
     return this.push(Step.dropIndex(spec), "terminal", "write") as Traversal<"terminal", "write">;
   }
-  createVectorIndexNodes(label: string, property: string, tenantProperty?: string | null): Traversal<"terminal", "write"> {
-    return this.createIndexIfNotExists(IndexSpec.nodeVector(label, property, tenantProperty));
+  /** Read one retained operation in the request's storage scope. */
+  getIndexOperation(operationId: string): Traversal<"terminal", M> {
+    return this.push(Step.getIndexOperation(operationId), "terminal", this.mode) as Traversal<"terminal", M>;
   }
-  createVectorIndexEdges(label: string, property: string, tenantProperty?: string | null): Traversal<"terminal", "write"> {
-    return this.createIndexIfNotExists(IndexSpec.edgeVector(label, property, tenantProperty));
+  /** Convergently requeue a blocked operation at its exact checkpoint. */
+  retryIndexOperation(operationId: string): Traversal<"terminal", "write"> {
+    return this.push(Step.retryIndexOperation(operationId), "terminal", "write") as Traversal<"terminal", "write">;
+  }
+  /** Convert one constructing build into abort cleanup. */
+  abortIndexOperation(operationId: string): Traversal<"terminal", "write"> {
+    return this.push(Step.abortIndexOperation(operationId), "terminal", "write") as Traversal<"terminal", "write">;
+  }
+  createVectorIndexNodes(
+    label: string,
+    property: string,
+    dimension: number,
+    metric: VectorDistanceMetric,
+    tenantProperty?: string | null,
+  ): Traversal<"terminal", "write"> {
+    return this.createIndexIfNotExists(IndexSpec.nodeVector(label, property, dimension, metric, tenantProperty));
+  }
+  createVectorIndexEdges(
+    label: string,
+    property: string,
+    dimension: number,
+    metric: VectorDistanceMetric,
+    tenantProperty?: string | null,
+  ): Traversal<"terminal", "write"> {
+    return this.createIndexIfNotExists(IndexSpec.edgeVector(label, property, dimension, metric, tenantProperty));
   }
   createTextIndexNodes(label: string, property: string, tenantProperty?: string | null): Traversal<"terminal", "write"> {
     return this.createIndexIfNotExists(IndexSpec.nodeText(label, property, tenantProperty));
@@ -1879,7 +2373,7 @@ export class SubTraversal implements Encodable {
     return this.push(Step.simplePath());
   }
   toJSON(): JsonValue {
-    return { steps: this.steps };
+    return { root: stepsToAst(this.steps, "context") };
   }
 }
 
@@ -1906,21 +2400,21 @@ export class BatchCondition implements Encodable {
   }
   toJSON(): JsonValue {
     return this.variant === "PrevNotEmpty"
-      ? unit("PrevNotEmpty")
+      ? astUnit("PrevNotEmpty")
       : this.variant === "VarMinSize"
-        ? tuple("VarMinSize", this.payload as unknown[])
-        : newtype(this.variant, this.payload);
+        ? astNewtype("VarMinSize", this.payload as unknown[])
+        : astNewtype(this.variant, this.payload);
   }
 }
 
 export class NamedQuery implements Encodable {
   constructor(
     readonly name: string | null,
-    readonly steps: Step[],
+    readonly root: JsonValue,
     readonly condition: BatchCondition | null,
   ) {}
   toJSON(): JsonValue {
-    return { name: this.name, steps: this.steps, condition: this.condition };
+    return { name: this.name ?? undefined, root: this.root, condition: this.condition ?? undefined };
   }
 }
 
@@ -1936,7 +2430,7 @@ export class BatchEntry implements Encodable {
     return new BatchEntry("ForEach", { param: paramName, body });
   }
   toJSON(): JsonValue {
-    return this.variant === "Query" ? newtype("Query", this.payload) : struct("ForEach", this.payload as Record<string, unknown>);
+    return this.variant === "Query" ? astNewtype("Query", this.payload) : astTag("ForEach", this.payload as Record<string, unknown>);
   }
 }
 
@@ -1950,11 +2444,11 @@ export class ReadBatch implements Encodable {
   }
   varAs<S extends TraversalState>(name: string, traversal: Traversal<S, "read">): ReadBatch {
     if (traversal.mode !== "read") throw new TypeError("ReadBatch.varAs only accepts read-only traversals");
-    return new ReadBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoSteps(), null))], this.returns);
+    return new ReadBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoAst(), null))], this.returns);
   }
   varAsIf<S extends TraversalState>(name: string, condition: BatchCondition, traversal: Traversal<S, "read">): ReadBatch {
     if (traversal.mode !== "read") throw new TypeError("ReadBatch.varAsIf only accepts read-only traversals");
-    return new ReadBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoSteps(), condition))], this.returns);
+    return new ReadBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoAst(), condition))], this.returns);
   }
   forEachParam(paramName: string, body: ReadBatch): ReadBatch {
     return new ReadBatch([...this.queries, BatchEntry.forEach(paramName, body.queries)], this.returns);
@@ -1963,7 +2457,7 @@ export class ReadBatch implements Encodable {
     return new ReadBatch(this.queries, Array.from(vars));
   }
   toJSON(): JsonValue {
-    return { queries: this.queries, returns: this.returns };
+    return { entries: this.queries, returns: this.returns };
   }
   toJsonBytes(): Uint8Array {
     return new TextEncoder().encode(this.toJsonString());
@@ -1971,39 +2465,35 @@ export class ReadBatch implements Encodable {
   toJsonString(): string {
     return stringifyJson(this);
   }
-  toDynamicRequest(options?: DynamicQueryOptions): DynamicQueryRequest;
-  toDynamicRequest(): DynamicQueryRequest;
-  toDynamicRequest<T extends ParamShape>(
-    params: DefinedParams<T>,
-    values: ParamInputs<T>,
-    options?: DynamicQueryOptions,
-  ): DynamicQueryRequest;
-  toDynamicRequest<T extends ParamShape>(
-    paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+  toQueryRequest(options?: QueryOptions): QueryRequest;
+  toQueryRequest(): QueryRequest;
+  toQueryRequest<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: QueryOptions): QueryRequest;
+  toQueryRequest<T extends ParamShape>(
+    paramsOrOptions?: DefinedParams<T> | QueryOptions,
     values?: ParamInputs<T>,
-    options?: DynamicQueryOptions,
-  ): DynamicQueryRequest {
-    return buildDynamicRequest(DynamicQueryRequest.read(this), paramsOrOptions, values, options);
+    options?: QueryOptions,
+  ): QueryRequest {
+    return buildQueryRequest(QueryRequest.read(this), paramsOrOptions, values, options);
   }
-  toDynamicJson(options?: DynamicQueryOptions): string;
-  toDynamicJson(): string;
-  toDynamicJson<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: DynamicQueryOptions): string;
-  toDynamicJson<T extends ParamShape>(
-    paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+  toQueryJson(options?: QueryOptions): string;
+  toQueryJson(): string;
+  toQueryJson<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: QueryOptions): string;
+  toQueryJson<T extends ParamShape>(
+    paramsOrOptions?: DefinedParams<T> | QueryOptions,
     values?: ParamInputs<T>,
-    options?: DynamicQueryOptions,
+    options?: QueryOptions,
   ): string {
-    return this.toDynamicRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonString();
+    return this.toQueryRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonString();
   }
-  toDynamicBytes(options?: DynamicQueryOptions): Uint8Array;
-  toDynamicBytes(): Uint8Array;
-  toDynamicBytes<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: DynamicQueryOptions): Uint8Array;
-  toDynamicBytes<T extends ParamShape>(
-    paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+  toQueryBytes(options?: QueryOptions): Uint8Array;
+  toQueryBytes(): Uint8Array;
+  toQueryBytes<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: QueryOptions): Uint8Array;
+  toQueryBytes<T extends ParamShape>(
+    paramsOrOptions?: DefinedParams<T> | QueryOptions,
     values?: ParamInputs<T>,
-    options?: DynamicQueryOptions,
+    options?: QueryOptions,
   ): Uint8Array {
-    return this.toDynamicRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonBytes();
+    return this.toQueryRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonBytes();
   }
 }
 
@@ -2016,14 +2506,14 @@ export class WriteBatch implements Encodable {
     return new WriteBatch();
   }
   varAs<S extends TraversalState, M extends MutationMode>(name: string, traversal: Traversal<S, M>): WriteBatch {
-    return new WriteBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoSteps(), null))], this.returns);
+    return new WriteBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoAst(), null))], this.returns);
   }
   varAsIf<S extends TraversalState, M extends MutationMode>(
     name: string,
     condition: BatchCondition,
     traversal: Traversal<S, M>,
   ): WriteBatch {
-    return new WriteBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoSteps(), condition))], this.returns);
+    return new WriteBatch([...this.queries, BatchEntry.query(new NamedQuery(name, traversal.intoAst(), condition))], this.returns);
   }
   forEachParam(paramName: string, body: WriteBatch): WriteBatch {
     return new WriteBatch([...this.queries, BatchEntry.forEach(paramName, body.queries)], this.returns);
@@ -2032,7 +2522,7 @@ export class WriteBatch implements Encodable {
     return new WriteBatch(this.queries, Array.from(vars));
   }
   toJSON(): JsonValue {
-    return { queries: this.queries, returns: this.returns };
+    return { entries: this.queries, returns: this.returns };
   }
   toJsonBytes(): Uint8Array {
     return new TextEncoder().encode(this.toJsonString());
@@ -2040,39 +2530,35 @@ export class WriteBatch implements Encodable {
   toJsonString(): string {
     return stringifyJson(this);
   }
-  toDynamicRequest(options?: DynamicQueryOptions): DynamicQueryRequest;
-  toDynamicRequest(): DynamicQueryRequest;
-  toDynamicRequest<T extends ParamShape>(
-    params: DefinedParams<T>,
-    values: ParamInputs<T>,
-    options?: DynamicQueryOptions,
-  ): DynamicQueryRequest;
-  toDynamicRequest<T extends ParamShape>(
-    paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+  toQueryRequest(options?: QueryOptions): QueryRequest;
+  toQueryRequest(): QueryRequest;
+  toQueryRequest<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: QueryOptions): QueryRequest;
+  toQueryRequest<T extends ParamShape>(
+    paramsOrOptions?: DefinedParams<T> | QueryOptions,
     values?: ParamInputs<T>,
-    options?: DynamicQueryOptions,
-  ): DynamicQueryRequest {
-    return buildDynamicRequest(DynamicQueryRequest.write(this), paramsOrOptions, values, options);
+    options?: QueryOptions,
+  ): QueryRequest {
+    return buildQueryRequest(QueryRequest.write(this), paramsOrOptions, values, options);
   }
-  toDynamicJson(options?: DynamicQueryOptions): string;
-  toDynamicJson(): string;
-  toDynamicJson<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: DynamicQueryOptions): string;
-  toDynamicJson<T extends ParamShape>(
-    paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+  toQueryJson(options?: QueryOptions): string;
+  toQueryJson(): string;
+  toQueryJson<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: QueryOptions): string;
+  toQueryJson<T extends ParamShape>(
+    paramsOrOptions?: DefinedParams<T> | QueryOptions,
     values?: ParamInputs<T>,
-    options?: DynamicQueryOptions,
+    options?: QueryOptions,
   ): string {
-    return this.toDynamicRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonString();
+    return this.toQueryRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonString();
   }
-  toDynamicBytes(options?: DynamicQueryOptions): Uint8Array;
-  toDynamicBytes(): Uint8Array;
-  toDynamicBytes<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: DynamicQueryOptions): Uint8Array;
-  toDynamicBytes<T extends ParamShape>(
-    paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+  toQueryBytes(options?: QueryOptions): Uint8Array;
+  toQueryBytes(): Uint8Array;
+  toQueryBytes<T extends ParamShape>(params: DefinedParams<T>, values: ParamInputs<T>, options?: QueryOptions): Uint8Array;
+  toQueryBytes<T extends ParamShape>(
+    paramsOrOptions?: DefinedParams<T> | QueryOptions,
     values?: ParamInputs<T>,
-    options?: DynamicQueryOptions,
+    options?: QueryOptions,
   ): Uint8Array {
-    return this.toDynamicRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonBytes();
+    return this.toQueryRequest(paramsOrOptions as DefinedParams<T>, values as ParamInputs<T>, options).toJsonBytes();
   }
 }
 
@@ -2119,22 +2605,7 @@ export class QueryParamType implements Encodable {
     return new QueryParamType("Array", inner);
   }
   toJSON(): JsonValue {
-    return this.variant === "Array" ? newtype("Array", this.inner) : unit(this.variant);
-  }
-}
-
-export interface QueryParameter extends Encodable {
-  name: string;
-  ty: QueryParamType;
-}
-
-class QueryParameterImpl implements QueryParameter {
-  constructor(
-    readonly name: string,
-    readonly ty: QueryParamType,
-  ) {}
-  toJSON(): JsonValue {
-    return { name: this.name, ty: this.ty };
+    return this.variant === "Array" ? astNewtype("Array", this.inner) : astUnit(this.variant);
   }
 }
 
@@ -2227,10 +2698,6 @@ function schemaForParams<T extends ParamShape>(params: DefinedParams<T>): T {
   return metadata.schema;
 }
 
-function parametersForParams<T extends ParamShape>(params: DefinedParams<T>): QueryParameter[] {
-  return Object.entries(schemaForParams(params)).map(([name, schema]) => new QueryParameterImpl(name, schema.toParamType()));
-}
-
 function convertInputFromSchema<T extends ParamShape>(schema: T, input: ParamInputs<T>): Record<string, JsonValue> {
   const out: Record<string, JsonValue> = {};
   for (const [name, paramSchema] of Object.entries(schema)) {
@@ -2238,10 +2705,6 @@ function convertInputFromSchema<T extends ParamShape>(schema: T, input: ParamInp
     out[name] = convertParamValue(paramSchema, input[name], name);
   }
   return out;
-}
-
-function convertInputForParams<T extends ParamShape>(params: DefinedParams<T>, input: ParamInputs<T>): Record<string, JsonValue> {
-  return convertInputFromSchema(schemaForParams(params), input);
 }
 
 function convertParamValue(schema: ParamSchema, value: unknown, path: string): JsonValue {
@@ -2268,9 +2731,9 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
       return dateTimeToRfc3339(dt, path);
     }
     case "Bytes":
-      throw DynamicQueryError.unsupportedBytes(path);
+      throw QueryError.unsupportedBytes(path);
     case "Value":
-      return dynamicFromPropertyValue(PropertyValue.from(value as PropertyValueInput), path);
+      return queryValueFromPropertyValue(PropertyValue.from(value as PropertyValueInput), path);
     case "Object": {
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
       const out: Record<string, JsonValue> = {};
@@ -2285,7 +2748,7 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
   }
 }
 
-function dynamicFromPropertyValue(value: PropertyValue, path: string): JsonValue {
+function queryValueFromPropertyValue(value: PropertyValue, path: string): JsonValue {
   switch (value.variant) {
     case "Null":
       return null;
@@ -2301,18 +2764,18 @@ function dynamicFromPropertyValue(value: PropertyValue, path: string): JsonValue
     case "String":
       return value.payload as string;
     case "Bytes":
-      throw DynamicQueryError.unsupportedBytes(path);
+      throw QueryError.unsupportedBytes(path);
     case "I64Array":
     case "F64Array":
     case "F32Array":
     case "StringArray":
       return value.payload as JsonValue;
     case "Array":
-      return (value.payload as PropertyValue[]).map((entry, index) => dynamicFromPropertyValue(entry, `${path}[${index}]`));
+      return (value.payload as PropertyValue[]).map((entry, index) => queryValueFromPropertyValue(entry, `${path}[${index}]`));
     case "Object": {
       const out: Record<string, JsonValue> = {};
       for (const [key, entry] of Object.entries(value.payload as Record<string, PropertyValue>))
-        out[key] = dynamicFromPropertyValue(entry, `${path}.${key}`);
+        out[key] = queryValueFromPropertyValue(entry, `${path}.${key}`);
       return out;
     }
     default:
@@ -2320,12 +2783,12 @@ function dynamicFromPropertyValue(value: PropertyValue, path: string): JsonValue
   }
 }
 
-export enum DynamicQueryRequestType {
+export enum QueryRequestType {
   Read = "read",
   Write = "write",
 }
-export type DynamicQueryValue = JsonValue;
-export const DynamicQueryValue = {
+export type QueryValue = JsonValue;
+export const QueryValue = {
   null: (): JsonValue => null,
   bool: (value: boolean): JsonValue => value,
   i64: (value: number | bigint): JsonValue => intToJson(value),
@@ -2336,24 +2799,24 @@ export const DynamicQueryValue = {
   object: (values: Record<string, JsonValue>): JsonValue => values,
 };
 export type BatchQuery = ReadBatch | WriteBatch;
-export type DynamicQueryOptions = { queryName?: string | null };
+export type QueryOptions = { queryName?: string | null };
 
-export class DynamicQueryRequest implements Encodable {
+export class QueryRequest implements Encodable {
   queryName: string | null = null;
   parameters?: Record<string, JsonValue>;
   parameterTypes?: Record<string, QueryParamType>;
   private constructor(
-    readonly requestType: DynamicQueryRequestType,
+    readonly requestType: QueryRequestType,
     readonly query: BatchQuery,
     queryName: string | null = null,
   ) {
     this.queryName = queryName;
   }
-  static read(query: ReadBatch, queryName: string | null = null): DynamicQueryRequest {
-    return new DynamicQueryRequest(DynamicQueryRequestType.Read, query, queryName);
+  static read(query: ReadBatch, queryName: string | null = null): QueryRequest {
+    return new QueryRequest(QueryRequestType.Read, query, queryName);
   }
-  static write(query: WriteBatch, queryName: string | null = null): DynamicQueryRequest {
-    return new DynamicQueryRequest(DynamicQueryRequestType.Write, query, queryName);
+  static write(query: WriteBatch, queryName: string | null = null): QueryRequest {
+    return new QueryRequest(QueryRequestType.Write, query, queryName);
   }
   insertParameterValue(name: string, value: JsonValue): void {
     this.parameters ??= {};
@@ -2363,11 +2826,11 @@ export class DynamicQueryRequest implements Encodable {
     this.parameterTypes ??= {};
     this.parameterTypes[name] = ty;
   }
-  withParameterValue(name: string, value: JsonValue): DynamicQueryRequest {
+  withParameterValue(name: string, value: JsonValue): QueryRequest {
     this.insertParameterValue(name, value);
     return this;
   }
-  withParameterType(name: string, ty: QueryParamType): DynamicQueryRequest {
+  withParameterType(name: string, ty: QueryParamType): QueryRequest {
     this.insertParameterType(name, ty);
     return this;
   }
@@ -2377,7 +2840,7 @@ export class DynamicQueryRequest implements Encodable {
   clearQueryName(): void {
     this.queryName = null;
   }
-  withQueryName(name: string): DynamicQueryRequest {
+  withQueryName(name: string): QueryRequest {
     this.setQueryName(name);
     return this;
   }
@@ -2385,7 +2848,7 @@ export class DynamicQueryRequest implements Encodable {
     return {
       request_type: this.requestType,
       query_name: this.queryName ?? null,
-      query: this.query,
+      query: this.requestType === QueryRequestType.Read ? { read: this.query } : { write: this.query },
       parameters: this.parameters,
       parameter_types: this.parameterTypes,
     };
@@ -2398,21 +2861,21 @@ export class DynamicQueryRequest implements Encodable {
   }
 }
 
-function addDynamicParameters<T extends ParamShape>(
-  request: DynamicQueryRequest,
-  params?: DefinedParams<T>,
-  values?: ParamInputs<T>,
-): DynamicQueryRequest {
-  if (!params) return request;
-  if (values === undefined) throw new TypeError("dynamic parameter values are required when a parameter schema is provided");
+function rejectUnknownParameters(input: Record<string, unknown>, expected: string[]): void {
+  const allowed = new Set(expected);
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) throw new TypeError(`unknown parameter: ${key}`);
+  }
+}
 
-  const parameters = parametersForParams(params);
-  rejectUnknownParameters(
-    values as Record<string, unknown>,
-    parameters.map((parameter) => parameter.name),
-  );
-  const converted = convertInputForParams(params, values);
-  for (const parameter of parameters) request.insertParameterType(parameter.name, parameter.ty);
+function addQueryParameters<T extends ParamShape>(request: QueryRequest, params?: DefinedParams<T>, values?: ParamInputs<T>): QueryRequest {
+  if (!params) return request;
+  if (values === undefined) throw new TypeError("query parameter values are required when a parameter schema is provided");
+
+  const schema = schemaForParams(params);
+  rejectUnknownParameters(values as Record<string, unknown>, Object.keys(schema));
+  const converted = convertInputFromSchema(schema, values);
+  for (const [name, paramSchema] of Object.entries(schema)) request.insertParameterType(name, paramSchema.toParamType());
   for (const [name, value] of Object.entries(converted)) request.insertParameterValue(name, value);
   return request;
 }
@@ -2421,7 +2884,7 @@ function isDefinedParams(value: unknown): value is DefinedParams<ParamShape> {
   return typeof value === "object" && value !== null && PARAMS_METADATA in value;
 }
 
-function applyDynamicQueryOptions(request: DynamicQueryRequest, options?: DynamicQueryOptions): DynamicQueryRequest {
+function applyQueryOptions(request: QueryRequest, options?: QueryOptions): QueryRequest {
   if (!options || !("queryName" in options)) return request;
   if (options.queryName === null || options.queryName === undefined) {
     request.clearQueryName();
@@ -2431,237 +2894,17 @@ function applyDynamicQueryOptions(request: DynamicQueryRequest, options?: Dynami
   return request;
 }
 
-function buildDynamicRequest<T extends ParamShape>(
-  request: DynamicQueryRequest,
-  paramsOrOptions?: DefinedParams<T> | DynamicQueryOptions,
+function buildQueryRequest<T extends ParamShape>(
+  request: QueryRequest,
+  paramsOrOptions?: DefinedParams<T> | QueryOptions,
   values?: ParamInputs<T>,
-  options?: DynamicQueryOptions,
-): DynamicQueryRequest {
+  options?: QueryOptions,
+): QueryRequest {
   if (isDefinedParams(paramsOrOptions)) {
-    return applyDynamicQueryOptions(addDynamicParameters(request, paramsOrOptions, values), options);
+    return applyQueryOptions(addQueryParameters(request, paramsOrOptions, values), options);
   }
-  if (values !== undefined) throw new TypeError("dynamic parameter values require a parameter schema");
-  return applyDynamicQueryOptions(request, paramsOrOptions);
-}
-
-export const LEGACY_QUERY_BUNDLE_VERSION_V4 = 4;
-export const QUERY_BUNDLE_VERSION = 5;
-export const SUPPORTED_QUERY_BUNDLE_VERSIONS = [LEGACY_QUERY_BUNDLE_VERSION_V4, QUERY_BUNDLE_VERSION] as const;
-
-export interface QueryBundle extends Encodable {
-  version: number;
-  readRoutes: Record<string, ReadBatch>;
-  writeRoutes: Record<string, WriteBatch>;
-  readParameters: Record<string, QueryParameter[]>;
-  writeParameters: Record<string, QueryParameter[]>;
-}
-
-class QueryBundleImpl implements QueryBundle {
-  constructor(
-    readonly version: number,
-    readonly readRoutes: Record<string, ReadBatch>,
-    readonly writeRoutes: Record<string, WriteBatch>,
-    readonly readParameters: Record<string, QueryParameter[]>,
-    readonly writeParameters: Record<string, QueryParameter[]>,
-  ) {}
-  toJSON(): JsonValue {
-    return {
-      version: this.version,
-      read_routes: sortedObject(this.readRoutes),
-      write_routes: sortedObject(this.writeRoutes),
-      read_parameters: sortedObject(this.readParameters),
-      write_parameters: sortedObject(this.writeParameters),
-    };
-  }
-}
-
-function sortedObject<T>(input: Record<string, T>): Record<string, T> {
-  return Object.fromEntries(Object.entries(input).sort(([a], [b]) => a.localeCompare(b)));
-}
-
-export type RegisteredReadQuery<Input extends Record<string, unknown> = Record<string, unknown>> = {
-  kind: "read";
-  build: () => ReadBatch;
-  parameters: () => QueryParameter[];
-  convertInput?: (input: Input) => Record<string, JsonValue>;
-};
-export type RegisteredWriteQuery<Input extends Record<string, unknown> = Record<string, unknown>> = {
-  kind: "write";
-  build: () => WriteBatch;
-  parameters: () => QueryParameter[];
-  convertInput?: (input: Input) => Record<string, JsonValue>;
-};
-
-type ReadBuilder<T extends ParamShape> = (params: DefinedParams<T>) => ReadBatch;
-type WriteBuilder<T extends ParamShape> = (params: DefinedParams<T>) => WriteBatch;
-
-export function registerRead<T extends ParamShape>(builder: ReadBuilder<T>, params: DefinedParams<T>): RegisteredReadQuery<ParamInputs<T>> {
-  return {
-    kind: "read",
-    build: () => builder(params),
-    parameters: () => parametersForParams(params),
-    convertInput: (input) => convertInputForParams(params, input),
-  };
-}
-
-export function registerWrite<T extends ParamShape>(
-  builder: WriteBuilder<T>,
-  params: DefinedParams<T>,
-): RegisteredWriteQuery<ParamInputs<T>> {
-  return {
-    kind: "write",
-    build: () => builder(params),
-    parameters: () => parametersForParams(params),
-    convertInput: (input) => convertInputForParams(params, input),
-  };
-}
-
-type QueryDefinitions = { read?: Record<string, RegisteredReadQuery<any>>; write?: Record<string, RegisteredWriteQuery<any>> };
-type RouteInput<T> = T extends RegisteredReadQuery<infer Input> ? Input : T extends RegisteredWriteQuery<infer Input> ? Input : never;
-type CallArgs<Input extends Record<string, unknown>> = keyof Input extends never ? [input?: Input] : [input: Input];
-type QueryCallMap<T extends QueryDefinitions> = {
-  readonly [K in keyof NonNullable<T["read"]>]: (...args: CallArgs<RouteInput<NonNullable<T["read"]>[K]>>) => DynamicQueryRequest;
-} & {
-  readonly [K in keyof NonNullable<T["write"]>]: (...args: CallArgs<RouteInput<NonNullable<T["write"]>[K]>>) => DynamicQueryRequest;
-};
-
-export class DefinedQueries<T extends QueryDefinitions> {
-  readonly call: QueryCallMap<T>;
-  constructor(readonly definitions: T) {
-    assertUniqueRouteNames(definitions);
-    const call: Record<string, (input?: Record<string, unknown>) => DynamicQueryRequest> = {};
-    for (const [name, route] of Object.entries(definitions.read ?? {})) call[name] = (input = {}) => buildRequest(name, route, input);
-    for (const [name, route] of Object.entries(definitions.write ?? {})) call[name] = (input = {}) => buildRequest(name, route, input);
-    this.call = call as QueryCallMap<T>;
-  }
-  buildQueryBundle(): QueryBundle {
-    return buildQueryBundle(this.definitions);
-  }
-  async generate(path = "queries.json"): Promise<string> {
-    return generateToPath(this.definitions, path);
-  }
-}
-
-function buildRequest(
-  name: string,
-  route: RegisteredReadQuery | RegisteredWriteQuery,
-  input: Record<string, unknown>,
-): DynamicQueryRequest {
-  const request = route.kind === "read" ? DynamicQueryRequest.read(route.build()) : DynamicQueryRequest.write(route.build());
-  request.setQueryName(name);
-  const parameters = route.parameters();
-  rejectUnknownParameters(
-    input,
-    parameters.map((parameter) => parameter.name),
-  );
-  const values = route.convertInput ? route.convertInput(input) : convertInputFromSchema(parametersToSchemas(parameters), input);
-  for (const parameter of parameters) request.insertParameterType(parameter.name, parameter.ty);
-  for (const [paramName, value] of Object.entries(values)) request.insertParameterValue(paramName, value);
-  return request;
-}
-
-function rejectUnknownParameters(input: Record<string, unknown>, expected: string[]): void {
-  const allowed = new Set(expected);
-  for (const key of Object.keys(input)) {
-    if (!allowed.has(key)) throw new TypeError(`unknown parameter: ${key}`);
-  }
-}
-
-function assertUniqueRouteNames(definitions: QueryDefinitions): void {
-  const names = new Set<string>();
-  for (const name of Object.keys(definitions.read ?? {})) {
-    if (names.has(name)) throw GenerateError.duplicateQueryName(name);
-    names.add(name);
-  }
-  for (const name of Object.keys(definitions.write ?? {})) {
-    if (names.has(name)) throw GenerateError.duplicateQueryName(name);
-    names.add(name);
-  }
-}
-
-function parametersToSchemas(parameters: QueryParameter[]): Record<string, ParamSchema> {
-  const out: Record<string, ParamSchema> = {};
-  for (const parameter of parameters) out[parameter.name] = schemaFromParamType(parameter.ty);
-  return out;
-}
-
-function schemaFromParamType(type: QueryParamType): ParamSchema {
-  switch (type.variant) {
-    case "Bool":
-      return param.bool();
-    case "I64":
-      return param.i64();
-    case "F64":
-      return param.f64();
-    case "F32":
-      return param.f32();
-    case "String":
-      return param.string();
-    case "DateTime":
-      return param.dateTime();
-    case "Bytes":
-      return param.bytes();
-    case "Value":
-      return param.value();
-    case "Object":
-      return param.object();
-    case "Array":
-      return param.array(schemaFromParamType(type.inner!));
-    default:
-      throw new Error(`unknown parameter type: ${type.variant}`);
-  }
-}
-
-export function defineQueries<T extends QueryDefinitions>(definitions: T): DefinedQueries<T> {
-  return new DefinedQueries(definitions);
-}
-
-export function buildQueryBundle(definitions: QueryDefinitions): QueryBundle {
-  assertUniqueRouteNames(definitions);
-  const readRoutes: Record<string, ReadBatch> = {};
-  const writeRoutes: Record<string, WriteBatch> = {};
-  const readParameters: Record<string, QueryParameter[]> = {};
-  const writeParameters: Record<string, QueryParameter[]> = {};
-  for (const [name, route] of Object.entries(definitions.read ?? {})) {
-    if (name in readRoutes || name in writeRoutes) throw GenerateError.duplicateQueryName(name);
-    readRoutes[name] = route.build();
-    readParameters[name] = route.parameters();
-  }
-  for (const [name, route] of Object.entries(definitions.write ?? {})) {
-    if (name in readRoutes || name in writeRoutes) throw GenerateError.duplicateQueryName(name);
-    writeRoutes[name] = route.build();
-    writeParameters[name] = route.parameters();
-  }
-  return new QueryBundleImpl(QUERY_BUNDLE_VERSION, readRoutes, writeRoutes, readParameters, writeParameters);
-}
-
-export function serializeQueryBundle(bundle: QueryBundle): string {
-  return stringifyJson(bundle, true);
-}
-
-export function deserializeQueryBundle(json: string | Uint8Array): unknown {
-  const text = typeof json === "string" ? json : new TextDecoder().decode(json);
-  const parsed = JSON.parse(text) as { version?: number };
-  if (!SUPPORTED_QUERY_BUNDLE_VERSIONS.includes(parsed.version as (typeof SUPPORTED_QUERY_BUNDLE_VERSIONS)[number]))
-    throw GenerateError.unsupportedVersion(parsed.version ?? -1, QUERY_BUNDLE_VERSION);
-  return parsed;
-}
-
-export async function writeQueryBundleToPath(bundle: QueryBundle, path: string): Promise<void> {
-  await writeFile(path, serializeQueryBundle(bundle));
-}
-
-export async function readQueryBundleFromPath(path: string): Promise<unknown> {
-  return deserializeQueryBundle(await readFile(path));
-}
-
-export async function generateToPath(definitions: QueryDefinitions, path: string): Promise<string> {
-  await writeQueryBundleToPath(buildQueryBundle(definitions), path);
-  return path;
-}
-
-export async function generate(definitions: QueryDefinitions): Promise<string> {
-  return generateToPath(definitions, "queries.json");
+  if (values !== undefined) throw new TypeError("query parameter values require a parameter schema");
+  return applyQueryOptions(request, paramsOrOptions);
 }
 
 export const prelude = {
@@ -2670,19 +2913,18 @@ export const prelude = {
   readBatch,
   writeBatch,
   defineParams,
-  defineQueries,
-  registerRead,
-  registerWrite,
   param,
   DateTime,
-  DynamicQueryRequest,
-  DynamicQueryRequestType,
-  DynamicQueryValue,
+  QueryError,
+  QueryRequest,
+  QueryRequestType,
+  QueryValue,
   PropertyValue,
   PropertyInput,
   NodeRef,
   EdgeRef,
   Expr,
+  WhenThen,
   StreamBound,
   CompareOp,
   Predicate,
@@ -2690,17 +2932,22 @@ export const prelude = {
   PropertyProjection,
   ExprProjection,
   Projection,
+  BindingProjection,
+  BindingTarget,
   Order,
+  ShortestPathDirection,
   EmitBehavior,
   AggregateFunction,
   RepeatConfig,
   IndexSpec,
   RangeIndexDirection,
+  VectorDistanceMetric,
   Traversal,
   SubTraversal,
   ReadBatch,
   WriteBatch,
   BatchCondition,
+  NamedQuery,
   BatchEntry,
   QueryParamType,
 };

@@ -1,0 +1,31 @@
+[package]
+name = "helixdb-uniffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "helixdb_uniffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "helixdb-uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+db = { path = "../../crates/db" }
+helix-graph = { path = "../../crates/graph-algorithms" }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+uniffi = { version = "=0.31.2", features = ["tokio"] }
+
+[dev-dependencies]
+helix-ast = { path = "../../crates/ast" }
+sonic-rs = "0.5.8"
+
+[lints]
+workspace = true

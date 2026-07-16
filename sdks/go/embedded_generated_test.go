@@ -1,0 +1,28 @@
+//go:build helixdb_uniffi
+
+package helix
+
+import (
+	"context"
+	"testing"
+)
+
+func TestGeneratedEmbeddedClientExecutesQuery(t *testing.T) {
+	client, err := NewEmbeddedClient(InMemorySource{Database: "go-generated-embedded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close generated embedded client: %v", err)
+		}
+	})
+
+	var response findUsersResponse
+	if err := client.Exec(context.Background(), findUsers("acme", 1), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Users) != 0 {
+		t.Fatalf("expected no users in a new embedded database, got %d", len(response.Users))
+	}
+}

@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 )
 
 var (
 	ErrWriteTraversalInReadBatch = errors.New("helix: read batch cannot contain write traversal")
-	ErrUnsupportedBytesParameter = errors.New("helix: dynamic query JSON cannot represent bytes parameters")
+	ErrUnsupportedBytesParameter = errors.New("helix: query JSON cannot represent bytes parameters")
 	ErrDuplicateParameter        = errors.New("helix: duplicate parameter")
 	ErrInvalidParameterType      = errors.New("helix: invalid parameter type")
 	ErrInvalidDateTimeParameter  = errors.New("helix: invalid datetime parameter")
@@ -36,6 +40,64 @@ type Request interface {
 	json.Marshaler
 	Validate() error
 	isHelixRequest()
+}
+
+func snakeName(name string) string {
+	runes := []rune(name)
+	var out strings.Builder
+	for i, r := range runes {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				prev := runes[i-1]
+				nextIsLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+				if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextIsLower) {
+					out.WriteByte('_')
+				}
+			}
+			out.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+func astUnit(name string) any { return snakeName(name) }
+
+func astNewtype(name string, value any) any {
+	return map[string]any{snakeName(name): value}
+}
+
+func astStruct(name string, fields map[string]any) any {
+	for key, value := range fields {
+		if value == nil {
+			delete(fields, key)
+		}
+	}
+	return map[string]any{snakeName(name): fields}
+}
+
+func literalBound(value any) any { return astNewtype("Literal", value) }
+func exprBound(value any) any    { return astNewtype("Expr", value) }
+
+func jsonFields(value any) (map[string]any, error) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+func withInput(input any, fields map[string]any) (map[string]any, error) {
+	if input == nil {
+		return nil, errors.New("helix: step requires a source AST node")
+	}
+	fields["input"] = input
+	return fields, nil
 }
 
 func MarshalRequest(req Request) ([]byte, error) {
@@ -254,18 +316,18 @@ func (p PropertyValue) MarshalJSON() ([]byte, error) {
 	}
 	switch p.kind {
 	case "Null":
-		return json.Marshal("Null")
+		return json.Marshal(astUnit("Null"))
 	case "Bytes":
 		bytesValue := p.value.([]byte)
 		ints := make([]int, len(bytesValue))
 		for i, b := range bytesValue {
 			ints[i] = int(b)
 		}
-		return json.Marshal(map[string]any{p.kind: ints})
+		return json.Marshal(astNewtype(p.kind, ints))
 	case "F32":
-		return json.Marshal(map[string]any{p.kind: float32(p.value.(float32))})
+		return json.Marshal(astNewtype(p.kind, float32(p.value.(float32))))
 	default:
-		return json.Marshal(map[string]any{p.kind: p.value})
+		return json.Marshal(astNewtype(p.kind, p.value))
 	}
 }
 
@@ -304,12 +366,12 @@ func (p PropertyInput) MarshalJSON() ([]byte, error) {
 		return nil, p.err
 	}
 	if p.expr != nil {
-		return json.Marshal(map[string]any{"Expr": *p.expr})
+		return json.Marshal(astNewtype("Expr", *p.expr))
 	}
 	if p.value == nil {
-		return json.Marshal(map[string]any{"Value": Null()})
+		return json.Marshal(astNewtype("Value", Null()))
 	}
-	return json.Marshal(map[string]any{"Value": *p.value})
+	return json.Marshal(astNewtype("Value", *p.value))
 }
 
 type NodeRef struct {
@@ -327,9 +389,9 @@ func NodeParam(name string) NodeRef { return NodeRef{kind: "Param", value: name}
 
 func (n NodeRef) MarshalJSON() ([]byte, error) {
 	if n.kind == "All" {
-		return json.Marshal("All")
+		return json.Marshal(astUnit("All"))
 	}
-	return json.Marshal(map[string]any{n.kind: n.value})
+	return json.Marshal(astNewtype(n.kind, n.value))
 }
 
 type EdgeRef struct {
@@ -337,6 +399,7 @@ type EdgeRef struct {
 	value any
 }
 
+func AllEdges() EdgeRef        { return EdgeRef{kind: "All"} }
 func EdgeID(id uint64) EdgeRef { return EdgeRef{kind: "Ids", value: []uint64{id}} }
 func EdgeIDs(ids ...uint64) EdgeRef {
 	return EdgeRef{kind: "Ids", value: append([]uint64(nil), ids...)}
@@ -344,7 +407,12 @@ func EdgeIDs(ids ...uint64) EdgeRef {
 func EdgeVar(name string) EdgeRef   { return EdgeRef{kind: "Var", value: name} }
 func EdgeParam(name string) EdgeRef { return EdgeRef{kind: "Param", value: name} }
 
-func (e EdgeRef) MarshalJSON() ([]byte, error) { return json.Marshal(map[string]any{e.kind: e.value}) }
+func (e EdgeRef) MarshalJSON() ([]byte, error) {
+	if e.kind == "All" {
+		return json.Marshal(astUnit("All"))
+	}
+	return json.Marshal(astNewtype(e.kind, e.value))
+}
 
 type Expr struct {
 	kind  string
@@ -364,28 +432,36 @@ func (e Expr) Div(other Expr) Expr { return Expr{kind: "Div", value: []Expr{e, o
 func (e Expr) Mod(other Expr) Expr { return Expr{kind: "Mod", value: []Expr{e, other}} }
 func (e Expr) Neg() Expr           { return Expr{kind: "Neg", value: e} }
 
-type CaseBranch struct {
+type WhenThen struct {
 	When Predicate
 	Then Expr
 }
 
-func ExprCase(branches []CaseBranch, elseExpr *Expr) Expr {
-	whenThen := make([][2]any, len(branches))
+func ExprCase(branches []WhenThen, elseExpr *Expr) Expr {
+	whenThen := make([]map[string]any, len(branches))
 	for i, branch := range branches {
-		whenThen[i] = [2]any{branch.When, branch.Then}
+		whenThen[i] = map[string]any{"when": branch.When, "then": branch.Then}
 	}
-	return Expr{kind: "Case", value: struct {
-		WhenThen [][2]any `json:"when_then"`
-		ElseExpr *Expr    `json:"else_expr"`
-	}{WhenThen: whenThen, ElseExpr: elseExpr}}
+	value := map[string]any{"when_then": whenThen}
+	if elseExpr != nil {
+		value["else_expr"] = *elseExpr
+	}
+	return Expr{kind: "Case", value: value}
 }
 
 func (e Expr) MarshalJSON() ([]byte, error) {
 	switch e.kind {
 	case "Id", "Timestamp", "DateTimeNow":
-		return json.Marshal(e.kind)
+		return json.Marshal(astUnit(e.kind))
+	case "Add", "Sub", "Mul", "Div", "Mod":
+		values := e.value.([]Expr)
+		return json.Marshal(astStruct(e.kind, map[string]any{"left": values[0], "right": values[1]}))
+	case "Neg":
+		return json.Marshal(astStruct("Neg", map[string]any{"expr": e.value}))
+	case "Case":
+		return json.Marshal(astStruct("Case", e.value.(map[string]any)))
 	default:
-		return json.Marshal(map[string]any{e.kind: e.value})
+		return json.Marshal(astNewtype(e.kind, e.value))
 	}
 }
 
@@ -427,24 +503,24 @@ func streamBoundOf(value any) StreamBound {
 
 func (s StreamBound) MarshalJSON() ([]byte, error) {
 	if s.expr != nil {
-		return json.Marshal(map[string]any{"Expr": *s.expr})
+		return json.Marshal(exprBound(*s.expr))
 	}
 	value := 0
 	if s.literal != nil {
 		value = *s.literal
 	}
-	return json.Marshal(map[string]any{"Literal": value})
+	return json.Marshal(literalBound(value))
 }
 
 type CompareOp string
 
 const (
-	CompareEq  CompareOp = "Eq"
-	CompareNeq CompareOp = "Neq"
-	CompareGt  CompareOp = "Gt"
-	CompareGte CompareOp = "Gte"
-	CompareLt  CompareOp = "Lt"
-	CompareLte CompareOp = "Lte"
+	CompareEq  CompareOp = "eq"
+	CompareNeq CompareOp = "neq"
+	CompareGt  CompareOp = "gt"
+	CompareGte CompareOp = "gte"
+	CompareLt  CompareOp = "lt"
+	CompareLte CompareOp = "lte"
 )
 
 type Predicate struct {
@@ -492,11 +568,7 @@ func PredAnd(preds ...Predicate) Predicate { return Predicate{kind: "And", value
 func PredOr(preds ...Predicate) Predicate  { return Predicate{kind: "Or", value: preds} }
 func PredNot(pred Predicate) Predicate     { return Predicate{kind: "Not", value: pred} }
 func PredCompare(left Expr, op CompareOp, right Expr) Predicate {
-	return Predicate{kind: "Compare", value: struct {
-		Left  Expr      `json:"left"`
-		Op    CompareOp `json:"op"`
-		Right Expr      `json:"right"`
-	}{left, op, right}}
+	return Predicate{kind: "Compare", value: map[string]any{"left": left, "op": op, "right": right}}
 }
 func PredBetween(property string, min any, max any) Predicate {
 	minExpr, minIsExpr := exprFromValue(min)
@@ -532,57 +604,123 @@ func exprFromValue(value any) (Expr, bool) {
 }
 
 func (p Predicate) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{p.kind: p.value})
+	return json.Marshal(p.ast())
 }
 
-type SourcePredicate struct {
-	kind  string
-	value any
+func (p Predicate) ast() any {
+	propExpr := func(property string) Expr { return ExprProp(property) }
+	asExpr := func(value any) Expr {
+		if expr, ok := value.(Expr); ok {
+			return expr
+		}
+		return ExprVal(value)
+	}
+	binary := func(name string, values []any) any {
+		return astStruct(name, map[string]any{"left": propExpr(values[0].(string)), "right": asExpr(values[1])})
+	}
+	switch p.kind {
+	case "Eq", "EqExpr":
+		return binary("Eq", p.value.([]any))
+	case "Neq", "NeqExpr":
+		return binary("Neq", p.value.([]any))
+	case "Gt", "GtExpr":
+		return binary("Gt", p.value.([]any))
+	case "Gte", "GteExpr":
+		return binary("Gte", p.value.([]any))
+	case "Lt", "LtExpr":
+		return binary("Lt", p.value.([]any))
+	case "Lte", "LteExpr":
+		return binary("Lte", p.value.([]any))
+	case "Between":
+		values := p.value.([]any)
+		return astStruct("Between", map[string]any{"value": propExpr(values[0].(string)), "min": asExpr(values[1]), "max": asExpr(values[2])})
+	case "BetweenExpr":
+		values := p.value.([]any)
+		return astStruct("Between", map[string]any{"value": propExpr(values[0].(string)), "min": values[1], "max": values[2]})
+	case "HasKey", "IsNull", "IsNotNull":
+		return astStruct(p.kind, map[string]any{"property": p.value})
+	case "StartsWith":
+		values := p.value.([]any)
+		return astStruct("StartsWith", map[string]any{"value": propExpr(values[0].(string)), "prefix": ExprVal(values[1])})
+	case "EndsWith":
+		values := p.value.([]any)
+		return astStruct("EndsWith", map[string]any{"value": propExpr(values[0].(string)), "suffix": ExprVal(values[1])})
+	case "Contains":
+		values := p.value.([]any)
+		return astStruct("Contains", map[string]any{"value": propExpr(values[0].(string)), "substring": ExprVal(values[1])})
+	case "ContainsExpr":
+		values := p.value.([]any)
+		return astStruct("Contains", map[string]any{"value": propExpr(values[0].(string)), "substring": values[1]})
+	case "IsIn":
+		values := p.value.([]any)
+		return astStruct("IsIn", map[string]any{"value": propExpr(values[0].(string)), "values": ExprVal(values[1])})
+	case "IsInExpr":
+		values := p.value.([]any)
+		return astStruct("IsIn", map[string]any{"value": propExpr(values[0].(string)), "values": values[1]})
+	case "And", "Or":
+		return astStruct(p.kind, map[string]any{"predicates": p.value})
+	case "Not":
+		return astStruct("Not", map[string]any{"predicate": p.value})
+	case "Compare":
+		return astStruct("Compare", p.value.(map[string]any))
+	default:
+		return astNewtype(p.kind, p.value)
+	}
 }
+
+type SourcePredicate = Predicate
 
 func SourceEq(property string, value any) SourcePredicate {
-	return sourceComparison("Eq", property, value)
+	return PredEq(property, value)
 }
 func SourceNeq(property string, value any) SourcePredicate {
-	return sourceComparison("Neq", property, value)
+	return PredNeq(property, value)
 }
 func SourceGt(property string, value any) SourcePredicate {
-	return sourceComparison("Gt", property, value)
+	return PredGt(property, value)
 }
 func SourceGte(property string, value any) SourcePredicate {
-	return sourceComparison("Gte", property, value)
+	return PredGte(property, value)
 }
 func SourceLt(property string, value any) SourcePredicate {
-	return sourceComparison("Lt", property, value)
+	return PredLt(property, value)
 }
 func SourceLte(property string, value any) SourcePredicate {
-	return sourceComparison("Lte", property, value)
+	return PredLte(property, value)
 }
 func SourceHasKey(property string) SourcePredicate {
-	return SourcePredicate{kind: "HasKey", value: property}
+	return PredHasKey(property)
 }
 func SourceStartsWith(property, prefix string) SourcePredicate {
-	return SourcePredicate{kind: "StartsWith", value: []any{property, prefix}}
+	return PredStartsWith(property, prefix)
 }
+func SourceEndsWith(property, suffix string) SourcePredicate {
+	return PredEndsWith(property, suffix)
+}
+func SourceContains(property, needle string) SourcePredicate {
+	return PredContains(property, needle)
+}
+func SourceContainsExpr(property string, expr Expr) SourcePredicate {
+	return PredContainsExpr(property, expr)
+}
+func SourceIsIn(property string, value any) SourcePredicate { return PredIsIn(property, value) }
+func SourceIsInExpr(property string, expr Expr) SourcePredicate {
+	return PredIsInExpr(property, expr)
+}
+func SourceIsNull(property string) SourcePredicate    { return PredIsNull(property) }
+func SourceIsNotNull(property string) SourcePredicate { return PredIsNotNull(property) }
 func SourceAnd(preds ...SourcePredicate) SourcePredicate {
-	return SourcePredicate{kind: "And", value: preds}
+	return PredAnd(preds...)
 }
 func SourceOr(preds ...SourcePredicate) SourcePredicate {
-	return SourcePredicate{kind: "Or", value: preds}
+	return PredOr(preds...)
+}
+func SourceNot(pred SourcePredicate) SourcePredicate { return PredNot(pred) }
+func SourceCompare(left Expr, op CompareOp, right Expr) SourcePredicate {
+	return PredCompare(left, op, right)
 }
 func SourceBetween(property string, min any, max any) SourcePredicate {
-	pred := PredBetween(property, min, max)
-	return SourcePredicate{kind: pred.kind, value: pred.value}
-}
-
-func sourceComparison(kind, property string, value any) SourcePredicate {
-	pred := comparisonPredicate(kind, property, value)
-	return SourcePredicate{kind: pred.kind, value: pred.value}
-}
-
-func (s SourcePredicate) Predicate() Predicate { return Predicate{kind: s.kind, value: s.value} }
-func (s SourcePredicate) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{s.kind: s.value})
+	return PredBetween(property, min, max)
 }
 
 type Projection struct {
@@ -603,15 +741,15 @@ func ProjectExpr(alias string, expr Expr) Projection { return Projection{Alias: 
 
 func (p Projection) MarshalJSON() ([]byte, error) {
 	if p.Expr != nil {
-		return json.Marshal(struct {
+		return json.Marshal(astNewtype("Expr", struct {
 			Alias string `json:"alias"`
 			Expr  Expr   `json:"expr"`
-		}{p.Alias, *p.Expr})
+		}{p.Alias, *p.Expr}))
 	}
-	return json.Marshal(struct {
+	return json.Marshal(astNewtype("Property", struct {
 		Source string `json:"source"`
 		Alias  string `json:"alias"`
-	}{p.Source, p.Alias})
+	}{p.Source, p.Alias}))
 }
 
 type BindingTarget struct {
@@ -626,9 +764,9 @@ func Binding(name string) BindingTarget {
 
 func (t BindingTarget) MarshalJSON() ([]byte, error) {
 	if t.current {
-		return json.Marshal("Current")
+		return json.Marshal(astUnit("Current"))
 	}
-	return json.Marshal(map[string]string{"Binding": t.name})
+	return json.Marshal(astNewtype("Binding", t.name))
 }
 
 type BindingValueRef struct {
@@ -654,6 +792,13 @@ type BindingProjection struct {
 	Refs   []BindingValueRef `json:"refs,omitempty"`
 }
 
+func (p BindingProjection) MarshalJSON() ([]byte, error) {
+	if p.Kind == "Coalesce" {
+		return json.Marshal(astStruct("Coalesce", map[string]any{"refs": p.Refs, "alias": p.Alias}))
+	}
+	return json.Marshal(astStruct("Property", map[string]any{"target": p.Target, "source": p.Source, "alias": p.Alias}))
+}
+
 func ProjectBinding(target BindingTarget, source, alias string) BindingProjection {
 	return BindingProjection{Kind: "Property", Target: &target, Source: source, Alias: alias}
 }
@@ -675,9 +820,30 @@ type projectBindingsStep struct {
 type Order string
 
 const (
-	OrderAsc  Order = "Asc"
-	OrderDesc Order = "Desc"
+	OrderAsc  Order = "asc"
+	OrderDesc Order = "desc"
 )
+
+type ShortestPathDirection string
+
+const (
+	ShortestPathOut  ShortestPathDirection = "out"
+	ShortestPathIn   ShortestPathDirection = "in"
+	ShortestPathBoth ShortestPathDirection = "both"
+)
+
+type ShortestPathOptions struct {
+	Label     string
+	Direction ShortestPathDirection
+}
+
+type shortestPathStep struct {
+	Source    NodeRef               `json:"source"`
+	Target    NodeRef               `json:"target"`
+	Label     *string               `json:"label,omitempty"`
+	Direction ShortestPathDirection `json:"direction"`
+	MaxDepth  int                   `json:"max_depth"`
+}
 
 type Ordering struct {
 	Property string
@@ -689,27 +855,35 @@ func (o Ordering) MarshalJSON() ([]byte, error) { return json.Marshal([]any{o.Pr
 type AggregateFunction string
 
 const (
-	AggregateCount AggregateFunction = "Count"
-	AggregateSum   AggregateFunction = "Sum"
-	AggregateMin   AggregateFunction = "Min"
-	AggregateMax   AggregateFunction = "Max"
-	AggregateMean  AggregateFunction = "Mean"
+	AggregateCount AggregateFunction = "count"
+	AggregateSum   AggregateFunction = "sum"
+	AggregateMin   AggregateFunction = "min"
+	AggregateMax   AggregateFunction = "max"
+	AggregateMean  AggregateFunction = "mean"
 )
 
 type EmitBehavior string
 
 const (
-	EmitNone   EmitBehavior = "None"
-	EmitBefore EmitBehavior = "Before"
-	EmitAfter  EmitBehavior = "After"
-	EmitAll    EmitBehavior = "All"
+	EmitNone   EmitBehavior = "none"
+	EmitBefore EmitBehavior = "before"
+	EmitAfter  EmitBehavior = "after"
+	EmitAll    EmitBehavior = "all"
 )
 
 type RangeIndexDirection string
 
 const (
-	RangeIndexAsc  RangeIndexDirection = "Asc"
-	RangeIndexDesc RangeIndexDirection = "Desc"
+	RangeIndexAsc  RangeIndexDirection = "asc"
+	RangeIndexDesc RangeIndexDirection = "desc"
+)
+
+type VectorDistanceMetric string
+
+const (
+	VectorDistanceCosine    VectorDistanceMetric = "cosine"
+	VectorDistanceEuclidean VectorDistanceMetric = "euclidean"
+	VectorDistanceManhattan VectorDistanceMetric = "manhattan"
 )
 
 type RepeatConfig struct {
@@ -736,9 +910,391 @@ func (r RepeatConfig) EmitIf(pred Predicate) RepeatConfig {
 }
 func (r RepeatConfig) WithMaxDepth(max int) RepeatConfig { r.MaxDepth = max; return r }
 
+func (r RepeatConfig) MarshalJSON() ([]byte, error) {
+	fields := map[string]any{
+		"traversal": r.Traversal,
+		"emit":      r.Emit,
+		"max_depth": r.MaxDepth,
+	}
+	if r.Times != nil {
+		fields["times"] = *r.Times
+	}
+	if r.Until != nil {
+		fields["until"] = *r.Until
+	}
+	if r.EmitPredicate != nil {
+		fields["emit_predicate"] = *r.EmitPredicate
+	}
+	return json.Marshal(fields)
+}
+
 type IndexSpec struct {
 	kind  string
 	value any
+}
+
+// IndexOperationID is a canonical lowercase non-nil lifecycle UUID.
+type IndexOperationID string
+
+var indexOperationIDPattern = regexp.MustCompile(`^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
+
+// validateIndexOperationID enforces the frozen lifecycle control identifier.
+func validateIndexOperationID(value string) (IndexOperationID, error) {
+	if !indexOperationIDPattern.MatchString(value) || value == "00000000-0000-0000-0000-000000000000" {
+		return "", fmt.Errorf("helix: index operation ID must be a canonical lowercase non-nil UUID: %s", value)
+	}
+	return IndexOperationID(value), nil
+}
+
+// IndexDdlReceipt is implemented by every tagged CREATE/DROP receipt variant.
+type IndexDdlReceipt interface{ indexDdlReceipt() }
+
+// IndexDdlAccepted reports newly accepted durable lifecycle work.
+type IndexDdlAccepted struct {
+	Kind        string           `json:"kind"`
+	OperationID IndexOperationID `json:"operation_id"`
+	IndexID     string           `json:"index_id"`
+	Generation  string           `json:"generation"`
+}
+
+func (IndexDdlAccepted) indexDdlReceipt() {}
+
+// IndexDdlExistingOperation converges on already-running lifecycle work.
+type IndexDdlExistingOperation struct {
+	Kind        string           `json:"kind"`
+	OperationID IndexOperationID `json:"operation_id"`
+}
+
+func (IndexDdlExistingOperation) indexDdlReceipt() {}
+
+// IndexDdlAlreadyActive reports an identical active generation.
+type IndexDdlAlreadyActive struct {
+	Kind       string `json:"kind"`
+	IndexID    string `json:"index_id"`
+	Generation string `json:"generation"`
+}
+
+func (IndexDdlAlreadyActive) indexDdlReceipt() {}
+
+// IndexErrorCode is a stable machine-readable public lifecycle error.
+type IndexErrorCode string
+
+const (
+	IndexLifecycleUnavailable              IndexErrorCode = "index_lifecycle_unavailable"
+	IndexAlreadyExists                     IndexErrorCode = "index_already_exists"
+	IndexDefinitionConflict                IndexErrorCode = "index_definition_conflict"
+	IndexBusy                              IndexErrorCode = "index_busy"
+	IndexNotFound                          IndexErrorCode = "index_not_found"
+	IndexOperationNotFound                 IndexErrorCode = "index_operation_not_found"
+	IndexOperationNotAbortable             IndexErrorCode = "index_operation_not_abortable"
+	ReaderCoordinationUnavailable          IndexErrorCode = "reader_coordination_unavailable"
+	IndexIDExhausted                       IndexErrorCode = "index_id_exhausted"
+	BlobPublicationCoordinationUnavailable IndexErrorCode = "blob_publication_coordination_unavailable"
+	VectorPhysicalIDExhausted              IndexErrorCode = "vector_physical_id_exhausted"
+	IndexGenerationExhausted               IndexErrorCode = "index_generation_exhausted"
+	IndexRevisionExhausted                 IndexErrorCode = "index_revision_exhausted"
+	IndexOperationRevisionExhausted        IndexErrorCode = "index_operation_revision_exhausted"
+	StaleIndexGeneration                   IndexErrorCode = "stale_index_generation"
+	WriterFencedCommitOutcomeUnknown       IndexErrorCode = "writer_fenced_commit_outcome_unknown"
+)
+
+// IndexOperationBlockerCode is a stable reason explicit control is required.
+type IndexOperationBlockerCode string
+
+const (
+	IndexBlockerInvalidSourceData                      IndexOperationBlockerCode = "invalid_source_data"
+	IndexBlockerUniquenessViolation                    IndexOperationBlockerCode = "uniqueness_violation"
+	IndexBlockerOversizedEntity                        IndexOperationBlockerCode = "oversized_entity"
+	IndexBlockerManifestLimit                          IndexOperationBlockerCode = "manifest_limit"
+	IndexBlockerReaderCoordinationUnavailable          IndexOperationBlockerCode = "reader_coordination_unavailable"
+	IndexBlockerObjectStoreConfigurationUnavailable    IndexOperationBlockerCode = "object_store_configuration_unavailable"
+	IndexBlockerBlobPublicationCoordinationUnavailable IndexOperationBlockerCode = "blob_publication_coordination_unavailable"
+	IndexBlockerInvariantViolation                     IndexOperationBlockerCode = "invariant_violation"
+)
+
+// IndexOperationProgress contains decimal-string bounded-work counters.
+type IndexOperationProgress struct {
+	Entities         string `json:"entities"`
+	InputBytes       string `json:"input_bytes"`
+	OutputOperations string `json:"output_operations"`
+	OutputBytes      string `json:"output_bytes"`
+}
+
+// IndexOperationStatusCommon contains fields shared by every status variant.
+type IndexOperationStatusCommon struct {
+	OperationID   IndexOperationID       `json:"operation_id"`
+	IndexID       string                 `json:"index_id"`
+	Generation    string                 `json:"generation"`
+	OperationKind string                 `json:"operation_kind"`
+	Family        string                 `json:"family"`
+	Stage         string                 `json:"stage"`
+	Attempt       uint32                 `json:"attempt"`
+	Progress      IndexOperationProgress `json:"progress"`
+}
+
+// IndexOperationStatus is implemented by each tagged status variant.
+type IndexOperationStatus interface{ indexOperationStatus() }
+
+// IndexOperationQueued is runnable, including bounded retry delay.
+type IndexOperationQueued struct {
+	Status string `json:"status"`
+	IndexOperationStatusCommon
+}
+
+func (IndexOperationQueued) indexOperationStatus() {}
+
+// IndexOperationRunning is currently claimed by a fenced writer.
+type IndexOperationRunning struct {
+	Status string `json:"status"`
+	IndexOperationStatusCommon
+}
+
+func (IndexOperationRunning) indexOperationStatus() {}
+
+// IndexOperationBlocked requires an explicit retry or abort.
+type IndexOperationBlocked struct {
+	Status string `json:"status"`
+	IndexOperationStatusCommon
+	BlockerCode IndexOperationBlockerCode `json:"blocker_code"`
+	Message     string                    `json:"message,omitempty"`
+}
+
+func (IndexOperationBlocked) indexOperationStatus() {}
+
+// IndexOperationSucceeded completed a build or drop successfully.
+type IndexOperationSucceeded struct {
+	Status string `json:"status"`
+	IndexOperationStatusCommon
+}
+
+func (IndexOperationSucceeded) indexOperationStatus() {}
+
+// IndexOperationAborted completed cleanup for an explicitly aborted build.
+type IndexOperationAborted struct {
+	Status string `json:"status"`
+	IndexOperationStatusCommon
+}
+
+func (IndexOperationAborted) indexOperationStatus() {}
+
+var indexOperationStages = map[string]struct{}{
+	"scan": {}, "scan_partitions": {}, "await_upload": {}, "catch_up": {}, "validate": {},
+	"validate_descriptor": {}, "compact": {}, "prepare_manifests": {},
+	"validate_manifests": {}, "activate": {},
+	"begin_drain": {}, "delete_entries": {}, "retire_cache": {}, "delete_physical": {},
+	"delete_deltas": {}, "prepare_candidates": {}, "acquire_delete_fences": {},
+	"retire_manifest": {}, "retire_artifacts": {}, "retire_upload_intents": {},
+	"mark_reachability": {}, "delete_blobs": {}, "delete_entity_state": {},
+	"finish_drain": {}, "finalize": {}, "aborting_begin_drain": {},
+	"aborting_delete_entries": {}, "aborting_retire_cache": {}, "aborting_delete_physical": {},
+	"aborting_delete_deltas": {}, "aborting_prepare_candidates": {},
+	"aborting_acquire_delete_fences": {}, "aborting_retire_manifest": {},
+	"aborting_retire_artifacts": {}, "aborting_retire_upload_intents": {},
+	"aborting_mark_reachability": {}, "aborting_delete_blobs": {},
+	"aborting_delete_entity_state": {}, "aborting_finish_drain": {}, "aborting_finalize": {},
+}
+
+var indexOperationBlockers = map[IndexOperationBlockerCode]struct{}{
+	IndexBlockerInvalidSourceData: {}, IndexBlockerUniquenessViolation: {},
+	IndexBlockerOversizedEntity: {}, IndexBlockerManifestLimit: {},
+	IndexBlockerReaderCoordinationUnavailable: {}, IndexBlockerObjectStoreConfigurationUnavailable: {},
+	IndexBlockerBlobPublicationCoordinationUnavailable: {}, IndexBlockerInvariantViolation: {},
+}
+
+// validateLifecycleU64 accepts only the canonical decimal-string wire shape.
+func validateLifecycleU64(value, field string, allowZero bool) error {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return fmt.Errorf("helix: %s must be a canonical unsigned decimal string", field)
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return fmt.Errorf("helix: %s must be a canonical unsigned decimal string", field)
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || (!allowZero && parsed == 0) {
+		return fmt.Errorf("helix: %s is outside the u64 range", field)
+	}
+	return nil
+}
+
+// requireLifecycleFields rejects responses missing frozen contract fields.
+func requireLifecycleFields(payload map[string]json.RawMessage, fields ...string) error {
+	for _, field := range fields {
+		if _, ok := payload[field]; !ok {
+			return fmt.Errorf("helix: lifecycle response is missing required field %s", field)
+		}
+	}
+	return nil
+}
+
+// UnmarshalIndexDdlReceipt decodes a tagged receipt and ignores additive fields.
+func UnmarshalIndexDdlReceipt(data []byte) (IndexDdlReceipt, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("helix: decode index DDL receipt: %w", err)
+	}
+	if err := requireLifecycleFields(payload, "kind"); err != nil {
+		return nil, err
+	}
+	var tag struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(data, &tag); err != nil {
+		return nil, fmt.Errorf("helix: decode index DDL receipt kind: %w", err)
+	}
+	validateAccepted := func(receipt IndexDdlAccepted) (IndexDdlReceipt, error) {
+		if receipt.Kind != "accepted" {
+			return nil, fmt.Errorf("helix: invalid accepted receipt tag %q", receipt.Kind)
+		}
+		if _, err := validateIndexOperationID(string(receipt.OperationID)); err != nil {
+			return nil, err
+		}
+		if err := validateLifecycleU64(receipt.IndexID, "index_id", false); err != nil {
+			return nil, err
+		}
+		if err := validateLifecycleU64(receipt.Generation, "generation", false); err != nil {
+			return nil, err
+		}
+		return receipt, nil
+	}
+	switch tag.Kind {
+	case "accepted":
+		if err := requireLifecycleFields(payload, "operation_id", "index_id", "generation"); err != nil {
+			return nil, err
+		}
+		var receipt IndexDdlAccepted
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			return nil, fmt.Errorf("helix: decode accepted receipt: %w", err)
+		}
+		return validateAccepted(receipt)
+	case "existing_operation":
+		if err := requireLifecycleFields(payload, "operation_id"); err != nil {
+			return nil, err
+		}
+		var receipt IndexDdlExistingOperation
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			return nil, fmt.Errorf("helix: decode existing-operation receipt: %w", err)
+		}
+		if _, err := validateIndexOperationID(string(receipt.OperationID)); err != nil {
+			return nil, err
+		}
+		return receipt, nil
+	case "already_active":
+		if err := requireLifecycleFields(payload, "index_id", "generation"); err != nil {
+			return nil, err
+		}
+		var receipt IndexDdlAlreadyActive
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			return nil, fmt.Errorf("helix: decode already-active receipt: %w", err)
+		}
+		if err := validateLifecycleU64(receipt.IndexID, "index_id", false); err != nil {
+			return nil, err
+		}
+		if err := validateLifecycleU64(receipt.Generation, "generation", false); err != nil {
+			return nil, err
+		}
+		return receipt, nil
+	default:
+		return nil, fmt.Errorf("helix: unknown index DDL receipt kind %q", tag.Kind)
+	}
+}
+
+// validateIndexOperationStatusCommon validates fields shared by every status.
+func validateIndexOperationStatusCommon(common *IndexOperationStatusCommon) error {
+	if _, err := validateIndexOperationID(string(common.OperationID)); err != nil {
+		return err
+	}
+	if err := validateLifecycleU64(common.IndexID, "index_id", false); err != nil {
+		return err
+	}
+	if err := validateLifecycleU64(common.Generation, "generation", false); err != nil {
+		return err
+	}
+	if common.OperationKind != "build" && common.OperationKind != "drop" {
+		return fmt.Errorf("helix: unknown index operation kind %q", common.OperationKind)
+	}
+	if common.Family != "secondary" && common.Family != "vector" && common.Family != "text" {
+		return fmt.Errorf("helix: unknown index family %q", common.Family)
+	}
+	if _, ok := indexOperationStages[common.Stage]; !ok {
+		return fmt.Errorf("helix: unknown index operation stage %q", common.Stage)
+	}
+	for field, value := range map[string]string{
+		"progress.entities":          common.Progress.Entities,
+		"progress.input_bytes":       common.Progress.InputBytes,
+		"progress.output_operations": common.Progress.OutputOperations,
+		"progress.output_bytes":      common.Progress.OutputBytes,
+	} {
+		if err := validateLifecycleU64(value, field, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UnmarshalIndexOperationStatus decodes a tagged status and ignores additive fields.
+func UnmarshalIndexOperationStatus(data []byte) (IndexOperationStatus, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("helix: decode index operation status: %w", err)
+	}
+	if err := requireLifecycleFields(
+		payload,
+		"status", "operation_id", "index_id", "generation", "operation_kind", "family", "stage", "attempt", "progress",
+	); err != nil {
+		return nil, err
+	}
+	var tag struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(data, &tag); err != nil {
+		return nil, fmt.Errorf("helix: decode index operation status tag: %w", err)
+	}
+	var status IndexOperationStatus
+	switch tag.Status {
+	case "queued":
+		status = &IndexOperationQueued{}
+	case "running":
+		status = &IndexOperationRunning{}
+	case "blocked":
+		if err := requireLifecycleFields(payload, "blocker_code"); err != nil {
+			return nil, err
+		}
+		status = &IndexOperationBlocked{}
+	case "succeeded":
+		status = &IndexOperationSucceeded{}
+	case "aborted":
+		status = &IndexOperationAborted{}
+	default:
+		return nil, fmt.Errorf("helix: unknown index operation status %q", tag.Status)
+	}
+	if err := json.Unmarshal(data, status); err != nil {
+		return nil, fmt.Errorf("helix: decode %s index operation status: %w", tag.Status, err)
+	}
+	var common *IndexOperationStatusCommon
+	switch typed := status.(type) {
+	case *IndexOperationQueued:
+		common = &typed.IndexOperationStatusCommon
+	case *IndexOperationRunning:
+		common = &typed.IndexOperationStatusCommon
+	case *IndexOperationBlocked:
+		common = &typed.IndexOperationStatusCommon
+		if _, ok := indexOperationBlockers[typed.BlockerCode]; !ok {
+			return nil, fmt.Errorf("helix: unknown index operation blocker %q", typed.BlockerCode)
+		}
+	case *IndexOperationSucceeded:
+		common = &typed.IndexOperationStatusCommon
+	case *IndexOperationAborted:
+		common = &typed.IndexOperationStatusCommon
+	}
+	if err := validateIndexOperationStatusCommon(common); err != nil {
+		return nil, err
+	}
+	if tag.Status == "aborted" && (common.OperationKind != "build" || !strings.HasPrefix(common.Stage, "aborting_")) {
+		return nil, fmt.Errorf("helix: aborted status must describe build cleanup")
+	}
+	return status, nil
 }
 
 func NodeEqualityIndex(label, property string) IndexSpec {
@@ -768,25 +1324,21 @@ func EdgeRangeDescIndex(label, property string) IndexSpec {
 func EdgeRangeIndexWithDirection(label, property string, direction RangeIndexDirection) IndexSpec {
 	return IndexSpec{kind: "EdgeRange", value: rangeIndexFields(label, property, direction)}
 }
-func NodeVectorIndex(label, property string, tenantProperty ...string) IndexSpec {
-	return tenantIndex("NodeVector", label, property, tenantProperty...)
+func NodeVectorIndex(label, property string, dimension uint, metric VectorDistanceMetric, tenantProperty ...string) IndexSpec {
+	return vectorIndex("NodeVector", label, property, dimension, metric, tenantProperty...)
 }
 func NodeTextIndex(label, property string, tenantProperty ...string) IndexSpec {
 	return tenantIndex("NodeText", label, property, tenantProperty...)
 }
-func EdgeVectorIndex(label, property string, tenantProperty ...string) IndexSpec {
-	return tenantIndex("EdgeVector", label, property, tenantProperty...)
+func EdgeVectorIndex(label, property string, dimension uint, metric VectorDistanceMetric, tenantProperty ...string) IndexSpec {
+	return vectorIndex("EdgeVector", label, property, dimension, metric, tenantProperty...)
 }
 func EdgeTextIndex(label, property string, tenantProperty ...string) IndexSpec {
 	return tenantIndex("EdgeText", label, property, tenantProperty...)
 }
 
 func rangeIndexFields(label, property string, direction RangeIndexDirection) map[string]any {
-	value := map[string]any{"label": label, "property": property}
-	if direction != RangeIndexAsc {
-		value["direction"] = direction
-	}
-	return value
+	return map[string]any{"label": label, "property": property, "direction": direction}
 }
 
 func tenantIndex(kind, label, property string, tenantProperty ...string) IndexSpec {
@@ -797,8 +1349,24 @@ func tenantIndex(kind, label, property string, tenantProperty ...string) IndexSp
 	return IndexSpec{kind: kind, value: value}
 }
 
+func vectorIndex(kind, label, property string, dimension uint, metric VectorDistanceMetric, tenantProperty ...string) IndexSpec {
+	if dimension == 0 {
+		panic("helix: vector dimension must be non-zero")
+	}
+	switch metric {
+	case VectorDistanceCosine, VectorDistanceEuclidean, VectorDistanceManhattan:
+	default:
+		panic("helix: unsupported vector distance metric")
+	}
+	value := tenantIndex(kind, label, property, tenantProperty...)
+	fields := value.value.(map[string]any)
+	fields["dimension"] = dimension
+	fields["metric"] = metric
+	return value
+}
+
 func (i IndexSpec) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{i.kind: i.value})
+	return json.Marshal(astNewtype(i.kind, i.value))
 }
 
 type searchNodesVectorStep struct {
@@ -817,34 +1385,37 @@ type searchNodesTextStep struct {
 	K           StreamBound    `json:"k"`
 }
 
-type indexStepSpec struct {
-	Label          string  `json:"label"`
-	Property       string  `json:"property"`
-	TenantProperty *string `json:"tenant_property,omitempty"`
+func CreateVectorIndexNodesStep(
+	label, property string,
+	dimension uint,
+	metric VectorDistanceMetric,
+	tenantProperty ...string,
+) Step {
+	return createIndexStep(NodeVectorIndex(label, property, dimension, metric, tenantProperty...))
 }
 
-func CreateVectorIndexNodesStep(label, property string, tenantProperty ...string) Step {
-	return step("CreateVectorIndexNodes", newIndexStepSpec(label, property, tenantProperty...))
-}
-
-func CreateVectorIndexEdgesStep(label, property string, tenantProperty ...string) Step {
-	return step("CreateVectorIndexEdges", newIndexStepSpec(label, property, tenantProperty...))
+func CreateVectorIndexEdgesStep(
+	label, property string,
+	dimension uint,
+	metric VectorDistanceMetric,
+	tenantProperty ...string,
+) Step {
+	return createIndexStep(EdgeVectorIndex(label, property, dimension, metric, tenantProperty...))
 }
 
 func CreateTextIndexNodesStep(label, property string, tenantProperty ...string) Step {
-	return step("CreateTextIndexNodes", newIndexStepSpec(label, property, tenantProperty...))
+	return createIndexStep(NodeTextIndex(label, property, tenantProperty...))
 }
 
 func CreateTextIndexEdgesStep(label, property string, tenantProperty ...string) Step {
-	return step("CreateTextIndexEdges", newIndexStepSpec(label, property, tenantProperty...))
+	return createIndexStep(EdgeTextIndex(label, property, tenantProperty...))
 }
 
-func newIndexStepSpec(label, property string, tenantProperty ...string) indexStepSpec {
-	spec := indexStepSpec{Label: label, Property: property}
-	if len(tenantProperty) > 0 && tenantProperty[0] != "" {
-		spec.TenantProperty = &tenantProperty[0]
-	}
-	return spec
+func createIndexStep(spec IndexSpec) Step {
+	return step("CreateIndex", struct {
+		Spec        IndexSpec `json:"spec"`
+		IfNotExists bool      `json:"if_not_exists"`
+	}{spec, true})
 }
 
 type Step struct {
@@ -856,11 +1427,174 @@ type Step struct {
 func unitStep(kind string) Step        { return Step{kind: kind, unit: true} }
 func step(kind string, value any) Step { return Step{kind: kind, value: value} }
 
-func (s Step) MarshalJSON() ([]byte, error) {
-	if s.unit {
-		return json.Marshal(s.kind)
+func (s Step) ToAST(input any) (any, error) {
+	unary := func(name string, fields map[string]any) (any, error) {
+		with, err := withInput(input, fields)
+		if err != nil {
+			return nil, err
+		}
+		return astStruct(name, with), nil
 	}
-	return json.Marshal(map[string]any{s.kind: s.value})
+	switch s.kind {
+	case "N":
+		return astStruct("Nodes", map[string]any{"reference": s.value}), nil
+	case "NWhere":
+		return astStruct("NodesWhere", map[string]any{"predicate": s.value}), nil
+	case "ShortestPath":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return astStruct("ShortestPath", fields), nil
+	case "E":
+		return astStruct("Edges", map[string]any{"reference": s.value}), nil
+	case "EWhere":
+		return astStruct("EdgesWhere", map[string]any{"predicate": s.value}), nil
+	case "VectorSearchNodes", "TextSearchNodes", "VectorSearchEdges", "TextSearchEdges":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return astStruct(s.kind, fields), nil
+	case "Out", "In", "Both", "OutE", "InE", "BothE":
+		return unary(s.kind, map[string]any{"label": s.value})
+	case "OutN", "InN", "OtherN", "Dedup", "Count", "Exists", "Id", "Label", "EdgeProperties", "Fold", "Unfold", "Path", "SimplePath", "SackGet":
+		return unary(s.kind, map[string]any{})
+	case "Has":
+		values := s.value.([]any)
+		return unary("Has", map[string]any{"property": values[0], "value": values[1]})
+	case "HasLabel":
+		return unary("HasLabel", map[string]any{"label": s.value})
+	case "HasKey":
+		return unary("HasKey", map[string]any{"property": s.value})
+	case "Where":
+		return unary("Where", map[string]any{"predicate": s.value})
+	case "Within":
+		return unary("Within", map[string]any{"variable": s.value})
+	case "Without":
+		return unary("Without", map[string]any{"variable": s.value})
+	case "EdgeHas":
+		values := s.value.([]any)
+		return unary("EdgeHas", map[string]any{"property": values[0], "value": values[1]})
+	case "EdgeHasLabel":
+		return unary("EdgeHasLabel", map[string]any{"label": s.value})
+	case "Limit":
+		return unary("Limit", map[string]any{"count": literalBound(s.value)})
+	case "LimitBy":
+		return unary("Limit", map[string]any{"count": exprBound(s.value)})
+	case "Skip":
+		return unary("Skip", map[string]any{"count": literalBound(s.value)})
+	case "SkipBy":
+		return unary("Skip", map[string]any{"count": exprBound(s.value)})
+	case "Range":
+		values := s.value.([]any)
+		return unary("Range", map[string]any{"start": literalBound(values[0]), "end": literalBound(values[1])})
+	case "RangeBy":
+		values := s.value.([]any)
+		return unary("Range", map[string]any{"start": values[0], "end": values[1]})
+	case "As", "Store", "Select", "Bind":
+		return unary(s.kind, map[string]any{"name": s.value})
+	case "Inject":
+		fields := map[string]any{"variable": s.value}
+		if input != nil {
+			fields["input"] = input
+		}
+		return astStruct("Inject", fields), nil
+	case "Values":
+		return unary("Values", map[string]any{"properties": s.value})
+	case "ValueMap":
+		return unary("ValueMap", map[string]any{"properties": s.value})
+	case "Project":
+		return unary("Project", map[string]any{"projections": s.value})
+	case "ProjectBindings":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return unary("ProjectBindings", fields)
+	case "CreateIndex", "DropIndex", "GetIndexOperation", "RetryIndexOperation", "AbortIndexOperation":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return astStruct(s.kind, fields), nil
+	case "AddN":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		if input != nil {
+			fields["input"] = input
+		}
+		return astStruct("AddN", fields), nil
+	case "AddE":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return unary("AddE", fields)
+	case "SetProperty":
+		values := s.value.([]any)
+		return unary("SetProperty", map[string]any{"name": values[0], "value": values[1]})
+	case "RemoveProperty":
+		return unary("RemoveProperty", map[string]any{"name": s.value})
+	case "Drop":
+		return unary("Drop", map[string]any{})
+	case "DropEdge":
+		return unary("DropEdge", map[string]any{"to": s.value})
+	case "DropEdgeLabeled":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return unary("DropEdgeLabeled", fields)
+	case "DropEdgeById":
+		fields := map[string]any{"edges": s.value}
+		if input != nil {
+			fields["input"] = input
+		}
+		return astStruct("DropEdgeById", fields), nil
+	case "OrderBy":
+		values := s.value.([]any)
+		return unary("OrderBy", map[string]any{"property": values[0], "order": values[1]})
+	case "OrderByMultiple":
+		return unary("OrderByMultiple", map[string]any{"orderings": s.value})
+	case "Repeat":
+		return unary("Repeat", map[string]any{"config": s.value})
+	case "Union":
+		return unary("Union", map[string]any{"traversals": s.value})
+	case "Choose":
+		fields, err := jsonFields(s.value)
+		if err != nil {
+			return nil, err
+		}
+		return unary("Choose", fields)
+	case "Coalesce":
+		return unary("Coalesce", map[string]any{"traversals": s.value})
+	case "Optional":
+		return unary("Optional", map[string]any{"traversal": s.value})
+	case "Group":
+		return unary("Group", map[string]any{"property": s.value})
+	case "GroupCount":
+		return unary("GroupCount", map[string]any{"property": s.value})
+	case "AggregateBy":
+		values := s.value.([]any)
+		return unary("AggregateBy", map[string]any{"function": values[0], "property": values[1]})
+	case "WithSack":
+		return unary("WithSack", map[string]any{"initial": s.value})
+	case "SackSet", "SackAdd":
+		return unary(s.kind, map[string]any{"property": s.value})
+	default:
+		return nil, fmt.Errorf("helix: unknown step %s", s.kind)
+	}
+}
+
+func (s Step) MarshalJSON() ([]byte, error) {
+	ast, err := s.ToAST("context")
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(ast)
 }
 
 type PropPair struct {
@@ -889,6 +1623,27 @@ func TraversalFromSteps(steps []Step) *Traversal {
 	return &Traversal{steps: append([]Step(nil), steps...)}
 }
 func (t *Traversal) Steps() []Step { return append([]Step(nil), t.steps...) }
+func (t *Traversal) Root() (any, error) {
+	if t == nil {
+		return nil, errors.New("helix: nil traversal")
+	}
+	return stepsToAST(t.steps, nil)
+}
+
+func stepsToAST(steps []Step, initial any) (any, error) {
+	root := initial
+	for _, step := range steps {
+		next, err := step.ToAST(root)
+		if err != nil {
+			return nil, err
+		}
+		root = next
+	}
+	if root == nil {
+		return nil, errors.New("helix: traversal must contain at least one AST node before execution")
+	}
+	return root, nil
+}
 func (t *Traversal) Validate() error {
 	if t == nil {
 		return errors.New("helix: nil traversal")
@@ -897,9 +1652,13 @@ func (t *Traversal) Validate() error {
 }
 func (t *Traversal) Err() error { return t.Validate() }
 func (t *Traversal) MarshalJSON() ([]byte, error) {
+	root, err := t.Root()
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(struct {
-		Steps []Step `json:"steps"`
-	}{t.steps})
+		Root any `json:"root"`
+	}{root})
 }
 
 func (t *Traversal) add(s Step) *Traversal {
@@ -934,6 +1693,25 @@ func (t *Traversal) NWhere(pred SourcePredicate) *Traversal { return t.add(step(
 func (t *Traversal) NWithLabel(label string) *Traversal     { return t.NWhere(SourceEq("$label", label)) }
 func (t *Traversal) NWithLabelWhere(label string, pred SourcePredicate) *Traversal {
 	return t.NWhere(SourceAnd(SourceEq("$label", label), pred))
+}
+func (t *Traversal) ShortestPath(source, target NodeRef, maxDepth int, options ...ShortestPathOptions) *Traversal {
+	direction := ShortestPathOut
+	var label *string
+	if len(options) > 0 {
+		if options[0].Direction != "" {
+			direction = options[0].Direction
+		}
+		if options[0].Label != "" {
+			label = &options[0].Label
+		}
+	}
+	return t.addTerminal(step("ShortestPath", shortestPathStep{
+		Source:    source,
+		Target:    target,
+		Label:     label,
+		Direction: direction,
+		MaxDepth:  maxDepth,
+	}))
 }
 func (t *Traversal) E(ref EdgeRef) *Traversal               { return t.add(step("E", ref)) }
 func (t *Traversal) EWhere(pred SourcePredicate) *Traversal { return t.add(step("EWhere", pred)) }
@@ -1123,11 +1901,57 @@ func (t *Traversal) DropIndex(spec IndexSpec) *Traversal {
 		Spec IndexSpec `json:"spec"`
 	}{spec}))
 }
-func (t *Traversal) CreateVectorIndexNodes(label, property string, tenantProperty ...string) *Traversal {
-	return t.CreateIndexIfNotExists(NodeVectorIndex(label, property, tenantProperty...))
+
+// GetIndexOperation reads one retained operation in the request storage scope.
+func (t *Traversal) GetIndexOperation(operationID string) *Traversal {
+	id, err := validateIndexOperationID(operationID)
+	if err != nil {
+		t.err = err
+		return t
+	}
+	return t.addTerminal(step("GetIndexOperation", struct {
+		OperationID IndexOperationID `json:"operation_id"`
+	}{id}))
 }
-func (t *Traversal) CreateVectorIndexEdges(label, property string, tenantProperty ...string) *Traversal {
-	return t.CreateIndexIfNotExists(EdgeVectorIndex(label, property, tenantProperty...))
+
+// RetryIndexOperation convergently requeues one blocked operation.
+func (t *Traversal) RetryIndexOperation(operationID string) *Traversal {
+	id, err := validateIndexOperationID(operationID)
+	if err != nil {
+		t.err = err
+		return t
+	}
+	return t.addWrite(step("RetryIndexOperation", struct {
+		OperationID IndexOperationID `json:"operation_id"`
+	}{id}))
+}
+
+// AbortIndexOperation converts one constructing build into abort cleanup.
+func (t *Traversal) AbortIndexOperation(operationID string) *Traversal {
+	id, err := validateIndexOperationID(operationID)
+	if err != nil {
+		t.err = err
+		return t
+	}
+	return t.addWrite(step("AbortIndexOperation", struct {
+		OperationID IndexOperationID `json:"operation_id"`
+	}{id}))
+}
+func (t *Traversal) CreateVectorIndexNodes(
+	label, property string,
+	dimension uint,
+	metric VectorDistanceMetric,
+	tenantProperty ...string,
+) *Traversal {
+	return t.CreateIndexIfNotExists(NodeVectorIndex(label, property, dimension, metric, tenantProperty...))
+}
+func (t *Traversal) CreateVectorIndexEdges(
+	label, property string,
+	dimension uint,
+	metric VectorDistanceMetric,
+	tenantProperty ...string,
+) *Traversal {
+	return t.CreateIndexIfNotExists(EdgeVectorIndex(label, property, dimension, metric, tenantProperty...))
 }
 func (t *Traversal) CreateTextIndexNodes(label, property string, tenantProperty ...string) *Traversal {
 	return t.CreateIndexIfNotExists(NodeTextIndex(label, property, tenantProperty...))
@@ -1146,11 +1970,11 @@ func (t *Traversal) SackSet(property string) *Traversal { return t.add(step("Sac
 func (t *Traversal) SackAdd(property string) *Traversal { return t.add(step("SackAdd", property)) }
 func (t *Traversal) SackGet() *Traversal                { return t.add(unitStep("SackGet")) }
 
-func optionalString(values []string) *string {
+func optionalString(values []string) any {
 	if len(values) == 0 || values[0] == "" {
 		return nil
 	}
-	return &values[0]
+	return values[0]
 }
 
 func vectorSearchInput(value any) PropertyInput {
@@ -1183,9 +2007,13 @@ func SubTraversalFromSteps(steps []Step) SubTraversal {
 	return SubTraversal{steps: append([]Step(nil), steps...)}
 }
 func (s SubTraversal) MarshalJSON() ([]byte, error) {
+	root, err := stepsToAST(s.steps, "context")
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(struct {
-		Steps []Step `json:"steps"`
-	}{s.steps})
+		Root any `json:"root"`
+	}{root})
 }
 func (s SubTraversal) add(step Step) SubTraversal { s.steps = append(s.steps, step); return s }
 func (s SubTraversal) Out(label ...string) SubTraversal {
@@ -1221,20 +2049,83 @@ type BatchCondition struct {
 func VarNotEmpty(name string) BatchCondition { return BatchCondition{kind: "VarNotEmpty", value: name} }
 func VarEmpty(name string) BatchCondition    { return BatchCondition{kind: "VarEmpty", value: name} }
 func VarMinSize(name string, size int) BatchCondition {
+	if size < 0 {
+		panic("helix: batch minimum size must be non-negative")
+	}
 	return BatchCondition{kind: "VarMinSize", value: []any{name, size}}
 }
 func PrevNotEmpty() BatchCondition { return BatchCondition{kind: "PrevNotEmpty"} }
 func (b BatchCondition) MarshalJSON() ([]byte, error) {
 	if b.kind == "PrevNotEmpty" {
-		return json.Marshal("PrevNotEmpty")
+		return json.Marshal(astUnit("PrevNotEmpty"))
 	}
-	return json.Marshal(map[string]any{b.kind: b.value})
+	if b.kind != "VarNotEmpty" && b.kind != "VarEmpty" && b.kind != "VarMinSize" {
+		return nil, errors.New("helix: invalid batch condition")
+	}
+	return json.Marshal(astNewtype(b.kind, b.value))
+}
+func (b *BatchCondition) UnmarshalJSON(data []byte) error {
+	var unit string
+	if err := json.Unmarshal(data, &unit); err == nil {
+		if unit != "prev_not_empty" {
+			return fmt.Errorf("helix: unknown batch condition %q", unit)
+		}
+		*b = PrevNotEmpty()
+		return nil
+	}
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tagged); err != nil {
+		return err
+	}
+	if len(tagged) != 1 {
+		return errors.New("helix: batch condition must contain exactly one variant")
+	}
+	for name, payload := range tagged {
+		switch name {
+		case "var_not_empty":
+			var variable string
+			if err := json.Unmarshal(payload, &variable); err != nil {
+				return err
+			}
+			*b = VarNotEmpty(variable)
+		case "var_empty":
+			var variable string
+			if err := json.Unmarshal(payload, &variable); err != nil {
+				return err
+			}
+			*b = VarEmpty(variable)
+		case "var_min_size":
+			var values []json.RawMessage
+			if err := json.Unmarshal(payload, &values); err != nil {
+				return err
+			}
+			if len(values) != 2 {
+				return errors.New("helix: var_min_size requires a variable and minimum size")
+			}
+			var variable string
+			var size int
+			if err := json.Unmarshal(values[0], &variable); err != nil {
+				return err
+			}
+			if err := json.Unmarshal(values[1], &size); err != nil {
+				return err
+			}
+			if size < 0 {
+				return errors.New("helix: batch minimum size must be non-negative")
+			}
+			*b = VarMinSize(variable, size)
+		default:
+			return fmt.Errorf("helix: unknown batch condition %q", name)
+		}
+		return nil
+	}
+	return errors.New("helix: missing batch condition variant")
 }
 
 type NamedQuery struct {
-	Name      string          `json:"name"`
-	Steps     []Step          `json:"steps"`
-	Condition *BatchCondition `json:"condition"`
+	Name      string          `json:"name,omitempty"`
+	Root      any             `json:"root"`
+	Condition *BatchCondition `json:"condition,omitempty"`
 }
 
 type BatchEntry struct {
@@ -1253,15 +2144,63 @@ func forEachParamEntry(param string, body []BatchEntry) BatchEntry {
 }
 func (b BatchEntry) MarshalJSON() ([]byte, error) {
 	if b.kind == "ForEach" {
-		return json.Marshal(map[string]any{"ForEach": b.forEach})
+		return json.Marshal(astNewtype("ForEach", b.forEach))
 	}
-	return json.Marshal(map[string]any{"Query": b.query})
+	return json.Marshal(astNewtype("Query", b.query))
+}
+func (b *BatchEntry) UnmarshalJSON(data []byte) error {
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tagged); err != nil {
+		return err
+	}
+	if len(tagged) != 1 {
+		return errors.New("helix: batch entry must contain exactly one variant")
+	}
+	if payload, ok := tagged["query"]; ok {
+		var query struct {
+			Name      string          `json:"name,omitempty"`
+			Root      json.RawMessage `json:"root"`
+			Condition *BatchCondition `json:"condition,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &query); err != nil {
+			return err
+		}
+		var root any
+		decoder := json.NewDecoder(bytes.NewReader(query.Root))
+		decoder.UseNumber()
+		if err := decoder.Decode(&root); err != nil {
+			return err
+		}
+		*b = queryEntry(NamedQuery{Name: query.Name, Root: root, Condition: query.Condition})
+		return nil
+	}
+	if payload, ok := tagged["for_each"]; ok {
+		var entry forEachEntry
+		if err := json.Unmarshal(payload, &entry); err != nil {
+			return err
+		}
+		*b = forEachParamEntry(entry.Param, entry.Body)
+		return nil
+	}
+	return errors.New("helix: unknown batch entry variant")
 }
 
 type batchBase struct {
 	queries []BatchEntry
 	returns []string
 	err     error
+}
+
+type batchPayload struct {
+	Entries []BatchEntry `json:"entries"`
+	Returns []string     `json:"returns"`
+}
+
+func canonicalBatchPayload(batch batchBase) batchPayload {
+	return batchPayload{
+		Entries: append([]BatchEntry{}, batch.queries...),
+		Returns: append([]string{}, batch.returns...),
+	}
 }
 
 func returningVars(vars []string) []string {
@@ -1282,6 +2221,59 @@ func (b *batchBase) Err() error { return b.Validate() }
 type ReadBatch struct{ batchBase }
 type WriteBatch struct{ batchBase }
 
+type QueryRequestType string
+
+const (
+	RequestTypeRead  QueryRequestType = "read"
+	RequestTypeWrite QueryRequestType = "write"
+)
+
+// BatchQuery is the closed read-or-write batch union used by QueryRequest.
+type BatchQuery struct {
+	requestType QueryRequestType
+	batch       batchBase
+	err         error
+}
+
+func ReadBatchQuery(batch *ReadBatch) BatchQuery {
+	if batch == nil {
+		return BatchQuery{err: errors.New("helix: nil read batch")}
+	}
+	return BatchQuery{requestType: RequestTypeRead, batch: batch.batchBase}
+}
+
+func WriteBatchQuery(batch *WriteBatch) BatchQuery {
+	if batch == nil {
+		return BatchQuery{err: errors.New("helix: nil write batch")}
+	}
+	return BatchQuery{requestType: RequestTypeWrite, batch: batch.batchBase}
+}
+
+func (q BatchQuery) Validate() error {
+	if q.err != nil {
+		return q.err
+	}
+	if q.requestType != RequestTypeRead && q.requestType != RequestTypeWrite {
+		return errors.New("helix: invalid batch query type")
+	}
+	return q.batch.err
+}
+
+func (q BatchQuery) MarshalJSON() ([]byte, error) {
+	if err := q.Validate(); err != nil {
+		return nil, err
+	}
+	batch := canonicalBatchPayload(q.batch)
+	if q.requestType == RequestTypeRead {
+		return json.Marshal(struct {
+			Read any `json:"read"`
+		}{batch})
+	}
+	return json.Marshal(struct {
+		Write any `json:"write"`
+	}{batch})
+}
+
 func Read() *ReadBatch   { return &ReadBatch{} }
 func Write() *WriteBatch { return &WriteBatch{} }
 func (b *ReadBatch) VarAs(name string, traversal *Traversal) *ReadBatch {
@@ -1295,7 +2287,11 @@ func (b *ReadBatch) VarAs(name string, traversal *Traversal) *ReadBatch {
 	if traversal.write && b.err == nil {
 		b.err = ErrWriteTraversalInReadBatch
 	}
-	b.queries = append(b.queries, queryEntry(NamedQuery{Name: name, Steps: traversal.Steps()}))
+	root, err := traversal.Root()
+	if err != nil && b.err == nil {
+		b.err = err
+	}
+	b.queries = append(b.queries, queryEntry(NamedQuery{Name: name, Root: root}))
 	return b
 }
 func (b *ReadBatch) VarAsIf(name string, condition BatchCondition, traversal *Traversal) *ReadBatch {
@@ -1320,10 +2316,18 @@ func (b *ReadBatch) MarshalJSON() ([]byte, error) {
 	if err := b.Validate(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(struct {
-		Queries []BatchEntry `json:"queries"`
+	return json.Marshal(canonicalBatchPayload(b.batchBase))
+}
+func (b *ReadBatch) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		Entries []BatchEntry `json:"entries"`
 		Returns []string     `json:"returns"`
-	}{b.queries, b.returns})
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	b.batchBase = batchBase{queries: payload.Entries, returns: returningVars(payload.Returns)}
+	return nil
 }
 
 func (b *WriteBatch) VarAs(name string, traversal *Traversal) *WriteBatch {
@@ -1334,7 +2338,11 @@ func (b *WriteBatch) VarAs(name string, traversal *Traversal) *WriteBatch {
 	if err := traversal.Validate(); err != nil && b.err == nil {
 		b.err = err
 	}
-	b.queries = append(b.queries, queryEntry(NamedQuery{Name: name, Steps: traversal.Steps()}))
+	root, err := traversal.Root()
+	if err != nil && b.err == nil {
+		b.err = err
+	}
+	b.queries = append(b.queries, queryEntry(NamedQuery{Name: name, Root: root}))
 	return b
 }
 func (b *WriteBatch) VarAsIf(name string, condition BatchCondition, traversal *Traversal) *WriteBatch {
@@ -1359,10 +2367,18 @@ func (b *WriteBatch) MarshalJSON() ([]byte, error) {
 	if err := b.Validate(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(struct {
-		Queries []BatchEntry `json:"queries"`
+	return json.Marshal(canonicalBatchPayload(b.batchBase))
+}
+func (b *WriteBatch) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		Entries []BatchEntry `json:"entries"`
 		Returns []string     `json:"returns"`
-	}{b.queries, b.returns})
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	b.batchBase = batchBase{queries: payload.Entries, returns: returningVars(payload.Returns)}
+	return nil
 }
 
 type ParamKind string
@@ -1383,11 +2399,53 @@ func ParamTypeObject() QueryParamType   { return QueryParamType{Kind: "Object"} 
 func ParamTypeArray(inner QueryParamType) QueryParamType {
 	return QueryParamType{Kind: "Array", Inner: &inner}
 }
-func (q QueryParamType) MarshalJSON() ([]byte, error) {
-	if q.Kind == "Array" {
-		return json.Marshal(map[string]any{"Array": q.Inner})
+func (q QueryParamType) Validate() error {
+	switch q.Kind {
+	case "Bool", "I64", "F64", "F32", "String", "DateTime", "Bytes", "Value", "Object":
+		if q.Inner != nil {
+			return errors.New("helix: scalar parameter type cannot have an inner type")
+		}
+		return nil
+	case "Array":
+		if q.Inner == nil {
+			return errors.New("helix: array parameter type requires an inner type")
+		}
+		return q.Inner.Validate()
+	default:
+		return fmt.Errorf("helix: unknown query parameter type %q", q.Kind)
 	}
-	return json.Marshal(string(q.Kind))
+}
+func (q QueryParamType) MarshalJSON() ([]byte, error) {
+	if err := q.Validate(); err != nil {
+		return nil, err
+	}
+	if q.Kind == "Array" {
+		return json.Marshal(astNewtype("Array", q.Inner))
+	}
+	return json.Marshal(astUnit(string(q.Kind)))
+}
+func (q *QueryParamType) UnmarshalJSON(data []byte) error {
+	var unit string
+	if err := json.Unmarshal(data, &unit); err == nil {
+		for _, kind := range []ParamKind{"Bool", "I64", "F64", "F32", "String", "DateTime", "Bytes", "Value", "Object"} {
+			if unit == snakeName(string(kind)) {
+				*q = QueryParamType{Kind: kind}
+				return nil
+			}
+		}
+		return fmt.Errorf("helix: unknown query parameter type %q", unit)
+	}
+	var tagged struct {
+		Array *QueryParamType `json:"array"`
+	}
+	if err := json.Unmarshal(data, &tagged); err != nil {
+		return err
+	}
+	if tagged.Array == nil {
+		return errors.New("helix: array parameter type requires an inner type")
+	}
+	*q = ParamTypeArray(*tagged.Array)
+	return nil
 }
 
 type ParamRef struct {
@@ -1400,51 +2458,65 @@ func (p ParamRef) Input() PropertyInput         { return ParamInput(p.Name) }
 func (p ParamRef) Bound() StreamBound           { return BoundExpr(p.Expr()) }
 func (p ParamRef) MarshalJSON() ([]byte, error) { return p.Expr().MarshalJSON() }
 
-type DynamicValue any
+type QueryValue any
 
-func DynamicNull() DynamicValue                                 { return nil }
-func DynamicBool(value bool) DynamicValue                       { return value }
-func DynamicI64(value int64) DynamicValue                       { return value }
-func DynamicF64(value float64) DynamicValue                     { return value }
-func DynamicF32(value float32) DynamicValue                     { return value }
-func DynamicString(value string) DynamicValue                   { return value }
-func DynamicArray(values ...DynamicValue) DynamicValue          { return values }
-func DynamicObject(values map[string]DynamicValue) DynamicValue { return values }
+func QueryNull() QueryValue                               { return nil }
+func QueryBool(value bool) QueryValue                     { return value }
+func QueryI64(value int64) QueryValue                     { return value }
+func QueryF64(value float64) QueryValue                   { return value }
+func QueryF32(value float32) QueryValue                   { return value }
+func QueryString(value string) QueryValue                 { return value }
+func QueryArray(values ...QueryValue) QueryValue          { return values }
+func QueryObject(values map[string]QueryValue) QueryValue { return values }
 
-type queryBuilder struct {
-	requestType string
+type QueryRequest struct {
+	requestType QueryRequestType
 	queryName   *string
 	batch       batchBase
-	parameters  map[string]DynamicValue
+	parameters  map[string]QueryValue
 	types       map[string]QueryParamType
 	err         error
-	write       bool
 }
 
-type ReadQueryBuilder struct{ queryBuilder }
-type WriteQueryBuilder struct{ queryBuilder }
+type ReadQueryBuilder struct{ QueryRequest }
+type WriteQueryBuilder struct{ QueryRequest }
 
 func ReadQuery(name string) *ReadQueryBuilder {
-	return &ReadQueryBuilder{queryBuilder: newQueryBuilder("read", name, false)}
+	return &ReadQueryBuilder{QueryRequest: newQueryRequest(RequestTypeRead, name)}
 }
 func WriteQuery(name string) *WriteQueryBuilder {
-	return &WriteQueryBuilder{queryBuilder: newQueryBuilder("write", name, true)}
+	return &WriteQueryBuilder{QueryRequest: newQueryRequest(RequestTypeWrite, name)}
 }
-func newQueryBuilder(requestType, name string, write bool) queryBuilder {
+func NewQueryRequest(query BatchQuery) *QueryRequest {
+	request := newQueryRequest(query.requestType, "")
+	request.batch = query.batch
+	request.err = query.err
+	return &request
+}
+func NewReadQueryRequest(query *ReadBatch) *QueryRequest {
+	return NewQueryRequest(ReadBatchQuery(query))
+}
+func NewWriteQueryRequest(query *WriteBatch) *QueryRequest {
+	return NewQueryRequest(WriteBatchQuery(query))
+}
+func newQueryRequest(requestType QueryRequestType, name string) QueryRequest {
 	var queryName *string
 	if name != "" {
 		queryName = &name
 	}
-	return queryBuilder{requestType: requestType, queryName: queryName, parameters: map[string]DynamicValue{}, types: map[string]QueryParamType{}, write: write}
+	return QueryRequest{requestType: requestType, queryName: queryName, parameters: map[string]QueryValue{}, types: map[string]QueryParamType{}}
 }
-func (q *queryBuilder) Validate() error {
+func (q *QueryRequest) Validate() error {
 	if q.err != nil {
 		return q.err
 	}
+	if q.requestType != RequestTypeRead && q.requestType != RequestTypeWrite {
+		return errors.New("helix: invalid query request type")
+	}
 	return q.batch.err
 }
-func (q *queryBuilder) isHelixRequest() {}
-func (q *queryBuilder) addParam(name string, ty QueryParamType, value DynamicValue, err error) ParamRef {
+func (q *QueryRequest) isHelixRequest() {}
+func (q *QueryRequest) addParam(name string, ty QueryParamType, value QueryValue, err error) ParamRef {
 	if _, exists := q.types[name]; exists && q.err == nil {
 		q.err = &PathError{Path: name, Err: ErrDuplicateParameter}
 	}
@@ -1455,56 +2527,92 @@ func (q *queryBuilder) addParam(name string, ty QueryParamType, value DynamicVal
 	q.parameters[name] = value
 	return ParamRef{Name: name, Type: ty}
 }
-func (q *queryBuilder) ParamBool(name string, value bool) ParamRef {
-	return q.addParam(name, ParamTypeBool(), DynamicBool(value), nil)
+func (q *QueryRequest) addParameterType(name string, ty QueryParamType) {
+	if _, exists := q.types[name]; exists && q.err == nil {
+		q.err = &PathError{Path: name, Err: ErrDuplicateParameter}
+	}
+	q.types[name] = ty
 }
-func (q *queryBuilder) ParamI64(name string, value any) ParamRef {
-	v, err := dynamicI64(value)
-	return q.addParam(name, ParamTypeI64(), DynamicI64(v), err)
+func (q *QueryRequest) RequestType() QueryRequestType { return q.requestType }
+func (q *QueryRequest) InsertParameterValue(name string, value QueryValue) {
+	q.parameters[name] = value
 }
-func (q *queryBuilder) ParamF64(name string, value any) ParamRef {
-	v, err := dynamicFloat64(value)
-	return q.addParam(name, ParamTypeF64(), DynamicF64(v), err)
+func (q *QueryRequest) InsertParameterType(name string, ty QueryParamType) {
+	q.types[name] = ty
 }
-func (q *queryBuilder) ParamF32(name string, value any) ParamRef {
-	v, err := dynamicFloat64(value)
-	return q.addParam(name, ParamTypeF32(), DynamicF32(float32(v)), err)
+func (q *QueryRequest) WithParameterValue(name string, value QueryValue) *QueryRequest {
+	q.InsertParameterValue(name, value)
+	return q
 }
-func (q *queryBuilder) ParamString(name string, value string) ParamRef {
-	return q.addParam(name, ParamTypeString(), DynamicString(value), nil)
+func (q *QueryRequest) WithParameterType(name string, ty QueryParamType) *QueryRequest {
+	q.InsertParameterType(name, ty)
+	return q
 }
-func (q *queryBuilder) ParamDateTime(name string, value any) ParamRef {
-	v, err := dynamicDateTime(value)
-	return q.addParam(name, ParamTypeDateTime(), DynamicString(v), err)
+func (q *QueryRequest) SetQueryName(name string) { q.queryName = &name }
+func (q *QueryRequest) ClearQueryName()          { q.queryName = nil }
+func (q *QueryRequest) WithQueryName(name string) *QueryRequest {
+	q.SetQueryName(name)
+	return q
 }
-func (q *queryBuilder) ParamValue(name string, value any) ParamRef {
-	v, err := dynamicFromValue(value, name)
+func (q *QueryRequest) ParamBool(name string, value bool) ParamRef {
+	return q.addParam(name, ParamTypeBool(), QueryBool(value), nil)
+}
+func (q *QueryRequest) ParamI64(name string, value any) ParamRef {
+	v, err := queryI64(value)
+	return q.addParam(name, ParamTypeI64(), QueryI64(v), err)
+}
+func (q *QueryRequest) ParamF64(name string, value any) ParamRef {
+	v, err := queryFloat64(value)
+	return q.addParam(name, ParamTypeF64(), QueryF64(v), err)
+}
+func (q *QueryRequest) ParamF32(name string, value any) ParamRef {
+	v, err := queryFloat64(value)
+	return q.addParam(name, ParamTypeF32(), QueryF32(float32(v)), err)
+}
+func (q *QueryRequest) ParamString(name string, value string) ParamRef {
+	return q.addParam(name, ParamTypeString(), QueryString(value), nil)
+}
+func (q *QueryRequest) ParamDateTime(name string, value any) ParamRef {
+	v, err := queryDateTime(value)
+	return q.addParam(name, ParamTypeDateTime(), QueryString(v), err)
+}
+func (q *QueryRequest) ParamValue(name string, value any) ParamRef {
+	v, err := queryValueFromValue(value, name)
 	return q.addParam(name, ParamTypeValue(), v, err)
 }
-func (q *queryBuilder) ParamObject(name string, value any, inner ...QueryParamType) ParamRef {
-	v, err := dynamicFromValue(value, name)
+func (q *QueryRequest) ParamObject(name string, value any, inner ...QueryParamType) ParamRef {
+	v, err := queryValueFromValue(value, name)
 	return q.addParam(name, ParamTypeObject(), v, err)
 }
-func (q *queryBuilder) ParamArray(name string, value any, inner QueryParamType) ParamRef {
-	v, err := dynamicFromValue(value, name)
+func (q *QueryRequest) ParamArray(name string, value any, inner QueryParamType) ParamRef {
+	v, err := queryValueFromValue(value, name)
 	return q.addParam(name, ParamTypeArray(inner), v, err)
 }
-func (q *queryBuilder) MarshalJSON() ([]byte, error) {
+func (q *QueryRequest) MarshalJSON() ([]byte, error) {
 	if err := q.Validate(); err != nil {
 		return nil, err
 	}
+	batch := canonicalBatchPayload(q.batch)
+	query := struct {
+		Read  any `json:"read,omitempty"`
+		Write any `json:"write,omitempty"`
+	}{}
+	if q.requestType == RequestTypeWrite {
+		query.Write = batch
+	} else {
+		query.Read = batch
+	}
 	payload := struct {
-		RequestType    string                    `json:"request_type"`
+		RequestType    QueryRequestType          `json:"request_type"`
 		QueryName      *string                   `json:"query_name"`
 		Query          any                       `json:"query"`
-		Parameters     map[string]DynamicValue   `json:"parameters,omitempty"`
+		Parameters     map[string]QueryValue     `json:"parameters,omitempty"`
 		ParameterTypes map[string]QueryParamType `json:"parameter_types,omitempty"`
-	}{RequestType: q.requestType, QueryName: q.queryName, Query: struct {
-		Queries []BatchEntry `json:"queries"`
-		Returns []string     `json:"returns"`
-	}{q.batch.queries, q.batch.returns}}
+	}{RequestType: q.requestType, QueryName: q.queryName, Query: query}
 	if len(q.parameters) > 0 {
 		payload.Parameters = q.parameters
+	}
+	if len(q.types) > 0 {
 		payload.ParameterTypes = q.types
 	}
 	return json.Marshal(payload)
@@ -1521,7 +2629,11 @@ func (q *ReadQueryBuilder) VarAs(name string, traversal *Traversal) *ReadQueryBu
 	if traversal.write && q.err == nil {
 		q.err = ErrWriteTraversalInReadBatch
 	}
-	q.batch.queries = append(q.batch.queries, queryEntry(NamedQuery{Name: name, Steps: traversal.Steps()}))
+	root, err := traversal.Root()
+	if err != nil && q.err == nil {
+		q.err = err
+	}
+	q.batch.queries = append(q.batch.queries, queryEntry(NamedQuery{Name: name, Root: root}))
 	return q
 }
 func (q *ReadQueryBuilder) VarAsIf(name string, condition BatchCondition, traversal *Traversal) *ReadQueryBuilder {
@@ -1540,34 +2652,38 @@ func (q *ReadQueryBuilder) ForEachParam(param string, body *ReadBatch) *ReadQuer
 }
 func (q *ReadQueryBuilder) Returning(vars ...string) Request {
 	q.batch.returns = returningVars(vars)
-	return &q.queryBuilder
+	return &q.QueryRequest
 }
 func (q *ReadQueryBuilder) ParamBool(name string, value bool) ParamRef {
-	return q.queryBuilder.ParamBool(name, value)
+	return q.QueryRequest.ParamBool(name, value)
 }
 func (q *ReadQueryBuilder) ParamI64(name string, value any) ParamRef {
-	return q.queryBuilder.ParamI64(name, value)
+	return q.QueryRequest.ParamI64(name, value)
 }
 func (q *ReadQueryBuilder) ParamF64(name string, value any) ParamRef {
-	return q.queryBuilder.ParamF64(name, value)
+	return q.QueryRequest.ParamF64(name, value)
 }
 func (q *ReadQueryBuilder) ParamF32(name string, value any) ParamRef {
-	return q.queryBuilder.ParamF32(name, value)
+	return q.QueryRequest.ParamF32(name, value)
 }
 func (q *ReadQueryBuilder) ParamString(name string, value string) ParamRef {
-	return q.queryBuilder.ParamString(name, value)
+	return q.QueryRequest.ParamString(name, value)
 }
 func (q *ReadQueryBuilder) ParamDateTime(name string, value any) ParamRef {
-	return q.queryBuilder.ParamDateTime(name, value)
+	return q.QueryRequest.ParamDateTime(name, value)
 }
 func (q *ReadQueryBuilder) ParamValue(name string, value any) ParamRef {
-	return q.queryBuilder.ParamValue(name, value)
+	return q.QueryRequest.ParamValue(name, value)
 }
 func (q *ReadQueryBuilder) ParamObject(name string, value any, inner ...QueryParamType) ParamRef {
-	return q.queryBuilder.ParamObject(name, value, inner...)
+	return q.QueryRequest.ParamObject(name, value, inner...)
 }
 func (q *ReadQueryBuilder) ParamArray(name string, value any, inner QueryParamType) ParamRef {
-	return q.queryBuilder.ParamArray(name, value, inner)
+	return q.QueryRequest.ParamArray(name, value, inner)
+}
+func (q *ReadQueryBuilder) WithParameterType(name string, ty QueryParamType) *ReadQueryBuilder {
+	q.addParameterType(name, ty)
+	return q
 }
 
 func (q *WriteQueryBuilder) VarAs(name string, traversal *Traversal) *WriteQueryBuilder {
@@ -1578,7 +2694,11 @@ func (q *WriteQueryBuilder) VarAs(name string, traversal *Traversal) *WriteQuery
 	if err := traversal.Validate(); err != nil && q.err == nil {
 		q.err = err
 	}
-	q.batch.queries = append(q.batch.queries, queryEntry(NamedQuery{Name: name, Steps: traversal.Steps()}))
+	root, err := traversal.Root()
+	if err != nil && q.err == nil {
+		q.err = err
+	}
+	q.batch.queries = append(q.batch.queries, queryEntry(NamedQuery{Name: name, Root: root}))
 	return q
 }
 func (q *WriteQueryBuilder) VarAsIf(name string, condition BatchCondition, traversal *Traversal) *WriteQueryBuilder {
@@ -1597,37 +2717,41 @@ func (q *WriteQueryBuilder) ForEachParam(param string, body *WriteBatch) *WriteQ
 }
 func (q *WriteQueryBuilder) Returning(vars ...string) Request {
 	q.batch.returns = returningVars(vars)
-	return &q.queryBuilder
+	return &q.QueryRequest
 }
 func (q *WriteQueryBuilder) ParamBool(name string, value bool) ParamRef {
-	return q.queryBuilder.ParamBool(name, value)
+	return q.QueryRequest.ParamBool(name, value)
 }
 func (q *WriteQueryBuilder) ParamI64(name string, value any) ParamRef {
-	return q.queryBuilder.ParamI64(name, value)
+	return q.QueryRequest.ParamI64(name, value)
 }
 func (q *WriteQueryBuilder) ParamF64(name string, value any) ParamRef {
-	return q.queryBuilder.ParamF64(name, value)
+	return q.QueryRequest.ParamF64(name, value)
 }
 func (q *WriteQueryBuilder) ParamF32(name string, value any) ParamRef {
-	return q.queryBuilder.ParamF32(name, value)
+	return q.QueryRequest.ParamF32(name, value)
 }
 func (q *WriteQueryBuilder) ParamString(name string, value string) ParamRef {
-	return q.queryBuilder.ParamString(name, value)
+	return q.QueryRequest.ParamString(name, value)
 }
 func (q *WriteQueryBuilder) ParamDateTime(name string, value any) ParamRef {
-	return q.queryBuilder.ParamDateTime(name, value)
+	return q.QueryRequest.ParamDateTime(name, value)
 }
 func (q *WriteQueryBuilder) ParamValue(name string, value any) ParamRef {
-	return q.queryBuilder.ParamValue(name, value)
+	return q.QueryRequest.ParamValue(name, value)
 }
 func (q *WriteQueryBuilder) ParamObject(name string, value any, inner ...QueryParamType) ParamRef {
-	return q.queryBuilder.ParamObject(name, value, inner...)
+	return q.QueryRequest.ParamObject(name, value, inner...)
 }
 func (q *WriteQueryBuilder) ParamArray(name string, value any, inner QueryParamType) ParamRef {
-	return q.queryBuilder.ParamArray(name, value, inner)
+	return q.QueryRequest.ParamArray(name, value, inner)
+}
+func (q *WriteQueryBuilder) WithParameterType(name string, ty QueryParamType) *WriteQueryBuilder {
+	q.addParameterType(name, ty)
+	return q
 }
 
-func dynamicI64(value any) (int64, error) {
+func queryI64(value any) (int64, error) {
 	pv, err := PropertyValueOf(value)
 	if err != nil {
 		return 0, err
@@ -1637,7 +2761,7 @@ func dynamicI64(value any) (int64, error) {
 	}
 	return pv.value.(int64), nil
 }
-func dynamicFloat64(value any) (float64, error) {
+func queryFloat64(value any) (float64, error) {
 	switch v := value.(type) {
 	case float64:
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -1658,7 +2782,7 @@ func dynamicFloat64(value any) (float64, error) {
 		return 0, ErrInvalidParameterType
 	}
 }
-func dynamicDateTime(value any) (string, error) {
+func queryDateTime(value any) (string, error) {
 	switch v := value.(type) {
 	case DateTime:
 		return v.RFC3339()
@@ -1678,14 +2802,14 @@ func dynamicDateTime(value any) (string, error) {
 		return "", ErrInvalidDateTimeParameter
 	}
 }
-func dynamicFromValue(value any, path string) (DynamicValue, error) {
+func queryValueFromValue(value any, path string) (QueryValue, error) {
 	pv, err := PropertyValueOf(value)
 	if err != nil {
 		return nil, err
 	}
-	return dynamicFromPropertyValue(pv, path)
+	return queryValueFromPropertyValue(pv, path)
 }
-func dynamicFromPropertyValue(value PropertyValue, path string) (DynamicValue, error) {
+func queryValueFromPropertyValue(value PropertyValue, path string) (QueryValue, error) {
 	if value.err != nil {
 		return nil, value.err
 	}
@@ -1702,9 +2826,9 @@ func dynamicFromPropertyValue(value PropertyValue, path string) (DynamicValue, e
 		return value.value, nil
 	case "Array":
 		vals := value.value.([]PropertyValue)
-		out := make([]DynamicValue, len(vals))
+		out := make([]QueryValue, len(vals))
 		for i, val := range vals {
-			converted, err := dynamicFromPropertyValue(val, fmt.Sprintf("%s[%d]", path, i))
+			converted, err := queryValueFromPropertyValue(val, fmt.Sprintf("%s[%d]", path, i))
 			if err != nil {
 				return nil, err
 			}
@@ -1713,9 +2837,9 @@ func dynamicFromPropertyValue(value PropertyValue, path string) (DynamicValue, e
 		return out, nil
 	case "Object":
 		vals := value.value.(map[string]PropertyValue)
-		out := make(map[string]DynamicValue, len(vals))
+		out := make(map[string]QueryValue, len(vals))
 		for key, val := range vals {
-			converted, err := dynamicFromPropertyValue(val, path+"."+key)
+			converted, err := queryValueFromPropertyValue(val, path+"."+key)
 			if err != nil {
 				return nil, err
 			}

@@ -1,26 +1,48 @@
-.helix/
-*.log
-test/
-# but keep the TypeScript SDK's committed unit tests (CI runs them)
-!sdks/typescript/test/
-!sdks/typescript/test/**
-/thoughts/
-.claude/
-hack/
-.DS_Store
-/tmp
-/data
-claude.md
-.cargo/
-**/dist
-**/node_modules
-**/.env*
-**/*.egg-info
+# Rust / Cargo
+**/target/
+**/*.profraw
+**/*.lcov
 
-**/target
+# Node / TypeScript SDK
+**/node_modules
 **/dist
 **/dist-dev
+
+# Python SDK
+**/__pycache__
+**/*.egg-info
+**/.venv/
+/sdks/python/build/
+**/.coverage
+**/.coverage.*
+**/htmlcov/
+
+# Go SDK
+/sdks/go/coverage.out
+
+# Parity test artifacts
 **/tests/parity/results
 **/tests/parity/workspaces
 **/tests/parity/generated
-**/__pycache__
+
+# Local data & runtime
+/data
+/tmp
+/.helix/*/
+*.log
+.docs/
+
+# Secrets
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+!**/.env.template
+
+# Editor / tooling local state
+**/.cursor/
+**/.claude/settings.local.json
+/.claude/worktrees/
+
+# OS
+**/.DS_Store

@@ -1,0 +1,96 @@
+name: CLI tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/cli-tests.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/cli/**"
+      - "crates/metrics/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cli-tests.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/cli/**"
+      - "crates/metrics/**"
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Validate locked workspace metadata
+        run: cargo metadata --locked --format-version 1 --no-deps
+      - name: Unit and binary integration tests
+        run: cargo test --locked -p helix-cli --all-targets
+      - name: Doc tests
+        run: cargo test --locked -p helix-cli --doc
+      - name: Clippy
+        run: cargo clippy --locked -p helix-cli --all-targets -- -D warnings
+      - name: Formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt -p helix-cli -- --check
+
+  coverage:
+    name: Coverage (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --locked
+      - name: Enforce 80% CLI line coverage
+        run: >-
+          cargo llvm-cov --locked -p helix-cli --all-targets
+          --ignore-filename-regex '(crates/cli/tests/|crates/cli/src/prompts.rs|crates/cli/src/commands/update.rs)'
+          --fail-under-lines 80 --lcov --output-path target/cli-coverage.lcov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-coverage
+          path: target/cli-coverage.lcov
+
+  runtime:
+    name: Docker runtime integration (Ubuntu)
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify Docker
+        run: docker info
+      - name: Real runtime lifecycle and persistence
+        run: cargo test --locked -p helix-cli --test e2e_runtime -- --ignored --test-threads=1
+      - name: Remove test containers
+        if: always()
+        shell: bash
+        run: docker ps -aq --filter "name=helix-" | xargs -r docker rm -f

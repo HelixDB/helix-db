@@ -1,0 +1,1 @@
+standalone runnable binary for the db from which the docker image is built

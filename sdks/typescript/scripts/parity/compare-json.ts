@@ -1,38 +1,40 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { canonicalizeJson, parseJsonStructural, structuralJsonEqual } from "../../src/index.js";
-import { goGeneratedRoot, rustGeneratedRoot, typescriptGeneratedRoot } from "./paths.js";
+import { goGeneratedRoot, pythonGeneratedRoot, rustGeneratedRoot, typescriptGeneratedRoot } from "./paths.js";
 
 const EXPECTED_RUNTIME = 224;
-const EXPECTED_JSON_ONLY = 12;
-const EXPECTED_TOTAL = EXPECTED_RUNTIME + EXPECTED_JSON_ONLY;
+const EXPECTED_JSON_ONLY = 15;
 
 type Generated = {
-  label: "TypeScript" | "Go";
+  label: "TypeScript" | "Go" | "Python";
   root: string;
+  scope: "all" | "json-only";
 };
 
 const rustFiles = await jsonFiles(rustGeneratedRoot);
 assertExpectedCounts("Rust", rustFiles);
 
 const generated: Generated[] = [
-  { label: "TypeScript", root: typescriptGeneratedRoot },
-  { label: "Go", root: goGeneratedRoot },
+  { label: "TypeScript", root: typescriptGeneratedRoot, scope: "all" },
+  { label: "Go", root: goGeneratedRoot, scope: "all" },
+  { label: "Python", root: pythonGeneratedRoot, scope: "all" },
 ];
 
 for (const candidate of generated) {
   await compareGenerated(candidate, rustFiles);
 }
 
-console.log(`request JSON parity passed for ${rustFiles.length} fixture(s) across Rust, TypeScript, and Go`);
+console.log(`request JSON parity passed for ${rustFiles.length} fixtures across Rust, TypeScript, Go, and Python`);
 
 async function compareGenerated(candidate: Generated, rustFiles: string[]) {
+  const baselineFiles = candidate.scope === "all" ? rustFiles : rustFiles.filter((file) => file.startsWith("json-only/"));
   const candidateFiles = await jsonFiles(candidate.root);
-  assertExpectedCounts(candidate.label, candidateFiles);
+  assertExpectedCounts(candidate.label, candidateFiles, candidate.scope === "all" ? EXPECTED_RUNTIME : 0);
 
-  const rustSet = new Set(rustFiles);
+  const rustSet = new Set(baselineFiles);
   const candidateSet = new Set(candidateFiles);
-  const missingInCandidate = rustFiles.filter((file) => !candidateSet.has(file));
+  const missingInCandidate = baselineFiles.filter((file) => !candidateSet.has(file));
   const extraInCandidate = candidateFiles.filter((file) => !rustSet.has(file));
   if (missingInCandidate.length || extraInCandidate.length) {
     throw new Error(
@@ -46,7 +48,7 @@ async function compareGenerated(candidate: Generated, rustFiles: string[]) {
   }
 
   const mismatches: string[] = [];
-  for (const file of rustFiles) {
+  for (const file of baselineFiles) {
     const rustJson = await readFile(join(rustGeneratedRoot, file), "utf8");
     const candidateJson = await readFile(join(candidate.root, file), "utf8");
     if (!structuralJsonEqual(rustJson, candidateJson)) {
@@ -61,10 +63,11 @@ async function compareGenerated(candidate: Generated, rustFiles: string[]) {
   }
 }
 
-function assertExpectedCounts(label: string, files: string[]) {
+function assertExpectedCounts(label: string, files: string[], expectedRuntime = EXPECTED_RUNTIME) {
   const runtime = files.filter((file) => file.startsWith("runtime/")).length;
   const jsonOnly = files.filter((file) => file.startsWith("json-only/")).length;
-  if (runtime !== EXPECTED_RUNTIME || jsonOnly !== EXPECTED_JSON_ONLY || files.length !== EXPECTED_TOTAL) {
+  const expectedTotal = expectedRuntime + EXPECTED_JSON_ONLY;
+  if (runtime !== expectedRuntime || jsonOnly !== EXPECTED_JSON_ONLY || files.length !== expectedTotal) {
     throw new Error(`${label} fixture count mismatch: runtime=${runtime}, json-only=${jsonOnly}, total=${files.length}`);
   }
 }

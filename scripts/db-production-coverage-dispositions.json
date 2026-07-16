@@ -1,0 +1,51 @@
+[
+  {
+    "path": "crates/db/src/search/vector/index.rs",
+    "lines": [436, 437, 438, 713, 766, 795, 809, 830, 983, 1048],
+    "classification": "named-test",
+    "evidence": "vector_index_exercises_facade_and_row_safety_contracts",
+    "reason": "These source regions are async continuations of validated metadata dimension binding and typed present, absent, corrupt, and faulted batch-read contracts exercised directly by the named production test. LLVM retains separate zero-count regions for generic future instantiations after merging the source line."
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "lines": [359, 360, 361],
+    "classification": "named-test",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition",
+    "reason": "The named test runs concurrent retirement futures behind a live lease and proves idempotent close. LLVM maps the losing finalizer's post-await return continuation separately from the covered Closed transition."
+  },
+  {
+    "path": "crates/db/src/search/vector/mutation.rs",
+    "lines": [227, 228, 242, 243, 277, 280, 281, 294, 295],
+    "classification": "named-test",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions",
+    "reason": "The stale-root replacement, no-replacement, and insert recovery paths are covered by the named test; the residual regions are tracing field expansions rather than distinct mutation state transitions."
+  },
+  {
+    "path": "crates/db/src/search/vector/mutation.rs",
+    "lines": [342, 387, 437, 444, 480, 489, 505, 517, 560, 589, 593, 651, 755, 782, 819, 830, 836, 932, 938, 939, 954, 1062, 1071, 1076, 1083, 1096, 1098, 1121, 1138, 1187, 1269, 1336, 1374, 1395, 1401, 1410, 1417, 1432, 1434, 1439, 1465, 1480, 1482, 1483, 1484, 1485, 1486, 1489, 1490, 1497, 1504, 1529],
+    "classification": "named-test",
+    "evidence": "vector_index_exercises_facade_and_row_safety_contracts",
+    "reason": "The named contract forces each measured read and write boundary, stale or missing row state, layer 0 and upper-layer repair, diversity pruning, reciprocal cleanup, and flush retry. The residual zero-count regions are generic async continuation mappings for other active metric instantiations, not unvisited mutation states."
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "lines": [176, 177, 418, 419, 432, 440, 453, 460, 461],
+    "classification": "named-test",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries",
+    "reason": "The named contract exercises stale-entry replacement, missing replacement, failed row recovery, and both compile-time diagnostics specializations. The residual regions are tracing field expansions, async return continuations, and instrumentation-only block endings rather than unvisited recovery decisions."
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "lines": [552, 684, 697, 864, 902, 991, 1007, 1182, 1203, 1219, 1235],
+    "classification": "named-test",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries",
+    "reason": "The named contract covers cached-neighbor reuse, sampling accounting, canonical vector batch reads, neighbor prefetch, budget subtraction, upper-layer greedy traversal, and observed versus result-only dispatch. LLVM retains separate zero-count source regions for generic async and const-generic instantiations."
+  },
+  {
+    "path": "crates/db/src/search/vector/spaces/simple.rs",
+    "lines": [80, 83],
+    "classification": "architecture-test",
+    "evidence": "db-vector-production-coverage architecture matrix and public_float_distance_kernels_cover_long_vectors_and_zero_cosine",
+    "reason": "NEON selection and scalar fallback are mutually exclusive runtime or target-feature paths. The architecture matrix runs the production contracts on aarch64 and x86_64 and explicitly forces scalar and native target features."
+  }
+]

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package helixdb.server.v1;
+
+service HelixDbServer {
+  rpc ExecuteQuery(QueryJsonRequest) returns (QueryJsonResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message QueryJsonRequest {
+  bytes body = 1;
+  bool warm_only = 2;
+  bool require_writer = 3;
+  bool await_durable = 4;
+}
+
+message QueryJsonResponse {
+  bytes body = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  string mode = 2;
+}

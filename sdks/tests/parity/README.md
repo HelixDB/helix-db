@@ -1,8 +1,10 @@
-# Rust/TypeScript DSL Parity
+# Cross-SDK DSL Parity
 
-This suite proves that the Rust DSL and TypeScript DSL emit the same dynamic query JSON, then executes the runtime-safe fixtures against separate fresh local Helix instances.
+This suite proves that every SDK emits the same query JSON, then executes every
+runtime fixture through the public embedded Rust, TypeScript, Go, and Python
+clients against separate fresh in-memory databases.
 
-Run from `ts-dsl/`:
+Run from `sdks/typescript/`:
 
 ```sh
 npm run test:parity
@@ -10,11 +12,21 @@ npm run test:parity
 
 The suite does three things:
 
-- `parity:generate:rust` writes Rust-generated requests to `tests/parity/generated/rust`.
-- `parity:generate:ts` writes TypeScript-generated requests to `tests/parity/generated/typescript`.
-- `parity:compare-json` structurally compares every Rust and TypeScript request, including unsafe integer values.
-- `parity:helix` runs all files in `generated/*/runtime` with `helix query dev --json ... --compact`, first on a Rust instance and then on a separate TypeScript instance, and compares the outputs.
+- `parity:generate` independently writes Rust, TypeScript, Go, and Python
+  requests under `tests/parity/generated`.
+- `parity:compare-json` structurally compares all 239 requests from all four
+  SDKs. This includes integers outside JavaScript's safe range.
+- `parity:embedded` generates Python, Node, and Go UniFFI bindings in a fresh
+  temporary directory, runs all 224 runtime fixtures through each SDK, compares
+  all results, and removes the generated bindings.
 
-Runtime instances are CLI-managed local projects under `tests/parity/workspaces` and use ports `18080` and `18081`. Runtime outputs are written under `tests/parity/results`.
+Generated bindings and runtime results are test artifacts only. They are never
+written into an SDK source tree or committed.
 
-The `json-only` fixture bucket covers DSL shapes that must serialize identically but are not safe or useful to execute directly as a runtime query. The `runtime` bucket is ordered and replayed sequentially against Helix.
+The Rust generator contains an exhaustive visitor whose matches fail to compile
+when a new authoritative `helix-ast` variant is not classified. Its coverage
+assertions also require every classified variant to appear in the fixture corpus.
+
+The `json-only` bucket covers DSL shapes that must serialize identically but are
+not safe or useful to execute. The ordered `runtime` bucket is replayed
+sequentially by all four SDKs.

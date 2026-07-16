@@ -1,8 +1,8 @@
 [package]
 name = "helix-db"
-version = "2.0.6"
-edition = "2021"
-rust-version = "1.75"
+version = "3.0.0"
+edition = "2024"
+rust-version = "1.85.0"
 description = "Library for working with HelixDB"
 license = "Apache-2.0"
 repository = "https://github.com/helixdb/helix-db/tree/main/sdks/rust"
@@ -20,9 +20,20 @@ path = "src/lib.rs"
 [dependencies]
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sonic-rs = "0.5.8"
-inventory = "0.3.24"
-helix-dsl-macros = { version = "0.2.0", path = "helix-dsl-macros" }
+helix-ast = { path = "../../crates/ast" }
+helix-graph = { path = "../../crates/graph-algorithms" }
+helix-dsl-macros = { version = "0.3.0", path = "helix-dsl-macros" }
 reqwest = { version = "0.13.3" }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2.0.18"
+uuid = { version = "1", features = ["serde"] }
+db = { path = "../../crates/db", optional = true }
+
+[features]
+default = []
+embedded = ["dep:db"]
+
+[dev-dependencies]
+tempfile = "3"

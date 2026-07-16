@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    FnArg, GenericArgument, ItemFn, Pat, PathArguments, Type, parse_macro_input, parse_quote,
+    parse_macro_input, parse_quote, FnArg, GenericArgument, ItemFn, Pat, PathArguments, Type,
 };
 
 enum QueryKind {
@@ -42,7 +42,7 @@ impl ParamTypeSpec {
         }
     }
 
-    fn to_dynamic_value_tokens(
+    fn to_query_value_tokens(
         &self,
         value: proc_macro2::TokenStream,
         path: proc_macro2::TokenStream,
@@ -51,58 +51,58 @@ impl ParamTypeSpec {
         match self {
             Self::Bool => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Ok(::helix_db::DynamicQueryValue::Bool(#value))
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Ok(::helix_db::QueryValue::Bool(#value))
             },
             Self::I64 => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Ok(::helix_db::DynamicQueryValue::I64(#value))
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Ok(::helix_db::QueryValue::I64(#value))
             },
             Self::F64 => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Ok(::helix_db::DynamicQueryValue::F64(#value))
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Ok(::helix_db::QueryValue::F64(#value))
             },
             Self::F32 => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Ok(::helix_db::DynamicQueryValue::F32(#value))
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Ok(::helix_db::QueryValue::F32(#value))
             },
             Self::String => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Ok(::helix_db::DynamicQueryValue::String(#value))
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Ok(::helix_db::QueryValue::String(#value))
             },
             Self::DateTime => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Ok(::helix_db::DynamicQueryValue::String(
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Ok(::helix_db::QueryValue::String(
                     (#value)
                         .to_rfc3339()
-                        .ok_or_else(|| ::helix_db::DynamicQueryError::invalid_datetime(#path, (#value).millis()))?
+                        .ok_or_else(|| ::helix_db::QueryError::invalid_datetime(#path, (#value).millis()))?
                 ))
             },
             Self::Bytes => quote! {
                 ::std::result::Result::<
-                    ::helix_db::DynamicQueryValue,
-                    ::helix_db::DynamicQueryError,
-                >::Err(::helix_db::DynamicQueryError::unsupported_bytes(#path))
+                    ::helix_db::QueryValue,
+                    ::helix_db::QueryError,
+                >::Err(::helix_db::QueryError::unsupported_bytes(#path))
             },
             Self::Value => quote! {
-                ::helix_db::__private::dynamic_query_value_from_property_value(#value, #path)
+                ::helix_db::__private::query_value_from_property_value(#value, #path)
             },
             Self::Object(inner) => {
                 let key_ident = format_ident!("__helix_param_key_{depth}");
                 let value_ident = format_ident!("__helix_param_value_{depth}");
                 let path_ident = format_ident!("__helix_param_path_{depth}");
-                let inner_tokens = inner.to_dynamic_value_tokens(
+                let inner_tokens = inner.to_query_value_tokens(
                     quote! { #value_ident },
                     quote! { #path_ident },
                     depth + 1,
@@ -110,9 +110,9 @@ impl ParamTypeSpec {
 
                 quote! {
                     ::std::result::Result::<
-                        ::helix_db::DynamicQueryValue,
-                        ::helix_db::DynamicQueryError,
-                    >::Ok(::helix_db::DynamicQueryValue::Object(
+                        ::helix_db::QueryValue,
+                        ::helix_db::QueryError,
+                    >::Ok(::helix_db::QueryValue::Object(
                         (#value)
                             .into_iter()
                             .map(|(#key_ident, #value_ident)| {
@@ -121,7 +121,7 @@ impl ParamTypeSpec {
                             })
                             .collect::<::std::result::Result<
                                 ::std::collections::BTreeMap<_, _>,
-                                ::helix_db::DynamicQueryError,
+                                ::helix_db::QueryError,
                             >>()?,
                     ))
                 }
@@ -130,7 +130,7 @@ impl ParamTypeSpec {
                 let index_ident = format_ident!("__helix_param_index_{depth}");
                 let value_ident = format_ident!("__helix_param_value_{depth}");
                 let path_ident = format_ident!("__helix_param_path_{depth}");
-                let inner_tokens = inner.to_dynamic_value_tokens(
+                let inner_tokens = inner.to_query_value_tokens(
                     quote! { #value_ident },
                     quote! { #path_ident },
                     depth + 1,
@@ -138,9 +138,9 @@ impl ParamTypeSpec {
 
                 quote! {
                     ::std::result::Result::<
-                        ::helix_db::DynamicQueryValue,
-                        ::helix_db::DynamicQueryError,
-                    >::Ok(::helix_db::DynamicQueryValue::Array(
+                        ::helix_db::QueryValue,
+                        ::helix_db::QueryError,
+                    >::Ok(::helix_db::QueryValue::Array(
                         (#value)
                             .into_iter()
                             .enumerate()
@@ -150,7 +150,7 @@ impl ParamTypeSpec {
                             })
                             .collect::<::std::result::Result<
                                 ::std::vec::Vec<_>,
-                                ::helix_db::DynamicQueryError,
+                                ::helix_db::QueryError,
                             >>()?,
                     ))
                 }
@@ -165,7 +165,7 @@ struct ParamSpec {
     ty: ParamTypeSpec,
 }
 
-/// Infer whether a registered function is a read or write query by inspecting its body for a
+/// Infer whether a function is a read or write query by inspecting its body for a
 /// call to `read_batch()` or `write_batch()`. The return type is not used (and may be omitted).
 fn infer_query_kind(fn_item: &ItemFn) -> syn::Result<QueryKind> {
     fn mentions(tokens: proc_macro2::TokenStream, target: &str) -> bool {
@@ -191,7 +191,7 @@ fn infer_query_kind(fn_item: &ItemFn) -> syn::Result<QueryKind> {
 }
 
 const TYPE_ERROR_MSG: &str = "\
-#[register] parameter type must be a supported query parameter type: \
+#[query] parameter type must be a supported query parameter type: \
 bool, i64, f64, f32, String, DateTime, Vec<u8>, PropertyValue, ParamValue, ParamObject, \
 Vec<T> for supported T, or BTreeMap<String, T>/HashMap<String, T> for supported T";
 
@@ -247,7 +247,7 @@ fn is_string_type(ty: &Type) -> bool {
     segment.ident == "String" && matches!(segment.arguments, PathArguments::None)
 }
 
-/// Parse a supported registered parameter type into an owned schema shape.
+/// Parse a supported query parameter type into an owned schema shape.
 fn parse_param_type(ty: &Type) -> syn::Result<ParamTypeSpec> {
     let Type::Path(type_path) = ty else {
         return Err(syn::Error::new_spanned(ty, TYPE_ERROR_MSG));
@@ -294,15 +294,17 @@ fn parse_param_type(ty: &Type) -> syn::Result<ParamTypeSpec> {
         }
         "Vec" => {
             let inner = single_type_arg(segment, ty)?;
-            if let Type::Path(inner_path) = inner {
-                if let Some(inner_seg) = inner_path.path.segments.last() {
-                    if inner_seg.ident == "u8" && matches!(inner_seg.arguments, PathArguments::None)
-                    {
-                        return Ok(ParamTypeSpec::Bytes);
-                    }
+            match inner {
+                Type::Path(inner_path)
+                    if inner_path.path.segments.last().is_some_and(|inner_seg| {
+                        inner_seg.ident == "u8"
+                            && matches!(inner_seg.arguments, PathArguments::None)
+                    }) =>
+                {
+                    Ok(ParamTypeSpec::Bytes)
                 }
+                _ => Ok(ParamTypeSpec::Array(Box::new(parse_param_type(inner)?))),
             }
-            Ok(ParamTypeSpec::Array(Box::new(parse_param_type(inner)?)))
         }
         "BTreeMap" | "HashMap" => {
             let (key_ty, value_ty) = two_type_args(segment, ty)?;
@@ -323,21 +325,20 @@ fn extract_param_specs(fn_item: &ItemFn) -> syn::Result<Vec<ParamSpec>> {
             FnArg::Receiver(recv) => {
                 return Err(syn::Error::new_spanned(
                     recv,
-                    "#[register] functions cannot take self",
+                    "#[query] functions cannot take self",
                 ));
             }
             FnArg::Typed(pat_type) => {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                    params.push(ParamSpec {
-                        ident: pat_ident.ident.clone(),
-                        ty: parse_param_type(&pat_type.ty)?,
-                    });
-                } else {
+                let Pat::Ident(pat_ident) = &*pat_type.pat else {
                     return Err(syn::Error::new_spanned(
                         &pat_type.pat,
-                        "#[register] function parameters must be simple identifiers",
+                        "#[query] function parameters must be simple identifiers",
                     ));
-                }
+                };
+                params.push(ParamSpec {
+                    ident: pat_ident.ident.clone(),
+                    ty: parse_param_type(&pat_type.ty)?,
+                });
             }
         }
     }
@@ -345,11 +346,11 @@ fn extract_param_specs(fn_item: &ItemFn) -> syn::Result<Vec<ParamSpec>> {
 }
 
 #[proc_macro_attribute]
-pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "#[register] does not accept arguments",
+            "#[query] does not accept arguments",
         )
         .to_compile_error()
         .into();
@@ -358,7 +359,7 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
 
     if fn_item.sig.asyncness.is_some() {
-        return syn::Error::new_spanned(&fn_item.sig, "#[register] functions cannot be async")
+        return syn::Error::new_spanned(&fn_item.sig, "#[query] functions cannot be async")
             .to_compile_error()
             .into();
     }
@@ -366,7 +367,7 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !fn_item.sig.generics.params.is_empty() {
         return syn::Error::new_spanned(
             &fn_item.sig.generics,
-            "#[register] functions cannot be generic",
+            "#[query] functions cannot be generic",
         )
         .to_compile_error()
         .into();
@@ -386,8 +387,6 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_attrs = fn_item.attrs.clone();
     let fn_visibility = fn_item.vis.clone();
     let fn_body = &fn_item.block;
-    let params_fn_name = format_ident!("__helix_dsl_params_{}", fn_name);
-
     // Generate `let name = Expr::param("name");` bindings for each parameter
     let param_name_strs: Vec<String> = param_specs
         .iter()
@@ -402,26 +401,6 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let #ident = ::helix_db::Expr::param(#name_str);
             }
         });
-
-    let parameter_entries = param_specs
-        .iter()
-        .zip(param_name_strs.iter())
-        .map(|(param, name)| {
-            let ty = param.ty.to_tokens();
-            quote! {
-                ::helix_db::QueryParameter {
-                    name: #name.to_string(),
-                    ty: #ty,
-                }
-            }
-        });
-
-    let parameters_fn = quote! {
-        #[allow(non_snake_case)]
-        fn #params_fn_name() -> ::std::vec::Vec<::helix_db::QueryParameter> {
-            vec![#(#parameter_entries),*]
-        }
-    };
 
     let decomposed_fn_name = format_ident!("{}_decomposed", fn_name);
 
@@ -441,16 +420,16 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
         },
     };
 
-    // The user-callable function always returns a bare `DynamicQueryRequest`, regardless of
+    // The user-callable function always returns a bare `QueryRequest`, regardless of
     // visibility: calling `query1(args)` builds the request directly. Parameter coercion that can
     // fail (DateTime, bytes, Value, collections) is wrapped in a closure and `.expect()`-ed so the
-    // `?` inside `to_dynamic_value_tokens` has a `Result` context; infallible scalars never panic.
+    // `?` inside `to_query_value_tokens` has a `Result` context; infallible scalars never panic.
     let callable_fn = {
         let mut request_sig = fn_item.sig.clone();
-        request_sig.output = parse_quote!(-> ::helix_db::DynamicQueryRequest);
+        request_sig.output = parse_quote!(-> ::helix_db::QueryRequest);
         let request_ctor = match query_kind {
-            QueryKind::Read => quote! { ::helix_db::DynamicQueryRequest::read },
-            QueryKind::Write => quote! { ::helix_db::DynamicQueryRequest::write },
+            QueryKind::Read => quote! { ::helix_db::QueryRequest::read },
+            QueryKind::Write => quote! { ::helix_db::QueryRequest::write },
         };
         let request_param_inserts =
             param_specs
@@ -461,15 +440,15 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let value_tokens =
                         param
                             .ty
-                            .to_dynamic_value_tokens(quote! { #ident }, quote! { #name }, 0);
+                            .to_query_value_tokens(quote! { #ident }, quote! { #name }, 0);
                     let type_tokens = param.ty.to_tokens();
                     let expect_msg = format!("failed to coerce parameter `{name}`");
                     quote! {
                         request.insert_parameter_value(
                             #name,
                             (|| -> ::std::result::Result<
-                                ::helix_db::DynamicQueryValue,
-                                ::helix_db::DynamicQueryError,
+                                ::helix_db::QueryValue,
+                                ::helix_db::QueryError,
                             > { #value_tokens })()
                             .expect(#expect_msg),
                         );
@@ -488,36 +467,9 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let submit_item = match query_kind {
-        QueryKind::Read => {
-            quote! {
-                ::helix_db::__private::inventory::submit! {
-                    ::helix_db::RegisteredReadQuery {
-                        name: stringify!(#fn_name),
-                        build: #decomposed_fn_name,
-                        parameters: #params_fn_name,
-                    }
-                }
-            }
-        }
-        QueryKind::Write => {
-            quote! {
-                ::helix_db::__private::inventory::submit! {
-                    ::helix_db::RegisteredWriteQuery {
-                        name: stringify!(#fn_name),
-                        build: #decomposed_fn_name,
-                        parameters: #params_fn_name,
-                    }
-                }
-            }
-        }
-    };
-
     quote! {
         #callable_fn
         #decomposed_fn
-        #parameters_fn
-        #submit_item
     }
     .into()
 }
@@ -525,7 +477,7 @@ pub fn register(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::{Type, parse_str};
+    use syn::{parse_str, Type};
 
     fn parse_type(input: &str) -> ParamTypeSpec {
         let ty: Type = parse_str(input).expect("parse type");

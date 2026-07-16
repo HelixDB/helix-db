@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! # helix-db Rust SDK
 //!
 //! The `helix-db` crate (imported as `helix_db`) is the Rust SDK for
@@ -8,10 +10,8 @@
 //! ## Crate layout
 //!
 //! - [`dsl`] — the query-builder DSL: traversals, predicates, batches, and the
-//!   [`DynamicQueryRequest`] payload type. This is the bulk of the public API.
-//! - [`query_generator`] — query-bundle generation, used to emit deployable
-//!   stored queries from `#[register]`-annotated builders.
-//! - The crate root ([`Client`], [`QueryBuilder`], [`QueryRequest`],
+//!   [`QueryRequest`] payload type. This is the bulk of the public API.
+//! - The crate root ([`Client`], [`QueryBuilder`], [`QueryExecutionRequest`],
 //!   [`HelixError`]) — the async execution surface that sends DSL queries over
 //!   HTTP.
 //!
@@ -47,10 +47,7 @@
 //!
 //! ## Running queries
 //!
-//! Build a [`Client`], then use its fluent request builder. Pick a query kind —
-//! [`dynamic`](QueryBuilder::dynamic) to POST an inline [`DynamicQueryRequest`]
-//! to `/v1/query`, or [`stored`](QueryBuilder::stored) to call a deployed query
-//! at `/v1/query/<name>` — and `await` the response:
+//! Build a [`Client`], then send a [`QueryRequest`] to `/v1/query`:
 //!
 //! ```no_run
 //! use helix_db::Client;
@@ -60,35 +57,47 @@
 //! #[derive(Deserialize)]
 //! struct Friends { friends: Vec<u64> }
 //!
-//! # async fn run(request: DynamicQueryRequest) -> Result<(), helix_db::HelixError> {
+//! # async fn run(request: QueryRequest) -> Result<(), helix_db::HelixError> {
 //! let client = Client::new(Some("https://cluster.helix-db.com"))?
 //!     .with_api_key(Some("hx_your_api_key"));
 //!
-//! let response: Friends = client.query().dynamic(request).send().await?;
+//! let response: Friends = client.query(request).send().await?;
 //! # let _ = response.friends;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! See [`Client`] for the full request-building surface (header toggles,
-//! request bodies, error handling).
+//! See [`Client`] for the full request-building surface and error handling.
 
 pub mod dsl;
-pub mod query_generator;
+pub mod graph;
+pub mod lifecycle;
 
-use std::marker::PhantomData;
+pub use lifecycle::*;
+
+#[cfg(feature = "embedded")]
+use std::sync::Arc;
+use std::{fmt, marker::PhantomData};
 
 // Re-export the DSL surface (types, builders, `prelude`, etc.) at the crate
-// root. This is also what makes the `crate::*` paths used inside `dsl.rs` and
-// `query_generator.rs` resolve.
+// root. This is also what makes the `crate::*` paths used inside `dsl.rs`
+// resolve.
 pub use dsl::*;
 
 // Convenience re-export so `helix_db::prelude::*` is reachable directly, in
 // addition to the canonical `helix_db::dsl::prelude::*`.
 pub use dsl::prelude;
 
+#[cfg(feature = "embedded")]
+pub use db::config::{
+    CacheConfig, CacheMode, DbConfig, DiskCacheConfig, SlateHybridCacheConfig,
+    SlateObjectStoreCacheSettings, VectorMemoryBudget, VectorMemorySettings,
+};
+#[cfg(feature = "embedded")]
+pub use db::{HelixDB, HelixDbMode, HelixDbSource};
+
 use reqwest::{Client as ReqwestClient, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 
 /// Async HTTP client for running queries against a Helix instance.
@@ -119,11 +128,41 @@ use thiserror::Error;
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
+    backend: ClientBackend,
+}
+
+#[derive(Clone)]
+enum ClientBackend {
+    Server(ServerClient),
+    #[cfg(feature = "embedded")]
+    Embedded(Arc<db::HelixDB>),
+}
+
+#[derive(Debug, Clone)]
+struct ServerClient {
     client: ReqwestClient,
     url: reqwest::Url,
     api_key: Option<String>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.backend {
+            ClientBackend::Server(server) => formatter
+                .debug_struct("Client")
+                .field("mode", &"server")
+                .field("url", &server.url)
+                .field("api_key", &server.api_key.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(_) => formatter
+                .debug_struct("Client")
+                .field("mode", &"embedded")
+                .finish(),
+        }
+    }
 }
 
 /// Backwards-compatible alias for [`Client`].
@@ -151,6 +190,19 @@ pub enum HelixError {
     /// resolved query route was not a valid URL.
     #[error("Invalid URL: {0}")]
     InvalidURL(String),
+    /// The request uses options that are unavailable for the selected client mode.
+    #[error("Invalid request: {details}")]
+    InvalidRequest {
+        /// Description of the unsupported request shape.
+        details: String,
+    },
+    /// Embedded DB execution failed.
+    #[cfg(feature = "embedded")]
+    #[error("Embedded DB error: {details}")]
+    EmbeddedError {
+        /// Error text from the embedded DB layer.
+        details: String,
+    },
 }
 
 impl Client {
@@ -158,25 +210,66 @@ impl Client {
     ///
     /// `url` is the instance base URL; when `None`, it defaults to
     /// `http://localhost:6969`. The `/v1/query` base route is resolved up front
-    /// and reused by every request — dynamic queries POST to it directly and
-    /// stored queries append `/<name>`.
+    /// and reused by every request.
     ///
     /// # Errors
     ///
     /// Returns [`HelixError::InvalidURL`] if `url` (or the resolved query route)
     /// cannot be parsed.
     pub fn new(url: Option<&str>) -> Result<Self, HelixError> {
-        // Resolve the base query endpoint up front. `send()` reuses this for
-        // dynamic queries and appends `/<name>` for stored queries.
+        Self::server(url)
+    }
+
+    /// Create a server-mode client pointed at a Helix instance.
+    pub fn server(url: Option<&str>) -> Result<Self, HelixError> {
+        // Resolve the query endpoint up front. `send()` reuses it for every request.
         let url = reqwest::Url::parse(url.unwrap_or("http://localhost:6969"))
             .map_err(|e| HelixError::InvalidURL(e.to_string()))?
             .join("/v1/query")
             .map_err(|e| HelixError::InvalidURL(e.to_string()))?;
         Ok(Self {
-            client: ReqwestClient::new(),
-            url,
-            api_key: None,
+            backend: ClientBackend::Server(ServerClient {
+                client: ReqwestClient::new(),
+                url,
+                api_key: None,
+            }),
         })
+    }
+
+    /// Create an embedded-mode writer client backed by the DB crate.
+    #[cfg(feature = "embedded")]
+    pub async fn open(source: HelixDbSource) -> Result<Self, HelixError> {
+        db::HelixDB::open(source)
+            .await
+            .map(|db| Self {
+                backend: ClientBackend::Embedded(Arc::new(db)),
+            })
+            .map_err(embedded_error)
+    }
+
+    /// Create an embedded-mode writer client with explicit DB config.
+    #[cfg(feature = "embedded")]
+    pub async fn open_with_config(
+        source: HelixDbSource,
+        config: DbConfig,
+    ) -> Result<Self, HelixError> {
+        db::HelixDB::open_with_config(source, config)
+            .await
+            .map(|db| Self {
+                backend: ClientBackend::Embedded(Arc::new(db)),
+            })
+            .map_err(embedded_error)
+    }
+
+    /// Create an embedded-mode read-only client backed by the DB crate.
+    #[cfg(feature = "embedded")]
+    pub async fn open_reader(source: HelixDbSource) -> Result<Self, HelixError> {
+        db::HelixDB::open_reader(source)
+            .await
+            .map(|db| Self {
+                backend: ClientBackend::Embedded(Arc::new(db)),
+            })
+            .map_err(embedded_error)
     }
 
     /// Attach (or clear) the bearer API key sent with every request.
@@ -184,16 +277,40 @@ impl Client {
     /// Passing `Some(key)` sets an `Authorization: Bearer <key>` header on each
     /// request; passing `None` clears any previously set key.
     pub fn with_api_key(mut self, api_key: Option<&str>) -> Self {
-        self.api_key = api_key.map(|key| key.to_string());
+        match &mut self.backend {
+            ClientBackend::Server(server) => {
+                server.api_key = api_key.map(|key| key.to_string());
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(_) => {}
+        }
         self
     }
 
-    /// Start building a request.
+    /// Execute an SDK-built query request.
+    ///
+    /// In server mode this posts to `/v1/query`. In embedded mode this executes
+    /// directly against the in-process [`HelixDB`].
+    pub fn query<R: for<'de> Deserialize<'de>>(
+        &self,
+        request: QueryRequest,
+    ) -> QueryExecutionRequest<'_, 'static, R> {
+        QueryBuilder::new(self).query(request)
+    }
+
+    /// Execute a query while retaining the response as raw bytes.
+    ///
+    /// Graph loading uses this path so Rust validates and constructs the graph
+    /// without an intermediate language-level object graph.
+    pub fn query_raw(&self, request: QueryRequest) -> QueryExecutionRequest<'_, 'static, Vec<u8>> {
+        QueryBuilder::new(self).query(request)
+    }
+
+    /// Start building an advanced server request.
     ///
     /// `R` is the type the JSON response body is deserialized into by
-    /// [`QueryRequest::send`]. Returns a [`QueryBuilder`] on which you can toggle
-    /// request headers, then pick a query kind with [`QueryBuilder::dynamic`] or
-    /// [`QueryBuilder::stored`].
+    /// [`QueryExecutionRequest::send`]. Returns a [`QueryBuilder`] on which you can toggle
+    /// request headers, then attach a request with [`QueryBuilder::query`].
     ///
     /// # Examples
     ///
@@ -205,49 +322,37 @@ impl Client {
     /// #[derive(Deserialize)]
     /// struct Users { count: u64 }
     ///
-    /// # async fn run(client: &Client, request: DynamicQueryRequest) -> Result<(), helix_db::HelixError> {
-    /// let response: Users = client.query().dynamic(request).send().await?;
+    /// # async fn run(client: &Client, request: QueryRequest) -> Result<(), helix_db::HelixError> {
+    /// let response: Users = client.query(request).send().await?;
     /// # let _ = response;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn query<R: for<'de> Deserialize<'de>>(&self) -> QueryBuilder<'_, '_, R> {
+    pub fn request_builder<R: for<'de> Deserialize<'de>>(&self) -> QueryBuilder<'_, '_, R> {
         QueryBuilder::new(self)
+    }
+}
+
+#[cfg(feature = "embedded")]
+fn embedded_error(error: db::error::HelixDbError) -> HelixError {
+    HelixError::EmbeddedError {
+        details: error.to_string(),
     }
 }
 
 /// Fluent builder for a single request, produced by [`Client::query`].
 ///
-/// Optional header toggles ([`writer_only`](Self::writer_only),
+/// Optional server header toggles ([`writer_only`](Self::writer_only),
 /// [`warm_only`](Self::warm_only),
-/// [`should_await_durability`](Self::should_await_durability)) and an optional
-/// [`body`](Self::body) can be chained, then exactly one query kind is selected
-/// with [`stored`](Self::stored) or [`dynamic`](Self::dynamic) — both of which
-/// transition to a [`QueryRequest`] ready to [`send`](QueryRequest::send).
+/// [`should_await_durability`](Self::should_await_durability)) can be chained,
+/// then [`query`](Self::query) transitions to a [`QueryExecutionRequest`] ready
+/// to [`send`](QueryExecutionRequest::send).
 ///
 /// `R` is the response deserialization target carried through to `send()`.
 pub struct QueryBuilder<'hlx, 'a, R> {
     client: &'hlx HelixDBClient,
-    query_type: QueryType,
     headers: [Option<(&'a str, &'a str)>; 4],
-    body: Option<Vec<u8>>,
     _phantom: PhantomData<R>,
-}
-
-/// Which Helix query route a [`QueryBuilder`] targets.
-///
-/// Set internally by [`QueryBuilder::stored`] / [`QueryBuilder::dynamic`]; the
-/// [`Empty`](QueryType::Empty) default is never observed by `send()` because
-/// reaching it requires picking a query kind first.
-#[derive(Default)]
-pub(crate) enum QueryType {
-    /// A deployed stored query, posted to `/v1/query/<name>`.
-    Stored(String),
-    /// An inline dynamic query, posted to `/v1/query`.
-    Dynamic(DynamicQueryRequest),
-    /// No query kind chosen yet (builder default).
-    #[default]
-    Empty,
 }
 
 impl<'hlx, 'a, R> QueryBuilder<'hlx, 'a, R> {
@@ -260,9 +365,7 @@ impl<'hlx, 'a, R> QueryBuilder<'hlx, 'a, R> {
         headers[0] = Some(("Content-Type", "application/json"));
         Self {
             client,
-            query_type: QueryType::default(),
             headers,
-            body: None,
             _phantom: PhantomData,
         }
     }
@@ -297,58 +400,81 @@ impl<'hlx, 'a, R> QueryBuilder<'hlx, 'a, R> {
         self
     }
 
-    /// Attach a serialized JSON request body.
+    /// Target the query route at `/v1/query`.
     ///
-    /// Used to pass parameters to a [`stored`](Self::stored) query route.
-    /// [`dynamic`](Self::dynamic) requests ignore this body — they serialize the
-    /// [`DynamicQueryRequest`] itself as the payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`HelixError::SerializationError`] if `data` cannot be serialized
-    /// to JSON.
+    /// The [`QueryRequest`] (DSL query plus parameters) is serialized as
+    /// the request body. Build one directly or with a `#[query]` helper, then
+    /// call [`QueryExecutionRequest::send`].
     #[must_use]
-    pub fn body<T: Serialize + Sync>(mut self, data: &T) -> Result<Self, HelixError> {
-        self.body = Some(sonic_rs::to_vec(data)?);
-        Ok(self)
-    }
-
-    /// Target a deployed stored query at `/v1/query/<query_name>`.
-    ///
-    /// Pair with [`body`](Self::body) to supply the query's parameters, then
-    /// call [`QueryRequest::send`].
-    #[must_use]
-    pub fn stored(mut self, query_name: String) -> QueryRequest<'hlx, 'a, R> {
-        self.query_type = QueryType::Stored(query_name);
-        QueryRequest { request: self }
-    }
-
-    /// Target an inline dynamic query at `/v1/query`.
-    ///
-    /// The [`DynamicQueryRequest`] (DSL query plus parameters) is serialized as
-    /// the request body. Build one directly or with a `#[register]` helper, then
-    /// call [`QueryRequest::send`].
-    #[must_use]
-    pub fn dynamic(mut self, query: DynamicQueryRequest) -> QueryRequest<'hlx, 'a, R> {
-        self.query_type = QueryType::Dynamic(query);
-        QueryRequest { request: self }
+    pub fn query(self, query: QueryRequest) -> QueryExecutionRequest<'hlx, 'a, R> {
+        QueryExecutionRequest {
+            client: self.client,
+            headers: self.headers,
+            query,
+            _phantom: PhantomData,
+        }
     }
 }
 
 /// A fully addressed request, ready to [`send`](Self::send).
 ///
-/// Produced once a query kind has been chosen via [`QueryBuilder::stored`] or
-/// [`QueryBuilder::dynamic`]; the only remaining step is `send()`.
-pub struct QueryRequest<'hlx, 'a, R> {
-    request: QueryBuilder<'hlx, 'a, R>,
+/// Produced once a query has been attached via [`QueryBuilder::query`].
+pub struct QueryExecutionRequest<'hlx, 'a, R> {
+    client: &'hlx HelixDBClient,
+    headers: [Option<(&'a str, &'a str)>; 4],
+    query: QueryRequest,
+    _phantom: PhantomData<R>,
 }
 
-impl<'hlx, 'a, R: for<'de> Deserialize<'de>> QueryRequest<'hlx, 'a, R> {
+impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
+    /// Send the request and return the successful response body unchanged.
+    pub async fn send_bytes(self) -> Result<Vec<u8>, HelixError> {
+        match &self.client.backend {
+            ClientBackend::Server(server) => {
+                let mut request = server.client.post(server.url.clone());
+                for (key, value) in self.headers.into_iter().flatten() {
+                    request = request.header(key, value);
+                }
+                if let Some(api_key) = &server.api_key {
+                    request = request.bearer_auth(api_key);
+                }
+                let response = request.body(sonic_rs::to_vec(&self.query)?).send().await?;
+                match response.status() {
+                    StatusCode::OK => response
+                        .bytes()
+                        .await
+                        .map(|bytes| bytes.to_vec())
+                        .map_err(Into::into),
+                    code => match response.text().await {
+                        Ok(details) => Err(HelixError::RemoteError { details }),
+                        Err(_) => Err(HelixError::RemoteError {
+                            details: code.canonical_reason().map_or_else(
+                                || format!("unknown error with code: {code}"),
+                                str::to_string,
+                            ),
+                        }),
+                    },
+                }
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(db) => {
+                if self.headers.iter().skip(1).any(Option::is_some) {
+                    return Err(HelixError::InvalidRequest {
+                        details: "request options require server mode".to_string(),
+                    });
+                }
+                let request = sonic_rs::to_vec(&self.query)?;
+                db.query_json(&request).await.map_err(embedded_error)
+            }
+        }
+    }
+}
+
+impl<'hlx, 'a, R: for<'de> Deserialize<'de>> QueryExecutionRequest<'hlx, 'a, R> {
     /// Send the request and deserialize the response body into `R`.
     ///
-    /// Resolves the route (`/v1/query` for dynamic, `/v1/query/<name>` for
-    /// stored), applies the toggled headers and bearer API key, attaches the
-    /// body, and awaits the response.
+    /// Sends the request to `/v1/query`, applies the toggled headers and bearer
+    /// API key, and awaits the response.
     ///
     /// # Errors
     ///
@@ -368,58 +494,15 @@ impl<'hlx, 'a, R: for<'de> Deserialize<'de>> QueryRequest<'hlx, 'a, R> {
     /// #[derive(Deserialize)]
     /// struct AddUserResponse { user_id: u64 }
     ///
-    /// # async fn run(client: &Client, request: DynamicQueryRequest) -> Result<(), helix_db::HelixError> {
-    /// let response: AddUserResponse = client.query().dynamic(request).send().await?;
+    /// # async fn run(client: &Client, request: QueryRequest) -> Result<(), helix_db::HelixError> {
+    /// let response: AddUserResponse = client.query(request).send().await?;
     /// # let _ = response.user_id;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn send(self) -> Result<R, HelixError> {
-        let query_request = self.request;
-        let (url, body) = match query_request.query_type {
-            QueryType::Dynamic(query) => ("/v1/query".to_string(), Some(sonic_rs::to_vec(&query)?)),
-            QueryType::Stored(name) => (format!("/v1/query/{name}"), query_request.body),
-            QueryType::Empty => {
-                unreachable!("send() is only reachable after stored() or dynamic() sets query_type")
-            }
-        };
-        let url = query_request
-            .client
-            .url
-            .join(&url)
-            .map_err(|e| HelixError::InvalidURL(e.to_string()))?;
-
-        let mut request = query_request.client.client.post(url);
-
-        for (k, v) in query_request.headers.into_iter().flatten() {
-            request = request.header(k, v);
-        }
-        if let Some(ref api_key) = query_request.client.api_key {
-            request = request.bearer_auth(api_key);
-        }
-        if let Some(body) = body {
-            request = request.body(body);
-        }
-
-        let response = request.send().await?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let bytes = response.bytes().await?;
-                sonic_rs::from_slice::<R>(&bytes).map_err(Into::into)
-            }
-            code => match response.text().await {
-                Ok(t) => Err(HelixError::RemoteError { details: t }),
-                Err(_) => match code.canonical_reason() {
-                    Some(r) => Err(HelixError::RemoteError {
-                        details: r.to_string(),
-                    }),
-                    None => Err(HelixError::RemoteError {
-                        details: format!("unkown error with code: {code}"),
-                    }),
-                },
-            },
-        }
+        let response = self.send_bytes().await?;
+        sonic_rs::from_slice::<R>(&response).map_err(Into::into)
     }
 }
 
@@ -430,7 +513,7 @@ mod tests {
     use helix_db::dsl::prelude::*;
     use std::collections::BTreeMap;
 
-    #[register]
+    #[query]
     fn query1(name: String) {
         // helix_db query that returns a read query or write query
         read_batch()
@@ -446,100 +529,100 @@ mod tests {
     }
 
     #[test]
-    fn query1_builds_dynamic_request() {
-        // Calling the registered fn with concrete args yields a DynamicQueryRequest directly.
+    fn query1_builds_query_request() {
+        // Calling the registered fn with concrete args yields a QueryRequest directly.
         let query = query1(String::from("alice"));
 
-        assert!(matches!(query.request_type, DynamicQueryRequestType::Read));
+        assert!(matches!(query.request_type, QueryRequestType::Read));
         assert_eq!(query.query_name.as_deref(), Some("query1"));
         let params = query.parameters.expect("parameters present");
         assert!(matches!(
             params.get("name"),
-            Some(DynamicQueryValue::String(s)) if s == "alice"
+            Some(QueryValue::String(s)) if s == "alice"
         ));
     }
 
     #[test]
-    fn dynamic_request_serializes_query_name() {
-        let unnamed = DynamicQueryRequest::read(
+    fn query_request_serializes_query_name() {
+        let unnamed = QueryRequest::read(
             read_batch()
                 .var_as("count", g().n_with_label("User").count())
                 .returning(["count"]),
         )
         .to_json_string()
-        .expect("serialize unnamed dynamic request");
+        .expect("serialize unnamed query request");
         assert!(
             unnamed.contains(r#""query_name":null"#),
             "unnamed request should serialize query_name=null: {unnamed}"
         );
 
-        let named = DynamicQueryRequest::read(read_batch())
+        let named = QueryRequest::read(read_batch())
             .with_query_name("find_users")
             .to_json_string()
-            .expect("serialize named dynamic request");
+            .expect("serialize named query request");
         assert!(
             named.contains(r#""query_name":"find_users""#),
             "named request should serialize query_name: {named}"
         );
     }
 
-    // ---- Group 1: every #[register] param type coerces correctly -----------
+    // ---- Group 1: every #[query] param type coerces correctly -----------
 
-    #[register]
+    #[query]
     fn q_bool(flag: bool) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", flag)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_i64(num: i64) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", num)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_f64(x: f64) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", x)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_f32(x: f32) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", x)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_datetime(ts: DateTime) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", ts)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_value(val: ParamValue) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", val)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_object(obj: ParamObject) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", obj)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_array(items: Vec<String>) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", items)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     fn q_map(map: BTreeMap<String, String>) {
         read_batch()
             .var_as("v", g().n_where(SourcePredicate::eq("field", map)))
             .returning(["v"])
     }
-    #[register]
+    #[query]
     #[allow(unused_variables)] // bytes coercion errors without reading the value (see test below)
     fn q_bytes(blob: Vec<u8>) {
         read_batch()
@@ -551,10 +634,10 @@ mod tests {
     fn param_types_coerce_correctly() {
         // bool
         let r = q_bool(true);
-        assert!(matches!(r.request_type, DynamicQueryRequestType::Read));
+        assert!(matches!(r.request_type, QueryRequestType::Read));
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("flag"),
-            Some(DynamicQueryValue::Bool(true))
+            Some(QueryValue::Bool(true))
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("flag"),
@@ -565,7 +648,7 @@ mod tests {
         let r = q_i64(7);
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("num"),
-            Some(DynamicQueryValue::I64(7))
+            Some(QueryValue::I64(7))
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("num"),
@@ -576,7 +659,7 @@ mod tests {
         let r = q_f64(1.5);
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("x"),
-            Some(DynamicQueryValue::F64(v)) if *v == 1.5
+            Some(QueryValue::F64(v)) if *v == 1.5
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("x"),
@@ -587,7 +670,7 @@ mod tests {
         let r = q_f32(1.5f32);
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("x"),
-            Some(DynamicQueryValue::F32(v)) if *v == 1.5f32
+            Some(QueryValue::F32(v)) if *v == 1.5f32
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("x"),
@@ -599,7 +682,7 @@ mod tests {
         let expected = DateTime::from_millis(0).to_rfc3339().unwrap();
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("ts"),
-            Some(DynamicQueryValue::String(s)) if *s == expected
+            Some(QueryValue::String(s)) if *s == expected
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("ts"),
@@ -610,7 +693,7 @@ mod tests {
         let r = q_value(PropertyValue::I64(5));
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("val"),
-            Some(DynamicQueryValue::I64(5))
+            Some(QueryValue::I64(5))
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("val"),
@@ -623,7 +706,7 @@ mod tests {
         let r = q_object(obj);
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("obj"),
-            Some(DynamicQueryValue::Object(_))
+            Some(QueryValue::Object(_))
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("obj"),
@@ -633,10 +716,10 @@ mod tests {
         // Vec<String> -> Array(String)
         let r = q_array(vec!["a".to_string(), "b".to_string()]);
         match r.parameters.as_ref().unwrap().get("items") {
-            Some(DynamicQueryValue::Array(items)) => {
+            Some(QueryValue::Array(items)) => {
                 assert_eq!(items.len(), 2);
-                assert!(matches!(&items[0], DynamicQueryValue::String(s) if s == "a"));
-                assert!(matches!(&items[1], DynamicQueryValue::String(s) if s == "b"));
+                assert!(matches!(&items[0], QueryValue::String(s) if s == "a"));
+                assert!(matches!(&items[1], QueryValue::String(s) if s == "b"));
             }
             other => panic!("expected array, got {other:?}"),
         }
@@ -651,7 +734,7 @@ mod tests {
         let r = q_map(map);
         assert!(matches!(
             r.parameters.as_ref().unwrap().get("map"),
-            Some(DynamicQueryValue::Object(_))
+            Some(QueryValue::Object(_))
         ));
         assert!(matches!(
             r.parameter_types.as_ref().unwrap().get("map"),
@@ -661,43 +744,43 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "failed to coerce parameter")]
-    fn bytes_param_panics_on_dynamic_call() {
-        // Bytes params register fine for the stored query, but dynamic coercion is unsupported
+    fn bytes_param_panics_on_query_call() {
+        // Bytes cannot be represented by the query JSON route
         // and the generated callable panics when invoked.
         let _ = q_bytes(vec![1, 2, 3]);
     }
 
-    // ---- Group 2: Predicate JSON — old (literal) vs new (param) ------------
+    // ---- Group 2: Predicate JSON ------------------------------------------
 
     #[test]
-    fn predicate_literal_json_is_unchanged() {
+    fn predicate_literal_json_uses_ast_shape() {
         assert_eq!(
             sonic_rs::to_string(&Predicate::eq("username", "alice")).unwrap(),
-            r#"{"Eq":["username",{"String":"alice"}]}"#
+            r#"{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&Predicate::gt("score", 10i64)).unwrap(),
-            r#"{"Gt":["score",{"I64":10}]}"#
+            r#"{"gt":{"left":{"property":"score"},"right":{"constant":{"i64":10}}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&Predicate::between("age", 18i64, 65i64)).unwrap(),
-            r#"{"Between":["age",{"I64":18},{"I64":65}]}"#
+            r#"{"between":{"value":{"property":"age"},"min":{"constant":{"i64":18}},"max":{"constant":{"i64":65}}}}"#
         );
     }
 
     #[test]
-    fn predicate_param_json_uses_expr_variants() {
+    fn predicate_param_json_uses_param_exprs() {
         assert_eq!(
             sonic_rs::to_string(&Predicate::eq("username", Expr::param("name"))).unwrap(),
-            r#"{"EqExpr":["username",{"Param":"name"}]}"#
+            r#"{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&Predicate::lte("score", Expr::param("max"))).unwrap(),
-            r#"{"LteExpr":["score",{"Param":"max"}]}"#
+            r#"{"lte":{"left":{"property":"score"},"right":{"param":"max"}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&Predicate::between("age", Expr::param("lo"), 65i64)).unwrap(),
-            r#"{"BetweenExpr":["age",{"Param":"lo"},{"Constant":{"I64":65}}]}"#
+            r#"{"between":{"value":{"property":"age"},"min":{"param":"lo"},"max":{"constant":{"i64":65}}}}"#
         );
     }
 
@@ -714,38 +797,38 @@ mod tests {
         }
     }
 
-    // ---- Group 3: SourcePredicate JSON — old (literal) vs new (param) -------
+    // ---- Group 3: SourcePredicate JSON -------------------------------------
 
     #[test]
-    fn source_predicate_literal_json_is_unchanged() {
+    fn source_predicate_literal_json_uses_ast_shape() {
         assert_eq!(
             sonic_rs::to_string(&SourcePredicate::eq("username", "alice")).unwrap(),
-            r#"{"Eq":["username",{"String":"alice"}]}"#
+            r#"{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&SourcePredicate::gt("score", 10i64)).unwrap(),
-            r#"{"Gt":["score",{"I64":10}]}"#
+            r#"{"gt":{"left":{"property":"score"},"right":{"constant":{"i64":10}}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&SourcePredicate::between("age", 18i64, 65i64)).unwrap(),
-            r#"{"Between":["age",{"I64":18},{"I64":65}]}"#
+            r#"{"between":{"value":{"property":"age"},"min":{"constant":{"i64":18}},"max":{"constant":{"i64":65}}}}"#
         );
     }
 
     #[test]
-    fn source_predicate_param_json_uses_expr_variants() {
+    fn source_predicate_param_json_uses_param_exprs() {
         assert_eq!(
             sonic_rs::to_string(&SourcePredicate::eq("username", Expr::param("name"))).unwrap(),
-            r#"{"EqExpr":["username",{"Param":"name"}]}"#
+            r#"{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&SourcePredicate::lte("score", Expr::param("max"))).unwrap(),
-            r#"{"LteExpr":["score",{"Param":"max"}]}"#
+            r#"{"lte":{"left":{"property":"score"},"right":{"param":"max"}}}"#
         );
         assert_eq!(
             sonic_rs::to_string(&SourcePredicate::between("age", Expr::param("lo"), 65i64))
                 .unwrap(),
-            r#"{"BetweenExpr":["age",{"Param":"lo"},{"Constant":{"I64":65}}]}"#
+            r#"{"between":{"value":{"property":"age"},"min":{"param":"lo"},"max":{"constant":{"i64":65}}}}"#
         );
     }
 
@@ -774,10 +857,10 @@ mod tests {
             .returning(["user"]);
         let literal_json = sonic_rs::to_string(&literal).unwrap();
         assert!(
-            literal_json.contains(r#"{"NWhere":{"Eq":["username",{"String":"alice"}]}}"#),
-            "literal NWhere step changed shape: {literal_json}"
+            literal_json.contains(r#""root":{"nodes_where":{"predicate":{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}}}"#),
+            "literal nodes_where AST changed shape: {literal_json}"
         );
-        assert!(!literal_json.contains("EqExpr"));
+        assert!(!literal_json.contains("steps"));
 
         let param = read_batch()
             .var_as(
@@ -787,13 +870,51 @@ mod tests {
             .returning(["user"]);
         let param_json = sonic_rs::to_string(&param).unwrap();
         assert!(
-            param_json.contains(r#"{"NWhere":{"EqExpr":["username",{"Param":"name"}]}}"#),
-            "param NWhere step missing EqExpr/Param: {param_json}"
+            param_json.contains(r#""root":{"nodes_where":{"predicate":{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}}}}"#),
+            "param nodes_where AST missing param expression: {param_json}"
         );
     }
 
     #[test]
-    fn nested_dynamic_property_query_json() {
+    fn row_binding_query_uses_public_sdk_prelude_ast_shape() {
+        let query = read_batch()
+            .var_as(
+                "workloads",
+                g().n_with_label("Service")
+                    .bind("service")
+                    .optional(sub().in_(Some("CREATES")).bind("deployment"))
+                    .union(vec![
+                        sub().in_(Some("MANAGES")).bind("owner"),
+                        sub().out(Some("ROUTES_TO")).bind("workload"),
+                    ])
+                    .project_distinct_bindings(vec![
+                        BindingProjection::binding("service", "$id", "service_id"),
+                        BindingProjection::current("$id", "current_id"),
+                        BindingProjection::coalesce(
+                            vec![
+                                BindingValueRef::binding("deployment", "$id"),
+                                BindingValueRef::binding("owner", "$id"),
+                                BindingValueRef::binding("workload", "$id"),
+                            ],
+                            "workload_id",
+                        ),
+                    ]),
+            )
+            .returning(["workloads"]);
+
+        let json = sonic_rs::to_string(&query).unwrap();
+        assert!(json.contains(r#""project_bindings""#));
+        assert!(json.contains(r#""bind":{"input""#));
+        assert!(json.contains(r#""name":"service""#));
+        assert!(json.contains(r#""target":{"binding":"service"}"#));
+        assert!(json.contains(r#""target":"current""#));
+        assert!(json.contains(r#""coalesce""#));
+        assert!(json.contains(r#""distinct":true"#));
+        assert!(!json.contains("steps"));
+    }
+
+    #[test]
+    fn nested_query_property_json() {
         let metadata = PropertyValue::object(vec![
             ("externalID", PropertyValue::from("some_id")),
             ("score", PropertyValue::from(20i64)),
@@ -823,19 +944,22 @@ mod tests {
         let write_json = sonic_rs::to_string(&write).unwrap();
         assert!(
             write_json
-                .contains(r#""metadata",{"Value":{"Object":{"externalID":{"String":"some_id"}"#),
+                .contains(r#""metadata",{"value":{"object":{"externalID":{"string":"some_id"}"#),
             "AddN nested object value changed shape: {write_json}"
         );
         assert!(
-            write_json.contains(r#""tags":{"Array":[{"String":"alpha"},{"I64":7}]}"#),
+            write_json.contains(r#""tags":{"array":[{"string":"alpha"},{"i64":7}]}"#),
             "AddN nested array value changed shape: {write_json}"
         );
         assert!(
-            write_json.contains(r#"{"SetProperty":["metadata",{"Expr":{"Param":"metadata"}}]}"#),
+            write_json.contains(r#""set_property":{"input":{"add_n""#)
+                && write_json
+                    .contains(r#""name":"metadata","value":{"expr":{"param":"metadata"}}"#),
             "SetProperty param changed shape: {write_json}"
         );
         assert!(
-            write_json.contains(r#"{"ValueMap":["metadata.externalID"]}"#),
+            write_json.contains(r#""value_map":{"input":{"set_property""#)
+                && write_json.contains(r#""properties":["metadata.externalID"]"#),
             "filtered ValueMap dotted path changed shape: {write_json}"
         );
 
@@ -859,11 +983,12 @@ mod tests {
             .returning(["users", "external_ids"]);
         let read_json = sonic_rs::to_string(&read).unwrap();
         assert!(
-            read_json.contains(r#"{"Eq":["metadata.externalID",{"String":"some_id"}]}"#),
+            read_json.contains(r#""eq":{"left":{"property":"metadata.externalID"},"right":{"constant":{"string":"some_id"}}}"#),
             "dotted SourcePredicate changed shape: {read_json}"
         );
         assert!(
-            read_json.contains(r#"{"OrderBy":["metadata.score","Desc"]}"#),
+            read_json.contains(r#""order_by":{"input":{"nodes_where""#)
+                && read_json.contains(r#""property":"metadata.score","order":"desc""#),
             "dotted OrderBy changed shape: {read_json}"
         );
         assert!(
@@ -871,11 +996,12 @@ mod tests {
             "dotted property projection changed shape: {read_json}"
         );
         assert!(
-            read_json.contains(r#""expr":{"Property":"metadata.score"}"#),
+            read_json.contains(r#""expr":{"property":"metadata.score"}"#),
             "dotted expression projection changed shape: {read_json}"
         );
         assert!(
-            read_json.contains(r#"{"Values":["metadata.externalID"]}"#),
+            read_json.contains(r#""values":{"input":{"nodes_where""#)
+                && read_json.contains(r#""properties":["metadata.externalID"]"#),
             "dotted Values changed shape: {read_json}"
         );
     }
@@ -890,11 +1016,17 @@ mod client_tests {
     use super::*;
     use serde::Deserialize;
 
-    #[derive(Deserialize)]
+    #[derive(Debug, Deserialize)]
     struct Resp;
 
-    fn sample_request() -> DynamicQueryRequest {
-        DynamicQueryRequest::read(
+    #[cfg(feature = "embedded")]
+    #[derive(Debug, Deserialize)]
+    struct CountResp {
+        users: u64,
+    }
+
+    fn sample_request() -> QueryRequest {
+        QueryRequest::read(
             read_batch()
                 .var_as(
                     "user",
@@ -904,19 +1036,52 @@ mod client_tests {
         )
     }
 
+    #[cfg(feature = "embedded")]
+    fn count_request() -> QueryRequest {
+        QueryRequest::read(
+            read_batch()
+                .var_as("users", g().n_with_label("Missing").count())
+                .returning(["users"]),
+        )
+    }
+
+    #[cfg(feature = "embedded")]
+    fn write_request() -> QueryRequest {
+        QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "created",
+                    g().add_n("User", vec![("name", PropertyInput::from("Ada"))]),
+                )
+                .returning(["created"]),
+        )
+    }
+
+    fn server_backend(client: &Client) -> &ServerClient {
+        match &client.backend {
+            ClientBackend::Server(server) => server,
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(_) => panic!("test expected server-mode client"),
+        }
+    }
+
     // ---- Client construction ------------------------------------------------
 
     #[test]
     fn new_defaults_to_localhost() {
         let client = Client::new(None).unwrap();
-        assert_eq!(client.url.as_str(), "http://localhost:6969/v1/query");
-        assert!(client.api_key.is_none());
+        let server = server_backend(&client);
+        assert_eq!(server.url.as_str(), "http://localhost:6969/v1/query");
+        assert!(server.api_key.is_none());
     }
 
     #[test]
     fn new_parses_custom_url() {
         let client = Client::new(Some("https://cluster.helix-db.com")).unwrap();
-        assert_eq!(client.url.as_str(), "https://cluster.helix-db.com/v1/query");
+        assert_eq!(
+            server_backend(&client).url.as_str(),
+            "https://cluster.helix-db.com/v1/query"
+        );
     }
 
     #[test]
@@ -928,10 +1093,13 @@ mod client_tests {
     #[test]
     fn with_api_key_sets_and_clears() {
         let client = Client::new(None).unwrap().with_api_key(Some("hx_secret"));
-        assert_eq!(client.api_key.as_deref(), Some("hx_secret"));
+        assert_eq!(
+            server_backend(&client).api_key.as_deref(),
+            Some("hx_secret")
+        );
 
         let cleared = client.with_api_key(None);
-        assert!(cleared.api_key.is_none());
+        assert!(server_backend(&cleared).api_key.is_none());
     }
 
     // ---- Header assembly ----------------------------------------------------
@@ -939,19 +1107,19 @@ mod client_tests {
     #[test]
     fn query_builder_starts_with_only_content_type() {
         let client = Client::new(None).unwrap();
-        let builder = client.query::<Resp>();
+        let builder = client.request_builder::<Resp>();
         assert_eq!(
             builder.headers[0],
             Some(("Content-Type", "application/json"))
         );
-        assert!(builder.headers[1..].iter().all(Option::is_none));
+        assert!(builder.headers.iter().skip(1).all(Option::is_none));
     }
 
     #[test]
     fn header_toggles_populate_slots() {
         let client = Client::new(None).unwrap();
         let builder = client
-            .query::<Resp>()
+            .request_builder::<Resp>()
             .writer_only()
             .warm_only()
             .should_await_durability(true);
@@ -963,41 +1131,20 @@ mod client_tests {
     #[test]
     fn should_await_durability_false_sends_false() {
         let client = Client::new(None).unwrap();
-        let builder = client.query::<Resp>().should_await_durability(false);
+        let builder = client
+            .request_builder::<Resp>()
+            .should_await_durability(false);
         assert_eq!(builder.headers[3], Some(("x-helix-await-durable", "false")));
     }
 
-    // ---- Query type + body --------------------------------------------------
+    // ---- Query attachment ---------------------------------------------------
 
     #[test]
-    fn dynamic_query_sets_query_type() {
+    fn query_builder_attaches_query_request() {
         let client = Client::new(None).unwrap();
-        let request = client.query::<Resp>().dynamic(sample_request());
-        assert!(matches!(request.request.query_type, QueryType::Dynamic(_)));
-    }
-
-    #[test]
-    fn stored_query_sets_query_type() {
-        let client = Client::new(None).unwrap();
-        let request = client.query::<Resp>().stored("add_user".to_string());
-        assert!(
-            matches!(&request.request.query_type, QueryType::Stored(name) if name == "add_user")
-        );
-    }
-
-    #[derive(serde::Serialize)]
-    struct Payload {
-        name: String,
-    }
-
-    #[test]
-    fn body_serializes_payload() {
-        let client = Client::new(None).unwrap();
-        let payload = Payload {
-            name: "alice".to_string(),
-        };
-        let builder = client.query::<Resp>().body(&payload).unwrap();
-        assert_eq!(builder.body, Some(sonic_rs::to_vec(&payload).unwrap()));
+        let query = sample_request();
+        let request = client.request_builder::<Resp>().query(query.clone());
+        assert_eq!(request.query, query);
     }
 
     // ---- Request routing (exercises the real `send()` path) -----------------
@@ -1030,28 +1177,79 @@ mod client_tests {
     }
 
     #[tokio::test]
-    async fn dynamic_query_posts_to_v1_query() {
+    async fn query_posts_to_v1_query() {
         let (base, handle) = spawn_capture_server().await;
         let client = Client::new(Some(&base)).unwrap();
-        let _: EmptyResp = client
-            .query()
-            .dynamic(sample_request())
-            .send()
-            .await
-            .unwrap();
+        let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
         assert_eq!(handle.await.unwrap(), "/v1/query");
     }
 
+    // ---- Embedded execution -------------------------------------------------
+
+    #[cfg(feature = "embedded")]
     #[tokio::test]
-    async fn stored_query_posts_to_named_route() {
-        let (base, handle) = spawn_capture_server().await;
-        let client = Client::new(Some(&base)).unwrap();
-        let _: EmptyResp = client
-            .query()
-            .stored("add_user".to_string())
+    async fn embedded_client_query_executes_against_in_memory_db() {
+        let client = Client::open(HelixDbSource::InMemory {
+            database: "rust-sdk-embedded-query".to_string(),
+        })
+        .await
+        .expect("embedded client should open");
+
+        let response: CountResp = client
+            .query(count_request())
             .send()
             .await
-            .unwrap();
-        assert_eq!(handle.await.unwrap(), "/v1/query/add_user");
+            .expect("embedded query should execute");
+
+        assert_eq!(response.users, 0);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn embedded_reader_rejects_write_request() {
+        let root = tempfile::tempdir().expect("tempdir should be created");
+        let source = HelixDbSource::Disk {
+            root: root.path().to_path_buf(),
+            database: "rust-sdk-reader".to_string(),
+        };
+        let writer = HelixDB::open(source.clone())
+            .await
+            .expect("writer DB should initialize disk database");
+        writer.close().await.expect("writer should close cleanly");
+        let client = Client::open_reader(source)
+            .await
+            .expect("embedded reader client should open");
+
+        let err = client
+            .query::<serde_json::Value>(write_request())
+            .send()
+            .await
+            .expect_err("embedded reader should reject writes");
+
+        assert!(matches!(err, HelixError::EmbeddedError { .. }));
+        assert!(err.to_string().contains("writer mode"));
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn embedded_client_rejects_server_options() {
+        let client = Client::open(HelixDbSource::InMemory {
+            database: "rust-sdk-server-options".to_string(),
+        })
+        .await
+        .expect("embedded client should open");
+
+        let err = client
+            .request_builder::<Resp>()
+            .writer_only()
+            .query(sample_request())
+            .send()
+            .await
+            .expect_err("server options should require server mode");
+
+        assert!(matches!(err, HelixError::InvalidRequest { .. }));
+        assert!(err
+            .to_string()
+            .contains("request options require server mode"));
     }
 }

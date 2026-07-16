@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { AddressInfo } from "node:net";
-import { Client, DynamicQueryRequest, HelixError, SourcePredicate, g, readBatch } from "../src/index.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Client, QueryRequest, HelixError, SourcePredicate, g, readBatch } from "../src/index.js";
 
 interface CapturedRequest {
   method: string;
@@ -54,12 +58,71 @@ function spawnCaptureServer(response: { status?: number; body?: string } = {}): 
   });
 }
 
-function sampleRequest(): DynamicQueryRequest {
-  return DynamicQueryRequest.read(
+function sampleRequest(): QueryRequest {
+  return QueryRequest.read(
     readBatch()
       .varAs("user", g().nWhere(SourcePredicate.eq("username", "alice")))
       .returning(["user"]),
   );
+}
+
+async function withFakeNativeModule<T>(run: (moduleUrl: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "helixdb-ts-native-"));
+  const modulePath = join(dir, "native.mjs");
+  await writeFile(
+    modulePath,
+    `
+export const calls = [];
+export const queryBodies = [];
+let closed = false;
+export const wasClosed = () => closed;
+
+export const HelixDbSource = {
+  InMemory: (database) => ({ variant: "InMemory", database }),
+  Disk: (root, database) => ({ variant: "Disk", root, database }),
+  ObjectStorage: (database, bucket, region, endpoint, allowHttp) => ({
+    variant: "ObjectStorage",
+    database,
+    bucket,
+    region,
+    endpoint,
+    allowHttp,
+  }),
+};
+
+function handle() {
+  return {
+    async query_json(request) {
+      queryBodies.push(new TextDecoder().decode(request));
+      return new TextEncoder().encode('{"users":0}');
+    },
+    async close() {
+      closed = true;
+    },
+  };
+}
+
+export const HelixDB = {
+  async open(source) {
+    calls.push(["open", source]);
+    return handle();
+  },
+  async open_reader(source) {
+    calls.push(["open_reader", source]);
+    return handle();
+  },
+};
+`,
+  );
+  const previous = process.env.HELIXDB_UNIFFI_NODE_PACKAGE;
+  process.env.HELIXDB_UNIFFI_NODE_PACKAGE = pathToFileURL(modulePath).href;
+  try {
+    return await run(process.env.HELIXDB_UNIFFI_NODE_PACKAGE);
+  } finally {
+    if (previous === undefined) delete process.env.HELIXDB_UNIFFI_NODE_PACKAGE;
+    else process.env.HELIXDB_UNIFFI_NODE_PACKAGE = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 // ---- Client construction ----------------------------------------------------
@@ -79,12 +142,12 @@ assert.throws(
   (error: unknown) => error instanceof HelixError && error.kind === "InvalidUrl",
 );
 
-// ---- Request routing + headers (dynamic) ------------------------------------
+// ---- Request routing + headers ----------------------------------------------
 
 {
   const server = await spawnCaptureServer();
   const client = new Client(server.base).withApiKey("hx_secret");
-  const result = await client.query<Record<string, unknown>>().warmOnly().writerOnly().dynamic(sampleRequest()).send();
+  const result = await client.requestBuilder<Record<string, unknown>>().warmOnly().writerOnly().query(sampleRequest()).send();
 
   const req = await server.captured;
   await server.close();
@@ -99,25 +162,20 @@ assert.throws(
   assert.deepEqual(result, {});
 }
 
-// ---- Request routing (stored) + durability header ---------------------------
+// ---- Durability header -------------------------------------------------------
 
 {
   const server = await spawnCaptureServer({ body: '{"ok":true}' });
   const client = new Client(server.base);
-  const result = await client
-    .query<Record<string, unknown>>()
-    .shouldAwaitDurability(false)
-    .body({ name: "alice" })
-    .stored("add_user")
-    .send();
+  const result = await client.requestBuilder<Record<string, unknown>>().shouldAwaitDurability(false).query(sampleRequest()).send();
 
   const req = await server.captured;
   await server.close();
 
-  assert.equal(req.path, "/v1/query/add_user");
+  assert.equal(req.path, "/v1/query");
   assert.equal(req.headers["x-helix-await-durable"], "false");
   assert.equal(req.headers["authorization"], undefined);
-  assert.equal(req.body, '{"name":"alice"}');
+  assert.equal(req.body, sampleRequest().toJsonString());
   assert.deepEqual(result, { ok: true });
 }
 
@@ -127,7 +185,7 @@ assert.throws(
   const server = await spawnCaptureServer({ status: 500, body: "boom" });
   const client = new Client(server.base);
   await assert.rejects(
-    client.query().stored("add_user").send(),
+    client.query(sampleRequest()).send(),
     (error: unknown) => error instanceof HelixError && error.kind === "Remote" && error.details === "boom",
   );
   await server.close();
@@ -138,13 +196,50 @@ assert.throws(
 {
   const client = new Client("http://127.0.0.1:1");
   await assert.rejects(
-    client.query().stored("add_user").send(),
+    client.query(sampleRequest()).send(),
     (error: unknown) =>
       error instanceof HelixError &&
       error.kind === "Network" &&
-      error.message.includes("http://127.0.0.1:1/v1/query/add_user") &&
+      error.message.includes("http://127.0.0.1:1/v1/query") &&
       error.message.includes("helix start"),
   );
 }
+
+// ---- Embedded execution -----------------------------------------------------
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const client = await Client.embedded({ kind: "inMemory", database: "ts-sdk-embedded" });
+  const result = await client
+    .query<{ users: number }>(QueryRequest.read(readBatch().varAs("users", g().nWithLabel("Missing").count()).returning(["users"])))
+    .send();
+  await client.close();
+  const native = (await import(moduleUrl)) as {
+    calls: unknown[];
+    queryBodies: string[];
+    wasClosed: () => boolean;
+  };
+
+  assert.deepEqual(result, { users: 0 });
+  assert.deepEqual(native.calls[0], ["open", { variant: "InMemory", database: "ts-sdk-embedded" }]);
+  assert.equal(JSON.parse(native.queryBodies[0]).request_type, "read");
+  assert.equal(native.wasClosed(), true);
+});
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const client = await Client.embeddedReader({ kind: "disk", root: "/tmp/helix", database: "ts-sdk-reader" });
+  const native = (await import(moduleUrl)) as { calls: unknown[] };
+
+  assert.deepEqual(native.calls[0], ["open_reader", { variant: "Disk", root: "/tmp/helix", database: "ts-sdk-reader" }]);
+  await client.close();
+});
+
+await withFakeNativeModule(async () => {
+  const client = await Client.embedded({ kind: "objectStorage", database: "ts-sdk-os", bucket: "bucket", region: "region" });
+
+  await assert.rejects(
+    client.requestBuilder().warmOnly().query(sampleRequest()).send(),
+    (error: unknown) => error instanceof HelixError && error.kind === "InvalidRequest" && error.details?.includes("x-helix-warm") === true,
+  );
+});
 
 console.log("client.test.ts passed");

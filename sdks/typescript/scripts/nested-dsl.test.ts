@@ -27,23 +27,25 @@ const nestedWrite = writeBatch()
       .valueMap(["metadata.externalID"]),
   )
   .returning(["updated"]);
-const nestedWriteJson = parsed(nestedWrite);
-assert.deepEqual(nestedWriteJson.queries[0].Query.steps[0].AddN.properties[1], [
+const nestedWriteRoot = parsed(nestedWrite).entries[0].query.root;
+assert.deepEqual(nestedWriteRoot.value_map.input.set_property.input.add_n.properties[1], [
   "metadata",
   {
-    Value: {
-      Object: {
-        externalID: { String: "some_id" },
-        score: { I64: 20 },
-        tags: { Array: [{ String: "alpha" }, { I64: 7 }] },
+    value: {
+      object: {
+        externalID: { string: "some_id" },
+        score: { i64: 20 },
+        tags: { array: [{ string: "alpha" }, { i64: 7 }] },
       },
     },
   },
 ]);
-assert.deepEqual(nestedWriteJson.queries[0].Query.steps[1], {
-  SetProperty: ["metadata", { Expr: { Param: "metadata" } }],
+assert.deepEqual(nestedWriteRoot.value_map.input.set_property, {
+  input: nestedWriteRoot.value_map.input.set_property.input,
+  name: "metadata",
+  value: { expr: { param: "metadata" } },
 });
-assert.deepEqual(nestedWriteJson.queries[0].Query.steps[2], { ValueMap: ["metadata.externalID"] });
+assert.deepEqual(nestedWriteRoot.value_map.properties, ["metadata.externalID"]);
 
 const nestedRead = readBatch()
   .varAs(
@@ -56,17 +58,26 @@ const nestedRead = readBatch()
   .varAs("external_ids", g().nWithLabel("User").values(["metadata.externalID"]))
   .returning(["users", "external_ids"]);
 const nestedReadJson = parsed(nestedRead);
-assert.deepEqual(nestedReadJson.queries[0].Query.steps[0], {
-  NWhere: { And: [{ Eq: ["name", { String: "john" }] }, { Eq: ["metadata.externalID", { String: "some_id" }] }] },
+assert.deepEqual(nestedReadJson.entries[0].query.root.project.input.order_by.input.nodes_where, {
+  predicate: {
+    and: {
+      predicates: [
+        { eq: { left: { property: "name" }, right: { constant: { string: "john" } } } },
+        { eq: { left: { property: "metadata.externalID" }, right: { constant: { string: "some_id" } } } },
+      ],
+    },
+  },
 });
-assert.deepEqual(nestedReadJson.queries[0].Query.steps[1], { OrderBy: ["metadata.score", "Desc"] });
-assert.deepEqual(nestedReadJson.queries[0].Query.steps[2], {
-  Project: [
-    { source: "metadata.externalID", alias: "external_id" },
-    { alias: "score_copy", expr: { Property: "metadata.score" } },
-  ],
+assert.deepEqual(nestedReadJson.entries[0].query.root.project.input.order_by, {
+  input: nestedReadJson.entries[0].query.root.project.input.order_by.input,
+  property: "metadata.score",
+  order: "desc",
 });
-assert.deepEqual(nestedReadJson.queries[1].Query.steps.at(-1), { Values: ["metadata.externalID"] });
+assert.deepEqual(nestedReadJson.entries[0].query.root.project.projections, [
+  { property: { source: "metadata.externalID", alias: "external_id" } },
+  { expr: { alias: "score_copy", expr: { property: "metadata.score" } } },
+]);
+assert.deepEqual(nestedReadJson.entries[1].query.root.values.properties, ["metadata.externalID"]);
 
 const genericEdgeFilters = g()
   .n([1])
@@ -76,27 +87,26 @@ const genericEdgeFilters = g()
   .hasKey("weight")
   .where(Predicate.gt("weight", 5))
   .edgeProperties();
-assert.deepEqual(parsed(genericEdgeFilters).steps, [
-  { N: { Ids: [1] } },
-  { OutE: "FOLLOWS" },
-  { Has: ["status", { String: "active" }] },
-  { HasLabel: "FOLLOWS" },
-  { HasKey: "weight" },
-  { Where: { Gt: ["weight", { I64: 5 }] } },
-  "EdgeProperties",
-]);
+assert.deepEqual(parsed(genericEdgeFilters).root.edge_properties.input.where.predicate, {
+  gt: { left: { property: "weight" }, right: { constant: { i64: 5 } } },
+});
+assert.deepEqual(parsed(genericEdgeFilters).root.edge_properties.input.where.input.has_key.input.has_label.input.has, {
+  input: { out_e: { input: { nodes: { reference: { ids: [1] } } }, label: "FOLLOWS" } },
+  property: "status",
+  value: { string: "active" },
+});
 
 assert.deepEqual(parsed(IndexSpec.nodeRange("User", "age")), {
-  NodeRange: { label: "User", property: "age" },
+  node_range: { label: "User", property: "age", direction: "asc" },
 });
 assert.deepEqual(parsed(IndexSpec.nodeRangeWithDirection("User", "age", RangeIndexDirection.Asc)), {
-  NodeRange: { label: "User", property: "age" },
+  node_range: { label: "User", property: "age", direction: "asc" },
 });
 assert.deepEqual(parsed(IndexSpec.nodeRangeDesc("User", "age")), {
-  NodeRange: { label: "User", property: "age", direction: "Desc" },
+  node_range: { label: "User", property: "age", direction: "desc" },
 });
 assert.deepEqual(parsed(IndexSpec.edgeRangeDesc("FOLLOWS", "weight")), {
-  EdgeRange: { label: "FOLLOWS", property: "weight", direction: "Desc" },
+  edge_range: { label: "FOLLOWS", property: "weight", direction: "desc" },
 });
 
 console.log("nested-dsl.test.ts passed");

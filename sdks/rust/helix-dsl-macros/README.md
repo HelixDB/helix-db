@@ -1,33 +1,33 @@
 # helix-dsl-macros
 
-Procedural macros for the [`helix-dsl`](../README.md) query registration system.
+Procedural macros for the [`helix-db`](../README.md) query DSL.
 
-This crate provides the `#[register]` attribute macro, which transforms query-building functions into self-registering queries with compile-time parameter validation and runtime metadata.
+This crate provides the `#[query]` attribute macro, which transforms a typed
+query-building function into a callable function returning `QueryRequest`.
 
 ## Usage
 
 ```rust
 use helix_db::prelude::*;
 
-#[register]
+#[query]
 fn find_user(username: String) -> ReadBatch {
     read_batch()
         .var_as("user", g().n_where(SourcePredicate::eq("username", username)))
         .returning(["user"])
 }
 
-#[register]
+#[query]
 fn create_post(payload: ParamObject) -> WriteBatch {
     write_batch()
         .create_node("Post", payload)
 }
 ```
 
-The macro:
-
-1. **Strips parameters** from the function signature and replaces them with `let` bindings to `Expr::param(...)`, making them available as typed query expressions inside the body.
-2. **Generates a metadata function** (`__helix_dsl_params_{name}`) that returns a `Vec<QueryParameter>` describing each parameter's name and type.
-3. **Registers the query** via [`inventory`](https://docs.rs/inventory) as a `RegisteredReadQuery` or `RegisteredWriteQuery`, making it discoverable at runtime by `helix_db::generate()`.
+The macro preserves the function's visibility and parameters, builds the query
+AST with `Expr::param(...)` references, inserts parameter values and types, sets
+`query_name` to the function name, and returns the complete request. It does not
+register or persist queries.
 
 ## Supported parameter types
 

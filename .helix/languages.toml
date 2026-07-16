@@ -1,0 +1,6 @@
+[language-server.rust-analyzer.config.check]
+command = "clippy"
+workspace = true
+allTargets = true
+features = "all"
+extraArgs = ["--", "-D", "warnings"]

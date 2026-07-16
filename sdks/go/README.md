@@ -1,6 +1,6 @@
 # HelixDB Go SDK
 
-Dynamic-first Go SDK for building and executing HelixDB queries.
+Go SDK for building and executing HelixDB queries.
 
 ## Install
 
@@ -99,6 +99,19 @@ limit := q.ParamI64("limit", int64(10))
 
 Parameter refs can be used in predicates, property inputs, and bounds.
 
+For low-level request construction, wrap a typed batch with
+`NewReadQueryRequest` or `NewWriteQueryRequest`. The resulting `QueryRequest`
+supports the same query-name, parameter-value, and parameter-type mutators as
+the other SDKs:
+
+```go
+request := helix.NewReadQueryRequest(
+	helix.Read().VarAs("users", helix.G().N(helix.AllNodes()).Count()).Returning("users"),
+).
+	WithQueryName("count_users").
+	WithParameterType("tenant_id", helix.ParamTypeString())
+```
+
 Direct Go values are serialized as literals in the inline AST. For example,
 `helix.SourceEq("id", "foo")` inlines the string `"foo"`; it does not create a
 runtime parameter. For request-specific values, declare a `q.Param*` value and
@@ -182,12 +195,33 @@ func ExecWithConflictRetry(ctx context.Context, client *helix.Client, build func
 }
 ```
 
+## Native graph algorithms
+
+Native graph support is included when the generated UniFFI tree is linked with
+the `helixdb_uniffi` build tag:
+
+```go
+selection := helix.GraphSelection{
+	NodeTraversal: helix.G().NWhere(helix.SourceHasKey("$id")),
+	EdgeTraversal: helix.G().EWhere(helix.SourceHasKey("$id")),
+	Direction: helix.GraphDirected,
+	AllowFullScan: true,
+}
+graph, err := client.Graph(ctx, selection)
+if err != nil { return err }
+scores, err := graph.BetweennessCentrality(helix.GraphifyBetweennessOptions())
+```
+
+The load performs one ordinary query and all later algorithms run locally.
+Without generated native bindings, `Client.Graph` returns
+`ErrNativeGraphUnavailable` before issuing the query.
+
 ## Notes
 
-- Go v1 is dynamic-first and posts to `/v1/query` through `client.Exec`.
-- Stored-query registration and bundle generation are not part of the primary Go workflow.
+- Go queries post to `/v1/query` through `client.Exec`.
+- Stored-query registration and bundle generation are not supported.
 - Use `MarshalRequest(req)` only for tests, parity fixtures, or debugging.
 - `int64` values serialize as JSON numbers; response decoding uses `json.Decoder.UseNumber()`.
-- Dynamic datetime parameters serialize as RFC3339 UTC strings with millisecond precision.
-- Dynamic JSON cannot represent bytes parameters; bytes remain valid stored property values.
+- Datetime parameters serialize as RFC3339 UTC strings with millisecond precision.
+- Query JSON cannot represent bytes parameters; bytes remain valid node and edge property values.
 - Non-200 responses return `*HelixError` with `Kind: ErrorRemote`, `Details`, and `StatusCode`.

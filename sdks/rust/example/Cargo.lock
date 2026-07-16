@@ -344,12 +344,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
-name = "helix-db"
-version = "2.0.0"
+name = "helix-ast"
+version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
+ "sonic-rs",
+]
+
+[[package]]
+name = "helix-db"
+version = "3.0.0"
+dependencies = [
+ "chrono",
+ "helix-ast",
  "helix-dsl-macros",
- "inventory",
  "reqwest",
  "serde",
  "sonic-rs",
@@ -359,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "helix-dsl-macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -601,15 +610,6 @@ checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
  "hashbrown",
-]
-
-[[package]]
-name = "inventory"
-version = "0.3.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
-dependencies = [
- "rustversion",
 ]
 
 [[package]]

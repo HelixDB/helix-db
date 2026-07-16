@@ -1,0 +1,49 @@
+[package]
+name = "db-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+db = { path = "..", features = ["fuzzing"] }
+
+[[bin]]
+name = "current_secondary_records"
+path = "fuzz_targets/current_secondary_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_search_records"
+path = "fuzz_targets/current_search_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_index_v2_keys"
+path = "fuzz_targets/current_index_v2_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_index_v2_records"
+path = "fuzz_targets/current_index_v2_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "current_index_v2_work"
+path = "fuzz_targets/current_index_v2_work.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

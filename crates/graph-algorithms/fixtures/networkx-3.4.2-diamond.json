@@ -1,0 +1,28 @@
+{
+  "source": "NetworkX 3.4.2",
+  "graph": {
+  "direction": "graph",
+    "nodes": ["a", "b", "c", "d"],
+    "edges": [
+      { "id": { "stored_id": "ab", "reverse_generation": 0 }, "graphify_key": null, "source": "a", "target": "b", "label": null, "weight": null, "attributes": {} },
+      { "id": { "stored_id": "ac", "reverse_generation": 0 }, "graphify_key": null, "source": "a", "target": "c", "label": null, "weight": null, "attributes": {} },
+      { "id": { "stored_id": "bd", "reverse_generation": 0 }, "graphify_key": null, "source": "b", "target": "d", "label": null, "weight": null, "attributes": {} },
+      { "id": { "stored_id": "cd", "reverse_generation": 0 }, "graphify_key": null, "source": "c", "target": "d", "label": null, "weight": null, "attributes": {} }
+    ]
+  },
+  "node_betweenness_normalized": {
+    "a": 0.16666666666666666,
+    "b": 0.16666666666666666,
+    "c": 0.16666666666666666,
+    "d": 0.16666666666666666
+  },
+  "edge_betweenness_normalized": {
+    "ab": 0.3333333333333333,
+    "ac": 0.3333333333333333,
+    "bd": 0.3333333333333333,
+    "cd": 0.3333333333333333
+  },
+  "cycles_length_bound_4": [
+    { "node_ids": ["a", "b", "d", "c"], "edge_ids": [{ "stored_id": "ab", "reverse_generation": 0 }, { "stored_id": "bd", "reverse_generation": 0 }, { "stored_id": "cd", "reverse_generation": 0 }, { "stored_id": "ac", "reverse_generation": 0 }] }
+  ]
+}

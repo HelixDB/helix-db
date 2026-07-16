@@ -5,8 +5,8 @@ import {
   BatchCondition,
   CompareOp,
   DateTime,
-  DynamicQueryRequest,
-  DynamicQueryValue,
+  QueryRequest,
+  QueryValue,
   EdgeRef,
   Expr,
   IndexSpec,
@@ -19,10 +19,12 @@ import {
   PropertyValue,
   QueryParamType,
   RepeatConfig,
+  ShortestPathDirection,
   SourcePredicate,
   Step,
   StreamBound,
   Traversal,
+  VectorDistanceMetric,
   g,
   readBatch,
   stringifyJson,
@@ -31,10 +33,10 @@ import {
 } from "../../src/index.js";
 import { typescriptGeneratedRoot } from "./paths.js";
 
-type Fixture = {
+export type Fixture = {
   bucket: "runtime" | "json-only";
   name: string;
-  request: DynamicQueryRequest;
+  request: QueryRequest;
 };
 
 await resetDir(join(typescriptGeneratedRoot, "runtime"));
@@ -50,15 +52,15 @@ async function resetDir(path: string) {
   await mkdir(path, { recursive: true });
 }
 
-function runtime(name: string, request: DynamicQueryRequest): Fixture {
+function runtime(name: string, request: QueryRequest): Fixture {
   return { bucket: "runtime", name, request };
 }
 
-function jsonOnly(name: string, request: DynamicQueryRequest): Fixture {
+function jsonOnly(name: string, request: QueryRequest): Fixture {
   return { bucket: "json-only", name, request };
 }
 
-function withParams(request: DynamicQueryRequest, values: [string, unknown][], types: [string, QueryParamType][]): DynamicQueryRequest {
+function withParams(request: QueryRequest, values: [string, unknown][], types: [string, QueryParamType][]): QueryRequest {
   for (const [name, value] of values) request.insertParameterValue(name, value);
   for (const [name, ty] of types) request.insertParameterType(name, ty);
   return request;
@@ -96,11 +98,11 @@ function nestedMetadataParam(externalID: string, score: number) {
   return { externalID, score, tags: ["alpha", 7] };
 }
 
-function runtimeFixtures(): Fixture[] {
+export function runtimeFixtures(): Fixture[] {
   return [
     runtime(
       "001-write-seed-core",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs(
             "alice",
@@ -150,11 +152,11 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "002-read-count-all-users",
-      DynamicQueryRequest.read(readBatch().varAs("user_count", g().nWithLabel("ParityUser").count()).returning(["user_count"])),
+      QueryRequest.read(readBatch().varAs("user_count", g().nWithLabel("ParityUser").count()).returning(["user_count"])),
     ),
     runtime(
       "003-read-source-predicate-and-count",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "active_adults",
@@ -167,7 +169,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "004-read-value-map-projection",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "alice",
@@ -186,7 +188,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "005-read-order-range-values",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "ordered",
@@ -204,7 +206,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "006-read-edge-count",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("edge_count", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "user-alice")).outE("FOLLOWS").count())
           .returning(["edge_count"]),
@@ -212,7 +214,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "007-read-edge-properties",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "edges",
@@ -226,7 +228,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "008-read-edge-endpoints",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("from_nodes", g().eWithLabel("FOLLOWS").edgeHasLabel("FOLLOWS").inN().valueMap(["externalId", "name"]))
           .varAs("to_nodes", g().eWithLabel("FOLLOWS").outN().valueMap(["externalId", "name"]))
@@ -235,7 +237,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "009-read-conditional-var-not-empty",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("alice", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "user-alice")))
           .varAsIf(
@@ -248,7 +250,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "010-read-conditional-var-empty",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("missing", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "missing-user")))
           .varAsIf("fallback", BatchCondition.varEmpty("missing"), g().nWithLabel("ParityUser").limit(1).valueMap(["externalId"]))
@@ -257,7 +259,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "011-read-conditional-var-min-size-prev",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("users", g().nWithLabel("ParityUser").limit(3))
           .varAsIf("min_two", BatchCondition.varMinSize("users", 2), g().n(NodeRef.var("users")).count())
@@ -268,7 +270,7 @@ function runtimeFixtures(): Fixture[] {
     runtime(
       "012-read-foreach-param",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .forEachParam(
               "lookups",
@@ -286,7 +288,7 @@ function runtimeFixtures(): Fixture[] {
     runtime(
       "013-write-foreach-param-create",
       withParams(
-        DynamicQueryRequest.write(
+        QueryRequest.write(
           writeBatch()
             .forEachParam(
               "rows",
@@ -315,11 +317,11 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "014-read-after-foreach-param",
-      DynamicQueryRequest.read(readBatch().varAs("event_count", g().nWithLabel("ParityEvent").count()).returning(["event_count"])),
+      QueryRequest.read(readBatch().varAs("event_count", g().nWithLabel("ParityEvent").count()).returning(["event_count"])),
     ),
     runtime(
       "015-write-set-remove-properties",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs(
             "updated",
@@ -336,7 +338,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "016-read-updated-properties",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "bob",
@@ -350,7 +352,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "017-read-repeat-union",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "walked",
@@ -367,7 +369,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "018-read-choose-coalesce-optional",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "branched",
@@ -385,7 +387,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "019-read-aggregations",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("by_status", g().nWithLabel("ParityUser").groupCount("status"))
           .varAs("mean_score", g().nWithLabel("ParityUser").aggregateBy(AggregateFunction.Mean, "score"))
@@ -395,7 +397,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "020-write-index-create",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs("node_eq", g().createIndexIfNotExists(IndexSpec.nodeEquality("ParityUser", "externalId")))
           .varAs("node_range", g().createIndexIfNotExists(IndexSpec.nodeRange("ParityUser", "age")))
@@ -407,7 +409,7 @@ function runtimeFixtures(): Fixture[] {
     runtime(
       "021-read-parameter-types",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .varAs(
               "matches",
@@ -434,7 +436,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "022-write-property-value-variants",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs(
             "variant_node",
@@ -458,22 +460,22 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "023-read-property-value-variants",
-      DynamicQueryRequest.read(readBatch().varAs("variant", g().nWithLabel("ParityVariant").valueMap(null)).returning(["variant"])),
+      QueryRequest.read(readBatch().varAs("variant", g().nWithLabel("ParityVariant").valueMap(null)).returning(["variant"])),
     ),
     runtime(
       "024-write-text-vector-indexes",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs("node_text", g().createTextIndexNodes("ParityUser", "bio", null))
-          .varAs("node_vector", g().createVectorIndexNodes("ParityUser", "embedding", null))
+          .varAs("node_vector", g().createVectorIndexNodes("ParityUser", "embedding", 3, VectorDistanceMetric.Cosine, null))
           .varAs("edge_text", g().createTextIndexEdges("FOLLOWS", "note", null))
-          .varAs("edge_vector", g().createVectorIndexEdges("FOLLOWS", "embedding", null))
+          .varAs("edge_vector", g().createVectorIndexEdges("FOLLOWS", "embedding", 2, VectorDistanceMetric.Cosine, null))
           .returning(["node_text", "node_vector", "edge_text", "edge_vector"]),
       ),
     ),
     runtime(
       "025-read-text-search-nodes",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("text_hits", g().textSearchNodes("ParityUser", "bio", "graph", 5, null).valueMap(["externalId", "bio", "$distance"]))
           .returning(["text_hits"]),
@@ -481,7 +483,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "026-read-vector-search-nodes",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "vector_hits",
@@ -494,7 +496,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "027-read-text-search-edges",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("edge_text_hits", g().textSearchEdges("FOLLOWS", "note", "follows", 5, null).edgeProperties())
           .returning(["edge_text_hits"]),
@@ -502,7 +504,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "028-read-vector-search-edges",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("edge_vector_hits", g().vectorSearchEdges("FOLLOWS", "embedding", [1.0, 0.0], 5, null).edgeProperties())
           .returning(["edge_vector_hits"]),
@@ -510,7 +512,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "029-write-drop-temp-node",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs("temp", g().addN("ParityTemp", [["name", PropertyInput.value("temp")]]))
           .varAs("dropped", g().n(NodeRef.var("temp")).drop().count())
@@ -519,7 +521,7 @@ function runtimeFixtures(): Fixture[] {
     ),
     runtime(
       "030-read-final-counts",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("users", g().nWithLabel("ParityUser").count())
           .varAs("events", g().nWithLabel("ParityEvent").count())
@@ -530,7 +532,7 @@ function runtimeFixtures(): Fixture[] {
     runtime(
       "031-read-source-predicate-eq-param",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .varAs(
               "user",
@@ -547,7 +549,7 @@ function runtimeFixtures(): Fixture[] {
     runtime(
       "032-read-source-predicate-between-param",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .varAs(
               "adults",
@@ -569,7 +571,7 @@ function runtimeFixtures(): Fixture[] {
   ];
 }
 
-function nodePermutationFixtures(): Fixture[] {
+export function nodePermutationFixtures(): Fixture[] {
   const sources = ["label", "where", "all"] as const;
   const filters = ["none", "has", "logic", "expr"] as const;
   const bounds = ["none", "limit", "skip", "range"] as const;
@@ -583,7 +585,7 @@ function nodePermutationFixtures(): Fixture[] {
           fixtures.push(
             runtime(
               `${String(index).padStart(3, "0")}-combo-node-${source}-${filter}-${bound}-${terminal}`,
-              DynamicQueryRequest.read(nodeComboBatch(source, filter, bound, terminal)),
+              QueryRequest.read(nodeComboBatch(source, filter, bound, terminal)),
             ),
           );
           index += 1;
@@ -655,7 +657,7 @@ function jsonOnlyFixtures(): Fixture[] {
     jsonOnly(
       "900-exhaustive-raw-read-steps",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .varAs(
               "raw_nodes",
@@ -692,10 +694,7 @@ function jsonOnlyFixtures(): Fixture[] {
               Traversal.fromSteps(
                 [
                   Step.e(EdgeRef.param("edge_ids")),
-                  Step.eWhere(SourcePredicate.or([SourcePredicate.hasKey("since"), SourcePredicate.startsWith("note", "Alice")])),
-                  Step.outN(),
-                  Step.inN(),
-                  Step.otherN(),
+                  Step.where(SourcePredicate.or([SourcePredicate.hasKey("since"), SourcePredicate.startsWith("note", "Alice")])),
                   Step.edgeHas("weight", PropertyInput.value(PropertyValue.f64(1.0))),
                   Step.edgeHasLabel("FOLLOWS"),
                   Step.orderBy("weight", Order.Desc),
@@ -705,7 +704,8 @@ function jsonOnlyFixtures(): Fixture[] {
                 "read",
               ),
             )
-            .returning(["raw_nodes", "raw_edges"]),
+            .varAs("index_operation", g().getIndexOperation("018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"))
+            .returning(["raw_nodes", "raw_edges", "index_operation"]),
         ),
         [
           ["node_ids", [1, 2]],
@@ -727,23 +727,14 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "901-exhaustive-raw-write-steps",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
-          .varAs(
-            "raw_indexes",
-            Traversal.fromSteps(
-              [
-                Step.createIndex(IndexSpec.nodeUniqueEquality("ParityUser", "externalId"), true),
-                Step.dropIndex(IndexSpec.nodeRange("ParityUser", "age")),
-                Step.createVectorIndexNodes("ParityUser", "embedding", "tenantId"),
-                Step.createVectorIndexEdges("FOLLOWS", "embedding", "tenantId"),
-                Step.createTextIndexNodes("ParityUser", "bio", "tenantId"),
-                Step.createTextIndexEdges("FOLLOWS", "note", "tenantId"),
-              ],
-              "terminal",
-              "write",
-            ),
-          )
+          .varAs("raw_unique_index", g().createIndexIfNotExists(IndexSpec.nodeUniqueEquality("ParityUser", "externalId")))
+          .varAs("raw_drop_range_index", g().dropIndex(IndexSpec.nodeRange("ParityUser", "age")))
+          .varAs("raw_node_vector_index", g().createVectorIndexNodes("ParityUser", "embedding", 3, VectorDistanceMetric.Cosine, "tenantId"))
+          .varAs("raw_edge_vector_index", g().createVectorIndexEdges("FOLLOWS", "embedding", 2, VectorDistanceMetric.Cosine, "tenantId"))
+          .varAs("raw_node_text_index", g().createTextIndexNodes("ParityUser", "bio", "tenantId"))
+          .varAs("raw_edge_text_index", g().createTextIndexEdges("FOLLOWS", "note", "tenantId"))
           .varAs(
             "raw_mutations",
             Traversal.fromSteps(
@@ -761,22 +752,34 @@ function jsonOnlyFixtures(): Fixture[] {
               "write",
             ),
           )
-          .returning(["raw_indexes", "raw_mutations"]),
+          .varAs("retry_index_operation", g().retryIndexOperation("018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"))
+          .varAs("abort_index_operation", g().abortIndexOperation("018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"))
+          .returning([
+            "raw_unique_index",
+            "raw_drop_range_index",
+            "raw_node_vector_index",
+            "raw_edge_vector_index",
+            "raw_node_text_index",
+            "raw_edge_text_index",
+            "raw_mutations",
+            "retry_index_operation",
+            "abort_index_operation",
+          ]),
       ),
     ),
     jsonOnly(
-      "902-dynamic-value-and-param-type-shapes",
+      "902-query-value-and-param-type-shapes",
       withParams(
-        DynamicQueryRequest.read(readBatch().varAs("empty", g().nWithLabel("Missing").count()).returning(["empty"])),
+        QueryRequest.read(readBatch().varAs("empty", g().nWithLabel("Missing").count()).returning(["empty"])),
         [
-          ["null", DynamicQueryValue.null()],
-          ["bool", DynamicQueryValue.bool(true)],
-          ["i64", DynamicQueryValue.i64(9_223_372_036_854_775_807n)],
-          ["f64", DynamicQueryValue.f64(1.25)],
-          ["f32", DynamicQueryValue.f32(1.5)],
-          ["string", DynamicQueryValue.string("value")],
-          ["array", DynamicQueryValue.array([1, "two"])],
-          ["object", DynamicQueryValue.object({ nested: true })],
+          ["null", QueryValue.null()],
+          ["bool", QueryValue.bool(true)],
+          ["i64", QueryValue.i64(9_223_372_036_854_775_807n)],
+          ["f64", QueryValue.f64(1.25)],
+          ["f32", QueryValue.f32(1.5)],
+          ["string", QueryValue.string("value")],
+          ["array", QueryValue.array([1, "two"])],
+          ["object", QueryValue.object({ nested: true })],
         ],
         [
           ["null", QueryParamType.value()],
@@ -793,7 +796,7 @@ function jsonOnlyFixtures(): Fixture[] {
     jsonOnly(
       "903-empty-source-vector-text-runtime-inputs",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .varAs(
               "vector_nodes",
@@ -833,7 +836,7 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "904-empty-query-and-node-edge-ref-shapes",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs("all_nodes", Traversal.fromSteps([Step.n(NodeRef.all()), Step.count()], "nodes", "read"))
           .varAs("node_ids", Traversal.fromSteps([Step.n(NodeRef.ids([1, 2])), Step.id()], "nodes", "read"))
@@ -845,7 +848,7 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "905-empty-traversal-source-mutators",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs("inject", Traversal.new().inject("some_var").count())
           .varAs("drop_edge_by_id", g().dropEdgeById(EdgeRef.id(123_456)).count())
@@ -853,9 +856,9 @@ function jsonOnlyFixtures(): Fixture[] {
       ),
     ),
     jsonOnly(
-      "906-nested-dynamic-property-write-shapes",
+      "906-nested-query-property-write-shapes",
       withParams(
-        DynamicQueryRequest.write(
+        QueryRequest.write(
           writeBatch()
             .varAs(
               "created",
@@ -883,9 +886,9 @@ function jsonOnlyFixtures(): Fixture[] {
       ),
     ),
     jsonOnly(
-      "907-nested-dynamic-property-read-shapes",
+      "907-nested-query-property-read-shapes",
       withParams(
-        DynamicQueryRequest.read(
+        QueryRequest.read(
           readBatch()
             .varAs(
               "nested_users",
@@ -925,7 +928,7 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "908-edge-endpoint-projection",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "endpoints",
@@ -942,7 +945,7 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "909-row-binding-basic-projection",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "bindings",
@@ -960,7 +963,7 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "910-row-binding-branch-distinct-projection",
-      DynamicQueryRequest.read(
+      QueryRequest.read(
         readBatch()
           .varAs(
             "workloads",
@@ -988,7 +991,7 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     jsonOnly(
       "911-range-index-direction",
-      DynamicQueryRequest.write(
+      QueryRequest.write(
         writeBatch()
           .varAs("node_desc", g().createIndexIfNotExists(IndexSpec.nodeRangeDesc("ParityUser", "age")))
           .varAs("edge_desc", g().createIndexIfNotExists(IndexSpec.edgeRangeDesc("FOLLOWS", "weight")))
@@ -996,7 +999,167 @@ function jsonOnlyFixtures(): Fixture[] {
           .returning(["node_desc", "edge_desc", "node_asc"]),
       ),
     ),
+    jsonOnly(
+      "912-shortest-path-terminal",
+      withParams(
+        QueryRequest.read(
+          readBatch()
+            .varAs(
+              "path",
+              g().shortestPath(NodeRef.id(1n), NodeRef.param("target"), 5, {
+                label: "FOLLOWS",
+                direction: ShortestPathDirection.Both,
+              }),
+            )
+            .returning(["path"]),
+        ),
+        [["target", 3]],
+        [["target", QueryParamType.i64()]],
+      ),
+    ),
+    remainingReadContractFixture(),
+    remainingWriteContractFixture(),
   ];
+}
+
+function remainingReadContractFixture(): Fixture {
+  const comparisons = Predicate.and([
+    Predicate.neq("neq", 1),
+    Predicate.gt("gt", 1),
+    Predicate.gte("gte", 1),
+    Predicate.lt("lt", 1),
+    Predicate.lte("lte", 1),
+    Predicate.between("between", 1, 3),
+    Predicate.endsWith("suffix", "end"),
+    Predicate.isIn("status", ["active", "inactive"]),
+    Predicate.isNull("missing"),
+    Predicate.isNotNull("present"),
+    Predicate.not(Predicate.eq("disabled", true)),
+    Predicate.compare(Expr.id(), CompareOp.Eq, Expr.val(1)),
+    Predicate.compare(Expr.id(), CompareOp.Neq, Expr.val(1)),
+    Predicate.compare(Expr.id(), CompareOp.Gt, Expr.val(1)),
+    Predicate.compare(Expr.id(), CompareOp.Gte, Expr.val(1)),
+    Predicate.compare(Expr.id(), CompareOp.Lt, Expr.val(1)),
+    Predicate.compare(Expr.id(), CompareOp.Lte, Expr.val(1)),
+  ]);
+  const request = QueryRequest.read(
+    readBatch()
+      .varAs(
+        "expressions_and_predicates",
+        g()
+          .n(NodeRef.all())
+          .where(comparisons)
+          .project([
+            Projection.expr("id", Expr.id()),
+            Projection.expr("timestamp", Expr.timestamp()),
+            Projection.expr("datetime", Expr.datetime()),
+            Projection.expr("null", Expr.val(PropertyValue.null())),
+            Projection.expr("date_value", Expr.val(PropertyValue.dateTime(1_777_000_000_000))),
+            Projection.expr("f32", Expr.val(PropertyValue.f32(1.25))),
+            Projection.expr("bytes", Expr.val(PropertyValue.bytes([1, 2, 3]))),
+            Projection.expr("i64_array", Expr.val(PropertyValue.i64Array([1, 2, 3]))),
+            Projection.expr("f64_array", Expr.val(PropertyValue.f64Array([1.25, 2.5]))),
+            Projection.expr("add", Expr.val(4).add(Expr.val(1))),
+            Projection.expr("sub", Expr.val(4).sub(Expr.val(1))),
+            Projection.expr("mul", Expr.val(4).mul(Expr.val(2))),
+            Projection.expr("div", Expr.val(4).div(Expr.val(2))),
+            Projection.expr("mod", Expr.val(5).modulo(Expr.val(2))),
+            Projection.expr(
+              "case",
+              Expr.case([{ when: Predicate.eq("status", "active"), then: Expr.val("enabled") }], Expr.val("disabled")),
+            ),
+          ]),
+      )
+      .varAs("both", g().n(NodeRef.id(1)).both().count())
+      .varAs("in_e", g().n(NodeRef.id(1)).inE().edgeProperties())
+      .varAs("out_e", g().n(NodeRef.id(1)).outE().edgeProperties())
+      .varAs("both_e", g().n(NodeRef.id(1)).bothE().edgeProperties())
+      .varAs("in_n", g().e(EdgeRef.all()).inN().valueMap(null))
+      .varAs("out_n", g().e(EdgeRef.all()).outN().valueMap(null))
+      .varAs("other_n", g().e(EdgeRef.all()).otherN().valueMap(null))
+      .varAs("direct_has_key", g().n(NodeRef.all()).hasKey("externalId").count())
+      .varAs("has_label", g().n(NodeRef.all()).hasLabel("ParityUser").count())
+      .varAs("exists", g().n(NodeRef.all()).exists())
+      .varAs("choose", g().n(NodeRef.all()).choose(Predicate.isNotNull("status"), sub().out(), sub().in()).count())
+      .varAs("coalesce", g().n(NodeRef.all()).coalesce([sub().out(), sub().in()]).count())
+      .varAs("group", g().n(NodeRef.all()).group("status"))
+      .varAs("group_count", g().n(NodeRef.all()).groupCount("status"))
+      .varAs("aggregate_count", g().n(NodeRef.all()).aggregateBy(AggregateFunction.Count, "age"))
+      .varAs("aggregate_sum", g().n(NodeRef.all()).aggregateBy(AggregateFunction.Sum, "age"))
+      .varAs("aggregate_min", g().n(NodeRef.all()).aggregateBy(AggregateFunction.Min, "age"))
+      .varAs("aggregate_max", g().n(NodeRef.all()).aggregateBy(AggregateFunction.Max, "age"))
+      .varAs("aggregate_mean", g().n(NodeRef.all()).aggregateBy(AggregateFunction.Mean, "age"))
+      .varAs("repeat_none", g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out())).count())
+      .varAs("repeat_before", g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out()).emitBefore()).count())
+      .varAs("repeat_after", g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out()).emitAfter()).count())
+      .varAs("repeat_all", g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out()).emitAll()).count())
+      .varAs("shortest_out", g().shortestPath(NodeRef.id(1), NodeRef.id(2), 5, { direction: ShortestPathDirection.Out }))
+      .varAs("shortest_in", g().shortestPath(NodeRef.id(1), NodeRef.id(2), 5, { direction: ShortestPathDirection.In }))
+      .varAs("vector_edges", g().vectorSearchEdges("FOLLOWS", "embedding", [1, 0], 5).edgeProperties())
+      .varAs("text_edges", g().textSearchEdges("FOLLOWS", "note", "graph", 5).edgeProperties())
+      .varAsIf("previous", BatchCondition.prevNotEmpty(), g().n(NodeRef.all()).count())
+      .varAsIf("not_empty", BatchCondition.varNotEmpty("expressions_and_predicates"), g().n(NodeRef.all()).count())
+      .varAsIf("empty", BatchCondition.varEmpty("missing"), g().n(NodeRef.all()).count())
+      .varAsIf("min_size", BatchCondition.varMinSize("expressions_and_predicates", 1), g().n(NodeRef.all()).count())
+      .forEachParam("rows", readBatch().varAs("foreach", g().n(NodeRef.all()).count()))
+      .returning([
+        "expressions_and_predicates",
+        "both",
+        "in_e",
+        "out_e",
+        "both_e",
+        "in_n",
+        "out_n",
+        "other_n",
+        "direct_has_key",
+        "has_label",
+        "exists",
+        "choose",
+        "coalesce",
+        "group",
+        "group_count",
+        "aggregate_count",
+        "aggregate_sum",
+        "aggregate_min",
+        "aggregate_max",
+        "aggregate_mean",
+        "repeat_none",
+        "repeat_before",
+        "repeat_after",
+        "repeat_all",
+        "shortest_out",
+        "shortest_in",
+        "vector_edges",
+        "text_edges",
+        "previous",
+        "not_empty",
+        "empty",
+        "min_size",
+        "foreach",
+      ]),
+  );
+  request.insertParameterType("bytes", QueryParamType.bytes());
+  request.insertParameterType("date_time", QueryParamType.dateTime());
+  return jsonOnly("913-remaining-read-contract", request);
+}
+
+function remainingWriteContractFixture(): Fixture {
+  return jsonOnly(
+    "914-remaining-write-contract",
+    QueryRequest.write(
+      writeBatch()
+        .varAs("edge_equality", g().createIndexIfNotExists(IndexSpec.edgeEquality("FOLLOWS", "since")))
+        .varAs(
+          "node_euclidean",
+          g().createIndexIfNotExists(IndexSpec.nodeVector("ParityUser", "euclidean_embedding", 4, VectorDistanceMetric.Euclidean)),
+        )
+        .varAs(
+          "edge_manhattan",
+          g().createIndexIfNotExists(IndexSpec.edgeVector("FOLLOWS", "manhattan_embedding", 4, VectorDistanceMetric.Manhattan)),
+        )
+        .returning(["edge_equality", "node_euclidean", "edge_manhattan"]),
+    ),
+  );
 }
 
 void stringifyJson;

@@ -1,0 +1,21 @@
+[package]
+name = "helixdb-uniffi-bindgen"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "helixdb-uniffi-bindgen-go"
+path = "src/bin/go.rs"
+
+[[bin]]
+name = "helixdb-uniffi-bindgen-node"
+path = "src/bin/node.rs"
+
+[dependencies]
+anyhow = "1"
+uniffi-bindgen-go = { git = "https://github.com/NordSecurity/uniffi-bindgen-go.git", tag = "v0.7.1+v0.31.0", version = "=0.7.1" }
+uniffi-bindgen-node-js = "=0.0.16"
+
+[workspace]
+resolver = "3"

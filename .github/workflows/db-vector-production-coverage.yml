@@ -1,0 +1,71 @@
+name: DB vector production coverage
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/db-vector-production-coverage.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/db/**"
+      - "scripts/db-production-coverage*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  production-coverage:
+    name: Production thresholds
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Verify coverage prerequisites
+        run: jq --version
+      - name: Enforce production vector coverage
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: scripts/db-production-coverage.sh
+
+  architecture-kernels:
+    name: ${{ matrix.kernel }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: x86_64 scalar reference
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64
+            features: production-coverage,force-vector-scalar-kernel
+          - kernel: x86_64 SSE4.1
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,-avx,-avx2,-fma
+            features: production-coverage
+          - kernel: x86_64 AVX FMA
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,+avx,+avx2,+fma
+            features: production-coverage
+          - kernel: aarch64 scalar reference
+            runner: macos-14
+            rustflags: ""
+            features: production-coverage,force-vector-scalar-kernel
+          - kernel: aarch64 NEON
+            runner: macos-14
+            rustflags: -C target-feature=+neon
+            features: production-coverage
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exercise scalar and native kernels directly
+        run: >-
+          cargo test -p db --features ${{ matrix.features }}
+          --test production_internal_contracts
+          vector_distance_neighbors_exercise_metric_and_graph_invariants

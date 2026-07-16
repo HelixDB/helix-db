@@ -132,7 +132,7 @@ helix-cli/
 │   │   ├── metrics.rs     # Metrics configuration
 │   │   ├── prune.rs       # Prune local containers/workspaces
 │   │   ├── push.rs        # Deploy an Enterprise Cloud instance
-│   │   ├── query.rs       # Send a dynamic query to POST /v1/query
+│   │   ├── query.rs       # Send a query to POST /v1/query
 │   │   ├── restart.rs     # Restart a background local instance
 │   │   ├── start.rs       # Start a local instance (alias: run)
 │   │   ├── status.rs      # Instance status
@@ -166,7 +166,7 @@ helix-cli/
 - `helix restart` - Restart a background local instance
 - `helix status` - Show local and Enterprise Cloud instance status
 - `helix logs` - View logs for a local or Enterprise Cloud instance
-- `helix query` - Send a dynamic query to `POST /v1/query`
+- `helix query` - Send a query to `POST /v1/query`
 - `helix push` - Deploy an Enterprise Cloud instance
 - `helix auth` - Enterprise Cloud authentication (login/logout/create-key)
 - `helix workspace` - Manage the active Enterprise Cloud workspace
@@ -190,7 +190,7 @@ The v3 CLI is a runtime orchestrator — there is no `helix compile`/`helix chec
 
 1. Scaffold a project with `helix init` (writes `helix.toml` and a `.helix/` workspace).
 2. Start a local instance with `helix start` — a Docker/Podman container running the `enterprise-dev` image (in-memory by default, on-disk with `--disk`).
-3. Author queries with the Rust, TypeScript, Go, or Python DSL; they serialize to JSON "dynamic queries".
+3. Author queries with the Rust, TypeScript, Go, or Python DSL; they serialize to query JSON.
 4. Send queries to a running instance via `POST /v1/query` (`helix query`); validation happens server-side.
 5. For production, deploy an Enterprise Cloud instance with `helix push`, managing auth/metadata via `helix auth`, `helix sync`, and the `workspace`/`project`/`cluster` commands.
 
@@ -213,7 +213,7 @@ Logos and images used in the README and docs.
 ## Key Concepts
 
 ### Query Language
-Queries are authored with the Rust, TypeScript, Go, or Python DSL (in `sdks/`) and serialized to JSON "dynamic queries" sent to a running instance. The legacy HelixQL `.hx` form below is still supported for reference and translation:
+Queries are authored with the Rust, TypeScript, Go, or Python DSL (in `sdks/`) and serialized to JSON sent to a running instance. The legacy HelixQL `.hx` form below is retained only for reference and translation:
 ```
 QUERY addUser(name: String, age: I64) =>
    user <- AddN<User({name: name, age: age})
@@ -234,7 +234,7 @@ QUERY addUser(name: String, age: I64) =>
 ## Architecture Flow
 
 1. **Definition**: Author queries with a Rust, TypeScript, Go, or Python DSL
-2. **Serialization**: The DSL produces a JSON dynamic-query AST (`POST /v1/query` body)
+2. **Serialization**: The DSL produces a query JSON AST (`POST /v1/query` body)
 3. **Execution**: Send to a running instance with `helix query`; the gateway validates and runs it server-side
 4. **Storage**: LMDB handles persistence with ACID guarantees
 

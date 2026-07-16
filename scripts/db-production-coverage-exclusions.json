@@ -1,0 +1,242 @@
+[
+  {
+    "path": "crates/db/src/search/vector/generation.rs",
+    "line": 334,
+    "reason": "The current descriptor constructor receives only validated ADTs and fixed supported constants.",
+    "evidence": "vector_generation_exercises_descriptor_and_namespace_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/generation.rs",
+    "line": 384,
+    "reason": "Every active Distance implementation is bound to the only active F32 codec; unsupported persisted codecs fail before this comparison.",
+    "evidence": "vector_generation_exercises_descriptor_and_namespace_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 218,
+    "reason": "An incomplete initial-hydration permit can observe only Hydrating or Retiring; completion suppresses its Drop path.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 255,
+    "reason": "Retirement cannot close while a refresh reservation remains in flight, so cancellation cannot first observe Closed.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 257,
+    "reason": "A refresh permit has a private constructor that transitions only from Ready and no transition returns to Hydrating.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 309,
+    "reason": "The value is replaced inside the Ready match arm while the same mutex guard excludes mutation.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 340,
+    "reason": "The private retirement transition is monotonic: Hydrating or Ready becomes Retiring and never becomes lease-admitting again.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 362,
+    "reason": "The all-dirty and publication guards preserve the previously proven drained Retiring state until close.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 435,
+    "reason": "Retirement waits for the refresh-inflight bit that this permit owns, so the permit cannot first publish into Closed.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 436,
+    "reason": "This is the result expression of the impossible Closed refresh-publication arm.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 439,
+    "reason": "A private refresh permit begins in Ready and the lifecycle has no transition back to Hydrating.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_registry.rs",
+    "line": 545,
+    "reason": "A lease increments a resident state's reader count and retirement retains that resident until every lease drops.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 937,
+    "reason": "SlateDB's prefix iterator cannot return a key outside the exact typed scope prefix supplied to the scan.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 995,
+    "reason": "A bounded hydration budget prevents admitted key and value byte totals from approaching u64 overflow.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 998,
+    "reason": "This is the propagation boundary of the bounded-byte overflow assertion arm.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 1005,
+    "reason": "A bounded scan cannot admit usize::MAX cache rows in one hydration operation.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 1008,
+    "reason": "This is the propagation boundary of the bounded-row-count overflow assertion arm.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 1043,
+    "reason": "Rust supports no pointer width wider than u64, so a usize key length always converts to u64.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 1044,
+    "reason": "This is the propagation boundary of an impossible usize-to-u64 key-length conversion failure.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 1046,
+    "reason": "Rust supports no pointer width wider than u64, so a usize value length always converts to u64.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/memory_store.rs",
+    "line": 1047,
+    "reason": "This is the propagation boundary of an impossible usize-to-u64 value-length conversion failure.",
+    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/mod.rs",
+    "line": 855,
+    "reason": "The active F32 codec has word size one, so multiplication by that word size cannot overflow.",
+    "evidence": "vector_primitives_exercise_active_codec_and_runtime_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/mutation.rs",
+    "line": 1128,
+    "reason": "The immediately preceding typed staging transition installs Present canonical neighbors before this private reciprocal-cleanup read.",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "line": 690,
+    "reason": "Pre-sampling runs only after a non-empty frontier check, so choosing an index from that unchanged frontier cannot return None.",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "line": 840,
+    "reason": "This branch is entered only with a non-empty deferred set, whose maximum-similarity subset is therefore non-empty and always yields an index.",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "line": 970,
+    "reason": "The loop guard proves either a virtual fill slot exists or the real beam exceeds ef; the final else arm contradicts that guard.",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "line": 786,
+    "reason": "A present neighbor fingerprint with an absent query fingerprint returns from the immediately preceding validation branch, so the later match cannot observe that pair.",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "line": 747,
+    "reason": "The layer-zero entry guard rejects an unused query fingerprint whenever filtering or sampling is enabled; computed fingerprints make this inner absence arm impossible.",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/search.rs",
+    "line": 596,
+    "reason": "The strict-exhaustive const specialization is selected from the query fingerprint variant; the non-exhaustive specialization therefore always carries a computed fingerprint.",
+    "evidence": "vector_search_exercises_session_and_policy_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash.rs",
+    "line": 236,
+    "reason": "The safe SimHasher slice API returns only DimensionMismatch; construction and allocation failures occur before hashing.",
+    "evidence": "vector_simhash_exercises_transactional_row_contracts"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash.rs",
+    "line": 259,
+    "reason": "The measured safe SimHasher slice API returns only DimensionMismatch; all other errors are construction-time states.",
+    "evidence": "vector_simhash_exercises_transactional_row_contracts"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash_registry.rs",
+    "line": 284,
+    "reason": "The closure calls the total fallible SimHasher constructor; allocation failure is returned as an error rather than panicking.",
+    "evidence": "vector_simhash_registry_exercises_limits_lru_and_single_flight"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash_registry.rs",
+    "line": 285,
+    "reason": "This rollback statement belongs to the defensive unwind arm around a total fallible constructor.",
+    "evidence": "vector_simhash_registry_exercises_limits_lru_and_single_flight"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash_registry.rs",
+    "line": 286,
+    "reason": "This wakeup statement belongs to the defensive unwind arm around a total fallible constructor.",
+    "evidence": "vector_simhash_registry_exercises_limits_lru_and_single_flight"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash_registry.rs",
+    "line": 287,
+    "reason": "This lock-release statement belongs to the defensive unwind arm around a total fallible constructor.",
+    "evidence": "vector_simhash_registry_exercises_limits_lru_and_single_flight"
+  },
+  {
+    "path": "crates/db/src/search/vector/simhash_registry.rs",
+    "line": 288,
+    "reason": "This resume-unwind statement belongs to the defensive unwind arm around a total fallible constructor.",
+    "evidence": "vector_simhash_registry_exercises_limits_lru_and_single_flight"
+  },
+  {
+    "path": "crates/db/src/search/vector/storage.rs",
+    "line": 312,
+    "reason": "Rust supports no pointer width wider than u64, and a SlateDB key plus value cannot exceed addressable memory.",
+    "evidence": "vector_storage_exercises_all_current_row_families"
+  },
+  {
+    "path": "crates/db/src/search/vector/storage.rs",
+    "line": 315,
+    "reason": "This is the propagation boundary of the impossible address-space-to-u64 measurement overflow.",
+    "evidence": "vector_storage_exercises_all_current_row_families"
+  },
+  {
+    "path": "crates/db/src/search/vector/storage.rs",
+    "line": 630,
+    "reason": "The typed reverse-edge prefix embeds the requested target ID, so a parseable row from that prefix cannot carry another target.",
+    "evidence": "vector_storage_exercises_all_current_row_families"
+  },
+  {
+    "path": "crates/db/src/search/vector/legacy.rs",
+    "line": 286,
+    "reason": "The adoption probe builds this descriptor only from a validated current metadata row and fixed current semantics.",
+    "evidence": "vector_legacy_adoption_exercises_proof_and_rejection_states"
+  }
+]

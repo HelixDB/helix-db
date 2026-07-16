@@ -66,7 +66,7 @@ If you'd rather wire things up yourself:
   ```bash
    helix start dev
   ```
-  > ⚠️ The default storage mode is **in-memory** — stopping the instance wipes its data. Use `helix start dev --disk` to persist data across restarts, or `--foreground` to stream logs.
+  > ⚠️ The default storage mode is **in-memory** — stopping the instance wipes its data. Use `helix start dev --disk` to persist with a Helix-managed MinIO volume, or `helix start dev --storage-uri s3://my-bucket/my-prefix --persist` to use your own S3/S3-compatible object-store prefix.
 3. **Send a query.**
   ```bash
    helix query dev --file examples/request.json
@@ -78,7 +78,7 @@ If you'd rather wire things up yourself:
 
 ## Writing queries with the SDKs
 
-Queries are authored with the Rust, TypeScript, Go, or Python DSL and sent straight to a running instance as dynamic requests against `POST /v1/query` — no build or deploy step. The SDKs produce the same JSON AST. The examples below talk to a local instance on `http://localhost:6969` (the default `helix start dev` port). See the [Querying Guide](https://docs.helix-db.com/database/querying-guide/overview) for the full builder catalog and the dynamic-query wire format.
+Queries are authored with the Rust, TypeScript, Go, or Python DSL and sent straight to a running instance through `POST /v1/query` — no build or deploy step. The SDKs produce the same JSON AST. The examples below talk to a local instance on `http://localhost:6969` (the default `helix start dev` port). See the [Querying Guide](https://docs.helix-db.com/database/querying-guide/overview) for the full builder catalog and query wire format.
 
 ### Rust
 
@@ -88,14 +88,14 @@ Install the crate (published as `helix-db`, imported as `helix_db`):
 cargo init && cargo add helix-db tokio sonic-rs
 ```
 
-Define your queries as `#[register]` functions, then run them directly through the client:
+Define queries as `#[query]` functions, then run them directly through the client:
 
 ```rust
 use helix_db::Client;
 use helix_db::dsl::prelude::*;
 
-#[register]
-pub fn add_user(name: String) {
+#[query]
+pub fn add_user(name: String) -> WriteBatch {
     write_batch()
         .var_as(
             "user",
@@ -105,8 +105,8 @@ pub fn add_user(name: String) {
         .returning(["user"])
 }
 
-#[register]
-pub fn get_user(name: String) {
+#[query]
+pub fn get_user(name: String) -> ReadBatch {
     read_batch()
         .var_as(
             "user",
@@ -122,18 +122,16 @@ async fn main() {
     let client = Client::new(None).unwrap(); // defaults to http://localhost:6969
 
     // add user
-    let new_user = client
-        .query::<sonic_rs::Value>()
-        .dynamic(add_user("John Doe".to_string()))
+    let new_user: sonic_rs::Value = client
+        .query(add_user("John Doe".to_string()))
         .send()
         .await
         .unwrap();
     println!("new user: {:#}", sonic_rs::to_string_pretty(&new_user).unwrap());
 
     // get user
-    let user = client
-        .query::<sonic_rs::Value>()
-        .dynamic(get_user("John Doe".to_string()))
+    let user: sonic_rs::Value = client
+        .query(get_user("John Doe".to_string()))
         .send()
         .await
         .unwrap();
@@ -184,7 +182,7 @@ const HELIX_URL = "http://localhost:6969/v1/query";
 const newUser = await fetch(HELIX_URL, {
   method: "POST",
   headers: { "content-type": "application/json" },
-  body: addUser().toDynamicJson(addUserParams, { name: "John Doe" }),
+  body: addUser().toQueryJson(addUserParams, { name: "John Doe" }),
 }).then((r) => r.json());
 console.log("new user:", newUser);
 
@@ -192,7 +190,7 @@ console.log("new user:", newUser);
 const user = await fetch(HELIX_URL, {
   method: "POST",
   headers: { "content-type": "application/json" },
-  body: getUser().toDynamicJson(getUserParams, { name: "John Doe" }),
+  body: getUser().toQueryJson(getUserParams, { name: "John Doe" }),
 }).then((r) => r.json());
 console.log("user:", user);
 ```
@@ -205,7 +203,7 @@ Install the package from this repository:
 pip install -e sdks/python
 ```
 
-Build dynamic requests with snake_case builders, then send them with the client:
+Build requests with snake_case builders, then send them with the client:
 
 ```python
 from helixdb import Client, Predicate, g, param, define_params, read_batch, write_batch
@@ -232,14 +230,14 @@ get_user = (
 
 client = Client("http://localhost:6969")
 
-new_user = client.query().dynamic(
-    add_user.to_dynamic_request(add_user_params, {"name": "John Doe"})
-).send()
+new_user = client.query(
+    add_user.to_query_request(add_user_params, {"name": "John Doe"})
+)
 print("new user:", new_user)
 
-user = client.query().dynamic(
-    get_user.to_dynamic_request(get_user_params, {"name": "John Doe"})
-).send()
+user = client.query(
+    get_user.to_query_request(get_user_params, {"name": "John Doe"})
+)
 print("user:", user)
 ```
 

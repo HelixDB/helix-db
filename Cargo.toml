@@ -1,22 +1,18 @@
 [workspace]
 members = [
-    "helix-cli",
-    "metrics",
+    "bindings/uniffi",
+    "crates/ast",
+    "crates/graph-algorithms",
+    "crates/planner",
+    "crates/server",
     "sdks/rust",
+    "crates/cli",
+    "crates/db",
 ]
-resolver = "2"
+exclude = ["bindings/uniffi-bindgen"]
+resolver = "3"
 
-[profile.release]
-opt-level = 2
-codegen-units = 1
-lto = true
-panic = "abort"
-strip = "debuginfo"
-
-[profile.dev]
-opt-level = 0
-codegen-units = 256
-lto = false
-panic = "abort"
-incremental = true
-debug = 1
+[workspace.lints.clippy]
+wildcard_enum_match_arm = "deny"
+# optional companion:
+match_wildcard_for_single_variants = "warn"

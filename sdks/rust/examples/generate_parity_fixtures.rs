@@ -1,18 +1,35 @@
-use std::collections::BTreeMap;
+#![recursion_limit = "256"]
+
+//! Generates canonical Rust SDK parity fixtures for cross-language comparison.
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use helix_db::dsl::prelude::*;
-use helix_db::{Empty, OnNodes, QueryParamType, ReadOnly, Step, Traversal, WriteEnabled};
+use helix_db::{Empty, OnNodes, QueryParamType, ReadOnly, Traversal};
 
 struct Fixture {
     bucket: &'static str,
     name: String,
-    request: DynamicQueryRequest,
+    request: QueryRequest,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+struct UserProps {
+    external_id: &'static str,
+    name: &'static str,
+    age: i64,
+    score: f64,
+    status: &'static str,
+    city: &'static str,
+    bio: &'static str,
+    embedding: Vec<f32>,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = env::args()
         .nth(1)
         .unwrap_or_else(|| "tests/parity/generated/rust".to_string());
@@ -23,6 +40,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixtures = runtime_fixtures();
     fixtures.extend(node_permutation_fixtures());
     fixtures.extend(json_only_fixtures());
+    validate_fixture_coverage(&fixtures);
+
+    match env::var("HELIX_EMBEDDED_PARITY_RESULTS") {
+        Ok(results) => execute_embedded_fixtures(&fixtures, Path::new(&results)).await?,
+        Err(env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
 
     for fixture in fixtures {
         let path = out
@@ -34,6 +58,1132 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(feature = "embedded")]
+async fn execute_embedded_fixtures(
+    fixtures: &[Fixture],
+    results: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use helix_db::{Client, HelixDbSource};
+
+    reset_dir(results)?;
+    let database = match env::var("HELIX_EMBEDDED_PARITY_DATABASE") {
+        Ok(database) => database,
+        Err(env::VarError::NotPresent) => "rust-sdk-embedded-parity".to_string(),
+        Err(error) => return Err(error.into()),
+    };
+    let client = Client::open(HelixDbSource::InMemory { database }).await?;
+    for fixture in fixtures
+        .iter()
+        .filter(|fixture| fixture.bucket == "runtime")
+    {
+        let response: serde_json::Value = client
+            .query(fixture.request.clone())
+            .send()
+            .await
+            .map_err(|error| format!("{}: {error}", fixture.name))?;
+        fs::write(
+            results.join(format!("{}.json", fixture.name)),
+            serde_json::to_vec(&response)?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "embedded"))]
+async fn execute_embedded_fixtures(
+    _fixtures: &[Fixture],
+    _results: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("HELIX_EMBEDDED_PARITY_RESULTS requires the embedded feature".into())
+}
+
+#[derive(Default)]
+struct FixtureCoverage {
+    ast_nodes: BTreeSet<&'static str>,
+    expressions: BTreeSet<&'static str>,
+    predicates: BTreeSet<&'static str>,
+    compare_ops: BTreeSet<&'static str>,
+    property_values: BTreeSet<&'static str>,
+    property_inputs: BTreeSet<&'static str>,
+    node_refs: BTreeSet<&'static str>,
+    edge_refs: BTreeSet<&'static str>,
+    projections: BTreeSet<&'static str>,
+    binding_targets: BTreeSet<&'static str>,
+    binding_projections: BTreeSet<&'static str>,
+    stream_bounds: BTreeSet<&'static str>,
+    index_specs: BTreeSet<&'static str>,
+    range_directions: BTreeSet<&'static str>,
+    vector_metrics: BTreeSet<&'static str>,
+    orders: BTreeSet<&'static str>,
+    shortest_path_directions: BTreeSet<&'static str>,
+    emit_behaviors: BTreeSet<&'static str>,
+    aggregate_functions: BTreeSet<&'static str>,
+    batch_conditions: BTreeSet<&'static str>,
+    batch_entries: BTreeSet<&'static str>,
+    batch_queries: BTreeSet<&'static str>,
+    query_param_types: BTreeSet<&'static str>,
+    query_values: BTreeSet<&'static str>,
+}
+
+fn validate_fixture_coverage(fixtures: &[Fixture]) {
+    assert_complete_fixture_coverage(&fixture_coverage(fixtures.iter()));
+    assert_complete_fixture_coverage(&fixture_coverage(
+        fixtures
+            .iter()
+            .filter(|fixture| fixture.bucket == "json-only" && fixture.name.starts_with('9')),
+    ));
+}
+
+fn fixture_coverage<'a>(fixtures: impl Iterator<Item = &'a Fixture>) -> FixtureCoverage {
+    let mut coverage = FixtureCoverage::default();
+    for fixture in fixtures {
+        visit_request(&fixture.request, &mut coverage);
+    }
+    coverage
+}
+
+fn assert_complete_fixture_coverage(coverage: &FixtureCoverage) {
+    assert_variants(
+        "AstNode",
+        &coverage.ast_nodes,
+        &[
+            "Context",
+            "Nodes",
+            "NodesWhere",
+            "Edges",
+            "EdgesWhere",
+            "VectorSearchNodes",
+            "TextSearchNodes",
+            "VectorSearchEdges",
+            "TextSearchEdges",
+            "Out",
+            "In",
+            "Both",
+            "OutE",
+            "InE",
+            "BothE",
+            "OutN",
+            "InN",
+            "OtherN",
+            "Has",
+            "HasLabel",
+            "HasKey",
+            "Where",
+            "Dedup",
+            "Within",
+            "Without",
+            "EdgeHas",
+            "EdgeHasLabel",
+            "Limit",
+            "Skip",
+            "Range",
+            "As",
+            "Store",
+            "Select",
+            "Bind",
+            "Inject",
+            "Count",
+            "Exists",
+            "Id",
+            "Label",
+            "Values",
+            "ValueMap",
+            "Project",
+            "ProjectBindings",
+            "EdgeProperties",
+            "CreateIndex",
+            "DropIndex",
+            "GetIndexOperation",
+            "RetryIndexOperation",
+            "AbortIndexOperation",
+            "AddN",
+            "AddE",
+            "SetProperty",
+            "RemoveProperty",
+            "Drop",
+            "DropEdge",
+            "DropEdgeLabeled",
+            "DropEdgeById",
+            "OrderBy",
+            "OrderByMultiple",
+            "Repeat",
+            "Union",
+            "Choose",
+            "Coalesce",
+            "Optional",
+            "Group",
+            "GroupCount",
+            "AggregateBy",
+            "Fold",
+            "Unfold",
+            "Path",
+            "SimplePath",
+            "WithSack",
+            "SackSet",
+            "SackAdd",
+            "SackGet",
+            "ShortestPath",
+        ],
+    );
+    assert_variants(
+        "Expr",
+        &coverage.expressions,
+        &[
+            "Property",
+            "Id",
+            "Timestamp",
+            "DateTimeNow",
+            "Constant",
+            "Param",
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Mod",
+            "Neg",
+            "Case",
+        ],
+    );
+    assert_variants(
+        "Predicate",
+        &coverage.predicates,
+        &[
+            "Eq",
+            "Neq",
+            "Gt",
+            "Gte",
+            "Lt",
+            "Lte",
+            "Between",
+            "HasKey",
+            "IsNull",
+            "IsNotNull",
+            "StartsWith",
+            "EndsWith",
+            "Contains",
+            "IsIn",
+            "And",
+            "Or",
+            "Not",
+            "Compare",
+        ],
+    );
+    assert_variants(
+        "CompareOp",
+        &coverage.compare_ops,
+        &["Eq", "Neq", "Gt", "Gte", "Lt", "Lte"],
+    );
+    assert_variants(
+        "PropertyValue",
+        &coverage.property_values,
+        &[
+            "Null",
+            "Bool",
+            "I64",
+            "DateTime",
+            "F64",
+            "F32",
+            "String",
+            "Bytes",
+            "I64Array",
+            "F64Array",
+            "F32Array",
+            "StringArray",
+            "Array",
+            "Object",
+        ],
+    );
+    assert_variants(
+        "PropertyInput",
+        &coverage.property_inputs,
+        &["Value", "Expr"],
+    );
+    assert_variants(
+        "NodeRef",
+        &coverage.node_refs,
+        &["All", "Ids", "Var", "Param"],
+    );
+    assert_variants(
+        "EdgeRef",
+        &coverage.edge_refs,
+        &["All", "Ids", "Var", "Param"],
+    );
+    assert_variants("Projection", &coverage.projections, &["Property", "Expr"]);
+    assert_variants(
+        "BindingTarget",
+        &coverage.binding_targets,
+        &["Current", "Binding"],
+    );
+    assert_variants(
+        "BindingProjection",
+        &coverage.binding_projections,
+        &["Property", "Coalesce"],
+    );
+    assert_variants("StreamBound", &coverage.stream_bounds, &["Literal", "Expr"]);
+    assert_variants(
+        "IndexSpec",
+        &coverage.index_specs,
+        &[
+            "NodeEquality",
+            "NodeRange",
+            "EdgeEquality",
+            "EdgeRange",
+            "NodeVector",
+            "NodeText",
+            "EdgeVector",
+            "EdgeText",
+        ],
+    );
+    assert_variants(
+        "RangeIndexDirection",
+        &coverage.range_directions,
+        &["Asc", "Desc"],
+    );
+    assert_variants(
+        "VectorDistanceMetric",
+        &coverage.vector_metrics,
+        &["Cosine", "Euclidean", "Manhattan"],
+    );
+    assert_variants("Order", &coverage.orders, &["Asc", "Desc"]);
+    assert_variants(
+        "ShortestPathDirection",
+        &coverage.shortest_path_directions,
+        &["Out", "In", "Both"],
+    );
+    assert_variants(
+        "EmitBehavior",
+        &coverage.emit_behaviors,
+        &["None", "Before", "After", "All"],
+    );
+    assert_variants(
+        "AggregateFunction",
+        &coverage.aggregate_functions,
+        &["Count", "Sum", "Min", "Max", "Mean"],
+    );
+    assert_variants(
+        "BatchCondition",
+        &coverage.batch_conditions,
+        &["VarNotEmpty", "VarEmpty", "VarMinSize", "PrevNotEmpty"],
+    );
+    assert_variants("BatchEntry", &coverage.batch_entries, &["Query", "ForEach"]);
+    assert_variants("BatchQuery", &coverage.batch_queries, &["Read", "Write"]);
+    assert_variants(
+        "QueryParamType",
+        &coverage.query_param_types,
+        &[
+            "Bool", "I64", "F64", "F32", "String", "DateTime", "Bytes", "Value", "Object", "Array",
+        ],
+    );
+    assert_variants(
+        "QueryValue",
+        &coverage.query_values,
+        &[
+            "Null", "Bool", "I64", "F64", "F32", "String", "Array", "Object",
+        ],
+    );
+}
+
+fn assert_variants(label: &str, actual: &BTreeSet<&str>, expected: &[&'static str]) {
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(actual, &expected, "{label} fixture coverage is incomplete");
+}
+
+fn visit_request(request: &QueryRequest, coverage: &mut FixtureCoverage) {
+    match &request.query {
+        BatchQuery::Read(batch) => {
+            coverage.batch_queries.insert("Read");
+            visit_batch(&batch.entries, coverage);
+        }
+        BatchQuery::Write(batch) => {
+            coverage.batch_queries.insert("Write");
+            visit_batch(&batch.entries, coverage);
+        }
+    }
+    if let Some(parameters) = &request.parameters {
+        for value in parameters.values() {
+            visit_query_value(value, coverage);
+        }
+    }
+    if let Some(parameter_types) = &request.parameter_types {
+        for param_type in parameter_types.values() {
+            visit_query_param_type(param_type, coverage);
+        }
+    }
+}
+
+fn visit_batch(entries: &[BatchEntry], coverage: &mut FixtureCoverage) {
+    for entry in entries {
+        match entry {
+            BatchEntry::Query(query) => {
+                coverage.batch_entries.insert("Query");
+                if let Some(condition) = &query.condition {
+                    visit_batch_condition(condition, coverage);
+                }
+                visit_ast_node(&query.root, coverage);
+            }
+            BatchEntry::ForEach { body, .. } => {
+                coverage.batch_entries.insert("ForEach");
+                visit_batch(body, coverage);
+            }
+        }
+    }
+}
+
+fn visit_batch_condition(condition: &BatchCondition, coverage: &mut FixtureCoverage) {
+    coverage.batch_conditions.insert(match condition {
+        BatchCondition::VarNotEmpty(_) => "VarNotEmpty",
+        BatchCondition::VarEmpty(_) => "VarEmpty",
+        BatchCondition::VarMinSize(_, _) => "VarMinSize",
+        BatchCondition::PrevNotEmpty => "PrevNotEmpty",
+    });
+}
+
+fn visit_ast_node(node: &AstNode, coverage: &mut FixtureCoverage) {
+    match node {
+        AstNode::Context => {
+            coverage.ast_nodes.insert("Context");
+        }
+        AstNode::Nodes { reference } => {
+            coverage.ast_nodes.insert("Nodes");
+            visit_node_ref(reference, coverage);
+        }
+        AstNode::NodesWhere { predicate } => {
+            coverage.ast_nodes.insert("NodesWhere");
+            visit_predicate(predicate, coverage);
+        }
+        AstNode::Edges { reference } => {
+            coverage.ast_nodes.insert("Edges");
+            visit_edge_ref(reference, coverage);
+        }
+        AstNode::EdgesWhere { predicate } => {
+            coverage.ast_nodes.insert("EdgesWhere");
+            visit_predicate(predicate, coverage);
+        }
+        AstNode::VectorSearchNodes {
+            tenant_value,
+            query_vector,
+            k,
+            ..
+        } => {
+            coverage.ast_nodes.insert("VectorSearchNodes");
+            if let Some(value) = tenant_value {
+                visit_property_input(value, coverage);
+            }
+            visit_property_input(query_vector, coverage);
+            visit_stream_bound(k, coverage);
+        }
+        AstNode::TextSearchNodes {
+            tenant_value,
+            query_text,
+            k,
+            ..
+        } => {
+            coverage.ast_nodes.insert("TextSearchNodes");
+            if let Some(value) = tenant_value {
+                visit_property_input(value, coverage);
+            }
+            visit_property_input(query_text, coverage);
+            visit_stream_bound(k, coverage);
+        }
+        AstNode::VectorSearchEdges {
+            tenant_value,
+            query_vector,
+            k,
+            ..
+        } => {
+            coverage.ast_nodes.insert("VectorSearchEdges");
+            if let Some(value) = tenant_value {
+                visit_property_input(value, coverage);
+            }
+            visit_property_input(query_vector, coverage);
+            visit_stream_bound(k, coverage);
+        }
+        AstNode::TextSearchEdges {
+            tenant_value,
+            query_text,
+            k,
+            ..
+        } => {
+            coverage.ast_nodes.insert("TextSearchEdges");
+            if let Some(value) = tenant_value {
+                visit_property_input(value, coverage);
+            }
+            visit_property_input(query_text, coverage);
+            visit_stream_bound(k, coverage);
+        }
+        AstNode::Out { input, .. } => visit_input("Out", input, coverage),
+        AstNode::In { input, .. } => visit_input("In", input, coverage),
+        AstNode::Both { input, .. } => visit_input("Both", input, coverage),
+        AstNode::OutE { input, .. } => visit_input("OutE", input, coverage),
+        AstNode::InE { input, .. } => visit_input("InE", input, coverage),
+        AstNode::BothE { input, .. } => visit_input("BothE", input, coverage),
+        AstNode::OutN { input } => visit_input("OutN", input, coverage),
+        AstNode::InN { input } => visit_input("InN", input, coverage),
+        AstNode::OtherN { input } => visit_input("OtherN", input, coverage),
+        AstNode::Has { input, value, .. } => {
+            coverage.ast_nodes.insert("Has");
+            visit_ast_node(input, coverage);
+            visit_property_value(value, coverage);
+        }
+        AstNode::HasLabel { input, .. } => visit_input("HasLabel", input, coverage),
+        AstNode::HasKey { input, .. } => visit_input("HasKey", input, coverage),
+        AstNode::Where {
+            input, predicate, ..
+        } => {
+            coverage.ast_nodes.insert("Where");
+            visit_ast_node(input, coverage);
+            visit_predicate(predicate, coverage);
+        }
+        AstNode::Dedup { input } => visit_input("Dedup", input, coverage),
+        AstNode::Within { input, .. } => visit_input("Within", input, coverage),
+        AstNode::Without { input, .. } => visit_input("Without", input, coverage),
+        AstNode::EdgeHas { input, value, .. } => {
+            coverage.ast_nodes.insert("EdgeHas");
+            visit_ast_node(input, coverage);
+            visit_property_input(value, coverage);
+        }
+        AstNode::EdgeHasLabel { input, .. } => visit_input("EdgeHasLabel", input, coverage),
+        AstNode::Limit { input, count } => {
+            coverage.ast_nodes.insert("Limit");
+            visit_ast_node(input, coverage);
+            visit_stream_bound(count, coverage);
+        }
+        AstNode::Skip { input, count } => {
+            coverage.ast_nodes.insert("Skip");
+            visit_ast_node(input, coverage);
+            visit_stream_bound(count, coverage);
+        }
+        AstNode::Range { input, start, end } => {
+            coverage.ast_nodes.insert("Range");
+            visit_ast_node(input, coverage);
+            visit_stream_bound(start, coverage);
+            visit_stream_bound(end, coverage);
+        }
+        AstNode::As { input, .. } => visit_input("As", input, coverage),
+        AstNode::Store { input, .. } => visit_input("Store", input, coverage),
+        AstNode::Select { input, .. } => visit_input("Select", input, coverage),
+        AstNode::Bind { input, .. } => visit_input("Bind", input, coverage),
+        AstNode::Inject { input, .. } => {
+            coverage.ast_nodes.insert("Inject");
+            if let Some(input) = input {
+                visit_ast_node(input, coverage);
+            }
+        }
+        AstNode::Count { input } => visit_input("Count", input, coverage),
+        AstNode::Exists { input } => visit_input("Exists", input, coverage),
+        AstNode::Id { input } => visit_input("Id", input, coverage),
+        AstNode::Label { input } => visit_input("Label", input, coverage),
+        AstNode::Values { input, .. } => visit_input("Values", input, coverage),
+        AstNode::ValueMap { input, .. } => visit_input("ValueMap", input, coverage),
+        AstNode::Project {
+            input, projections, ..
+        } => {
+            coverage.ast_nodes.insert("Project");
+            visit_ast_node(input, coverage);
+            for projection in projections {
+                visit_projection(projection, coverage);
+            }
+        }
+        AstNode::ProjectBindings {
+            input, projections, ..
+        } => {
+            coverage.ast_nodes.insert("ProjectBindings");
+            visit_ast_node(input, coverage);
+            for projection in projections {
+                visit_binding_projection(projection, coverage);
+            }
+        }
+        AstNode::EdgeProperties { input } => visit_input("EdgeProperties", input, coverage),
+        AstNode::CreateIndex { spec, .. } => {
+            coverage.ast_nodes.insert("CreateIndex");
+            visit_index_spec(spec, coverage);
+        }
+        AstNode::DropIndex { spec } => {
+            coverage.ast_nodes.insert("DropIndex");
+            visit_index_spec(spec, coverage);
+        }
+        AstNode::GetIndexOperation { .. } => {
+            coverage.ast_nodes.insert("GetIndexOperation");
+        }
+        AstNode::RetryIndexOperation { .. } => {
+            coverage.ast_nodes.insert("RetryIndexOperation");
+        }
+        AstNode::AbortIndexOperation { .. } => {
+            coverage.ast_nodes.insert("AbortIndexOperation");
+        }
+        AstNode::AddN {
+            input, properties, ..
+        } => {
+            coverage.ast_nodes.insert("AddN");
+            if let Some(input) = input {
+                visit_ast_node(input, coverage);
+            }
+            for (_, value) in properties {
+                visit_property_input(value, coverage);
+            }
+        }
+        AstNode::AddE {
+            input,
+            to,
+            properties,
+            ..
+        } => {
+            coverage.ast_nodes.insert("AddE");
+            visit_ast_node(input, coverage);
+            visit_node_ref(to, coverage);
+            for (_, value) in properties {
+                visit_property_input(value, coverage);
+            }
+        }
+        AstNode::SetProperty { input, value, .. } => {
+            coverage.ast_nodes.insert("SetProperty");
+            visit_ast_node(input, coverage);
+            visit_property_input(value, coverage);
+        }
+        AstNode::RemoveProperty { input, .. } => visit_input("RemoveProperty", input, coverage),
+        AstNode::Drop { input } => visit_input("Drop", input, coverage),
+        AstNode::DropEdge { input, to } => {
+            coverage.ast_nodes.insert("DropEdge");
+            visit_ast_node(input, coverage);
+            visit_node_ref(to, coverage);
+        }
+        AstNode::DropEdgeLabeled { input, to, .. } => {
+            coverage.ast_nodes.insert("DropEdgeLabeled");
+            visit_ast_node(input, coverage);
+            visit_node_ref(to, coverage);
+        }
+        AstNode::DropEdgeById { input, edges } => {
+            coverage.ast_nodes.insert("DropEdgeById");
+            if let Some(input) = input {
+                visit_ast_node(input, coverage);
+            }
+            visit_edge_ref(edges, coverage);
+        }
+        AstNode::OrderBy { input, order, .. } => {
+            coverage.ast_nodes.insert("OrderBy");
+            visit_ast_node(input, coverage);
+            visit_order(order, coverage);
+        }
+        AstNode::OrderByMultiple {
+            input, orderings, ..
+        } => {
+            coverage.ast_nodes.insert("OrderByMultiple");
+            visit_ast_node(input, coverage);
+            for (_, order) in orderings {
+                visit_order(order, coverage);
+            }
+        }
+        AstNode::Repeat { input, config } => {
+            coverage.ast_nodes.insert("Repeat");
+            visit_ast_node(input, coverage);
+            visit_repeat_config(config, coverage);
+        }
+        AstNode::Union { input, traversals } => {
+            coverage.ast_nodes.insert("Union");
+            visit_ast_node(input, coverage);
+            for traversal in traversals {
+                visit_ast_node(&traversal.root, coverage);
+            }
+        }
+        AstNode::Choose {
+            input,
+            condition,
+            then_traversal,
+            else_traversal,
+        } => {
+            coverage.ast_nodes.insert("Choose");
+            visit_ast_node(input, coverage);
+            visit_predicate(condition, coverage);
+            visit_ast_node(&then_traversal.root, coverage);
+            if let Some(traversal) = else_traversal {
+                visit_ast_node(&traversal.root, coverage);
+            }
+        }
+        AstNode::Coalesce { input, traversals } => {
+            coverage.ast_nodes.insert("Coalesce");
+            visit_ast_node(input, coverage);
+            for traversal in traversals {
+                visit_ast_node(&traversal.root, coverage);
+            }
+        }
+        AstNode::Optional { input, traversal } => {
+            coverage.ast_nodes.insert("Optional");
+            visit_ast_node(input, coverage);
+            visit_ast_node(&traversal.root, coverage);
+        }
+        AstNode::Group { input, .. } => visit_input("Group", input, coverage),
+        AstNode::GroupCount { input, .. } => visit_input("GroupCount", input, coverage),
+        AstNode::AggregateBy {
+            input, function, ..
+        } => {
+            coverage.ast_nodes.insert("AggregateBy");
+            visit_ast_node(input, coverage);
+            visit_aggregate_function(function, coverage);
+        }
+        AstNode::Fold { input } => visit_input("Fold", input, coverage),
+        AstNode::Unfold { input } => visit_input("Unfold", input, coverage),
+        AstNode::Path { input } => visit_input("Path", input, coverage),
+        AstNode::SimplePath { input } => visit_input("SimplePath", input, coverage),
+        AstNode::WithSack { input, initial } => {
+            coverage.ast_nodes.insert("WithSack");
+            visit_ast_node(input, coverage);
+            visit_property_value(initial, coverage);
+        }
+        AstNode::SackSet { input, .. } => visit_input("SackSet", input, coverage),
+        AstNode::SackAdd { input, .. } => visit_input("SackAdd", input, coverage),
+        AstNode::SackGet { input } => visit_input("SackGet", input, coverage),
+        AstNode::ShortestPath {
+            source,
+            target,
+            direction,
+            ..
+        } => {
+            coverage.ast_nodes.insert("ShortestPath");
+            visit_node_ref(source, coverage);
+            visit_node_ref(target, coverage);
+            visit_shortest_path_direction(direction, coverage);
+        }
+    }
+}
+
+fn visit_input(name: &'static str, input: &AstNode, coverage: &mut FixtureCoverage) {
+    coverage.ast_nodes.insert(name);
+    visit_ast_node(input, coverage);
+}
+
+fn visit_expr(expr: &Expr, coverage: &mut FixtureCoverage) {
+    match expr {
+        Expr::Property(_) => {
+            coverage.expressions.insert("Property");
+        }
+        Expr::Id => {
+            coverage.expressions.insert("Id");
+        }
+        Expr::Timestamp => {
+            coverage.expressions.insert("Timestamp");
+        }
+        Expr::DateTimeNow => {
+            coverage.expressions.insert("DateTimeNow");
+        }
+        Expr::Constant(value) => {
+            coverage.expressions.insert("Constant");
+            visit_property_value(value, coverage);
+        }
+        Expr::Param(_) => {
+            coverage.expressions.insert("Param");
+        }
+        Expr::Add { left, right } => visit_binary_expr("Add", left, right, coverage),
+        Expr::Sub { left, right } => visit_binary_expr("Sub", left, right, coverage),
+        Expr::Mul { left, right } => visit_binary_expr("Mul", left, right, coverage),
+        Expr::Div { left, right } => visit_binary_expr("Div", left, right, coverage),
+        Expr::Mod { left, right } => visit_binary_expr("Mod", left, right, coverage),
+        Expr::Neg { expr } => {
+            coverage.expressions.insert("Neg");
+            visit_expr(expr, coverage);
+        }
+        Expr::Case {
+            when_then,
+            else_expr,
+        } => {
+            coverage.expressions.insert("Case");
+            for branch in when_then {
+                visit_predicate(&branch.when, coverage);
+                visit_expr(&branch.then, coverage);
+            }
+            if let Some(expr) = else_expr {
+                visit_expr(expr, coverage);
+            }
+        }
+    }
+}
+
+fn visit_binary_expr(
+    name: &'static str,
+    left: &Expr,
+    right: &Expr,
+    coverage: &mut FixtureCoverage,
+) {
+    coverage.expressions.insert(name);
+    visit_expr(left, coverage);
+    visit_expr(right, coverage);
+}
+
+fn visit_predicate(predicate: &Predicate, coverage: &mut FixtureCoverage) {
+    match predicate {
+        Predicate::Eq { left, right } => visit_binary_predicate("Eq", left, right, coverage),
+        Predicate::Neq { left, right } => visit_binary_predicate("Neq", left, right, coverage),
+        Predicate::Gt { left, right } => visit_binary_predicate("Gt", left, right, coverage),
+        Predicate::Gte { left, right } => visit_binary_predicate("Gte", left, right, coverage),
+        Predicate::Lt { left, right } => visit_binary_predicate("Lt", left, right, coverage),
+        Predicate::Lte { left, right } => visit_binary_predicate("Lte", left, right, coverage),
+        Predicate::Between { value, min, max } => {
+            coverage.predicates.insert("Between");
+            visit_expr(value, coverage);
+            visit_expr(min, coverage);
+            visit_expr(max, coverage);
+        }
+        Predicate::HasKey { .. } => {
+            coverage.predicates.insert("HasKey");
+        }
+        Predicate::IsNull { .. } => {
+            coverage.predicates.insert("IsNull");
+        }
+        Predicate::IsNotNull { .. } => {
+            coverage.predicates.insert("IsNotNull");
+        }
+        Predicate::StartsWith { value, prefix } => {
+            visit_binary_predicate("StartsWith", value, prefix, coverage);
+        }
+        Predicate::EndsWith { value, suffix } => {
+            visit_binary_predicate("EndsWith", value, suffix, coverage);
+        }
+        Predicate::Contains { value, substring } => {
+            visit_binary_predicate("Contains", value, substring, coverage);
+        }
+        Predicate::IsIn { value, values } => {
+            visit_binary_predicate("IsIn", value, values, coverage);
+        }
+        Predicate::And { predicates } => visit_predicates("And", predicates, coverage),
+        Predicate::Or { predicates } => visit_predicates("Or", predicates, coverage),
+        Predicate::Not { predicate } => {
+            coverage.predicates.insert("Not");
+            visit_predicate(predicate, coverage);
+        }
+        Predicate::Compare { left, op, right } => {
+            coverage.predicates.insert("Compare");
+            visit_expr(left, coverage);
+            visit_compare_op(op, coverage);
+            visit_expr(right, coverage);
+        }
+    }
+}
+
+fn visit_binary_predicate(
+    name: &'static str,
+    left: &Expr,
+    right: &Expr,
+    coverage: &mut FixtureCoverage,
+) {
+    coverage.predicates.insert(name);
+    visit_expr(left, coverage);
+    visit_expr(right, coverage);
+}
+
+fn visit_predicates(name: &'static str, predicates: &[Predicate], coverage: &mut FixtureCoverage) {
+    coverage.predicates.insert(name);
+    for predicate in predicates {
+        visit_predicate(predicate, coverage);
+    }
+}
+
+fn visit_compare_op(op: &CompareOp, coverage: &mut FixtureCoverage) {
+    coverage.compare_ops.insert(match op {
+        CompareOp::Eq => "Eq",
+        CompareOp::Neq => "Neq",
+        CompareOp::Gt => "Gt",
+        CompareOp::Gte => "Gte",
+        CompareOp::Lt => "Lt",
+        CompareOp::Lte => "Lte",
+    });
+}
+
+fn visit_property_input(input: &PropertyInput, coverage: &mut FixtureCoverage) {
+    match input {
+        PropertyInput::Value(value) => {
+            coverage.property_inputs.insert("Value");
+            visit_property_value(value, coverage);
+        }
+        PropertyInput::Expr(expr) => {
+            coverage.property_inputs.insert("Expr");
+            visit_expr(expr, coverage);
+        }
+    }
+}
+
+fn visit_property_value(value: &PropertyValue, coverage: &mut FixtureCoverage) {
+    match value {
+        PropertyValue::Null => {
+            coverage.property_values.insert("Null");
+        }
+        PropertyValue::Bool(_) => {
+            coverage.property_values.insert("Bool");
+        }
+        PropertyValue::I64(_) => {
+            coverage.property_values.insert("I64");
+        }
+        PropertyValue::DateTime(_) => {
+            coverage.property_values.insert("DateTime");
+        }
+        PropertyValue::F64(_) => {
+            coverage.property_values.insert("F64");
+        }
+        PropertyValue::F32(_) => {
+            coverage.property_values.insert("F32");
+        }
+        PropertyValue::String(_) => {
+            coverage.property_values.insert("String");
+        }
+        PropertyValue::Bytes(_) => {
+            coverage.property_values.insert("Bytes");
+        }
+        PropertyValue::I64Array(_) => {
+            coverage.property_values.insert("I64Array");
+        }
+        PropertyValue::F64Array(_) => {
+            coverage.property_values.insert("F64Array");
+        }
+        PropertyValue::F32Array(_) => {
+            coverage.property_values.insert("F32Array");
+        }
+        PropertyValue::StringArray(_) => {
+            coverage.property_values.insert("StringArray");
+        }
+        PropertyValue::Array(values) => {
+            coverage.property_values.insert("Array");
+            for value in values {
+                visit_property_value(value, coverage);
+            }
+        }
+        PropertyValue::Object(values) => {
+            coverage.property_values.insert("Object");
+            for value in values.values() {
+                visit_property_value(value, coverage);
+            }
+        }
+    }
+}
+
+fn visit_query_value(value: &QueryValue, coverage: &mut FixtureCoverage) {
+    match value {
+        QueryValue::Null => {
+            coverage.query_values.insert("Null");
+        }
+        QueryValue::Bool(_) => {
+            coverage.query_values.insert("Bool");
+        }
+        QueryValue::I64(_) => {
+            coverage.query_values.insert("I64");
+        }
+        QueryValue::F64(_) => {
+            coverage.query_values.insert("F64");
+        }
+        QueryValue::F32(_) => {
+            coverage.query_values.insert("F32");
+        }
+        QueryValue::String(_) => {
+            coverage.query_values.insert("String");
+        }
+        QueryValue::Array(values) => {
+            coverage.query_values.insert("Array");
+            for value in values {
+                visit_query_value(value, coverage);
+            }
+        }
+        QueryValue::Object(values) => {
+            coverage.query_values.insert("Object");
+            for value in values.values() {
+                visit_query_value(value, coverage);
+            }
+        }
+    }
+}
+
+fn visit_node_ref(reference: &NodeRef, coverage: &mut FixtureCoverage) {
+    coverage.node_refs.insert(match reference {
+        NodeRef::All => "All",
+        NodeRef::Ids(_) => "Ids",
+        NodeRef::Var(_) => "Var",
+        NodeRef::Param(_) => "Param",
+    });
+}
+
+fn visit_edge_ref(reference: &EdgeRef, coverage: &mut FixtureCoverage) {
+    coverage.edge_refs.insert(match reference {
+        EdgeRef::All => "All",
+        EdgeRef::Ids(_) => "Ids",
+        EdgeRef::Var(_) => "Var",
+        EdgeRef::Param(_) => "Param",
+    });
+}
+
+fn visit_projection(projection: &Projection, coverage: &mut FixtureCoverage) {
+    match projection {
+        Projection::Property(_) => {
+            coverage.projections.insert("Property");
+        }
+        Projection::Expr(projection) => {
+            coverage.projections.insert("Expr");
+            visit_expr(&projection.expr, coverage);
+        }
+    }
+}
+
+fn visit_binding_target(target: &BindingTarget, coverage: &mut FixtureCoverage) {
+    coverage.binding_targets.insert(match target {
+        BindingTarget::Current => "Current",
+        BindingTarget::Binding(_) => "Binding",
+    });
+}
+
+fn visit_binding_value_ref(value_ref: &BindingValueRef, coverage: &mut FixtureCoverage) {
+    visit_binding_target(&value_ref.target, coverage);
+}
+
+fn visit_binding_projection(projection: &BindingProjection, coverage: &mut FixtureCoverage) {
+    match projection {
+        BindingProjection::Property { target, .. } => {
+            coverage.binding_projections.insert("Property");
+            visit_binding_target(target, coverage);
+        }
+        BindingProjection::Coalesce { refs, .. } => {
+            coverage.binding_projections.insert("Coalesce");
+            for value_ref in refs {
+                visit_binding_value_ref(value_ref, coverage);
+            }
+        }
+    }
+}
+
+fn visit_stream_bound(bound: &StreamBound, coverage: &mut FixtureCoverage) {
+    match bound {
+        StreamBound::Literal(_) => {
+            coverage.stream_bounds.insert("Literal");
+        }
+        StreamBound::Expr(expr) => {
+            coverage.stream_bounds.insert("Expr");
+            visit_expr(expr, coverage);
+        }
+    }
+}
+
+fn visit_index_spec(spec: &IndexSpec, coverage: &mut FixtureCoverage) {
+    match spec {
+        IndexSpec::NodeEquality { .. } => {
+            coverage.index_specs.insert("NodeEquality");
+        }
+        IndexSpec::NodeRange { direction, .. } => {
+            coverage.index_specs.insert("NodeRange");
+            visit_range_direction(direction, coverage);
+        }
+        IndexSpec::EdgeEquality { .. } => {
+            coverage.index_specs.insert("EdgeEquality");
+        }
+        IndexSpec::EdgeRange { direction, .. } => {
+            coverage.index_specs.insert("EdgeRange");
+            visit_range_direction(direction, coverage);
+        }
+        IndexSpec::NodeVector { metric, .. } => {
+            coverage.index_specs.insert("NodeVector");
+            visit_vector_metric(metric, coverage);
+        }
+        IndexSpec::NodeText { .. } => {
+            coverage.index_specs.insert("NodeText");
+        }
+        IndexSpec::EdgeVector { metric, .. } => {
+            coverage.index_specs.insert("EdgeVector");
+            visit_vector_metric(metric, coverage);
+        }
+        IndexSpec::EdgeText { .. } => {
+            coverage.index_specs.insert("EdgeText");
+        }
+    }
+}
+
+fn visit_range_direction(direction: &RangeIndexDirection, coverage: &mut FixtureCoverage) {
+    coverage.range_directions.insert(match direction {
+        RangeIndexDirection::Asc => "Asc",
+        RangeIndexDirection::Desc => "Desc",
+    });
+}
+
+fn visit_vector_metric(metric: &VectorDistanceMetric, coverage: &mut FixtureCoverage) {
+    coverage.vector_metrics.insert(match metric {
+        VectorDistanceMetric::Cosine => "Cosine",
+        VectorDistanceMetric::Euclidean => "Euclidean",
+        VectorDistanceMetric::Manhattan => "Manhattan",
+    });
+}
+
+fn visit_order(order: &Order, coverage: &mut FixtureCoverage) {
+    coverage.orders.insert(match order {
+        Order::Asc => "Asc",
+        Order::Desc => "Desc",
+    });
+}
+
+fn visit_shortest_path_direction(
+    direction: &ShortestPathDirection,
+    coverage: &mut FixtureCoverage,
+) {
+    coverage.shortest_path_directions.insert(match direction {
+        ShortestPathDirection::Out => "Out",
+        ShortestPathDirection::In => "In",
+        ShortestPathDirection::Both => "Both",
+    });
+}
+
+fn visit_repeat_config(config: &RepeatConfig, coverage: &mut FixtureCoverage) {
+    visit_ast_node(&config.traversal.root, coverage);
+    if let Some(predicate) = &config.until {
+        visit_predicate(predicate, coverage);
+    }
+    coverage.emit_behaviors.insert(match config.emit {
+        EmitBehavior::None => "None",
+        EmitBehavior::Before => "Before",
+        EmitBehavior::After => "After",
+        EmitBehavior::All => "All",
+    });
+    if let Some(predicate) = &config.emit_predicate {
+        visit_predicate(predicate, coverage);
+    }
+}
+
+fn visit_aggregate_function(function: &AggregateFunction, coverage: &mut FixtureCoverage) {
+    coverage.aggregate_functions.insert(match function {
+        AggregateFunction::Count => "Count",
+        AggregateFunction::Sum => "Sum",
+        AggregateFunction::Min => "Min",
+        AggregateFunction::Max => "Max",
+        AggregateFunction::Mean => "Mean",
+    });
+}
+
+fn visit_query_param_type(param_type: &QueryParamType, coverage: &mut FixtureCoverage) {
+    match param_type {
+        QueryParamType::Bool => {
+            coverage.query_param_types.insert("Bool");
+        }
+        QueryParamType::I64 => {
+            coverage.query_param_types.insert("I64");
+        }
+        QueryParamType::F64 => {
+            coverage.query_param_types.insert("F64");
+        }
+        QueryParamType::F32 => {
+            coverage.query_param_types.insert("F32");
+        }
+        QueryParamType::String => {
+            coverage.query_param_types.insert("String");
+        }
+        QueryParamType::DateTime => {
+            coverage.query_param_types.insert("DateTime");
+        }
+        QueryParamType::Bytes => {
+            coverage.query_param_types.insert("Bytes");
+        }
+        QueryParamType::Value => {
+            coverage.query_param_types.insert("Value");
+        }
+        QueryParamType::Object => {
+            coverage.query_param_types.insert("Object");
+        }
+        QueryParamType::Array(inner) => {
+            coverage.query_param_types.insert("Array");
+            visit_query_param_type(inner, coverage);
+        }
+    }
+}
+
 fn reset_dir(path: &Path) -> std::io::Result<()> {
     if path.exists() {
         fs::remove_dir_all(path)?;
@@ -41,7 +1191,7 @@ fn reset_dir(path: &Path) -> std::io::Result<()> {
     fs::create_dir_all(path)
 }
 
-fn runtime(name: impl Into<String>, request: DynamicQueryRequest) -> Fixture {
+fn runtime(name: impl Into<String>, request: QueryRequest) -> Fixture {
     Fixture {
         bucket: "runtime",
         name: name.into(),
@@ -49,7 +1199,7 @@ fn runtime(name: impl Into<String>, request: DynamicQueryRequest) -> Fixture {
     }
 }
 
-fn json_only(name: impl Into<String>, request: DynamicQueryRequest) -> Fixture {
+fn json_only(name: impl Into<String>, request: QueryRequest) -> Fixture {
     Fixture {
         bucket: "json-only",
         name: name.into(),
@@ -57,16 +1207,16 @@ fn json_only(name: impl Into<String>, request: DynamicQueryRequest) -> Fixture {
     }
 }
 
-fn read_request(batch: ReadBatch) -> DynamicQueryRequest {
-    DynamicQueryRequest::read(batch)
+fn read_request(batch: ReadBatch) -> QueryRequest {
+    QueryRequest::read(batch)
 }
 
-fn write_request(batch: WriteBatch) -> DynamicQueryRequest {
-    DynamicQueryRequest::write(batch)
+fn write_request(batch: WriteBatch) -> QueryRequest {
+    QueryRequest::write(batch)
 }
 
-fn object(entries: Vec<(&str, DynamicQueryValue)>) -> DynamicQueryValue {
-    DynamicQueryValue::Object(
+fn object(entries: Vec<(&str, QueryValue)>) -> QueryValue {
+    QueryValue::Object(
         entries
             .into_iter()
             .map(|(key, value)| (key.to_string(), value))
@@ -74,27 +1224,27 @@ fn object(entries: Vec<(&str, DynamicQueryValue)>) -> DynamicQueryValue {
     )
 }
 
-fn array(values: Vec<DynamicQueryValue>) -> DynamicQueryValue {
-    DynamicQueryValue::Array(values)
+fn array(values: Vec<QueryValue>) -> QueryValue {
+    QueryValue::Array(values)
 }
 
-fn string(value: &str) -> DynamicQueryValue {
-    DynamicQueryValue::String(value.to_string())
+fn string(value: &str) -> QueryValue {
+    QueryValue::String(value.to_string())
 }
 
-fn i64_value(value: i64) -> DynamicQueryValue {
-    DynamicQueryValue::I64(value)
+fn i64_value(value: i64) -> QueryValue {
+    QueryValue::I64(value)
 }
 
-fn f64_value(value: f64) -> DynamicQueryValue {
-    DynamicQueryValue::F64(value)
+fn f64_value(value: f64) -> QueryValue {
+    QueryValue::F64(value)
 }
 
 fn with_params(
-    mut request: DynamicQueryRequest,
-    values: Vec<(&str, DynamicQueryValue)>,
+    mut request: QueryRequest,
+    values: Vec<(&str, QueryValue)>,
     types: Vec<(&str, QueryParamType)>,
-) -> DynamicQueryRequest {
+) -> QueryRequest {
     for (name, value) in values {
         request.insert_parameter_value(name, value);
     }
@@ -104,32 +1254,23 @@ fn with_params(
     request
 }
 
-fn user_props(
-    external_id: &'static str,
-    name: &'static str,
-    age: i64,
-    score: f64,
-    status: &'static str,
-    city: &'static str,
-    bio: &'static str,
-    embedding: Vec<f32>,
-) -> Vec<(&'static str, PropertyInput)> {
+fn user_props(user: UserProps) -> Vec<(&'static str, PropertyInput)> {
     vec![
-        ("externalId", PropertyInput::from(external_id)),
-        ("name", PropertyInput::from(name)),
-        ("age", PropertyInput::from(age)),
-        ("score", PropertyInput::from(score)),
-        ("status", PropertyInput::from(status)),
+        ("externalId", PropertyInput::from(user.external_id)),
+        ("name", PropertyInput::from(user.name)),
+        ("age", PropertyInput::from(user.age)),
+        ("score", PropertyInput::from(user.score)),
+        ("status", PropertyInput::from(user.status)),
         ("tenantId", PropertyInput::from("tenant-a")),
-        ("city", PropertyInput::from(city)),
-        ("bio", PropertyInput::from(bio)),
+        ("city", PropertyInput::from(user.city)),
+        ("bio", PropertyInput::from(user.bio)),
         (
             "createdAt",
             PropertyInput::from(DateTime::from_millis(1_776_000_000_000)),
         ),
         (
             "embedding",
-            PropertyInput::from(PropertyValue::from(embedding)),
+            PropertyInput::from(PropertyValue::from(user.embedding)),
         ),
     ]
 }
@@ -148,7 +1289,7 @@ fn nested_metadata_property(external_id: &str, score: i64) -> PropertyValue {
     ])
 }
 
-fn nested_metadata_param(external_id: &str, score: i64) -> DynamicQueryValue {
+fn nested_metadata_param(external_id: &str, score: i64) -> QueryValue {
     object(vec![
         ("externalID", string(external_id)),
         ("score", i64_value(score)),
@@ -166,48 +1307,48 @@ fn runtime_fixtures() -> Vec<Fixture> {
                         "alice",
                         g().add_n(
                             "ParityUser",
-                            user_props(
-                                "user-alice",
-                                "Alice",
-                                31,
-                                90.5,
-                                "active",
-                                "London",
-                                "Alice writes graph database tests",
-                                vec![1.0, 0.0, 0.0],
-                            ),
+                            user_props(UserProps {
+                                external_id: "user-alice",
+                                name: "Alice",
+                                age: 31,
+                                score: 90.5,
+                                status: "active",
+                                city: "London",
+                                bio: "Alice writes graph database tests",
+                                embedding: vec![1.0, 0.0, 0.0],
+                            }),
                         ),
                     )
                     .var_as(
                         "bob",
                         g().add_n(
                             "ParityUser",
-                            user_props(
-                                "user-bob",
-                                "Bob",
-                                27,
-                                72.25,
-                                "active",
-                                "Paris",
-                                "Bob likes traversal testing",
-                                vec![0.9, 0.1, 0.0],
-                            ),
+                            user_props(UserProps {
+                                external_id: "user-bob",
+                                name: "Bob",
+                                age: 27,
+                                score: 72.25,
+                                status: "active",
+                                city: "Paris",
+                                bio: "Bob likes traversal testing",
+                                embedding: vec![0.9, 0.1, 0.0],
+                            }),
                         ),
                     )
                     .var_as(
                         "carol",
                         g().add_n(
                             "ParityUser",
-                            user_props(
-                                "user-carol",
-                                "Carol",
-                                42,
-                                64.0,
-                                "inactive",
-                                "Berlin",
-                                "Carol archives old records",
-                                vec![0.0, 1.0, 0.0],
-                            ),
+                            user_props(UserProps {
+                                external_id: "user-carol",
+                                name: "Carol",
+                                age: 42,
+                                score: 64.0,
+                                status: "inactive",
+                                city: "Berlin",
+                                bio: "Carol archives old records",
+                                embedding: vec![0.0, 1.0, 0.0],
+                            }),
                         ),
                     )
                     .var_as(
@@ -734,7 +1875,13 @@ fn runtime_fixtures() -> Vec<Fixture> {
                     )
                     .var_as(
                         "node_vector",
-                        g().create_vector_index_nodes("ParityUser", "embedding", None::<&str>),
+                        g().create_vector_index_nodes(
+                            "ParityUser",
+                            "embedding",
+                            NonZeroUsize::new(3).expect("node vector dimension is non-zero"),
+                            VectorDistanceMetric::Cosine,
+                            None::<&str>,
+                        ),
                     )
                     .var_as(
                         "edge_text",
@@ -742,7 +1889,13 @@ fn runtime_fixtures() -> Vec<Fixture> {
                     )
                     .var_as(
                         "edge_vector",
-                        g().create_vector_index_edges("FOLLOWS", "embedding", None::<&str>),
+                        g().create_vector_index_edges(
+                            "FOLLOWS",
+                            "embedding",
+                            NonZeroUsize::new(2).expect("edge vector dimension is non-zero"),
+                            VectorDistanceMetric::Cosine,
+                            None::<&str>,
+                        ),
                     )
                     .returning(["node_text", "node_vector", "edge_text", "edge_vector"]),
             ),
@@ -967,54 +2120,51 @@ fn json_only_fixtures() -> Vec<Fixture> {
                     read_batch()
                         .var_as(
                             "raw_nodes",
-                            Traversal::<OnNodes, ReadOnly>::from_steps(vec![
-                                Step::N(NodeRef::Param("node_ids".to_string())),
-                                Step::Has("name".to_string(), PropertyValue::from("Alice")),
-                                Step::Where(Predicate::contains_param("bio", "needle")),
-                                Step::LimitBy(Expr::param("limit")),
-                                Step::SkipBy(Expr::param("skip")),
-                                Step::RangeBy(
+                            g().n(NodeRef::Param("node_ids".to_string()))
+                                .has("name", "Alice")
+                                .where_(Predicate::contains_param("bio", "needle"))
+                                .limit(Expr::param("limit"))
+                                .skip(Expr::param("skip"))
+                                .range(
                                     StreamBound::literal(0),
                                     StreamBound::expr(Expr::param("end")),
-                                ),
-                                Step::As("a".to_string()),
-                                Step::Store("stored".to_string()),
-                                Step::Select("stored".to_string()),
-                                Step::Dedup,
-                                Step::Within("stored".to_string()),
-                                Step::Without("missing".to_string()),
-                                Step::Fold,
-                                Step::Unfold,
-                                Step::Path,
-                                Step::SimplePath,
-                                Step::WithSack(PropertyValue::from(0i64)),
-                                Step::SackSet("score".to_string()),
-                                Step::SackAdd("score".to_string()),
-                                Step::SackGet,
-                                Step::Project(vec![
+                                )
+                                .as_("a")
+                                .store("stored")
+                                .select("stored")
+                                .dedup()
+                                .within("stored")
+                                .without("missing")
+                                .fold()
+                                .unfold()
+                                .path()
+                                .simple_path()
+                                .with_sack(PropertyValue::from(0i64))
+                                .sack_set("score")
+                                .sack_add("score")
+                                .sack_get()
+                                .project(vec![
                                     Projection::property("externalId", "externalId"),
                                     Projection::expr("neg_age", Expr::prop("age").neg()),
                                 ]),
-                            ]),
                         )
                         .var_as(
                             "raw_edges",
-                            Traversal::<helix_db::OnEdges, ReadOnly>::from_steps(vec![
-                                Step::E(EdgeRef::Param("edge_ids".to_string())),
-                                Step::EWhere(SourcePredicate::or(vec![
+                            g().e(EdgeRef::Param("edge_ids".to_string()))
+                                .where_(SourcePredicate::or(vec![
                                     SourcePredicate::has_key("since"),
                                     SourcePredicate::starts_with("note", "Alice"),
-                                ])),
-                                Step::OutN,
-                                Step::InN,
-                                Step::OtherN,
-                                Step::EdgeHas("weight".to_string(), PropertyInput::from(1.0f64)),
-                                Step::EdgeHasLabel("FOLLOWS".to_string()),
-                                Step::OrderBy("weight".to_string(), Order::Desc),
-                                Step::EdgeProperties,
-                            ]),
+                                ]))
+                                .edge_has("weight", PropertyInput::from(1.0f64))
+                                .edge_has_label("FOLLOWS")
+                                .order_by("weight", Order::Desc)
+                                .edge_properties(),
                         )
-                        .returning(["raw_nodes", "raw_edges"]),
+                        .var_as(
+                            "index_operation",
+                            g().get_index_operation("018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"),
+                        )
+                        .returning(["raw_nodes", "raw_edges", "index_operation"]),
                 ),
                 vec![
                     ("node_ids", array(vec![i64_value(1), i64_value(2)])),
@@ -1045,68 +2195,82 @@ fn json_only_fixtures() -> Vec<Fixture> {
             write_request(
                 write_batch()
                     .var_as(
-                        "raw_indexes",
-                        Traversal::<helix_db::Terminal, WriteEnabled>::from_steps(vec![
-                            Step::CreateIndex {
-                                spec: IndexSpec::node_unique_equality("ParityUser", "externalId"),
-                                if_not_exists: true,
-                            },
-                            Step::DropIndex {
-                                spec: IndexSpec::node_range("ParityUser", "age"),
-                            },
-                            Step::CreateVectorIndexNodes {
-                                label: "ParityUser".to_string(),
-                                property: "embedding".to_string(),
-                                tenant_property: Some("tenantId".to_string()),
-                            },
-                            Step::CreateVectorIndexEdges {
-                                label: "FOLLOWS".to_string(),
-                                property: "embedding".to_string(),
-                                tenant_property: Some("tenantId".to_string()),
-                            },
-                            Step::CreateTextIndexNodes {
-                                label: "ParityUser".to_string(),
-                                property: "bio".to_string(),
-                                tenant_property: Some("tenantId".to_string()),
-                            },
-                            Step::CreateTextIndexEdges {
-                                label: "FOLLOWS".to_string(),
-                                property: "note".to_string(),
-                                tenant_property: Some("tenantId".to_string()),
-                            },
-                        ]),
+                        "raw_unique_index",
+                        g().create_index_if_not_exists(IndexSpec::node_unique_equality(
+                            "ParityUser",
+                            "externalId",
+                        )),
+                    )
+                    .var_as(
+                        "raw_drop_range_index",
+                        g().drop_index(IndexSpec::node_range("ParityUser", "age")),
+                    )
+                    .var_as(
+                        "raw_node_vector_index",
+                        g().create_vector_index_nodes(
+                            "ParityUser",
+                            "embedding",
+                            NonZeroUsize::new(3).expect("node vector dimension is non-zero"),
+                            VectorDistanceMetric::Cosine,
+                            Some("tenantId"),
+                        ),
+                    )
+                    .var_as(
+                        "raw_edge_vector_index",
+                        g().create_vector_index_edges(
+                            "FOLLOWS",
+                            "embedding",
+                            NonZeroUsize::new(2).expect("edge vector dimension is non-zero"),
+                            VectorDistanceMetric::Cosine,
+                            Some("tenantId"),
+                        ),
+                    )
+                    .var_as(
+                        "raw_node_text_index",
+                        g().create_text_index_nodes("ParityUser", "bio", Some("tenantId")),
+                    )
+                    .var_as(
+                        "raw_edge_text_index",
+                        g().create_text_index_edges("FOLLOWS", "note", Some("tenantId")),
                     )
                     .var_as(
                         "raw_mutations",
-                        Traversal::<OnNodes, WriteEnabled>::from_steps(vec![
-                            Step::AddN {
-                                label: "RawNode".to_string(),
-                                properties: vec![("name".to_string(), PropertyInput::from("raw"))],
-                            },
-                            Step::AddE {
-                                label: "RAW_EDGE".to_string(),
-                                to: NodeRef::Var("raw_mutations".to_string()),
-                                properties: vec![("weight".to_string(), PropertyInput::from(1i64))],
-                            },
-                            Step::SetProperty(
-                                "name".to_string(),
-                                PropertyInput::Expr(Expr::param("name")),
-                            ),
-                            Step::RemoveProperty("old".to_string()),
-                            Step::DropEdge(NodeRef::Ids(vec![999_999])),
-                            Step::DropEdgeLabeled {
-                                to: NodeRef::Ids(vec![999_999]),
-                                label: "RAW_EDGE".to_string(),
-                            },
-                            Step::DropEdgeById(EdgeRef::Ids(vec![999_999])),
-                            Step::Drop,
-                        ]),
+                        g().add_n("RawNode", vec![("name", PropertyInput::from("raw"))])
+                            .add_e(
+                                "RAW_EDGE",
+                                NodeRef::Var("raw_mutations".to_string()),
+                                vec![("weight", PropertyInput::from(1i64))],
+                            )
+                            .set_property("name", PropertyInput::Expr(Expr::param("name")))
+                            .remove_property("old")
+                            .drop_edge(NodeRef::Ids(vec![999_999]))
+                            .drop_edge_labeled(NodeRef::Ids(vec![999_999]), "RAW_EDGE")
+                            .drop_edge_by_id(EdgeRef::Ids(vec![999_999]))
+                            .drop(),
                     )
-                    .returning(["raw_indexes", "raw_mutations"]),
+                    .var_as(
+                        "retry_index_operation",
+                        g().retry_index_operation("018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"),
+                    )
+                    .var_as(
+                        "abort_index_operation",
+                        g().abort_index_operation("018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"),
+                    )
+                    .returning([
+                        "raw_unique_index",
+                        "raw_drop_range_index",
+                        "raw_node_vector_index",
+                        "raw_edge_vector_index",
+                        "raw_node_text_index",
+                        "raw_edge_text_index",
+                        "raw_mutations",
+                        "retry_index_operation",
+                        "abort_index_operation",
+                    ]),
             ),
         ),
         json_only(
-            "902-dynamic-value-and-param-type-shapes",
+            "902-query-value-and-param-type-shapes",
             with_params(
                 read_request(
                     read_batch()
@@ -1114,17 +2278,14 @@ fn json_only_fixtures() -> Vec<Fixture> {
                         .returning(["empty"]),
                 ),
                 vec![
-                    ("null", DynamicQueryValue::Null),
-                    ("bool", DynamicQueryValue::Bool(true)),
-                    ("i64", DynamicQueryValue::I64(i64::MAX)),
-                    ("f64", DynamicQueryValue::F64(1.25)),
-                    ("f32", DynamicQueryValue::F32(1.5)),
+                    ("null", QueryValue::Null),
+                    ("bool", QueryValue::Bool(true)),
+                    ("i64", QueryValue::I64(i64::MAX)),
+                    ("f64", QueryValue::F64(1.25)),
+                    ("f32", QueryValue::F32(1.5)),
                     ("string", string("value")),
                     ("array", array(vec![i64_value(1), string("two")])),
-                    (
-                        "object",
-                        object(vec![("nested", DynamicQueryValue::Bool(true))]),
-                    ),
+                    ("object", object(vec![("nested", QueryValue::Bool(true))])),
                 ],
                 vec![
                     ("null", QueryParamType::Value),
@@ -1192,40 +2353,16 @@ fn json_only_fixtures() -> Vec<Fixture> {
             "904-empty-query-and-node-edge-ref-shapes",
             read_request(
                 read_batch()
-                    .var_as(
-                        "all_nodes",
-                        Traversal::<OnNodes, ReadOnly>::from_steps(vec![
-                            Step::N(NodeRef::All),
-                            Step::Count,
-                        ]),
-                    )
-                    .var_as(
-                        "node_ids",
-                        Traversal::<OnNodes, ReadOnly>::from_steps(vec![
-                            Step::N(NodeRef::ids([1, 2])),
-                            Step::Id,
-                        ]),
-                    )
+                    .var_as("all_nodes", g().n(NodeRef::All).count())
+                    .var_as("node_ids", g().n(NodeRef::ids([1, 2])).id())
                     .var_as(
                         "node_var",
-                        Traversal::<OnNodes, ReadOnly>::from_steps(vec![
-                            Step::N(NodeRef::Var("all_nodes".to_string())),
-                            Step::Label,
-                        ]),
+                        g().n(NodeRef::Var("all_nodes".to_string())).label(),
                     )
-                    .var_as(
-                        "edge_ids",
-                        Traversal::<helix_db::OnEdges, ReadOnly>::from_steps(vec![
-                            Step::E(EdgeRef::ids([1, 2])),
-                            Step::Id,
-                        ]),
-                    )
+                    .var_as("edge_ids", g().e(EdgeRef::ids([1, 2])).id())
                     .var_as(
                         "edge_var",
-                        Traversal::<helix_db::OnEdges, ReadOnly>::from_steps(vec![
-                            Step::E(EdgeRef::Var("edge_ids".to_string())),
-                            Step::Label,
-                        ]),
+                        g().e(EdgeRef::Var("edge_ids".to_string())).label(),
                     )
                     .returning(["all_nodes", "node_ids", "node_var", "edge_ids", "edge_var"]),
             ),
@@ -1248,7 +2385,7 @@ fn json_only_fixtures() -> Vec<Fixture> {
             ),
         ),
         json_only(
-            "906-nested-dynamic-property-write-shapes",
+            "906-nested-query-property-write-shapes",
             with_params(
                 write_request(
                     write_batch()
@@ -1300,7 +2437,7 @@ fn json_only_fixtures() -> Vec<Fixture> {
             ),
         ),
         json_only(
-            "907-nested-dynamic-property-read-shapes",
+            "907-nested-query-property-read-shapes",
             with_params(
                 read_request(
                     read_batch()
@@ -1450,5 +2587,315 @@ fn json_only_fixtures() -> Vec<Fixture> {
                     .returning(["node_desc", "edge_desc", "node_asc"]),
             ),
         ),
+        json_only(
+            "912-shortest-path-terminal",
+            with_params(
+                read_request(
+                    read_batch()
+                        .var_as(
+                            "path",
+                            g().shortest_path_with(
+                                NodeRef::id(1),
+                                NodeRef::param("target"),
+                                Some("FOLLOWS"),
+                                ShortestPathDirection::Both,
+                                5,
+                            ),
+                        )
+                        .returning(["path"]),
+                ),
+                vec![("target", i64_value(3))],
+                vec![("target", QueryParamType::I64)],
+            ),
+        ),
+        remaining_read_contract_fixture(),
+        remaining_write_contract_fixture(),
     ]
+}
+
+fn remaining_read_contract_fixture() -> Fixture {
+    let comparisons = Predicate::and(vec![
+        Predicate::neq("neq", 1i64),
+        Predicate::gt("gt", 1i64),
+        Predicate::gte("gte", 1i64),
+        Predicate::lt("lt", 1i64),
+        Predicate::lte("lte", 1i64),
+        Predicate::between("between", 1i64, 3i64),
+        Predicate::ends_with("suffix", "end"),
+        Predicate::is_in("status", vec!["active".to_string(), "inactive".to_string()]),
+        Predicate::is_null("missing"),
+        Predicate::is_not_null("present"),
+        Predicate::not(Predicate::eq("disabled", true)),
+        Predicate::compare(Expr::id(), CompareOp::Eq, Expr::val(1i64)),
+        Predicate::compare(Expr::id(), CompareOp::Neq, Expr::val(1i64)),
+        Predicate::compare(Expr::id(), CompareOp::Gt, Expr::val(1i64)),
+        Predicate::compare(Expr::id(), CompareOp::Gte, Expr::val(1i64)),
+        Predicate::compare(Expr::id(), CompareOp::Lt, Expr::val(1i64)),
+        Predicate::compare(Expr::id(), CompareOp::Lte, Expr::val(1i64)),
+    ]);
+    let mut request = read_request(
+        read_batch()
+            .var_as(
+                "expressions_and_predicates",
+                g().n(NodeRef::all()).where_(comparisons).project(vec![
+                    Projection::expr("id", Expr::id()),
+                    Projection::expr("timestamp", Expr::timestamp()),
+                    Projection::expr("datetime", Expr::datetime()),
+                    Projection::expr("null", Expr::val(PropertyValue::Null)),
+                    Projection::expr(
+                        "date_value",
+                        Expr::val(PropertyValue::datetime_millis(1_777_000_000_000)),
+                    ),
+                    Projection::expr("f32", Expr::val(PropertyValue::F32(1.25))),
+                    Projection::expr("bytes", Expr::val(PropertyValue::Bytes(vec![1, 2, 3]))),
+                    Projection::expr(
+                        "i64_array",
+                        Expr::val(PropertyValue::I64Array(vec![1, 2, 3])),
+                    ),
+                    Projection::expr(
+                        "f64_array",
+                        Expr::val(PropertyValue::F64Array(vec![1.25, 2.5])),
+                    ),
+                    Projection::expr("add", Expr::val(4i64).add_expr(Expr::val(1i64))),
+                    Projection::expr("sub", Expr::val(4i64).sub_expr(Expr::val(1i64))),
+                    Projection::expr("mul", Expr::val(4i64).mul_expr(Expr::val(2i64))),
+                    Projection::expr("div", Expr::val(4i64).div_expr(Expr::val(2i64))),
+                    Projection::expr("mod", Expr::val(5i64).modulo(Expr::val(2i64))),
+                    Projection::expr(
+                        "case",
+                        Expr::case(
+                            vec![(Predicate::eq("status", "active"), Expr::val("enabled"))],
+                            Some(Expr::val("disabled")),
+                        ),
+                    ),
+                ]),
+            )
+            .var_as("both", g().n(NodeRef::id(1)).both(None::<&str>).count())
+            .var_as(
+                "in_e",
+                g().n(NodeRef::id(1)).in_e(None::<&str>).edge_properties(),
+            )
+            .var_as(
+                "out_e",
+                g().n(NodeRef::id(1)).out_e(None::<&str>).edge_properties(),
+            )
+            .var_as(
+                "both_e",
+                g().n(NodeRef::id(1)).both_e(None::<&str>).edge_properties(),
+            )
+            .var_as(
+                "in_n",
+                g().e(EdgeRef::all()).in_n().value_map(None::<Vec<&str>>),
+            )
+            .var_as(
+                "out_n",
+                g().e(EdgeRef::all()).out_n().value_map(None::<Vec<&str>>),
+            )
+            .var_as(
+                "other_n",
+                g().e(EdgeRef::all()).other_n().value_map(None::<Vec<&str>>),
+            )
+            .var_as(
+                "direct_has_key",
+                g().n(NodeRef::all()).has_key("externalId").count(),
+            )
+            .var_as(
+                "has_label",
+                g().n(NodeRef::all()).has_label("ParityUser").count(),
+            )
+            .var_as("exists", g().n(NodeRef::all()).exists())
+            .var_as(
+                "choose",
+                g().n(NodeRef::all())
+                    .choose(
+                        Predicate::is_not_null("status"),
+                        sub().out(None::<&str>),
+                        Some(sub().in_(None::<&str>)),
+                    )
+                    .count(),
+            )
+            .var_as(
+                "coalesce",
+                g().n(NodeRef::all())
+                    .coalesce(vec![sub().out(None::<&str>), sub().in_(None::<&str>)])
+                    .count(),
+            )
+            .var_as("group", g().n(NodeRef::all()).group("status"))
+            .var_as("group_count", g().n(NodeRef::all()).group_count("status"))
+            .var_as(
+                "aggregate_count",
+                g().n(NodeRef::all())
+                    .aggregate_by(AggregateFunction::Count, "age"),
+            )
+            .var_as(
+                "aggregate_sum",
+                g().n(NodeRef::all())
+                    .aggregate_by(AggregateFunction::Sum, "age"),
+            )
+            .var_as(
+                "aggregate_min",
+                g().n(NodeRef::all())
+                    .aggregate_by(AggregateFunction::Min, "age"),
+            )
+            .var_as(
+                "aggregate_max",
+                g().n(NodeRef::all())
+                    .aggregate_by(AggregateFunction::Max, "age"),
+            )
+            .var_as(
+                "aggregate_mean",
+                g().n(NodeRef::all())
+                    .aggregate_by(AggregateFunction::Mean, "age"),
+            )
+            .var_as(
+                "repeat_none",
+                g().n(NodeRef::id(1))
+                    .repeat(RepeatConfig::new(sub().out(None::<&str>)))
+                    .count(),
+            )
+            .var_as(
+                "repeat_before",
+                g().n(NodeRef::id(1))
+                    .repeat(RepeatConfig::new(sub().out(None::<&str>)).emit_before())
+                    .count(),
+            )
+            .var_as(
+                "repeat_after",
+                g().n(NodeRef::id(1))
+                    .repeat(RepeatConfig::new(sub().out(None::<&str>)).emit_after())
+                    .count(),
+            )
+            .var_as(
+                "repeat_all",
+                g().n(NodeRef::id(1))
+                    .repeat(RepeatConfig::new(sub().out(None::<&str>)).emit_all())
+                    .count(),
+            )
+            .var_as(
+                "shortest_out",
+                g().shortest_path_with(
+                    NodeRef::id(1),
+                    NodeRef::id(2),
+                    None::<&str>,
+                    ShortestPathDirection::Out,
+                    5,
+                ),
+            )
+            .var_as(
+                "shortest_in",
+                g().shortest_path_with(
+                    NodeRef::id(1),
+                    NodeRef::id(2),
+                    None::<&str>,
+                    ShortestPathDirection::In,
+                    5,
+                ),
+            )
+            .var_as(
+                "vector_edges",
+                g().vector_search_edges("FOLLOWS", "embedding", vec![1.0f32, 0.0], 5usize, None)
+                    .edge_properties(),
+            )
+            .var_as(
+                "text_edges",
+                g().text_search_edges("FOLLOWS", "note", "graph", 5usize, None)
+                    .edge_properties(),
+            )
+            .var_as_if(
+                "previous",
+                BatchCondition::PrevNotEmpty,
+                g().n(NodeRef::all()).count(),
+            )
+            .var_as_if(
+                "not_empty",
+                BatchCondition::VarNotEmpty("expressions_and_predicates".to_string()),
+                g().n(NodeRef::all()).count(),
+            )
+            .var_as_if(
+                "empty",
+                BatchCondition::VarEmpty("missing".to_string()),
+                g().n(NodeRef::all()).count(),
+            )
+            .var_as_if(
+                "min_size",
+                BatchCondition::VarMinSize("expressions_and_predicates".to_string(), 1),
+                g().n(NodeRef::all()).count(),
+            )
+            .for_each_param(
+                "rows",
+                read_batch().var_as("foreach", g().n(NodeRef::all()).count()),
+            )
+            .returning([
+                "expressions_and_predicates",
+                "both",
+                "in_e",
+                "out_e",
+                "both_e",
+                "in_n",
+                "out_n",
+                "other_n",
+                "direct_has_key",
+                "has_label",
+                "exists",
+                "choose",
+                "coalesce",
+                "group",
+                "group_count",
+                "aggregate_count",
+                "aggregate_sum",
+                "aggregate_min",
+                "aggregate_max",
+                "aggregate_mean",
+                "repeat_none",
+                "repeat_before",
+                "repeat_after",
+                "repeat_all",
+                "shortest_out",
+                "shortest_in",
+                "vector_edges",
+                "text_edges",
+                "previous",
+                "not_empty",
+                "empty",
+                "min_size",
+                "foreach",
+            ]),
+    );
+    request.insert_parameter_type("bytes", QueryParamType::Bytes);
+    request.insert_parameter_type("date_time", QueryParamType::DateTime);
+    json_only("913-remaining-read-contract", request)
+}
+
+fn remaining_write_contract_fixture() -> Fixture {
+    json_only(
+        "914-remaining-write-contract",
+        write_request(
+            write_batch()
+                .var_as(
+                    "edge_equality",
+                    g().create_index_if_not_exists(IndexSpec::edge_equality("FOLLOWS", "since")),
+                )
+                .var_as(
+                    "node_euclidean",
+                    g().create_index_if_not_exists(IndexSpec::node_vector(
+                        "ParityUser",
+                        "euclidean_embedding",
+                        NonZeroUsize::new(4).expect("node vector dimension is non-zero"),
+                        VectorDistanceMetric::Euclidean,
+                        None::<&str>,
+                    )),
+                )
+                .var_as(
+                    "edge_manhattan",
+                    g().create_index_if_not_exists(IndexSpec::edge_vector(
+                        "FOLLOWS",
+                        "manhattan_embedding",
+                        NonZeroUsize::new(4).expect("edge vector dimension is non-zero"),
+                        VectorDistanceMetric::Manhattan,
+                        None::<&str>,
+                    )),
+                )
+                .returning(["edge_equality", "node_euclidean", "edge_manhattan"]),
+        ),
+    )
 }

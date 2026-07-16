@@ -1,0 +1,8 @@
+[bindings.go]
+package_name = "helixdb"
+
+[bindings.node]
+package_name = "helixdb"
+
+[bindings.python]
+package_name = "helixdb_uniffi"
