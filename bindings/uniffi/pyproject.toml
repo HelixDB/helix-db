@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.11,<2", "uniffi-bindgen==0.31.0"]
+build-backend = "maturin"
+
+[project]
+name = "helix-db-embedded"
+version = "0.2.0b1"
+description = "Embedded HelixDB runtime and native graph algorithms for the HelixDB Python SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "HelixDB" }]
+keywords = ["helixdb", "graph", "vector", "database", "embedded"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/HelixDB/helix-db"
+Repository = "https://github.com/HelixDB/helix-db"
+
+[tool.maturin]
+bindings = "uniffi"
+module-name = "helixdb_uniffi"
+strip = true
