@@ -11,7 +11,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 bindgen = ["uniffi/cli"]
 
 [[bin]]
-name = "helixdb-uniffi-bindgen"
+name = "uniffi-bindgen"
 path = "src/bin/uniffi_bindgen.rs"
 required-features = ["bindgen"]
 
