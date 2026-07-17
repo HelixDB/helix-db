@@ -30,4 +30,3 @@ Repository = "https://github.com/HelixDB/helix-db"
 [tool.maturin]
 bindings = "uniffi"
 module-name = "helixdb_uniffi"
-strip = true
