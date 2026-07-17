@@ -1,9 +1,24 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::error::HelixError;
 use crate::graph::{graph_from_query_response, NativeGraph, NativeGraphError, NativeGraphLoadSpec};
 use crate::runtime;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EmbeddedDiskKey {
+    root: PathBuf,
+    database: String,
+}
+
+struct EmbeddedDiskRuntime {
+    dependencies: db::HelixRuntimeDependencies,
+}
+
+static EMBEDDED_DISK_RUNTIMES: LazyLock<
+    Mutex<HashMap<EmbeddedDiskKey, Weak<EmbeddedDiskRuntime>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// FFI-safe storage source for opening a HelixDB handle.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -47,15 +62,46 @@ impl From<HelixDbSource> for db::HelixDbSource {
     }
 }
 
+fn embedded_disk_runtime(
+    source: &HelixDbSource,
+) -> Result<Option<Arc<EmbeddedDiskRuntime>>, HelixError> {
+    let HelixDbSource::Disk { root, database } = source else {
+        return Ok(None);
+    };
+    let key = EmbeddedDiskKey {
+        root: PathBuf::from(root),
+        database: database.clone(),
+    };
+    let mut runtimes = EMBEDDED_DISK_RUNTIMES
+        .lock()
+        .map_err(|_| HelixError::Internal {
+            message: "embedded disk runtime registry is poisoned".to_string(),
+        })?;
+    if let Some(runtime) = runtimes.get(&key).and_then(Weak::upgrade) {
+        return Ok(Some(runtime));
+    }
+    runtimes.retain(|_, runtime| runtime.strong_count() > 0);
+    let runtime = Arc::new(EmbeddedDiskRuntime {
+        dependencies: db::HelixRuntimeDependencies::embedded_disk(&key.root, &key.database)
+            .map_err(HelixError::from)?,
+    });
+    runtimes.insert(key, Arc::downgrade(&runtime));
+    Ok(Some(runtime))
+}
+
 /// In-process HelixDB handle.
 #[derive(uniffi::Object)]
 pub struct HelixDB {
     inner: db::HelixDB,
+    _embedded_disk_runtime: Option<Arc<EmbeddedDiskRuntime>>,
 }
 
 impl HelixDB {
-    fn new(inner: db::HelixDB) -> Self {
-        Self { inner }
+    fn new(inner: db::HelixDB, embedded_disk_runtime: Option<Arc<EmbeddedDiskRuntime>>) -> Self {
+        Self {
+            inner,
+            _embedded_disk_runtime: embedded_disk_runtime,
+        }
     }
 }
 
@@ -64,19 +110,39 @@ impl HelixDB {
     /// Open a read/write HelixDB handle.
     #[uniffi::constructor]
     pub async fn open(source: HelixDbSource) -> Result<Arc<Self>, HelixError> {
-        let inner = runtime::enter(db::HelixDB::open(source.into()))
-            .await
-            .map_err(HelixError::from)?;
-        Ok(Arc::new(Self::new(inner)))
+        let embedded_disk_runtime = embedded_disk_runtime(&source)?;
+        let inner = match &embedded_disk_runtime {
+            Some(runtime_dependencies) => {
+                runtime::enter(db::HelixDB::open_with_runtime_dependencies(
+                    source.into(),
+                    db::DbConfig::new(),
+                    runtime_dependencies.dependencies.clone(),
+                ))
+                .await
+            }
+            None => runtime::enter(db::HelixDB::open(source.into())).await,
+        }
+        .map_err(HelixError::from)?;
+        Ok(Arc::new(Self::new(inner, embedded_disk_runtime)))
     }
 
     /// Open a read-only HelixDB handle.
     #[uniffi::constructor]
     pub async fn open_reader(source: HelixDbSource) -> Result<Arc<Self>, HelixError> {
-        let inner = runtime::enter(db::HelixDB::open_reader(source.into()))
-            .await
-            .map_err(HelixError::from)?;
-        Ok(Arc::new(Self::new(inner)))
+        let embedded_disk_runtime = embedded_disk_runtime(&source)?;
+        let inner = match &embedded_disk_runtime {
+            Some(runtime_dependencies) => {
+                runtime::enter(db::HelixDB::open_reader_with_runtime_dependencies(
+                    source.into(),
+                    db::DbConfig::new(),
+                    runtime_dependencies.dependencies.clone(),
+                ))
+                .await
+            }
+            None => runtime::enter(db::HelixDB::open_reader(source.into())).await,
+        }
+        .map_err(HelixError::from)?;
+        Ok(Arc::new(Self::new(inner, embedded_disk_runtime)))
     }
 
     /// Execute an SDK-built query encoded as JSON bytes.
@@ -111,8 +177,10 @@ impl HelixDB {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use helix_ast::batch::read_batch;
+    use helix_ast::batch::{read_batch, write_batch};
+    use helix_ast::index::IndexSpec;
     use helix_ast::query::QueryRequest;
     use helix_ast::traversal::g;
 
@@ -203,5 +271,42 @@ mod tests {
             .expect_err("invalid query JSON should fail");
 
         assert!(matches!(err, HelixError::InvalidRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn embedded_disk_open_installs_index_lifecycle_coordination() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "helix-uniffi-embedded-disk-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = HelixDB::open(HelixDbSource::Disk {
+            root: root.to_string_lossy().into_owned(),
+            database: "embedded-index-lifecycle".to_string(),
+        })
+        .await
+        .expect("embedded disk DB should open");
+        let request = QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "created",
+                    g().create_index_if_not_exists(IndexSpec::node_unique_equality(
+                        "User", "email",
+                    )),
+                )
+                .returning(["created"]),
+        )
+        .to_json_bytes()
+        .unwrap();
+
+        db.query_json(request)
+            .await
+            .expect("embedded disk index DDL should be available");
+        db.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

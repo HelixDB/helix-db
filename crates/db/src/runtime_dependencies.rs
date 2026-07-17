@@ -31,9 +31,10 @@
 
 #![deny(missing_docs)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use slatedb::object_store::{memory::InMemory, ObjectStore};
+use slatedb::object_store::{local::LocalFileSystem, memory::InMemory, ObjectStore};
 use uuid::Uuid;
 
 use crate::error::{HelixDbError, Result};
@@ -196,6 +197,36 @@ impl HelixRuntimeDependencies {
             SharedReaderLeaseMode::Unavailable,
             SharedBlobPublicationMode::Unavailable,
         )
+    }
+
+    /// Creates process-scoped coordinators for an exclusively owned embedded disk database.
+    ///
+    /// The returned dependencies use shared-storage topology because the files are externally
+    /// addressable. They are safe only while the embedding guarantees that every handle for the
+    /// database lives in the current process. Cross-process deployments must install genuinely
+    /// shared adapters with [`Self::shared`] instead.
+    pub fn embedded_disk(root: impl Into<PathBuf>, database: impl Into<String>) -> Result<Self> {
+        let database = database.into();
+        if database.is_empty() {
+            return Err(HelixDbError::Config(
+                "embedded disk database path must not be empty".to_string(),
+            ));
+        }
+        let object_store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFileSystem::new_with_prefix(root.into())?);
+        let reader_leases: Arc<dyn IndexLeaseCoordinator> = Arc::new(
+            ProcessLocalIndexLeaseCoordinator::new(ReaderLeaseTiming::default()),
+        );
+        let blob_publication: Arc<dyn BlobPublicationCoordinator> =
+            Arc::new(ProcessLocalBlobPublicationCoordinator::new(
+                object_store,
+                database,
+                BlobPublicationTiming::default(),
+            ));
+        Ok(Self::shared(
+            SharedReaderLeaseMode::Installed(reader_leases),
+            SharedBlobPublicationMode::Installed(blob_publication),
+        ))
     }
 
     /// Returns the trusted topology bound into these dependencies.
@@ -411,5 +442,17 @@ mod tests {
     #[test]
     fn process_local_database_path_must_be_nonempty() {
         assert!(ProcessLocalDatabaseToken::new("").is_err());
+    }
+
+    #[test]
+    fn embedded_disk_dependencies_install_both_process_scoped_coordinators() {
+        let root =
+            std::env::temp_dir().join(format!("helix-runtime-dependencies-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let dependencies = HelixRuntimeDependencies::embedded_disk(&root, "embedded").unwrap();
+        assert_eq!(dependencies.topology(), DatabaseAccessTopology::SHARED);
+        assert!(dependencies.reader_lease_coordinator().is_some());
+        assert!(dependencies.blob_publication_coordinator().is_some());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

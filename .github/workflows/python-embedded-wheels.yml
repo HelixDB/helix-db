@@ -59,7 +59,7 @@ jobs:
           working-directory: bindings/uniffi
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          before-script-linux: python3 -m pip install "uniffi-bindgen==0.31.0"
+          before-script-linux: /opt/python/cp313-cp313/bin/python -m pip install "uniffi-bindgen==0.31.0" && ln -s /opt/python/cp313-cp313/bin/uniffi-bindgen /usr/local/bin/uniffi-bindgen
           args: --release --locked --compatibility pypi --out dist
       - name: Validate wheel metadata
         run: |

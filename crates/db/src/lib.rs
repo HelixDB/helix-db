@@ -560,6 +560,7 @@ impl HelixDB {
             IndexConfig::new(),
         )
         .await?;
+        register_loaded_index_generations(&loaded_catalog, &runtime_dependencies).await?;
         let writer = HelixWriter::new(Arc::clone(&db), config.id_lease_size());
         let storage = HelixStorage::Writer(Arc::new(writer));
         let db = Self::from_storage(
@@ -693,6 +694,7 @@ impl HelixDB {
             IndexConfig::new(),
         )
         .await?;
+        register_loaded_index_generations(&loaded_catalog, &runtime_dependencies).await?;
         let storage = HelixStorage::Reader(Arc::new(reader));
         let db = Self::from_storage(
             HelixStorageParts::new(path, object_store, storage),
@@ -1568,6 +1570,29 @@ impl HelixDB {
             .expect("runtime state lock is not poisoned")
             .active_handles(scope)
     }
+}
+
+async fn register_loaded_index_generations(
+    indexes: &index_v2::LoadedV2ScopeCatalog,
+    runtime_dependencies: &HelixRuntimeDependencies,
+) -> Result<()> {
+    let Some(coordinator) = runtime_dependencies.reader_lease_coordinator() else {
+        return Ok(());
+    };
+    for handle in indexes.active_handles() {
+        coordinator
+            .register_generation(index_v2::reader_lease::LeaseGenerationKey::new(
+                handle.scope(),
+                handle.index_id(),
+                handle.generation(),
+            ))
+            .await
+            .map_err(|_| HelixDbError::IndexLifecycleUnavailable {
+                family: handle.family(),
+                reason: error::IndexLifecycleUnavailableReason::ReaderCoordinationUnavailable,
+            })?;
+    }
+    Ok(())
 }
 
 async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
