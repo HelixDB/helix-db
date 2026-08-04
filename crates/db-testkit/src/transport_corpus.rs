@@ -1,8 +1,9 @@
 //! Shared public-query corpus for embedded, service, and transport adapters.
 
 use helix_ast::batch;
+use helix_ast::expr::{Expr, Predicate, StreamBound};
 use helix_ast::graph::NodeRef;
-use helix_ast::query::QueryRequest;
+use helix_ast::query::{QueryRequest, QueryValue};
 use helix_ast::traversal;
 use helix_ast::value::{PropertyInput, PropertyValue};
 
@@ -109,6 +110,102 @@ pub fn transport_query_corpus() -> Vec<TransportCorpusStep> {
                     .returning(["range", "count"]),
             ),
         },
+        TransportCorpusStep {
+            name: "insert_cleanup_candidates",
+            request: QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "first_candidate",
+                        traversal::g().add_n(
+                            "Resource",
+                            vec![
+                                ("tenant", PropertyInput::from("tenant-a")),
+                                ("type", PropertyInput::from("job")),
+                            ],
+                        ),
+                    )
+                    .var_as(
+                        "second_candidate",
+                        traversal::g().add_n(
+                            "Resource",
+                            vec![
+                                ("tenant", PropertyInput::from("tenant-a")),
+                                ("type", PropertyInput::from("job")),
+                            ],
+                        ),
+                    )
+                    .var_as(
+                        "third_candidate",
+                        traversal::g().add_n(
+                            "Resource",
+                            vec![
+                                ("tenant", PropertyInput::from("tenant-a")),
+                                ("type", PropertyInput::from("job")),
+                            ],
+                        ),
+                    )
+                    .var_as(
+                        "other_tenant",
+                        traversal::g().add_n(
+                            "Resource",
+                            vec![
+                                ("tenant", PropertyInput::from("tenant-b")),
+                                ("type", PropertyInput::from("job")),
+                            ],
+                        ),
+                    )
+                    .returning(Vec::<String>::new()),
+            ),
+        },
+        TransportCorpusStep {
+            name: "direct_n_where_limit_drop",
+            request: QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "dropped",
+                        traversal::g()
+                            .n_where(Predicate::and(vec![
+                                Predicate::eq("$label", "Resource"),
+                                Predicate::eq_param("tenant", "tenant"),
+                                Predicate::eq_param("type", "type"),
+                            ]))
+                            .limit(StreamBound::expr(Expr::param("limit")))
+                            .drop(),
+                    )
+                    .returning(["dropped"]),
+            )
+            .with_parameter_value("tenant", QueryValue::String("tenant-a".to_owned()))
+            .with_parameter_value("type", QueryValue::String("job".to_owned()))
+            .with_parameter_value("limit", QueryValue::I64(2)),
+        },
+        TransportCorpusStep {
+            name: "verify_direct_n_where_limit_drop",
+            request: QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "candidate_count",
+                        traversal::g()
+                            .n_where(Predicate::and(vec![
+                                Predicate::eq("$label", "Resource"),
+                                Predicate::eq("tenant", "tenant-a"),
+                                Predicate::eq("type", "job"),
+                            ]))
+                            .count(),
+                    )
+                    .var_as(
+                        "other_tenant_count",
+                        traversal::g()
+                            .n_where(Predicate::and(vec![
+                                Predicate::eq("$label", "Resource"),
+                                Predicate::eq("tenant", "tenant-b"),
+                                Predicate::eq("type", "job"),
+                            ]))
+                            .count(),
+                    )
+                    .var_as("total_count", traversal::g().n(NodeRef::all()).count())
+                    .returning(["candidate_count", "other_tenant_count", "total_count"]),
+            ),
+        },
     ]
 }
 
@@ -149,6 +246,13 @@ pub fn expected_transport_observations() -> Vec<serde_json::Value> {
         serde_json::json!({
             "count": 1,
             "range": [{ "rank": 2 }],
+        }),
+        serde_json::json!({}),
+        serde_json::json!({ "dropped": [] }),
+        serde_json::json!({
+            "candidate_count": 1,
+            "other_tenant_count": 1,
+            "total_count": 3,
         }),
     ]
 }
@@ -197,6 +301,9 @@ mod tests {
                 "point_projection_aggregate",
                 "update",
                 "range_after_update",
+                "insert_cleanup_candidates",
+                "direct_n_where_limit_drop",
+                "verify_direct_n_where_limit_drop",
             ]
         );
 
@@ -215,6 +322,9 @@ mod tests {
             [
                 QueryRequestType::Write,
                 QueryRequestType::Read,
+                QueryRequestType::Write,
+                QueryRequestType::Read,
+                QueryRequestType::Write,
                 QueryRequestType::Write,
                 QueryRequestType::Read,
             ]
