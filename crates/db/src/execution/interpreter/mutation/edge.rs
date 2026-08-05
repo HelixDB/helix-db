@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use super::contracts::{label_of, EdgeMutationTarget};
@@ -42,7 +43,7 @@ pub(super) struct ObservedEdgeDeletion {
 }
 
 /// Batch-owned edge and pair observations advanced in deletion order.
-pub(super) struct ObservedEdgeDeletions {
+pub(super) struct ObservedEdgeDeletionBatch {
     rows: ObservedEdgeRows,
     pairs: BTreeMap<(u64, u64), ObservedPairState>,
 }
@@ -67,7 +68,17 @@ impl ObservedEdgeRows {
     }
 }
 
-impl ObservedEdgeDeletions {
+impl ObservedEdgeDeletionBatch {
+    /// Returns the sorted edge IDs owned by this observation batch.
+    pub(super) fn edge_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.rows.rows.keys().copied()
+    }
+
+    /// Returns the number of distinct physical pair rows owned by the batch.
+    pub(super) fn pair_count(&self) -> usize {
+        self.pairs.len()
+    }
+
     pub(super) fn matches_label(
         &self,
         edge_id: u64,
@@ -348,46 +359,60 @@ impl<'db> ExecutionContext<'db> {
         txn: &DbTransaction,
         edge_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedEdgeRows> {
+        const EDGES_PER_CHUNK: usize = 256;
+
         let edge_ids = edge_ids.into_iter().collect::<BTreeSet<_>>();
-        let mut keys = Vec::with_capacity(edge_ids.len().saturating_mul(2));
-        for edge_id in &edge_ids {
-            keys.push(self.storage_key(keys::DataKeyKind::EdgeEndpoints(
-                keys::EdgeEndpointsKey::new(*edge_id),
-            )));
-            keys.push(self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(*edge_id),
-            )));
-        }
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let mut values = values.into_iter();
+        let edge_ids = edge_ids.into_iter().collect::<Vec<_>>();
         let mut rows = BTreeMap::new();
-        for edge_id in edge_ids {
-            let endpoints = values
-                .next()
-                .expect("each observed edge has one endpoint result")
-                .map(|value| {
-                    crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue::decode(&value)
+        for chunk in edge_ids.chunks(EDGES_PER_CHUNK) {
+            self.check_execution_deadline()?;
+            let mut keys = Vec::with_capacity(chunk.len().saturating_mul(2));
+            for edge_id in chunk {
+                keys.push(self.storage_key(keys::DataKeyKind::EdgeEndpoints(
+                    keys::EdgeEndpointsKey::new(*edge_id),
+                )));
+                keys.push(self.storage_key(keys::DataKeyKind::EdgePropertyById(
+                    keys::EdgePropertyByIdKey::new(*edge_id),
+                )));
+            }
+            let values = txn.multi_get(&keys).await?;
+            let mut observed = keys.into_iter().zip(values);
+            for edge_id in chunk {
+                let (endpoint_key, endpoint_value) = observed
+                    .next()
+                    .expect("each observed edge has one endpoint result");
+                let endpoint_value = match endpoint_value {
+                    Some(value) => Some(value),
+                    None => txn.get(&endpoint_key).await?,
+                };
+                let endpoints = endpoint_value
+                    .map(|value| {
+                        crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue::decode(
+                            &value,
+                        )
                         .map(|endpoints| (endpoints.source(), endpoints.target()))
-                })
-                .transpose()?;
-            let properties = values
-                .next()
-                .expect("each observed edge has one property result")
-                .map(CanonicalPropertyRow::decode)
-                .transpose()?;
-            rows.insert(
-                edge_id,
-                ObservedEdgeRow {
-                    endpoints,
-                    properties,
-                },
-            );
+                    })
+                    .transpose()?;
+                let (property_key, property_value) = observed
+                    .next()
+                    .expect("each observed edge has one property result");
+                let property_value = match property_value {
+                    Some(value) => Some(value),
+                    None => txn.get(&property_key).await?,
+                };
+                let properties = property_value
+                    .map(CanonicalPropertyRow::decode)
+                    .transpose()?;
+                rows.insert(
+                    *edge_id,
+                    ObservedEdgeRow {
+                        endpoints,
+                        properties,
+                    },
+                );
+            }
+            assert!(observed.next().is_none());
         }
-        assert!(values.next().is_none());
         Ok(ObservedEdgeRows { rows })
     }
 
@@ -396,27 +421,76 @@ impl<'db> ExecutionContext<'db> {
         txn: &DbTransaction,
         edge_ids: impl IntoIterator<Item = u64>,
         index_context: &MutationIndexContext,
-    ) -> Result<ObservedEdgeDeletions> {
+    ) -> Result<ObservedEdgeDeletionBatch> {
         let rows = self.observe_edge_rows(txn, edge_ids).await?;
         let pairs = rows
             .rows
             .values()
             .filter_map(|row| row.endpoints)
             .collect::<BTreeSet<_>>();
-        let pair_keys = pairs
-            .iter()
-            .map(|(from, to)| {
-                keys::Key::Data {
-                    scope: self.tenant_scope,
-                    kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(*from, *to)),
-                }
-                .to_bytes()
-            })
-            .collect::<Vec<_>>();
-        let pair_values = index_context.observe_topology(txn, &pair_keys).await?;
-        let mut pair_states = pairs
+        let pair_values = self
+            .observe_edge_pair_values(txn, pairs, index_context)
+            .await?;
+        self.finish_edge_deletion_observation(txn, rows, pair_values)
+            .await
+    }
+
+    /// Observes each directed pair bitmap once in bounded, deadline-aware chunks.
+    pub(super) async fn observe_edge_pair_values(
+        &self,
+        txn: &DbTransaction,
+        pairs: BTreeSet<(u64, u64)>,
+        index_context: &MutationIndexContext,
+    ) -> Result<BTreeMap<(u64, u64), Option<Bytes>>> {
+        const PAIRS_PER_CHUNK: usize = 512;
+
+        let pairs = pairs.into_iter().collect::<Vec<_>>();
+        let mut observed = BTreeMap::new();
+        for chunk in pairs.chunks(PAIRS_PER_CHUNK) {
+            self.check_execution_deadline()?;
+            let keys = chunk
+                .iter()
+                .map(|(from, to)| {
+                    keys::Key::Data {
+                        scope: self.tenant_scope,
+                        kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(
+                            *from, *to,
+                        )),
+                    }
+                    .to_bytes()
+                })
+                .collect::<Vec<_>>();
+            let values = index_context.observe_topology(txn, &keys).await?;
+            observed.extend(chunk.iter().copied().zip(values));
+        }
+        Ok(observed)
+    }
+
+    /// Completes an edge-deletion batch from already observed pair bitmaps.
+    ///
+    /// Reusing the pair observations is what guarantees node cascades do not
+    /// reread a pair shared by multiple deleted nodes.
+    pub(super) async fn observe_edge_deletions_from_pairs(
+        &self,
+        txn: &DbTransaction,
+        edge_ids: impl IntoIterator<Item = u64>,
+        pair_values: BTreeMap<(u64, u64), Option<Bytes>>,
+    ) -> Result<ObservedEdgeDeletionBatch> {
+        let rows = self.observe_edge_rows(txn, edge_ids).await?;
+        self.finish_edge_deletion_observation(txn, rows, pair_values)
+            .await
+    }
+
+    async fn finish_edge_deletion_observation(
+        &self,
+        txn: &DbTransaction,
+        rows: ObservedEdgeRows,
+        pair_values: BTreeMap<(u64, u64), Option<Bytes>>,
+    ) -> Result<ObservedEdgeDeletionBatch> {
+        const PROPERTIES_PER_CHUNK: usize = 512;
+
+        let mut pair_states = pair_values
             .into_iter()
-            .zip(pair_values)
             .map(|(pair, value)| {
                 let edge_ids = value
                     .map(|value| {
@@ -435,42 +509,67 @@ impl<'db> ExecutionContext<'db> {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
 
+        for (edge_id, row) in &rows.rows {
+            let Some((from, to)) = row.endpoints else {
+                if pair_states
+                    .values()
+                    .any(|pair| pair.edge_ids.contains(*edge_id))
+                {
+                    return Err(HelixDbError::InvariantViolation(format!(
+                        "edge pair index references edge {edge_id} without endpoints"
+                    )));
+                }
+                continue;
+            };
+            let Some(pair) = pair_states.get(&(from, to)) else {
+                return Err(HelixDbError::InvariantViolation(format!(
+                    "edge {edge_id} endpoints have no observed pair state"
+                )));
+            };
+            if !pair.edge_ids.contains(*edge_id) {
+                return Err(HelixDbError::InvariantViolation(format!(
+                    "edge pair index was missing edge {edge_id} for {from} -> {to}"
+                )));
+            }
+        }
+
         let pair_edge_ids = pair_states
             .values()
             .flat_map(|pair| pair.edge_ids.iter())
             .collect::<BTreeSet<_>>();
-        let property_keys = pair_edge_ids
-            .iter()
-            .map(|edge_id| {
-                keys::Key::Data {
-                    scope: self.tenant_scope,
-                    kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(
-                        *edge_id,
-                    )),
-                }
-                .to_bytes()
-            })
-            .collect::<Vec<_>>();
-        let property_values = if property_keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&property_keys).await?
-        };
+        let pair_edge_ids = pair_edge_ids.into_iter().collect::<Vec<_>>();
         let mut labels = BTreeMap::new();
-        for ((edge_id, key), value) in pair_edge_ids
-            .into_iter()
-            .zip(property_keys)
-            .zip(property_values)
-        {
-            let value = match value {
-                Some(value) => Some(value),
-                None => txn.get(&key).await?,
-            };
-            let label = value
-                .map(|value| decode_properties(&value))
-                .transpose()?
-                .and_then(|properties| label_of(&properties).map(str::to_owned));
-            labels.insert(edge_id, label);
+        for chunk in pair_edge_ids.chunks(PROPERTIES_PER_CHUNK) {
+            self.check_execution_deadline()?;
+            let property_keys = chunk
+                .iter()
+                .map(|edge_id| {
+                    keys::Key::Data {
+                        scope: self.tenant_scope,
+                        kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(
+                            *edge_id,
+                        )),
+                    }
+                    .to_bytes()
+                })
+                .collect::<Vec<_>>();
+            let property_values = txn.multi_get(&property_keys).await?;
+            for ((edge_id, key), value) in chunk
+                .iter()
+                .copied()
+                .zip(property_keys)
+                .zip(property_values)
+            {
+                let value = match value {
+                    Some(value) => Some(value),
+                    None => txn.get(&key).await?,
+                };
+                let label = value
+                    .map(|value| decode_properties(&value))
+                    .transpose()?
+                    .and_then(|properties| label_of(&properties).map(str::to_owned));
+                labels.insert(edge_id, label);
+            }
         }
         for pair in pair_states.values_mut() {
             for label in pair
@@ -481,7 +580,7 @@ impl<'db> ExecutionContext<'db> {
                 *pair.label_counts.entry(label.to_owned()).or_default() += 1;
             }
         }
-        Ok(ObservedEdgeDeletions {
+        Ok(ObservedEdgeDeletionBatch {
             rows,
             pairs: pair_states,
         })

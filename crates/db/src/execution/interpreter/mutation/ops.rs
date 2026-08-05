@@ -350,11 +350,8 @@ impl<'db> ExecutionContext<'db> {
         }
 
         let mut scope = self.take_or_begin_write_scope().await?;
-        for node_id in node_ids {
-            self.check_execution_deadline()?;
-            self.delete_node(&scope.txn, node_id, &mut scope.index_context)
-                .await?;
-        }
+        self.delete_nodes(&scope.txn, node_ids, &mut scope.index_context)
+            .await?;
         self.finish_write_scope(scope).await?;
         Ok(ExecutionValue::Stream(Vec::new()))
     }
@@ -384,39 +381,26 @@ impl<'db> ExecutionContext<'db> {
 
         let mut scope = self.take_or_begin_write_scope().await?;
         scope.index_context.flush_topology(&scope.txn).await?;
-        let tenant_scope = self.tenant_scope;
-        let pair_keys = source_nodes
-            .iter()
-            .flat_map(|from| {
-                targets.iter().map(move |target| {
-                    keys::Key::Data {
-                        scope: tenant_scope,
-                        kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(
-                            *from, *target,
-                        )),
-                    }
-                    .to_bytes()
-                })
-            })
-            .collect::<Vec<_>>();
+        let pairs = self
+            .edge_pairs_between(&scope.txn, &source_nodes, &targets, &scope.index_context)
+            .await?;
+        let pair_values = self
+            .observe_edge_pair_values(&scope.txn, pairs, &scope.index_context)
+            .await?;
         let mut candidate_edge_ids = BTreeSet::new();
-        for value in scope
-            .index_context
-            .observe_topology(&scope.txn, &pair_keys)
-            .await?
-        {
+        for value in pair_values.values() {
             self.check_execution_deadline()?;
-            let Some(value) = value else {
+            let Some(value) = value.as_ref() else {
                 continue;
             };
             candidate_edge_ids
-                .extend(values::secondary::SecondaryEqualityValue::decode(&value)?.into_ids());
+                .extend(values::secondary::SecondaryEqualityValue::decode(value)?.into_ids());
         }
         let mut observed_edges = self
-            .observe_edge_deletions(
+            .observe_edge_deletions_from_pairs(
                 &scope.txn,
                 candidate_edge_ids.iter().copied(),
-                &scope.index_context,
+                pair_values,
             )
             .await?;
         let edge_ids = candidate_edge_ids
