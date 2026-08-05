@@ -988,6 +988,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_vector_deletion_is_visible_before_search_and_recreation() {
+        const DATABASE: &str = "mutation-node-vector-batched-deletion-visibility";
+
+        let config = test_support::in_memory_config(DATABASE).with_node_vector_index(
+            "Document",
+            "embedding",
+            2,
+            crate::search::vector::VectorDistanceMetric::Cosine,
+        );
+        let object_store = config.object_store();
+        let db = test_support::open_db_with_config(config).await;
+        let mut create = write_batch();
+        for ordinal in 0..8 {
+            create = create.var_as(
+                &format!("document_{ordinal}"),
+                g().add_n(
+                    "Document",
+                    vec![(
+                        "embedding",
+                        PropertyInput::from(vec![ordinal as f32 + 1.0, 9.0 - ordinal as f32]),
+                    )],
+                ),
+            );
+        }
+        db.query(QueryRequest::write(create.returning(Vec::<String>::new())))
+            .await
+            .expect("vector fixture commits");
+
+        let deletion = write_batch()
+            .var_as("deleted", g().n(NodeRef::all()).drop())
+            .var_as(
+                "remaining_hits",
+                g().vector_search_nodes("Document", "embedding", vec![1.0_f32, 8.0], 8, None)
+                    .id(),
+            )
+            .returning(["remaining_hits"]);
+        assert_eq!(
+            db.query(QueryRequest::write(deletion))
+                .await
+                .expect("vector barrier drains terminal deletions before search"),
+            serde_json::json!({ "remaining_hits": [] })
+        );
+
+        db.query(QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "seed",
+                    g().add_n(
+                        "Document",
+                        vec![("embedding", PropertyInput::from(vec![8.0_f32, 1.0]))],
+                    ),
+                )
+                .returning(Vec::<String>::new()),
+        ))
+        .await
+        .expect("recreation visibility fixture commits");
+
+        let replacement = write_batch()
+            .var_as("deleted_again", g().n(NodeRef::all()).drop())
+            .var_as(
+                "replacement",
+                g().add_n(
+                    "Document",
+                    vec![("embedding", PropertyInput::from(vec![1.0_f32, 8.0]))],
+                )
+                .id(),
+            )
+            .var_as(
+                "replacement_hits",
+                g().vector_search_nodes("Document", "embedding", vec![1.0_f32, 8.0], 8, None)
+                    .id(),
+            )
+            .returning(["replacement", "replacement_hits"]);
+        let replacement = db
+            .query(QueryRequest::write(replacement))
+            .await
+            .expect("ordinary insertion drains same-request deletions before recreation");
+        assert_eq!(replacement["replacement"], replacement["replacement_hits"]);
+        db.close().await.expect("vector writer closes");
+
+        let reopened = test_support::open_db_with_object_store(DATABASE, object_store).await;
+        let verification = read_batch()
+            .var_as(
+                "hits",
+                g().vector_search_nodes("Document", "embedding", vec![1.0_f32, 8.0], 8, None)
+                    .id(),
+            )
+            .returning(["hits"]);
+        assert_eq!(
+            reopened
+                .query(QueryRequest::read(verification))
+                .await
+                .expect("reopened vector search succeeds")["hits"],
+            replacement["replacement"]
+        );
+        reopened.close().await.expect("vector reader closes");
+    }
+
+    #[tokio::test]
     async fn batch_deletion_fails_closed_on_adjacency_without_a_node_row() {
         let db = test_support::open_db("mutation-node-delete-malformed-adjacency").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
