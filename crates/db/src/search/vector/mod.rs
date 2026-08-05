@@ -229,6 +229,7 @@ pub(crate) use model::Candidate;
 pub(crate) use mutation::production_contracts::run as run_mutation_contracts;
 pub(crate) use mutation::{
     ActiveVectorMutationRuntime, VectorBuildSession, VectorBuildSessionStats,
+    VectorGenerationAfterDeletion,
 };
 pub use parameters::{
     CollisionThreshold, Connections, ConstructionBeamWidth, DistanceScore, FailureProbability,

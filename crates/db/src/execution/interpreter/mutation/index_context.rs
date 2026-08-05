@@ -22,6 +22,7 @@ pub(crate) struct MutationIndexContext {
     routes: crate::index_lifecycle::mutation_catalog::MutationRouteCatalog,
     topology_runtime: super::topology::TopologyMutationRuntime,
     active_text_runtime: crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime,
+    active_vector_deletions: crate::index_lifecycle::vector::ActiveVectorDeletionBatch,
     active_vector_runtime: vector::ActiveVectorMutationRuntime,
     vector_cache_writes: vector::VectorCacheWriteSet,
     text_compaction_staged: bool,
@@ -59,6 +60,8 @@ impl MutationIndexContext {
             topology_runtime: super::topology::TopologyMutationRuntime::default(),
             active_text_runtime:
                 crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime::new(),
+            active_vector_deletions:
+                crate::index_lifecycle::vector::ActiveVectorDeletionBatch::default(),
             active_vector_runtime: vector::ActiveVectorMutationRuntime::new(
                 vector_retained_payload_limit,
             ),
@@ -84,6 +87,8 @@ impl MutationIndexContext {
             topology_runtime: super::topology::TopologyMutationRuntime::default(),
             active_text_runtime:
                 crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime::new(),
+            active_vector_deletions:
+                crate::index_lifecycle::vector::ActiveVectorDeletionBatch::default(),
             active_vector_runtime: vector::ActiveVectorMutationRuntime::new(
                 std::num::NonZeroU64::new(8 * 1024 * 1024)
                     .expect("the focused-test vector payload limit is non-zero"),
@@ -128,6 +133,9 @@ impl MutationIndexContext {
         object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
         database: &str,
     ) -> Result<(), crate::HelixDbError> {
+        if graph.after().is_some() {
+            self.flush_active_vector_deletions(transaction).await?;
+        }
         let routes = self.routes.targets_for(&graph);
         self.secondary_runtime
             .collect(graph.scope(), &self.secondary, &routes, &graph)?;
@@ -136,6 +144,7 @@ impl MutationIndexContext {
             graph.scope(),
             &self.vector,
             &routes,
+            &mut self.active_vector_deletions,
             &mut self.active_vector_runtime,
             &self.vector_cache_writes,
             &graph,
@@ -223,7 +232,23 @@ impl MutationIndexContext {
         &mut self,
         transaction: &slatedb::DbTransaction,
     ) -> Result<(), crate::HelixDbError> {
+        self.flush_active_vector_deletions(transaction).await?;
         self.active_vector_runtime.flush(transaction).await
+    }
+
+    /// Transfers logical terminal deletions into grouped physical HNSW repair.
+    async fn flush_active_vector_deletions(
+        &mut self,
+        transaction: &slatedb::DbTransaction,
+    ) -> Result<(), crate::HelixDbError> {
+        crate::index_lifecycle::vector::flush_active_deletions(
+            transaction,
+            &self.vector,
+            &mut self.active_vector_deletions,
+            &mut self.active_vector_runtime,
+            &self.vector_cache_writes,
+        )
+        .await
     }
 
     /// Drains one Active text epoch before a transaction-visible read.
@@ -277,6 +302,7 @@ impl MutationIndexContext {
         &mut self,
         transaction: &slatedb::DbTransaction,
     ) -> Result<(), crate::HelixDbError> {
+        self.flush_active_vector_deletions(transaction).await?;
         self.active_vector_runtime.prepare(transaction).await
     }
 
@@ -314,11 +340,13 @@ impl MutationIndexContext {
             routes: _,
             topology_runtime,
             active_text_runtime,
+            active_vector_deletions,
             active_vector_runtime,
             vector_cache_writes,
             text_compaction_staged,
         } = self;
         topology_runtime.consume_prepared()?;
+        active_vector_deletions.consume_drained()?;
         active_vector_runtime.consume_prepared()?;
         active_text_runtime.consume_prepared()?;
         secondary_runtime.consume_prepared()?;
