@@ -285,8 +285,6 @@ impl TopologyMutationRuntime {
         &mut self,
         transaction: &DbTransaction,
     ) -> Result<()> {
-        #[cfg(feature = "production-coverage")]
-        super::benchmark_telemetry::record_topology_flush();
         let state = std::mem::take(&mut self.state);
         let batch = match state {
             TopologyMutationRuntimeState::Collecting => return Ok(()),
@@ -298,6 +296,8 @@ impl TopologyMutationRuntime {
                 ));
             }
         };
+        #[cfg(feature = "production-coverage")]
+        super::benchmark_telemetry::record_topology_flush();
 
         let mut observation_keys = batch
             .bitmaps
