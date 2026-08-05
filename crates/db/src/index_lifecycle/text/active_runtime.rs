@@ -23,11 +23,28 @@ pub(crate) struct ActiveTextMutationRuntime {
 
 #[derive(Debug)]
 enum ActiveTextMutationRuntimeState {
-    Collecting {
-        mutations: BTreeMap<EntityKey, CoalescedActiveTextMutation>,
-        retained_bytes: u64,
-    },
+    Collecting(ActiveTextEpoch),
     Prepared,
+}
+
+/// One internally bounded set of coalesced text mutations.
+#[derive(Debug, Default)]
+struct ActiveTextEpoch {
+    mutations: BTreeMap<EntityKey, CoalescedActiveTextMutation>,
+    retained_bytes: u64,
+}
+
+/// A single mutation proven to fit a fresh empty text epoch.
+#[derive(Debug)]
+pub(crate) struct AdmissibleTextMutation(CoalescedActiveTextMutation);
+
+/// Result of admitting one mutation without implicitly publishing storage.
+#[derive(Debug)]
+pub(crate) enum ActiveTextCollection {
+    /// The current epoch now contains the transition's coalesced effect.
+    Collected,
+    /// The current epoch must drain before consuming this proven mutation.
+    DrainRequired(AdmissibleTextMutation),
 }
 
 /// Index work staged by one successfully drained epoch.
@@ -47,10 +64,7 @@ impl ActiveTextMutationRuntime {
     /// Starts with one empty collecting epoch.
     pub(crate) fn new() -> Self {
         Self {
-            state: ActiveTextMutationRuntimeState::Collecting {
-                mutations: BTreeMap::new(),
-                retained_bytes: 0,
-            },
+            state: ActiveTextMutationRuntimeState::Collecting(ActiveTextEpoch::default()),
         }
     }
 
@@ -68,7 +82,12 @@ impl ActiveTextMutationRuntime {
                 "Active text graph source disagrees with its supplied before state".to_string(),
             ));
         }
-        self.collect_routed(mutation, true, limits)
+        match self.try_collect_routed(mutation, true, limits)? {
+            ActiveTextCollection::Collected => Ok(()),
+            ActiveTextCollection::DrainRequired(_) => Err(HelixDbError::InvariantViolation(
+                "focused text collection requires an explicit epoch drain".to_string(),
+            )),
+        }
     }
 
     /// Coalesces a caller-observed transition only when text can observe it.
@@ -76,72 +95,103 @@ impl ActiveTextMutationRuntime {
     /// Mutation helpers construct the transition from their transaction-owned
     /// source row. Avoiding another point read here preserves that observation
     /// as the single graph-row authority for foreground writes.
-    pub(crate) fn collect_routed(
+    pub(crate) fn try_collect_routed(
         &mut self,
         mutation: GraphMutationTransition,
         text_relevant: bool,
         limits: ActiveTextMutationLimits,
-    ) -> Result<()> {
-        let ActiveTextMutationRuntimeState::Collecting {
-            mutations: collected,
-            retained_bytes,
-        } = &mut self.state
-        else {
+    ) -> Result<ActiveTextCollection> {
+        let ActiveTextMutationRuntimeState::Collecting(epoch) = &mut self.state else {
             return Err(HelixDbError::InvariantViolation(
                 "prepared Active text runtime cannot collect another mutation".to_string(),
             ));
         };
         let key = (mutation.scope(), mutation.entity());
-        if !text_relevant && !collected.contains_key(&key) {
-            return Ok(());
+        if !text_relevant && !epoch.mutations.contains_key(&key) {
+            return Ok(ActiveTextCollection::Collected);
         }
         let (scope, entity, before, after) = mutation.into_states();
         let key = (scope, entity);
-        match collected.get_mut(&key) {
-            Some(existing) => {
-                if existing.final_state != before {
-                    return Err(HelixDbError::InvariantViolation(
-                        "Active text entity transitions are discontinuous within one epoch"
-                            .to_string(),
-                    ));
-                }
-                *retained_bytes = retained_bytes.saturating_sub(existing.retained_input_bytes());
-                existing.final_state = after;
-                if existing.original == existing.final_state {
-                    collected.remove(&key);
-                } else {
-                    *retained_bytes =
-                        retained_bytes.saturating_add(existing.retained_input_bytes());
-                }
-            }
-            None if before == after => {}
-            None => {
-                let mutation = CoalescedActiveTextMutation {
-                    scope,
-                    entity,
-                    original: before,
-                    final_state: after,
-                };
-                *retained_bytes = retained_bytes.saturating_add(mutation.retained_input_bytes());
-                collected.insert(key, mutation);
-            }
+        let incoming = CoalescedActiveTextMutation {
+            scope,
+            entity,
+            original: before,
+            final_state: after,
+        };
+        if incoming.original == incoming.final_state {
+            return Ok(ActiveTextCollection::Collected);
         }
-        let entity_count = u64::try_from(collected.len()).unwrap_or(u64::MAX);
+        let existing = epoch.mutations.get(&key);
+        if existing.is_some_and(|existing| existing.final_state != incoming.original) {
+            return Err(HelixDbError::InvariantViolation(
+                "Active text entity transitions are discontinuous within one epoch".to_string(),
+            ));
+        }
+        let candidate = CoalescedActiveTextMutation {
+            scope,
+            entity,
+            original: existing.map_or_else(
+                || incoming.original.clone(),
+                |existing| existing.original.clone(),
+            ),
+            final_state: incoming.final_state.clone(),
+        };
+        let candidate_is_empty = candidate.original == candidate.final_state;
+        let retained_bytes = epoch
+            .retained_bytes
+            .saturating_sub(existing.map_or(0, CoalescedActiveTextMutation::retained_input_bytes))
+            .saturating_add(if candidate_is_empty {
+                0
+            } else {
+                candidate.retained_input_bytes()
+            });
+        let entity_count = epoch
+            .mutations
+            .len()
+            .saturating_add(usize::from(existing.is_none() && !candidate_is_empty))
+            .saturating_sub(usize::from(existing.is_some() && candidate_is_empty));
+        let entity_count = u64::try_from(entity_count).unwrap_or(u64::MAX);
         let entity_limit = u64::try_from(limits.max_entities().get()).unwrap_or(u64::MAX);
-        if entity_count > entity_limit {
-            return Err(HelixDbError::ActiveTextMutationLimitExceeded {
-                resource: ActiveTextMutationResource::Entities,
-                observed: entity_count,
-                limit: entity_limit,
-            });
+        let exceeds_epoch =
+            entity_count > entity_limit || retained_bytes > limits.max_input_bytes().get();
+        if exceeds_epoch {
+            let incoming_bytes = incoming.retained_input_bytes();
+            if incoming_bytes > limits.max_input_bytes().get() {
+                return Err(HelixDbError::ActiveTextMutationLimitExceeded {
+                    resource: ActiveTextMutationResource::InputBytes,
+                    observed: incoming_bytes,
+                    limit: limits.max_input_bytes().get(),
+                });
+            }
+            return Ok(ActiveTextCollection::DrainRequired(AdmissibleTextMutation(
+                incoming,
+            )));
         }
-        if *retained_bytes > limits.max_input_bytes().get() {
-            return Err(HelixDbError::ActiveTextMutationLimitExceeded {
-                resource: ActiveTextMutationResource::InputBytes,
-                observed: *retained_bytes,
-                limit: limits.max_input_bytes().get(),
-            });
+        epoch.retained_bytes = retained_bytes;
+        if candidate_is_empty {
+            epoch.mutations.remove(&key);
+        } else {
+            epoch.mutations.insert(key, candidate);
         }
+        Ok(ActiveTextCollection::Collected)
+    }
+
+    /// Consumes a proof token after the previous epoch has drained.
+    pub(crate) fn consume_admissible(&mut self, mutation: AdmissibleTextMutation) -> Result<()> {
+        let ActiveTextMutationRuntimeState::Collecting(epoch) = &mut self.state else {
+            return Err(HelixDbError::InvariantViolation(
+                "prepared Active text runtime cannot consume a mutation".to_string(),
+            ));
+        };
+        if !epoch.mutations.is_empty() || epoch.retained_bytes != 0 {
+            return Err(HelixDbError::InvariantViolation(
+                "admissible text mutation requires a freshly drained epoch".to_string(),
+            ));
+        }
+        let mutation = mutation.0;
+        let key = (mutation.scope, mutation.entity);
+        epoch.retained_bytes = mutation.retained_input_bytes();
+        assert!(epoch.mutations.insert(key, mutation).is_none());
         Ok(())
     }
 
@@ -155,20 +205,26 @@ impl ActiveTextMutationRuntime {
         object_store: &Arc<dyn ObjectStore>,
         database: &str,
     ) -> Result<ActiveTextFlushOutcome> {
-        let ActiveTextMutationRuntimeState::Collecting {
-            mutations: collected,
-            retained_bytes,
-        } = &mut self.state
-        else {
-            return Err(HelixDbError::InvariantViolation(
-                "prepared Active text runtime cannot flush another epoch".to_string(),
-            ));
+        let state = std::mem::replace(
+            &mut self.state,
+            ActiveTextMutationRuntimeState::Collecting(ActiveTextEpoch::default()),
+        );
+        let epoch = match state {
+            ActiveTextMutationRuntimeState::Collecting(epoch) => epoch,
+            ActiveTextMutationRuntimeState::Prepared => {
+                self.state = ActiveTextMutationRuntimeState::Prepared;
+                return Err(HelixDbError::InvariantViolation(
+                    "prepared Active text runtime cannot flush another epoch".to_string(),
+                ));
+            }
         };
-        let epoch = std::mem::take(collected).into_values().collect::<Vec<_>>();
-        *retained_bytes = 0;
-        if epoch.is_empty() {
+        if epoch.mutations.is_empty() {
+            assert_eq!(epoch.retained_bytes, 0);
             return Ok(ActiveTextFlushOutcome::default());
         }
+        #[cfg(feature = "production-coverage")]
+        let entity_count = epoch.mutations.len();
+        let epoch = epoch.mutations.into_values().collect::<Vec<_>>();
         let prepared = super::active_batch::prepare_active_text_epoch(
             transaction,
             mutations,
@@ -177,6 +233,8 @@ impl ActiveTextMutationRuntime {
             limits,
         )
         .await?;
+        #[cfg(feature = "production-coverage")]
+        let upload_count = prepared.upload_count();
         let published = super::active_publication::publish_active_text_epoch(
             object_store,
             database,
@@ -184,6 +242,14 @@ impl ActiveTextMutationRuntime {
             limits,
         )
         .await?;
+        #[cfg(feature = "production-coverage")]
+        crate::execution::interpreter::mutation::benchmark_telemetry::record_text_epoch(
+            entity_count,
+        );
+        #[cfg(feature = "production-coverage")]
+        crate::execution::interpreter::mutation::benchmark_telemetry::record_text_uploads(
+            upload_count,
+        );
         super::active_batch::stage_active_text_epoch(transaction, &published)?;
         Ok(ActiveTextFlushOutcome {
             compaction_staged: published.has_destination_work(),
@@ -218,11 +284,9 @@ impl ActiveTextMutationRuntime {
     pub(crate) fn consume_prepared(self) -> Result<()> {
         match self.state {
             ActiveTextMutationRuntimeState::Prepared => Ok(()),
-            ActiveTextMutationRuntimeState::Collecting { .. } => {
-                Err(HelixDbError::InvariantViolation(
-                    "Active text mutation runtime reached commit before prepare".to_string(),
-                ))
-            }
+            ActiveTextMutationRuntimeState::Collecting(_) => Err(HelixDbError::InvariantViolation(
+                "Active text mutation runtime reached commit before prepare".to_string(),
+            )),
         }
     }
 
@@ -230,7 +294,7 @@ impl ActiveTextMutationRuntime {
     #[cfg(test)]
     pub(crate) fn pending_entity_count(&self) -> usize {
         match &self.state {
-            ActiveTextMutationRuntimeState::Collecting { mutations, .. } => mutations.len(),
+            ActiveTextMutationRuntimeState::Collecting(epoch) => epoch.mutations.len(),
             ActiveTextMutationRuntimeState::Prepared => 0,
         }
     }
@@ -238,11 +302,16 @@ impl ActiveTextMutationRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::num::{NonZeroU64, NonZeroUsize};
+
     use slatedb::object_store::memory::InMemory;
     use slatedb::{Db, IsolationLevel};
 
     use super::*;
-    use crate::config::SearchIndexBackfillLimits;
+    use crate::config::{
+        SearchIndexBackfillLimits, SearchIndexBatchLimits, TextBackfillCompactionLimits,
+        TextBuildArtifactLimits,
+    };
     use crate::encoding::v1::property::{encode_properties, Property};
     use crate::index_lifecycle::graph_mutation::{
         CanonicalPropertyRow, PropertyEdit, PropertyEditOutcome,
@@ -269,6 +338,30 @@ mod tests {
             Property::string("$label", "Document"),
             Property::string("body", text),
         ]
+    }
+
+    fn small_input_limits() -> ActiveTextMutationLimits {
+        SearchIndexBackfillLimits::try_new(
+            SearchIndexBatchLimits::try_new(
+                NonZeroUsize::new(2).unwrap(),
+                NonZeroU64::new(4_096).unwrap(),
+                NonZeroU64::new(4_096).unwrap(),
+                NonZeroU64::new(4_096).unwrap(),
+                NonZeroU64::MIN,
+            )
+            .unwrap(),
+            NonZeroUsize::MIN,
+            TextBuildArtifactLimits::new(NonZeroUsize::MIN, NonZeroU64::MIN),
+            TextBackfillCompactionLimits::new(
+                NonZeroUsize::MIN,
+                NonZeroU64::new(512).unwrap(),
+                NonZeroU64::new(4_096).unwrap(),
+                NonZeroU64::new(4_096).unwrap(),
+                NonZeroU64::new(4_096).unwrap(),
+            ),
+        )
+        .unwrap()
+        .active_text_mutation()
     }
 
     fn create(scope: DataScope, id: u64, properties: &[Property]) -> GraphMutationTransition {
@@ -312,14 +405,10 @@ mod tests {
     fn collecting(
         runtime: &ActiveTextMutationRuntime,
     ) -> &BTreeMap<EntityKey, CoalescedActiveTextMutation> {
-        let ActiveTextMutationRuntimeState::Collecting {
-            mutations: collected,
-            ..
-        } = &runtime.state
-        else {
+        let ActiveTextMutationRuntimeState::Collecting(epoch) = &runtime.state else {
             panic!("runtime should remain collecting");
         };
-        collected
+        &epoch.mutations
     }
 
     #[tokio::test]
@@ -389,6 +478,45 @@ mod tests {
         ));
         drop(transaction);
         db.close().await.expect("coalescing fixture closes");
+    }
+
+    #[test]
+    fn oversized_single_mutation_preserves_the_current_epoch_exactly() {
+        let scope = DataScope::LegacyUnscoped;
+        let limits = small_input_limits();
+        let mut runtime = ActiveTextMutationRuntime::new();
+        assert!(matches!(
+            runtime
+                .try_collect_routed(delete(scope, 1, &properties("small")), true, limits)
+                .unwrap(),
+            ActiveTextCollection::Collected
+        ));
+        let before = collecting(&runtime).clone();
+        let retained_before = match &runtime.state {
+            ActiveTextMutationRuntimeState::Collecting(epoch) => epoch.retained_bytes,
+            ActiveTextMutationRuntimeState::Prepared => unreachable!(),
+        };
+
+        let error = runtime
+            .try_collect_routed(
+                delete(scope, 2, &properties(&"x".repeat(2_048))),
+                true,
+                limits,
+            )
+            .expect_err("an individually oversized mutation is rejected");
+
+        assert!(matches!(
+            error,
+            HelixDbError::ActiveTextMutationLimitExceeded {
+                resource: ActiveTextMutationResource::InputBytes,
+                ..
+            }
+        ));
+        assert_eq!(collecting(&runtime), &before);
+        let ActiveTextMutationRuntimeState::Collecting(epoch) = &runtime.state else {
+            unreachable!()
+        };
+        assert_eq!(epoch.retained_bytes, retained_before);
     }
 
     #[tokio::test]
@@ -477,6 +605,67 @@ mod tests {
             .expect("only prepared runtime reaches commit");
         drop(transaction);
         db.close().await.expect("lifecycle fixture closes");
+    }
+
+    #[tokio::test]
+    async fn ten_thousand_deletions_drain_into_bounded_zero_upload_epochs() {
+        let (db, object_store) = test_db("ten-thousand-deletions").await;
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("10k transaction opens");
+        let scope = DataScope::LegacyUnscoped;
+        let limits = SearchIndexBackfillLimits::default().active_text_mutation();
+        assert_eq!(limits.max_entities().get(), 512);
+        let mutations = super::super::mutation::TextMutationSet::empty();
+        let routes = crate::index_v2::mutation_catalog::MutationRouteCatalog::default();
+        let mut runtime = ActiveTextMutationRuntime::new();
+        let deleted = properties("deleted");
+        let mut drained_epochs = 0;
+
+        for entity_id in 0..10_000 {
+            match runtime
+                .try_collect_routed(delete(scope, entity_id, &deleted), true, limits)
+                .expect("deletion admission succeeds")
+            {
+                ActiveTextCollection::Collected => {}
+                ActiveTextCollection::DrainRequired(admissible) => {
+                    let outcome = runtime
+                        .flush(
+                            &transaction,
+                            &mutations,
+                            &routes,
+                            limits,
+                            &object_store,
+                            "ten-thousand-deletions",
+                        )
+                        .await
+                        .expect("bounded deletion epoch drains");
+                    assert!(!outcome.compaction_staged());
+                    runtime
+                        .consume_admissible(admissible)
+                        .expect("proven deletion starts the next epoch");
+                    drained_epochs += 1;
+                }
+            }
+        }
+        let outcome = runtime
+            .prepare(
+                &transaction,
+                &mutations,
+                &routes,
+                limits,
+                &object_store,
+                "ten-thousand-deletions",
+            )
+            .await
+            .expect("final deletion epoch prepares");
+
+        assert_eq!(drained_epochs, 19);
+        assert!(!outcome.compaction_staged());
+        runtime.consume_prepared().unwrap();
+        transaction.rollback();
+        db.close().await.expect("10k fixture closes");
     }
 
     #[tokio::test]

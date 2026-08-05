@@ -143,6 +143,15 @@ pub(crate) struct TextMutationSet {
     active_handles: Vec<crate::index_lifecycle::ActiveIndexHandle>,
 }
 
+impl TextMutationSet {
+    /// Resolves one routed Building ordinal to its immutable generation identity.
+    pub(super) fn building_identity(&self, ordinal: usize) -> Option<(IndexId, IndexGenerationId)> {
+        self.targets
+            .get(ordinal)
+            .map(|target| (target.index_id, target.generation))
+    }
+}
+
 /// Family-local target ordinal produced by the canonical catalog classifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::index_lifecycle) enum TextMutationTargetOrdinal {

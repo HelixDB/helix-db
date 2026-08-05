@@ -194,6 +194,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         txn.put(key, encoded)?;
@@ -271,6 +273,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         txn.put(
@@ -344,6 +348,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         txn.put(
@@ -671,6 +677,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         txn.delete(property_key)?;

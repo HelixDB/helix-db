@@ -233,6 +233,10 @@ impl<'db> ExecutionContext<'db> {
         active.index_context.prepare_secondary(&active.txn).await?;
         active
             .index_context
+            .prepare_active_vectors(&active.txn)
+            .await?;
+        active
+            .index_context
             .prepare_active_text(
                 &active.txn,
                 self.db
@@ -243,10 +247,6 @@ impl<'db> ExecutionContext<'db> {
                 self.db.object_store(),
                 self.db.path(),
             )
-            .await?;
-        active
-            .index_context
-            .prepare_active_vectors(&active.txn)
             .await?;
         #[cfg(feature = "production-coverage")]
         super::benchmark_telemetry::record_phase(
