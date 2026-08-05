@@ -635,4 +635,27 @@ mod tests {
                 .expect("benchmark fixture verifies");
         }
     }
+
+    #[tokio::test]
+    async fn node_cascade_stages_one_non_empty_topology_epoch() {
+        let fixture = DeletionBenchmarkFixture::prepare(
+            DeletionBenchmarkCase::try_supported(
+                DeletionBenchmarkWorkload::ChainNodes,
+                10,
+                DeletionBenchmarkCachePolicy::Warm,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let sample = fixture.run_sample().await.unwrap();
+        let operations = sample.telemetry.instrumented_logical_operations;
+
+        assert_eq!(operations.topology_flushes, 1);
+        assert_eq!(operations.cascade_nodes, 10);
+        assert_eq!(operations.cascade_edges, 9);
+        assert_eq!(operations.cascade_pairs, 9);
+        fixture.verify_and_close().await.unwrap();
+    }
 }

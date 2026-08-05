@@ -75,6 +75,7 @@ impl ObservedEdgeDeletionBatch {
     }
 
     /// Returns the number of distinct physical pair rows owned by the batch.
+    #[cfg(feature = "production-coverage")]
     pub(super) fn pair_count(&self) -> usize {
         self.pairs.len()
     }
