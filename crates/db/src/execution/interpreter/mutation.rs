@@ -1,6 +1,8 @@
 //! Graph mutation execution with transactional index-maintenance ownership.
 
 mod adjacency;
+#[cfg(feature = "production-coverage")]
+pub(crate) mod benchmark_telemetry;
 mod contracts;
 mod edge;
 mod index_context;
