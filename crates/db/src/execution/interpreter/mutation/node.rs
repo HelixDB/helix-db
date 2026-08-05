@@ -27,6 +27,17 @@ pub(super) struct ObservedNodeExistence {
     present: BTreeSet<u64>,
 }
 
+/// Existing node property rows captured by one deletion observation epoch.
+pub(super) struct ObservedNodeDeletionBatch {
+    rows: BTreeMap<u64, CanonicalPropertyRow>,
+}
+
+/// A complete node-cascade closure whose pair rows were each observed once.
+pub(super) struct PreparedTopologyDeletion {
+    nodes: ObservedNodeDeletionBatch,
+    edges: super::edge::ObservedEdgeDeletionBatch,
+}
+
 impl ObservedNodeExistence {
     pub(super) fn require(&self, node_id: u64) -> Result<()> {
         if self.present.contains(&node_id) {
@@ -360,97 +371,160 @@ impl<'db> ExecutionContext<'db> {
         Ok(ObservedNodeExistence { present })
     }
 
+    #[cfg(test)]
     pub(super) async fn delete_node(
         &self,
         txn: &DbTransaction,
         node_id: u64,
         index_context: &mut MutationIndexContext,
     ) -> Result<()> {
-        let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-            node_id,
-        )));
-        let Some(stored) = txn.get(&key).await? else {
-            return Ok(());
-        };
-        let transition = GraphMutationTransition::delete(
-            self.tenant_scope,
-            GraphEntity::node(node_id),
-            CanonicalPropertyRow::decode(stored)?,
-        );
-        let properties = transition
-            .before()
-            .expect("a delete transition has a before row")
-            .properties();
-        index_context.flush_topology(txn).await?;
-        let incident_edges = self.incident_edge_ids(txn, node_id, index_context).await?;
-        let mut observed_edges = self
-            .observe_edge_deletions(txn, incident_edges.iter().copied(), index_context)
+        self.delete_nodes(txn, std::iter::once(node_id), index_context)
+            .await
+    }
+
+    /// Observes and stages one complete node-deletion cascade as a single epoch.
+    ///
+    /// The closure owns sorted unique nodes, pairs, and incident edges, so a
+    /// self-loop or edge shared by multiple deleted nodes is processed once.
+    pub(super) async fn delete_nodes(
+        &self,
+        txn: &DbTransaction,
+        node_ids: impl IntoIterator<Item = u64>,
+        index_context: &mut MutationIndexContext,
+    ) -> Result<()> {
+        let PreparedTopologyDeletion { nodes, mut edges } = self
+            .observe_node_deletion_batch(txn, node_ids, index_context)
             .await?;
-        for edge_id in incident_edges {
+        let edge_ids = edges.edge_ids().collect::<Vec<_>>();
+        for edge_id in edge_ids {
             self.check_execution_deadline()?;
-            self.delete_edge_observed(txn, edge_id, observed_edges.take(edge_id)?, index_context)
+            self.delete_edge_observed(txn, edge_id, edges.take(edge_id)?, index_context)
                 .await?;
         }
-        index_context.flush_topology(txn).await?;
-        if let Some(label) = label_of(properties) {
-            index_context.topology_mutations().remove_node_label(
+        for (node_id, property_row) in nodes.rows {
+            self.check_execution_deadline()?;
+            let transition = GraphMutationTransition::delete(
                 self.tenant_scope,
-                label,
-                node_id,
+                GraphEntity::node(node_id),
+                property_row,
+            );
+            let properties = transition
+                .before()
+                .expect("a delete transition has a before row")
+                .properties();
+            if let Some(label) = label_of(properties) {
+                index_context.topology_mutations().remove_node_label(
+                    self.tenant_scope,
+                    label,
+                    node_id,
+                )?;
+            }
+            index_context
+                .maintain_graph_indexes(
+                    txn,
+                    transition,
+                    self.db
+                        .config()
+                        .db()
+                        .search_index_backfill()
+                        .active_text_mutation(),
+                )
+                .await?;
+            txn.delete(self.storage_key(keys::DataKeyKind::NodeProperty(
+                keys::NodePropertyKey::new(node_id),
+            )))?;
+            txn.delete(
+                self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
+                    node_id,
+                ))),
             )?;
         }
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
-        txn.delete(&key)?;
-        txn.delete(
-            self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
-                node_id,
-            ))),
-        )?;
         Ok(())
     }
 
-    async fn incident_edge_ids(
+    /// Builds one fail-closed incident-edge closure from bounded graph reads.
+    async fn observe_node_deletion_batch(
         &self,
         txn: &DbTransaction,
-        node_id: u64,
-        index_context: &MutationIndexContext,
-    ) -> Result<BTreeSet<u64>> {
-        let key = self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
-            node_id,
-        )));
-        let edges = decode_stored_edges(txn.get(&key).await?)?;
-        let pairs = edges
-            .iter_out()
-            .map(|to| (node_id, to))
-            .chain(edges.iter_in().map(|from| (from, node_id)))
-            .collect::<BTreeSet<_>>();
-        let keys = pairs
-            .into_iter()
-            .map(|(from, to)| {
-                self.storage_key(keys::DataKeyKind::EdgePairIndex(
-                    keys::EdgePairIndexKey::new(from, to),
-                ))
-            })
-            .collect::<Vec<_>>();
-        let mut edge_ids = BTreeSet::new();
-        for value in index_context.observe_topology(txn, &keys).await? {
+        node_ids: impl IntoIterator<Item = u64>,
+        index_context: &mut MutationIndexContext,
+    ) -> Result<PreparedTopologyDeletion> {
+        const NODES_PER_CHUNK: usize = 256;
+
+        let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
+        index_context.flush_topology(txn).await?;
+        let node_ids = node_ids.into_iter().collect::<Vec<_>>();
+        let mut nodes = BTreeMap::new();
+        let mut pairs = BTreeSet::new();
+        for chunk in node_ids.chunks(NODES_PER_CHUNK) {
             self.check_execution_deadline()?;
-            let Some(value) = value else {
-                continue;
-            };
-            edge_ids.extend(values::indexes::SecondaryEqualityValue::decode(&value)?.into_ids());
+            let property_keys = chunk
+                .iter()
+                .map(|node_id| {
+                    self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                        *node_id,
+                    )))
+                })
+                .collect::<Vec<_>>();
+            let adjacency_keys = chunk
+                .iter()
+                .map(|node_id| {
+                    self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
+                        *node_id,
+                    )))
+                })
+                .collect::<Vec<_>>();
+            let property_values = txn.multi_get(&property_keys).await?;
+            let adjacency_values = index_context.observe_topology(txn, &adjacency_keys).await?;
+            for (((node_id, property_key), property_value), adjacency_value) in chunk
+                .iter()
+                .copied()
+                .zip(property_keys)
+                .zip(property_values)
+                .zip(adjacency_values)
+            {
+                let property_value = match property_value {
+                    Some(value) => Some(value),
+                    None => txn.get(&property_key).await?,
+                };
+                let property_row = property_value
+                    .map(CanonicalPropertyRow::decode)
+                    .transpose()?;
+                if property_row.is_none() && adjacency_value.is_some() {
+                    return Err(HelixDbError::InvariantViolation(format!(
+                        "node {node_id} has adjacency without a canonical property row"
+                    )));
+                }
+                let adjacency = decode_stored_edges(adjacency_value)?;
+                pairs.extend(adjacency.iter_out().map(|to| (node_id, to)));
+                pairs.extend(adjacency.iter_in().map(|from| (from, node_id)));
+                if let Some(property_row) = property_row {
+                    nodes.insert(node_id, property_row);
+                }
+            }
         }
-        Ok(edge_ids)
+
+        let pair_values = self
+            .observe_edge_pair_values(txn, pairs, index_context)
+            .await?;
+        let mut incident_edges = BTreeSet::new();
+        for value in pair_values.values().filter_map(Option::as_ref) {
+            incident_edges
+                .extend(values::indexes::SecondaryEqualityValue::decode(value)?.into_ids());
+        }
+        let edges = self
+            .observe_edge_deletions_from_pairs(txn, incident_edges, pair_values)
+            .await?;
+        #[cfg(feature = "production-coverage")]
+        super::benchmark_telemetry::record_cascade(
+            nodes.len(),
+            edges.edge_ids().count(),
+            edges.pair_count(),
+        );
+        Ok(PreparedTopologyDeletion {
+            nodes: ObservedNodeDeletionBatch { rows: nodes },
+            edges,
+        })
     }
 
     pub(super) async fn node_targets(&self, plan: &ir::NodeTargetPlan) -> Result<Vec<u64>> {
@@ -499,7 +573,11 @@ impl<'db> ExecutionContext<'db> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use helix_ast::prelude::*;
     use helix_planner::context;
+    use proptest::prelude::*;
     use slatedb::IsolationLevel;
 
     use super::super::super::test_support;
@@ -509,6 +587,95 @@ mod tests {
         MutationIndexContext::for_configured_index_test(std::sync::Arc::clone(
             db.simhasher_registry(),
         ))
+    }
+
+    static PROPERTY_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn batch_node_deletion_matches_a_directed_multigraph_model(
+            node_count in 1usize..8,
+            generated_edges in prop::collection::vec((0usize..8, 0usize..8, 0u8..3), 0..24),
+            generated_deletions in prop::collection::vec(0usize..8, 1..12),
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("property-test runtime starts");
+            runtime.block_on(async move {
+                let database_id = PROPERTY_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+                let db = test_support::open_db(&format!(
+                    "mutation-node-batch-property-{database_id}"
+                ))
+                .await;
+                let mut nodes = Vec::with_capacity(node_count);
+                for ordinal in 0..node_count {
+                    nodes.push(test_support::add_user(&db, &format!("user-{ordinal}")).await);
+                }
+
+                let mut edges = Vec::with_capacity(generated_edges.len());
+                for (from, to, label) in generated_edges {
+                    let from = nodes[from % node_count];
+                    let to = nodes[to % node_count];
+                    let label = match label {
+                        0 => "LIKES",
+                        1 => "KNOWS",
+                        _ => "FOLLOWS",
+                    };
+                    let edge_id = test_support::add_edge(&db, from, to, label).await;
+                    edges.push((edge_id, from, to));
+                }
+
+                let deleted = generated_deletions
+                    .into_iter()
+                    .map(|ordinal| nodes[ordinal % node_count])
+                    .collect::<BTreeSet<_>>();
+                let deletion = write_batch().var_as(
+                    "deleted",
+                    g().n(NodeRef::ids(deleted.iter().copied())).drop(),
+                );
+                let plan = helix_planner::planning::plan_write_batch(
+                    &deletion,
+                    &db.planner_context(context::ParamBindings::default()),
+                )
+                .expect("property-test deletion plans");
+                db.execute(&plan, context::ParamBindings::default())
+                    .await
+                    .expect("property-test deletion commits");
+
+                let context = ExecutionContext::new(&db, context::ParamBindings::default());
+                let remaining_nodes = context
+                    .node_targets(&ir::NodeTargetPlan::All)
+                    .await
+                    .expect("remaining nodes scan");
+                let expected_nodes = nodes
+                    .iter()
+                    .copied()
+                    .filter(|node_id| !deleted.contains(node_id))
+                    .collect::<Vec<_>>();
+                assert_eq!(remaining_nodes, expected_nodes);
+
+                let transaction = db
+                    .inner_db()
+                    .begin(IsolationLevel::Snapshot)
+                    .await
+                    .expect("verification transaction begins");
+                for (edge_id, from, to) in edges {
+                    let expected = (!deleted.contains(&from) && !deleted.contains(&to))
+                        .then_some((from, to));
+                    assert_eq!(
+                        crate::search::get_edge_endpoints(&transaction, edge_id)
+                            .await
+                            .expect("edge endpoints read"),
+                        expected,
+                        "edge {edge_id} visibility must match the reference model"
+                    );
+                }
+                db.close().await.expect("property-test database closes");
+            });
+        }
     }
 
     #[tokio::test]
@@ -631,6 +798,94 @@ mod tests {
             .delete_node(&txn, 99, &mut index_context)
             .await
             .expect("deleting a missing node is idempotent");
+    }
+
+    #[tokio::test]
+    async fn same_transaction_create_then_batch_delete_observes_staged_topology() {
+        let db = test_support::open_db("mutation-node-create-delete-staged-topology").await;
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let mut index_context = index_context(&db);
+        let txn = db
+            .inner_db()
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("snapshot transaction begins");
+        for node_id in [10, 11] {
+            context
+                .store_node(
+                    &txn,
+                    node_id,
+                    vec![Property::string("$label", "User")],
+                    &mut index_context,
+                )
+                .await
+                .expect("node create stages");
+        }
+        context
+            .store_edge(
+                &txn,
+                super::super::contracts::EdgeMutationTarget::new(20, 10, 11),
+                &test_support::name("FOLLOWS"),
+                &CanonicalPropertyRow::new(vec![Property::string("$label", "FOLLOWS")]),
+                &mut index_context,
+            )
+            .await
+            .expect("edge create stages");
+
+        context
+            .delete_nodes(&txn, [10, 11, 10], &mut index_context)
+            .await
+            .expect("batch deletion observes the staged edge once");
+        index_context
+            .flush_topology(&txn)
+            .await
+            .expect("deletion topology flushes");
+
+        assert_eq!(
+            crate::search::get_edge_endpoints(&txn, 20)
+                .await
+                .expect("edge endpoint reads"),
+            None
+        );
+        for node_id in [10, 11] {
+            assert!(matches!(
+                context.ensure_node_exists_in_tx(&txn, node_id).await,
+                Err(HelixDbError::NodeNotFound(id)) if id == node_id
+            ));
+        }
+        let pair_key = context.storage_key(keys::DataKeyKind::EdgePairIndex(
+            keys::EdgePairIndexKey::new(10, 11),
+        ));
+        assert_eq!(txn.get(pair_key).await.expect("pair row reads"), None);
+    }
+
+    #[tokio::test]
+    async fn batch_deletion_fails_closed_on_adjacency_without_a_node_row() {
+        let db = test_support::open_db("mutation-node-delete-malformed-adjacency").await;
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let mut index_context = index_context(&db);
+        let txn = db
+            .inner_db()
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("snapshot transaction begins");
+        index_context
+            .topology_mutations()
+            .add_adjacency(
+                crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                10,
+                11,
+                ir::ExpandDirection::Out,
+            )
+            .expect("malformed adjacency collects");
+
+        let error = context
+            .delete_nodes(&txn, [10], &mut index_context)
+            .await
+            .expect_err("orphan adjacency must fail closed");
+
+        assert!(matches!(error, HelixDbError::InvariantViolation(_)));
+        assert!(error.to_string().contains("adjacency without"));
     }
 
     #[tokio::test]

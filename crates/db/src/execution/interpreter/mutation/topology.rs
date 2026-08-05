@@ -287,6 +287,8 @@ impl TopologyMutationRuntime {
         &mut self,
         transaction: &DbTransaction,
     ) -> Result<()> {
+        #[cfg(feature = "production-coverage")]
+        super::benchmark_telemetry::record_topology_flush();
         let state = std::mem::take(&mut self.state);
         let batch = match state {
             TopologyMutationRuntimeState::Collecting => return Ok(()),
@@ -325,15 +327,17 @@ impl TopologyMutationRuntime {
         let (staged_keys, snapshot_keys): (Vec<_>, Vec<_>) = observation_keys
             .into_iter()
             .partition(|key| self.staged_keys.contains(key));
-        let snapshot_values = if snapshot_keys.is_empty() {
-            Vec::new()
-        } else {
-            transaction.multi_get(&snapshot_keys).await?
-        };
-        let mut observations = snapshot_keys
-            .into_iter()
-            .zip(snapshot_values)
-            .collect::<BTreeMap<_, _>>();
+        const OBSERVATION_KEYS_PER_CHUNK: usize = 512;
+
+        let mut observations = BTreeMap::new();
+        for chunk in snapshot_keys.chunks(OBSERVATION_KEYS_PER_CHUNK) {
+            observations.extend(
+                chunk
+                    .iter()
+                    .cloned()
+                    .zip(transaction.multi_get(chunk).await?),
+            );
+        }
         for key in staged_keys {
             observations.insert(key.clone(), transaction.get(&key).await?);
         }
