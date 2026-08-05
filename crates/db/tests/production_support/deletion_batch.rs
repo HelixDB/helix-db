@@ -20,7 +20,7 @@ use slatedb::object_store::{
 use crate::execution::interpreter::mutation::benchmark_telemetry::{
     self, MutationBenchmarkTelemetry,
 };
-use crate::{error::HelixDbError, HelixDB};
+use crate::{config, error::HelixDbError, search, HelixDB};
 
 /// Supported deletion sizes or the explicit non-blocking 100k stress boundary.
 #[derive(
@@ -92,6 +92,66 @@ pub enum DeletionBenchmarkWorkload {
     ParallelEdgesById,
     /// Deletes independent relationships through the pair API.
     EdgePairs,
+    /// Deletes independent relationships through the labeled-pair API.
+    LabeledEdgePairs,
+}
+
+/// Index families maintained by a measured deletion transaction.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionBenchmarkIndexes {
+    /// Measures graph storage without configured V2 index targets.
+    None,
+    /// Maintains node and edge equality indexes.
+    Secondary,
+    /// Maintains node and edge vector indexes.
+    Vector,
+    /// Maintains node and edge text indexes.
+    Text,
+    /// Maintains every foreground index family together.
+    All,
+}
+
+/// Lifecycle state whose foreground mutation behavior is measured.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionBenchmarkLifecycle {
+    /// Published generations receive eager physical maintenance.
+    Active,
+    /// Hidden generations receive coalesced Building deltas.
+    Building,
+}
+
+/// Entity kind selected by a canonical deletion workload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionBenchmarkEntityKind {
+    /// A node-drop API, including incident-edge cascades.
+    Node,
+    /// A direct edge deletion API.
+    Edge,
+}
+
+/// Public deletion API shape selected by the workload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionBenchmarkApi {
+    /// Node drop with incident-edge closure.
+    NodeDrop,
+    /// Edge deletion by exact edge IDs.
+    EdgeId,
+    /// Unlabeled source/target pair deletion.
+    EdgePair,
+    /// Labeled source/target pair deletion.
+    LabeledEdgePair,
 }
 
 /// Explicit cache state applied before measurement.
@@ -107,16 +167,22 @@ pub enum DeletionBenchmarkCachePolicy {
 }
 
 /// One validated deletion benchmark fixture selection.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct DeletionBenchmarkCase {
     /// The graph shape and deletion API under measurement.
-    pub workload: DeletionBenchmarkWorkload,
+    workload: DeletionBenchmarkWorkload,
     /// The supported or manual stress batch size.
-    pub batch_size: DeletionBatchSize,
+    batch_size: DeletionBatchSize,
     /// The explicitly prepared cache state.
-    pub cache_policy: DeletionBenchmarkCachePolicy,
+    cache_policy: DeletionBenchmarkCachePolicy,
+    /// Configured foreground index families.
+    indexes: DeletionBenchmarkIndexes,
+    /// Active or Building generation behavior.
+    lifecycle: DeletionBenchmarkLifecycle,
+    /// Entity kind implied by the selected workload.
+    entity_kind: DeletionBenchmarkEntityKind,
+    /// Public deletion API implied by the selected workload.
+    api: DeletionBenchmarkApi,
 }
 
 impl DeletionBenchmarkCase {
@@ -126,10 +192,51 @@ impl DeletionBenchmarkCase {
         batch_size: usize,
         cache_policy: DeletionBenchmarkCachePolicy,
     ) -> Result<Self, HelixDbError> {
+        Self::try_indexed(
+            workload,
+            batch_size,
+            cache_policy,
+            DeletionBenchmarkIndexes::None,
+            DeletionBenchmarkLifecycle::Active,
+        )
+    }
+
+    /// Binds a canonical workload to exact family and lifecycle behavior.
+    ///
+    /// ```
+    /// # #[cfg(feature = "production-coverage")] {
+    /// use db::production_coverage::{
+    ///     DeletionBenchmarkCachePolicy, DeletionBenchmarkCase, DeletionBenchmarkIndexes,
+    ///     DeletionBenchmarkLifecycle, DeletionBenchmarkWorkload,
+    /// };
+    ///
+    /// let case = DeletionBenchmarkCase::try_indexed(
+    ///     DeletionBenchmarkWorkload::IsolatedNodes,
+    ///     10_000,
+    ///     DeletionBenchmarkCachePolicy::Warm,
+    ///     DeletionBenchmarkIndexes::Secondary,
+    ///     DeletionBenchmarkLifecycle::Active,
+    /// )
+    /// .expect("indexed 10k case validates");
+    /// assert_eq!(case.entity_count(), 10_000);
+    /// # }
+    /// ```
+    pub fn try_indexed(
+        workload: DeletionBenchmarkWorkload,
+        batch_size: usize,
+        cache_policy: DeletionBenchmarkCachePolicy,
+        indexes: DeletionBenchmarkIndexes,
+        lifecycle: DeletionBenchmarkLifecycle,
+    ) -> Result<Self, HelixDbError> {
+        let (entity_kind, api) = workload_contract(workload);
         Ok(Self {
             workload,
             batch_size: DeletionBatchSize::try_supported(batch_size)?,
             cache_policy,
+            indexes,
+            lifecycle,
+            entity_kind,
+            api,
         })
     }
 
@@ -138,11 +245,81 @@ impl DeletionBenchmarkCase {
         workload: DeletionBenchmarkWorkload,
         cache_policy: DeletionBenchmarkCachePolicy,
     ) -> Self {
+        let (entity_kind, api) = workload_contract(workload);
         Self {
             workload,
             batch_size: DeletionBatchSize::stress_100k(),
             cache_policy,
+            indexes: DeletionBenchmarkIndexes::None,
+            lifecycle: DeletionBenchmarkLifecycle::Active,
+            entity_kind,
+            api,
         }
+    }
+
+    /// Returns the concrete entity count used for throughput calculations.
+    pub const fn entity_count(self) -> usize {
+        self.batch_size.get()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DeletionBenchmarkCaseWire {
+    workload: DeletionBenchmarkWorkload,
+    batch_size: DeletionBatchSize,
+    cache_policy: DeletionBenchmarkCachePolicy,
+    indexes: DeletionBenchmarkIndexes,
+    lifecycle: DeletionBenchmarkLifecycle,
+    entity_kind: DeletionBenchmarkEntityKind,
+    api: DeletionBenchmarkApi,
+}
+
+impl<'de> serde::Deserialize<'de> for DeletionBenchmarkCase {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let wire = <DeletionBenchmarkCaseWire as serde::Deserialize>::deserialize(deserializer)?;
+        let (entity_kind, api) = workload_contract(wire.workload);
+        if (wire.entity_kind, wire.api) != (entity_kind, api) {
+            return Err(serde::de::Error::custom(
+                "deletion benchmark workload disagrees with its entity/API contract",
+            ));
+        }
+        Ok(Self {
+            workload: wire.workload,
+            batch_size: wire.batch_size,
+            cache_policy: wire.cache_policy,
+            indexes: wire.indexes,
+            lifecycle: wire.lifecycle,
+            entity_kind,
+            api,
+        })
+    }
+}
+
+const fn workload_contract(
+    workload: DeletionBenchmarkWorkload,
+) -> (DeletionBenchmarkEntityKind, DeletionBenchmarkApi) {
+    match workload {
+        DeletionBenchmarkWorkload::IsolatedNodes
+        | DeletionBenchmarkWorkload::ChainNodes
+        | DeletionBenchmarkWorkload::HighDegreeNode => (
+            DeletionBenchmarkEntityKind::Node,
+            DeletionBenchmarkApi::NodeDrop,
+        ),
+        DeletionBenchmarkWorkload::ParallelEdgesById => (
+            DeletionBenchmarkEntityKind::Edge,
+            DeletionBenchmarkApi::EdgeId,
+        ),
+        DeletionBenchmarkWorkload::EdgePairs => (
+            DeletionBenchmarkEntityKind::Edge,
+            DeletionBenchmarkApi::EdgePair,
+        ),
+        DeletionBenchmarkWorkload::LabeledEdgePairs => (
+            DeletionBenchmarkEntityKind::Edge,
+            DeletionBenchmarkApi::LabeledEdgePair,
+        ),
     }
 }
 
@@ -240,11 +417,15 @@ impl DeletionBenchmarkFixture {
             case.workload,
             case.batch_size.get()
         );
-        let mut db = Arc::new(
-            HelixDB::open_with_object_store(database.clone(), Arc::clone(&object_store)).await?,
-        );
+        let mut db = Arc::new(open_fixture_db(&database, Arc::clone(&object_store), case).await?);
         db.wait_for_startup_cache_warm().await;
+        if matches!(case.lifecycle, DeletionBenchmarkLifecycle::Building) {
+            install_building_indexes(&db, case).await?;
+        }
         let prepared = prepare_graph(&db, case).await?;
+        if matches!(case.lifecycle, DeletionBenchmarkLifecycle::Active) {
+            install_active_indexes(&db, case).await?;
+        }
 
         match case.cache_policy {
             DeletionBenchmarkCachePolicy::Warm => {
@@ -258,9 +439,7 @@ impl DeletionBenchmarkFixture {
             }
             DeletionBenchmarkCachePolicy::Cold => {
                 db.close().await?;
-                db = Arc::new(
-                    HelixDB::open_with_object_store(database, Arc::clone(&object_store)).await?,
-                );
+                db = Arc::new(open_fixture_db(&database, Arc::clone(&object_store), case).await?);
                 db.wait_for_startup_cache_warm().await;
             }
         }
@@ -388,6 +567,21 @@ async fn prepare_graph(
                 count + 1,
             )
         }
+        DeletionBenchmarkWorkload::LabeledEdgePairs => {
+            let edges = (0..count)
+                .map(|source| (source as u64, count as u64))
+                .collect::<Vec<_>>();
+            (
+                count + 1,
+                edges,
+                write_batch().var_as(
+                    "deleted",
+                    g().n(NodeRef::ids(0..count as u64))
+                        .drop_edge_labeled(NodeRef::id(count as u64), "DeletionBenchmarkEdge"),
+                ),
+                count + 1,
+            )
+        }
     };
 
     let mut create_nodes = write_batch();
@@ -395,10 +589,7 @@ async fn prepare_graph(
         let variable = format!("node_{node_id}");
         create_nodes = create_nodes.var_as(
             &variable,
-            g().add_n(
-                "DeletionBenchmarkNode",
-                vec![("ordinal", PropertyInput::from(node_id as i64))],
-            ),
+            g().add_n("DeletionBenchmarkNode", benchmark_properties(node_id)),
         );
     }
     let create_nodes = plan_write(db, &create_nodes, "creating benchmark nodes")?;
@@ -413,7 +604,7 @@ async fn prepare_graph(
                 g().n(NodeRef::id(from)).add_e(
                     "DeletionBenchmarkEdge",
                     NodeRef::id(to),
-                    Vec::<(String, PropertyInput)>::new(),
+                    benchmark_properties(edge_index),
                 ),
             );
         }
@@ -429,6 +620,144 @@ async fn prepare_graph(
         remaining_nodes: u64::try_from(remaining_nodes).unwrap_or(u64::MAX),
         remaining_edges: 0,
     })
+}
+
+fn benchmark_properties(ordinal: usize) -> Vec<(&'static str, PropertyInput)> {
+    vec![
+        ("ordinal", PropertyInput::from(ordinal as i64)),
+        ("body", PropertyInput::from("atomic deletion benchmark")),
+        (
+            "embedding",
+            PropertyInput::from(vec![ordinal as f32 + 1.0, 1.0_f32]),
+        ),
+    ]
+}
+
+async fn open_fixture_db(
+    database: &str,
+    object_store: Arc<dyn ObjectStore>,
+    case: DeletionBenchmarkCase,
+) -> Result<HelixDB, HelixDbError> {
+    match case.lifecycle {
+        DeletionBenchmarkLifecycle::Active => {
+            HelixDB::open_with_object_store(database.to_string(), object_store).await
+        }
+        DeletionBenchmarkLifecycle::Building => {
+            #[cfg(feature = "index-v2-lifecycle-testing")]
+            {
+                HelixDB::open_with_object_store_for_index_v2_lifecycle_testing(
+                    database.to_string(),
+                    object_store,
+                    crate::config::DbConfig::new(),
+                    crate::index_v2_lifecycle_testing::LifecycleTestScheduling::Explicit,
+                )
+                .await
+            }
+            #[cfg(not(feature = "index-v2-lifecycle-testing"))]
+            {
+                let _ = (database, object_store);
+                Err(HelixDbError::Config(
+                    "Building deletion benchmarks require index-v2-lifecycle-testing".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+async fn install_active_indexes(
+    db: &HelixDB,
+    case: DeletionBenchmarkCase,
+) -> Result<(), HelixDbError> {
+    for definition in benchmark_index_definitions(case.indexes)? {
+        db.install_index_for_tests(definition).await?;
+    }
+    Ok(())
+}
+
+async fn install_building_indexes(
+    db: &HelixDB,
+    case: DeletionBenchmarkCase,
+) -> Result<(), HelixDbError> {
+    #[cfg(feature = "index-v2-lifecycle-testing")]
+    {
+        let controller = crate::index_v2_lifecycle_testing::LifecycleTestController::new();
+        for definition in benchmark_index_definitions(case.indexes)? {
+            controller
+                .create_index(
+                    db,
+                    crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                    definition,
+                    helix_planner::ir::IndexCreateMode::IfNotExists,
+                )
+                .await?;
+        }
+        db.refresh_runtime_catalog(crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped)
+            .await
+    }
+    #[cfg(not(feature = "index-v2-lifecycle-testing"))]
+    {
+        let _ = (db, case);
+        Err(HelixDbError::Config(
+            "Building deletion benchmarks require index-v2-lifecycle-testing".to_string(),
+        ))
+    }
+}
+
+fn benchmark_index_definitions(
+    indexes: DeletionBenchmarkIndexes,
+) -> Result<Vec<crate::index_v2::ValidatedDynamicIndexDefinition>, HelixDbError> {
+    let includes_secondary = matches!(
+        indexes,
+        DeletionBenchmarkIndexes::Secondary | DeletionBenchmarkIndexes::All
+    );
+    let includes_vector = matches!(
+        indexes,
+        DeletionBenchmarkIndexes::Vector | DeletionBenchmarkIndexes::All
+    );
+    let includes_text = matches!(
+        indexes,
+        DeletionBenchmarkIndexes::Text | DeletionBenchmarkIndexes::All
+    );
+    let mut definitions = Vec::new();
+    if includes_secondary {
+        definitions.push(
+            config::SecondaryIndexDefinition::node_equality("DeletionBenchmarkNode", "ordinal")?
+                .try_into()?,
+        );
+        definitions.push(
+            config::SecondaryIndexDefinition::edge_equality("DeletionBenchmarkEdge", "ordinal")?
+                .try_into()?,
+        );
+    }
+    if includes_vector {
+        definitions.push(
+            config::VectorIndexDefinition::new_node(
+                "DeletionBenchmarkNode",
+                "embedding",
+                2,
+                search::vector::VectorDistanceMetric::Euclidean,
+            )?
+            .try_into()?,
+        );
+        definitions.push(
+            config::VectorIndexDefinition::new_edge(
+                "DeletionBenchmarkEdge",
+                "embedding",
+                2,
+                search::vector::VectorDistanceMetric::Euclidean,
+            )?
+            .try_into()?,
+        );
+    }
+    if includes_text {
+        definitions.push(
+            config::TextIndexDefinition::new_node("DeletionBenchmarkNode", "body")?.try_into()?,
+        );
+        definitions.push(
+            config::TextIndexDefinition::new_edge("DeletionBenchmarkEdge", "body")?.try_into()?,
+        );
+    }
+    Ok(definitions)
 }
 
 fn plan_write(
@@ -606,6 +935,26 @@ mod tests {
         assert_eq!(DeletionBatchSize::stress_100k().get(), 100_000);
     }
 
+    #[test]
+    fn serialized_case_rejects_an_inconsistent_entity_api_contract() {
+        let case = DeletionBenchmarkCase::try_indexed(
+            DeletionBenchmarkWorkload::IsolatedNodes,
+            10,
+            DeletionBenchmarkCachePolicy::Warm,
+            DeletionBenchmarkIndexes::Secondary,
+            DeletionBenchmarkLifecycle::Active,
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(case).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DeletionBenchmarkCase>(encoded.clone()).unwrap(),
+            case
+        );
+        let mut invalid = encoded;
+        invalid["entity_kind"] = serde_json::json!("edge");
+        assert!(serde_json::from_value::<DeletionBenchmarkCase>(invalid).is_err());
+    }
+
     #[tokio::test]
     async fn every_graph_workload_deletes_the_expected_rows() {
         for workload in [
@@ -614,6 +963,7 @@ mod tests {
             DeletionBenchmarkWorkload::HighDegreeNode,
             DeletionBenchmarkWorkload::ParallelEdgesById,
             DeletionBenchmarkWorkload::EdgePairs,
+            DeletionBenchmarkWorkload::LabeledEdgePairs,
         ] {
             let case = DeletionBenchmarkCase::try_supported(
                 workload,
@@ -633,6 +983,33 @@ mod tests {
                 .verify_and_close()
                 .await
                 .expect("benchmark fixture verifies");
+        }
+    }
+
+    #[tokio::test]
+    async fn secondary_fixture_covers_active_and_building_deletion_paths() {
+        for lifecycle in [
+            DeletionBenchmarkLifecycle::Active,
+            DeletionBenchmarkLifecycle::Building,
+        ] {
+            let case = DeletionBenchmarkCase::try_indexed(
+                DeletionBenchmarkWorkload::IsolatedNodes,
+                3,
+                DeletionBenchmarkCachePolicy::Warm,
+                DeletionBenchmarkIndexes::Secondary,
+                lifecycle,
+            )
+            .unwrap();
+            let fixture = DeletionBenchmarkFixture::prepare(case).await.unwrap();
+            let sample = fixture.run_sample().await.unwrap();
+            assert_eq!(
+                sample
+                    .telemetry
+                    .instrumented_logical_operations
+                    .secondary_deletions,
+                3
+            );
+            fixture.verify_and_close().await.unwrap();
         }
     }
 

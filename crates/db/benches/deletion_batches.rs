@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use db::production_coverage::{
     DeletionBenchmarkCachePolicy, DeletionBenchmarkCase, DeletionBenchmarkFixture,
-    DeletionBenchmarkSample, DeletionBenchmarkWorkload,
+    DeletionBenchmarkIndexes, DeletionBenchmarkLifecycle, DeletionBenchmarkSample,
+    DeletionBenchmarkWorkload,
 };
 use serde::Serialize;
 
@@ -118,7 +119,8 @@ fn run_children() {
 }
 
 async fn run() {
-    let commit = git_commit();
+    let commit =
+        std::env::var("HELIX_DELETION_BENCH_SOURCE_COMMIT").unwrap_or_else(|_| git_commit());
     let run_id = env_usize("HELIX_DELETION_BENCH_RUN_ID", 0);
     let profile = std::env::var("HELIX_DELETION_BENCH_PROFILE").unwrap_or_else(|_| {
         if cfg!(debug_assertions) {
@@ -141,62 +143,76 @@ async fn run() {
     let sizes = selected_sizes(&profile);
     let workloads = selected_workloads(&profile);
     let cache_policies = selected_cache_policies(&profile);
+    let index_families = selected_index_families();
+    let lifecycle_states = selected_lifecycle_states();
     for workload in workloads {
         for cache_policy in cache_policies.iter().copied() {
             for size in sizes.iter().copied() {
-                let case = if profile == "vector-100k" {
-                    DeletionBenchmarkCase::stress_100k(workload, cache_policy)
-                } else {
-                    DeletionBenchmarkCase::try_supported(workload, size, cache_policy)
-                        .expect("selected deletion benchmark case validates")
-                };
-                let mut measured = Vec::with_capacity(samples);
-                for sample_index in 0..samples {
-                    let fixture = DeletionBenchmarkFixture::prepare(case)
-                        .await
-                        .expect("deletion benchmark fixture prepares");
-                    ALLOCATION_CALLS.store(0, Ordering::Relaxed);
-                    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
-                    let (rss, baseline_rss) =
-                        RssSampler::start().await.expect("RSS sampler starts");
-                    let cpu_before = process_cpu_ns().expect("process CPU reads");
-                    TRACK_ALLOCATIONS.store(true, Ordering::Release);
-                    let sample = fixture
-                        .run_sample()
-                        .await
-                        .expect("deletion benchmark sample succeeds");
-                    TRACK_ALLOCATIONS.store(false, Ordering::Release);
-                    let cpu_after = process_cpu_ns().expect("process CPU reads");
-                    let peak_rss = rss.stop().await.expect("RSS sampler stops");
-                    let sample = sample.with_process_measurements(
-                        ALLOCATION_CALLS.load(Ordering::Relaxed),
-                        ALLOCATED_BYTES.load(Ordering::Relaxed),
-                        baseline_rss,
-                        peak_rss,
-                        cpu_after.saturating_sub(cpu_before),
-                    );
-                    println!(
-                        "{}",
-                        serde_json::to_string(&SampleRecord {
-                            record: "sample",
-                            commit: &commit,
-                            run_id,
-                            sample_index,
-                            sample: &sample,
-                        })
-                        .expect("sample serializes")
-                    );
-                    fixture
-                        .verify_and_close()
-                        .await
-                        .expect("deletion benchmark fixture verifies and closes");
-                    measured.push(sample);
+                for indexes in index_families.iter().copied() {
+                    for lifecycle in lifecycle_states.iter().copied() {
+                        let case = if profile == "vector-100k" {
+                            assert_eq!(indexes, DeletionBenchmarkIndexes::None);
+                            assert_eq!(lifecycle, DeletionBenchmarkLifecycle::Active);
+                            DeletionBenchmarkCase::stress_100k(workload, cache_policy)
+                        } else {
+                            DeletionBenchmarkCase::try_indexed(
+                                workload,
+                                size,
+                                cache_policy,
+                                indexes,
+                                lifecycle,
+                            )
+                            .expect("selected deletion benchmark case validates")
+                        };
+                        let mut measured = Vec::with_capacity(samples);
+                        for sample_index in 0..samples {
+                            let fixture = DeletionBenchmarkFixture::prepare(case)
+                                .await
+                                .expect("deletion benchmark fixture prepares");
+                            ALLOCATION_CALLS.store(0, Ordering::Relaxed);
+                            ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+                            let (rss, baseline_rss) =
+                                RssSampler::start().await.expect("RSS sampler starts");
+                            let cpu_before = process_cpu_ns().expect("process CPU reads");
+                            TRACK_ALLOCATIONS.store(true, Ordering::Release);
+                            let sample = fixture
+                                .run_sample()
+                                .await
+                                .expect("deletion benchmark sample succeeds");
+                            TRACK_ALLOCATIONS.store(false, Ordering::Release);
+                            let cpu_after = process_cpu_ns().expect("process CPU reads");
+                            let peak_rss = rss.stop().await.expect("RSS sampler stops");
+                            let sample = sample.with_process_measurements(
+                                ALLOCATION_CALLS.load(Ordering::Relaxed),
+                                ALLOCATED_BYTES.load(Ordering::Relaxed),
+                                baseline_rss,
+                                peak_rss,
+                                cpu_after.saturating_sub(cpu_before),
+                            );
+                            println!(
+                                "{}",
+                                serde_json::to_string(&SampleRecord {
+                                    record: "sample",
+                                    commit: &commit,
+                                    run_id,
+                                    sample_index,
+                                    sample: &sample,
+                                })
+                                .expect("sample serializes")
+                            );
+                            fixture
+                                .verify_and_close()
+                                .await
+                                .expect("deletion benchmark fixture verifies and closes");
+                            measured.push(sample);
+                        }
+                        println!(
+                            "{}",
+                            serde_json::to_string(&summarize(&commit, run_id, case, &measured))
+                                .expect("summary serializes")
+                        );
+                    }
                 }
-                println!(
-                    "{}",
-                    serde_json::to_string(&summarize(&commit, run_id, case, &measured))
-                        .expect("summary serializes")
-                );
             }
         }
     }
@@ -245,7 +261,7 @@ fn summarize<'sample>(
         ),
         total_p50_ns: percentile(samples, |sample| sample.total_ns, 50),
         total_p95_ns: percentile(samples, |sample| sample.total_ns, 95),
-        entities_per_second_p50: case.batch_size.get() as f64
+        entities_per_second_p50: case.entity_count() as f64
             / (percentile(samples, |sample| sample.total_ns, 50) as f64 / 1_000_000_000.0),
         process_cpu_p50_ns: percentile(samples, |sample| sample.process_cpu_ns, 50),
         allocation_calls_p50: percentile(samples, |sample| sample.allocation_calls, 50),
@@ -326,7 +342,35 @@ fn selected_workloads(profile: &str) -> Vec<DeletionBenchmarkWorkload> {
             "high_degree_node" => DeletionBenchmarkWorkload::HighDegreeNode,
             "parallel_edges_by_id" => DeletionBenchmarkWorkload::ParallelEdgesById,
             "edge_pairs" => DeletionBenchmarkWorkload::EdgePairs,
+            "labeled_edge_pairs" => DeletionBenchmarkWorkload::LabeledEdgePairs,
             other => panic!("unknown deletion benchmark workload `{other}`"),
+        })
+        .collect()
+}
+
+fn selected_index_families() -> Vec<DeletionBenchmarkIndexes> {
+    env_list("HELIX_DELETION_BENCH_INDEXES")
+        .unwrap_or_else(|| vec!["none".to_string()])
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "none" => DeletionBenchmarkIndexes::None,
+            "secondary" => DeletionBenchmarkIndexes::Secondary,
+            "vector" => DeletionBenchmarkIndexes::Vector,
+            "text" => DeletionBenchmarkIndexes::Text,
+            "all" => DeletionBenchmarkIndexes::All,
+            other => panic!("unknown deletion benchmark index family `{other}`"),
+        })
+        .collect()
+}
+
+fn selected_lifecycle_states() -> Vec<DeletionBenchmarkLifecycle> {
+    env_list("HELIX_DELETION_BENCH_LIFECYCLE")
+        .unwrap_or_else(|| vec!["active".to_string()])
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "active" => DeletionBenchmarkLifecycle::Active,
+            "building" => DeletionBenchmarkLifecycle::Building,
+            other => panic!("unknown deletion benchmark lifecycle `{other}`"),
         })
         .collect()
 }

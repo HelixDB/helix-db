@@ -31,8 +31,9 @@ pub const CURRENT_INDEX_STORAGE_VERSION: u16 =
 
 mod deletion_batch;
 pub use deletion_batch::{
-    DeletionBatchSize, DeletionBenchmarkCachePolicy, DeletionBenchmarkCase,
-    DeletionBenchmarkFixture, DeletionBenchmarkSample, DeletionBenchmarkWorkload,
+    DeletionBatchSize, DeletionBenchmarkApi, DeletionBenchmarkCachePolicy, DeletionBenchmarkCase,
+    DeletionBenchmarkEntityKind, DeletionBenchmarkFixture, DeletionBenchmarkIndexes,
+    DeletionBenchmarkLifecycle, DeletionBenchmarkSample, DeletionBenchmarkWorkload,
     PhysicalObjectStoreOperations,
 };
 
