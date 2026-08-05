@@ -1444,6 +1444,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cohort_deletion_cleans_missing_rows_reverse_residue_and_stale_entry_metadata() {
+        let db = Arc::new(
+            Db::open("active-deletion-cohort-residue", Arc::new(InMemory::new()))
+                .await
+                .unwrap(),
+        );
+        let handle = generation::<Cosine>("active-deletion-cohort-residue", 92);
+        let index = VectorIndex::<Cosine>::from_generation(&handle)
+            .with_scripted_layers(vec![1, 0, 1])
+            .unwrap();
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        index
+            .create(
+                &seed,
+                VectorIndexConfig::from_v2_definition(handle.definition(), handle.physical_name()),
+            )
+            .await
+            .unwrap();
+        for (node_id, vector) in [
+            (1, [1.0, 0.1, 0.2, 0.3]),
+            (2, [0.2, 1.0, 0.3, 0.4]),
+            (3, [0.3, 0.4, 1.0, 0.5]),
+        ] {
+            index.insert(&seed, node_id, &vector).await.unwrap();
+        }
+        seed.commit().await.unwrap();
+
+        let corrupt = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let (canonical_key, _) = index
+            .resolve_required_canonical_vector_key_counted(
+                &corrupt,
+                2,
+                "seeding batched deletion residue",
+            )
+            .await
+            .unwrap();
+        let measured = MeasuredVectorTransaction::new(&corrupt);
+        let rows = super::super::VectorWriteRows::new(&measured, index.row_keyspace());
+        rows.delete_canonical_vector(&canonical_key).unwrap();
+        rows.delete_layer0_neighbors(2).unwrap();
+        rows.put_reverse_locator(2, 0, 99).unwrap();
+        let mut metadata = index.get_metadata(&measured).await.unwrap().unwrap();
+        metadata.entry_point = Some(9_999);
+        metadata.max_layer = metadata.max_layer.max(1);
+        index.update_metadata(&measured, &metadata).await.unwrap();
+        corrupt.commit().await.unwrap();
+
+        let deletion = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let cache_writes = VectorCacheWriteSet::new(Arc::new(SimHasherRegistry::default()));
+        let mut runtime =
+            ActiveVectorMutationRuntime::new(NonZeroU64::new(8 * 1024 * 1024).unwrap());
+        assert_eq!(
+            runtime
+                .delete_batch(&deletion, &handle, &cache_writes, &[2])
+                .await
+                .unwrap(),
+            VectorGenerationAfterDeletion::Retained
+        );
+        runtime.prepare(&deletion).await.unwrap();
+        deletion.commit().await.unwrap();
+
+        assert!(index.get_item(db.as_ref(), 2).await.unwrap().is_none());
+        let reverse = index
+            .load_reverse_sources_for_target(db.as_ref(), 2)
+            .await
+            .unwrap();
+        assert!(reverse.sources_by_layer().values().all(Vec::is_empty));
+        let metadata = index.get_metadata(db.as_ref()).await.unwrap().unwrap();
+        let entry_point = metadata
+            .entry_point
+            .expect("survivors retain an entry point");
+        assert_ne!(entry_point, 9_999);
+        assert!(index
+            .get_item(db.as_ref(), entry_point)
+            .await
+            .unwrap()
+            .is_some());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn invalid_vector_aborts_without_durable_partial_graph() {
         enum ExpectedError {
             Dimension,
