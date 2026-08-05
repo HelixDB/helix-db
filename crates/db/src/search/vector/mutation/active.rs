@@ -1135,7 +1135,7 @@ fn evict_simhash<D: Distance>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use slatedb::object_store::memory::InMemory;
@@ -1357,6 +1357,7 @@ mod tests {
             panic!("a partial cohort must retain populated metadata");
         };
         assert!(![2, 3, 6].contains(&entry_point));
+        let survivors = [1, 4, 5, 7, 8];
         for node_id in 1..=8 {
             assert_eq!(
                 index
@@ -1366,6 +1367,62 @@ mod tests {
                     .is_some(),
                 ![2, 3, 6].contains(&node_id)
             );
+        }
+        for layer in 0..=metadata.max_layer {
+            let mut adjacency = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+            for node_id in survivors {
+                let neighbors = if layer == 0 {
+                    index
+                        .load_neighbors_layer0(db.as_ref(), node_id)
+                        .await
+                        .unwrap()
+                } else {
+                    index
+                        .load_upper_neighbors(db.as_ref(), layer, node_id)
+                        .await
+                        .unwrap()
+                        .unwrap_or_default()
+                };
+                let degree_limit = if layer == 0 {
+                    metadata.config.m0
+                } else {
+                    metadata.config.m
+                };
+                assert!(neighbors.len() <= degree_limit);
+                assert!(neighbors.windows(2).all(|pair| pair[0] < pair[1]));
+                assert!(!neighbors.contains(&node_id));
+                assert!(neighbors
+                    .iter()
+                    .all(|neighbor| survivors.contains(neighbor)));
+                adjacency.insert(node_id, neighbors.into_iter().collect());
+            }
+            for (&source, targets) in &adjacency {
+                for target in targets {
+                    assert!(adjacency
+                        .get(target)
+                        .is_some_and(|neighbors| neighbors.contains(&source)));
+                }
+            }
+            for target in survivors {
+                let expected = adjacency
+                    .iter()
+                    .filter_map(|(&source, neighbors)| {
+                        neighbors.contains(&target).then_some(source)
+                    })
+                    .collect::<Vec<_>>();
+                let reverse = index
+                    .load_reverse_sources_for_target(db.as_ref(), target)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reverse
+                        .sources_by_layer()
+                        .get(&layer)
+                        .cloned()
+                        .unwrap_or_default(),
+                    expected
+                );
+            }
         }
         for target in [2, 3, 6] {
             let reverse = index
@@ -1396,6 +1453,51 @@ mod tests {
         let rows = exact_namespace_rows(&db, handle.physical_index_id()).await;
         db.close().await.unwrap();
         (rows, result_ids)
+    }
+
+    async fn assert_complete_cohort_deletion<D: Distance>(database: &str, physical_id: u64) {
+        let db = Arc::new(Db::open(database, Arc::new(InMemory::new())).await.unwrap());
+        let handle = generation::<D>(database, physical_id);
+        let index = VectorIndex::<D>::from_generation(&handle);
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        index
+            .create(
+                &seed,
+                VectorIndexConfig::from_v2_definition(handle.definition(), handle.physical_name()),
+            )
+            .await
+            .unwrap();
+        index.insert(&seed, 1, &[1.0, 0.2, 0.3, 0.4]).await.unwrap();
+        seed.commit().await.unwrap();
+
+        let deletion = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let cache_writes = VectorCacheWriteSet::new(Arc::new(SimHasherRegistry::default()));
+        let mut runtime =
+            ActiveVectorMutationRuntime::new(NonZeroU64::new(8 * 1024 * 1024).unwrap());
+        assert_eq!(
+            runtime
+                .delete_batch(&deletion, &handle, &cache_writes, &[1])
+                .await
+                .unwrap(),
+            VectorGenerationAfterDeletion::Empty
+        );
+        runtime.prepare(&deletion).await.unwrap();
+        deletion.commit().await.unwrap();
+
+        let metadata = index.get_metadata(db.as_ref()).await.unwrap().unwrap();
+        assert_eq!(metadata.count, 0);
+        assert!(matches!(
+            metadata.validated_state().unwrap(),
+            VectorIndexState::Empty
+        ));
+        assert!(index.get_item(db.as_ref(), 1).await.unwrap().is_none());
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1441,6 +1543,13 @@ mod tests {
             first_results.into_iter().collect::<BTreeSet<_>>(),
             sequential_results.into_iter().collect::<BTreeSet<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn complete_cohort_deletion_is_empty_for_every_metric() {
+        assert_complete_cohort_deletion::<Cosine>("active-delete-all-cosine", 93).await;
+        assert_complete_cohort_deletion::<Euclidean>("active-delete-all-euclidean", 94).await;
+        assert_complete_cohort_deletion::<Manhattan>("active-delete-all-manhattan", 95).await;
     }
 
     #[tokio::test]
