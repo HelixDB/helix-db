@@ -12,6 +12,8 @@
 //! cosine zero vectors, metric-specific component magnitude, and type-preserving
 //! tenant identity before any HNSW or lifecycle row is staged.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use bytes::Bytes;
 use slatedb::DbTransaction;
 
@@ -87,6 +89,127 @@ enum VectorMutationMode {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct VectorMutationSet {
     targets: Vec<VectorMutationTarget>,
+}
+
+/// One non-empty, sorted set of terminal deletions for a physical vector group.
+///
+/// Private construction prevents an empty physical repair request, while the
+/// set representation makes duplicate terminal observations idempotent.
+#[derive(Debug)]
+pub(crate) struct NonEmptyVectorDeletionBatch {
+    entity_ids: BTreeSet<IndexEntityId>,
+}
+
+impl NonEmptyVectorDeletionBatch {
+    /// Starts a physical deletion group with its required first entity.
+    fn new(first: IndexEntityId) -> Self {
+        Self {
+            entity_ids: BTreeSet::from([first]),
+        }
+    }
+
+    /// Coalesces another terminal deletion into this exact physical group.
+    fn insert(&mut self, entity_id: IndexEntityId) {
+        self.entity_ids.insert(entity_id);
+    }
+
+    /// Consumes the proof and returns non-empty ascending graph IDs.
+    fn into_node_ids(self) -> Vec<crate::encoding::NodeId> {
+        let entity_ids = self
+            .entity_ids
+            .into_iter()
+            .map(IndexEntityId::get)
+            .collect::<Vec<_>>();
+        assert!(
+            !entity_ids.is_empty(),
+            "a non-empty vector deletion batch retains its first entity"
+        );
+        entity_ids
+    }
+}
+
+/// Exact logical vector generation and partition selected for deletion.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ActiveVectorDeletionGroup {
+    scope: DataScope,
+    target_ordinal: usize,
+    partition: TextPartition,
+}
+
+/// One entity observation used to reject discontinuous partition ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ActiveVectorDeletionObservation {
+    scope: DataScope,
+    target_ordinal: usize,
+    entity_id: IndexEntityId,
+}
+
+/// Transaction-local terminal deletions waiting for one cohort repair per group.
+///
+/// Ordinary vector mutations never enter this collector. An entity can be
+/// observed repeatedly in the same partition, but observing it in two
+/// partitions for one generation fails closed before physical work is staged.
+#[derive(Debug, Default)]
+pub(crate) struct ActiveVectorDeletionBatch {
+    groups: BTreeMap<ActiveVectorDeletionGroup, NonEmptyVectorDeletionBatch>,
+    observations: BTreeMap<ActiveVectorDeletionObservation, TextPartition>,
+}
+
+impl ActiveVectorDeletionBatch {
+    /// Records one terminal deletion under its exact routed target and partition.
+    fn collect(
+        &mut self,
+        scope: DataScope,
+        target_ordinal: usize,
+        partition: TextPartition,
+        entity_id: IndexEntityId,
+    ) -> Result<()> {
+        let observation = ActiveVectorDeletionObservation {
+            scope,
+            target_ordinal,
+            entity_id,
+        };
+        match self.observations.get(&observation) {
+            Some(observed) if observed != &partition => {
+                return Err(HelixDbError::InvariantViolation(
+                    "terminal vector deletion changed partition before its batch drained"
+                        .to_string(),
+                ));
+            }
+            Some(_) => return Ok(()),
+            None => {}
+        }
+        self.observations.insert(observation, partition.clone());
+        let group = ActiveVectorDeletionGroup {
+            scope,
+            target_ordinal,
+            partition,
+        };
+        match self.groups.get_mut(&group) {
+            Some(batch) => batch.insert(entity_id),
+            None => {
+                self.groups
+                    .insert(group, NonEmptyVectorDeletionBatch::new(entity_id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes all complete groups in deterministic physical-key order.
+    fn take_groups(&mut self) -> Vec<(ActiveVectorDeletionGroup, NonEmptyVectorDeletionBatch)> {
+        self.observations.clear();
+        core::mem::take(&mut self.groups).into_iter().collect()
+    }
+
+    /// Verifies that every logical deletion reached the physical runtime.
+    pub(crate) fn consume_drained(self) -> Result<()> {
+        if self.groups.is_empty() && self.observations.is_empty() {
+            return Ok(());
+        }
+        Err(HelixDbError::InvariantViolation(
+            "Active vector deletion batch reached commit without being drained".to_string(),
+        ))
+    }
 }
 
 /// Complete authoritative property transition for one graph entity.
@@ -242,7 +365,16 @@ pub(crate) async fn maintain_entity_with_runtime(
         .iter()
         .filter(|target| target.definition.element_kind() == entity.entity_kind)
     {
-        maintain_target(transaction, scope, target, runtime, cache_writes, entity).await?;
+        maintain_target(
+            transaction,
+            scope,
+            target,
+            runtime,
+            cache_writes,
+            entity,
+            None,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -254,6 +386,7 @@ async fn maintain_target(
     runtime: &mut vector::ActiveVectorMutationRuntime,
     cache_writes: &VectorCacheWriteSet,
     entity: VectorEntityMutation<'_>,
+    terminal_deletion: Option<(&mut ActiveVectorDeletionBatch, usize)>,
 ) -> Result<()> {
     let new_document = vector_document(&target.definition, entity.after)?;
     let (mut old_document, force_build_delta) =
@@ -302,6 +435,21 @@ async fn maintain_target(
             };
             transaction.put(key, encode_build_delta(&value))?;
         }
+        VectorMutationMode::MaintainActive(_)
+            if terminal_deletion.is_some() && new_document.is_none() =>
+        {
+            let (deletions, target_ordinal) =
+                terminal_deletion.expect("terminal Active deletion carries its collector");
+            let Some(old_document) = old_document else {
+                return Ok(());
+            };
+            deletions.collect(
+                scope,
+                target_ordinal,
+                old_document.partition,
+                entity.entity_id,
+            )?;
+        }
         VectorMutationMode::MaintainActive(handle) => {
             maintain_active(
                 transaction,
@@ -321,11 +469,16 @@ async fn maintain_target(
 }
 
 /// Maintains only vector targets selected by the transaction-owned router.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "routing binds the graph transition to its catalog, deletion collector, physical runtime, and cache effects"
+)]
 pub(crate) async fn maintain_routed_entity_with_runtime(
     transaction: &DbTransaction,
     scope: DataScope,
     mutations: &VectorMutationSet,
     routes: &super::mutation_catalog::RoutedMutationTargets<'_>,
+    deletions: &mut ActiveVectorDeletionBatch,
     runtime: &mut vector::ActiveVectorMutationRuntime,
     cache_writes: &VectorCacheWriteSet,
     transition: &super::graph_mutation::GraphMutationTransition,
@@ -354,7 +507,20 @@ pub(crate) async fn maintain_routed_entity_with_runtime(
         let target = mutations.targets.get(ordinal).ok_or_else(|| {
             corruption("vector mutation route named a target outside its catalog")
         })?;
-        maintain_target(transaction, scope, target, runtime, cache_writes, entity).await?;
+        let terminal_deletion = transition
+            .after()
+            .is_none()
+            .then_some((&mut *deletions, ordinal));
+        maintain_target(
+            transaction,
+            scope,
+            target,
+            runtime,
+            cache_writes,
+            entity,
+            terminal_deletion,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -382,6 +548,131 @@ pub(crate) async fn maintain_entity(
     )
     .await?;
     runtime.prepare(transaction).await
+}
+
+/// Drains terminal Active deletions into one physical cohort per generation and partition.
+///
+/// Resolution occurs once per group. Building generations never enter this
+/// boundary, and tenant retirement is attempted only after the complete cohort
+/// reports an empty generation.
+pub(crate) async fn flush_active_deletions(
+    transaction: &DbTransaction,
+    mutations: &VectorMutationSet,
+    deletions: &mut ActiveVectorDeletionBatch,
+    runtime: &mut vector::ActiveVectorMutationRuntime,
+    cache_writes: &VectorCacheWriteSet,
+) -> Result<()> {
+    for (group, batch) in deletions.take_groups() {
+        let target = mutations.targets.get(group.target_ordinal).ok_or_else(|| {
+            corruption("vector deletion group named a target outside its catalog")
+        })?;
+        let VectorMutationMode::MaintainActive(active) = &target.mode else {
+            return Err(corruption(
+                "vector deletion group retained a non-Active generation",
+            ));
+        };
+        let (physical_index_id, created) = resolve_active_physical(
+            transaction,
+            group.scope,
+            target,
+            active,
+            &group.partition,
+            false,
+        )
+        .await?;
+        if created {
+            return Err(corruption(
+                "vector deletion batch unexpectedly allocated a tenant partition",
+            ));
+        }
+        let entity_ids = batch.into_node_ids();
+        match target.definition.metric() {
+            VectorDistanceMetric::Cosine => {
+                delete_and_maybe_reclaim_active_group::<vector::distance::Cosine>(
+                    transaction,
+                    group.scope,
+                    target,
+                    active,
+                    physical_index_id,
+                    runtime,
+                    cache_writes,
+                    &group.partition,
+                    &entity_ids,
+                )
+                .await?;
+            }
+            VectorDistanceMetric::Euclidean => {
+                delete_and_maybe_reclaim_active_group::<vector::distance::Euclidean>(
+                    transaction,
+                    group.scope,
+                    target,
+                    active,
+                    physical_index_id,
+                    runtime,
+                    cache_writes,
+                    &group.partition,
+                    &entity_ids,
+                )
+                .await?;
+            }
+            VectorDistanceMetric::Manhattan => {
+                delete_and_maybe_reclaim_active_group::<vector::distance::Manhattan>(
+                    transaction,
+                    group.scope,
+                    target,
+                    active,
+                    physical_index_id,
+                    runtime,
+                    cache_writes,
+                    &group.partition,
+                    &entity_ids,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the group binds its lifecycle, partition, runtime, cache, and cohort"
+)]
+/// Deletes one metric-qualified cohort and retires an empty tenant namespace.
+async fn delete_and_maybe_reclaim_active_group<D: Distance>(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    target: &VectorMutationTarget,
+    active: &ActiveIndexHandle,
+    physical_index_id: VectorPhysicalIndexId,
+    runtime: &mut vector::ActiveVectorMutationRuntime,
+    cache_writes: &VectorCacheWriteSet,
+    partition: &TextPartition,
+    entity_ids: &[crate::encoding::NodeId],
+) -> Result<()> {
+    let generation =
+        vector::ValidatedVectorGenerationHandle::try_from_active::<D>(active, physical_index_id)
+            .map_err(|error| corruption(error.to_string()))?;
+    let outcome = runtime
+        .delete_batch(transaction, &generation, cache_writes, entity_ids)
+        .await?;
+    if !matches!(partition, TextPartition::TenantValue(_))
+        || !matches!(outcome, vector::VectorGenerationAfterDeletion::Empty)
+    {
+        return Ok(());
+    }
+    runtime.drain_generation(transaction, &generation).await?;
+    let index = crate::search::vector::VectorIndex::<D>::from_generation(&generation);
+    reclaim_empty_tenant_partition(
+        transaction,
+        scope,
+        target,
+        &generation,
+        cache_writes,
+        partition,
+        &index,
+    )
+    .await
 }
 
 #[allow(
@@ -949,6 +1240,68 @@ mod tests {
             },
             handle,
         )
+    }
+
+    #[test]
+    fn active_deletion_batch_is_non_empty_deduplicated_and_partition_stable() {
+        let mut batch = ActiveVectorDeletionBatch::default();
+        batch
+            .collect(
+                DataScope::LegacyUnscoped,
+                2,
+                TextPartition::Unpartitioned,
+                IndexEntityId::new(9),
+            )
+            .unwrap();
+        batch
+            .collect(
+                DataScope::LegacyUnscoped,
+                2,
+                TextPartition::Unpartitioned,
+                IndexEntityId::new(4),
+            )
+            .unwrap();
+        batch
+            .collect(
+                DataScope::LegacyUnscoped,
+                2,
+                TextPartition::Unpartitioned,
+                IndexEntityId::new(9),
+            )
+            .unwrap();
+
+        let groups = batch.take_groups();
+        assert_eq!(groups.len(), 1);
+        let [(group, entities)] = groups.try_into().unwrap();
+        assert_eq!(group.target_ordinal, 2);
+        assert_eq!(group.partition, TextPartition::Unpartitioned);
+        assert_eq!(entities.into_node_ids(), vec![4, 9]);
+        batch.consume_drained().unwrap();
+
+        let first_partition = TextPartition::try_tenant_value(Bytes::from_static(b"first"))
+            .expect("test tenant partition is valid");
+        let second_partition = TextPartition::try_tenant_value(Bytes::from_static(b"second"))
+            .expect("test tenant partition is valid");
+        let mut discontinuous = ActiveVectorDeletionBatch::default();
+        discontinuous
+            .collect(
+                DataScope::LegacyUnscoped,
+                1,
+                first_partition,
+                IndexEntityId::new(7),
+            )
+            .unwrap();
+        assert!(matches!(
+            discontinuous.collect(
+                DataScope::LegacyUnscoped,
+                1,
+                second_partition,
+                IndexEntityId::new(7),
+            ),
+            Err(HelixDbError::InvariantViolation(message))
+                if message.contains("changed partition")
+        ));
+        assert!(discontinuous.consume_drained().is_err());
     }
 
     /// Exercises one unpartitioned active generation through insert and removal.
