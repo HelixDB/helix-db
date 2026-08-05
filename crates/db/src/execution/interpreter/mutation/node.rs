@@ -97,6 +97,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
@@ -216,6 +218,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         txn.put(
@@ -300,6 +304,8 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.db.object_store(),
+                self.db.path(),
             )
             .await?;
         txn.put(
@@ -428,6 +434,8 @@ impl<'db> ExecutionContext<'db> {
                         .db()
                         .search_index_backfill()
                         .active_text_mutation(),
+                    self.db.object_store(),
+                    self.db.path(),
                 )
                 .await?;
             txn.delete(self.storage_key(keys::DataKeyKind::NodeProperty(
@@ -576,6 +584,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use helix_ast::prelude::*;
+    use helix_ast::query::QueryRequest;
     use helix_planner::context;
     use proptest::prelude::*;
     use slatedb::IsolationLevel;
@@ -857,6 +866,64 @@ mod tests {
             keys::EdgePairIndexKey::new(10, 11),
         ));
         assert_eq!(txn.get(pair_key).await.expect("pair row reads"), None);
+    }
+
+    #[tokio::test]
+    async fn active_text_deletion_drains_beyond_one_epoch_and_stays_absent_after_reopen() {
+        const DOCUMENT_COUNT: usize = 513;
+        const DATABASE: &str = "mutation-node-text-bounded-deletion";
+
+        let config =
+            test_support::in_memory_config(DATABASE).with_node_text_index("Document", "body");
+        let object_store = config.object_store();
+        let db = test_support::open_db_with_config(config).await;
+        let mut create = write_batch();
+        for ordinal in 0..DOCUMENT_COUNT {
+            create = create.var_as(
+                &format!("document_{ordinal}"),
+                g().add_n(
+                    "Document",
+                    vec![("body", PropertyInput::from("bounded deletion token"))],
+                ),
+            );
+        }
+        db.query(QueryRequest::write(create.returning(Vec::<String>::new())))
+            .await
+            .expect("513 indexed documents commit through bounded create epochs");
+
+        let deletion = write_batch()
+            .var_as("deleted", g().n(NodeRef::all()).drop())
+            .var_as(
+                "remaining_hits",
+                g().text_search_nodes("Document", "body", "bounded", 8, None)
+                    .id(),
+            )
+            .returning(["remaining_hits"]);
+        assert_eq!(
+            db.query(QueryRequest::write(deletion))
+                .await
+                .expect("513 indexed deletions drain and remain invisible to same-request search"),
+            serde_json::json!({ "remaining_hits": [] })
+        );
+        db.close().await.expect("bounded text writer closes");
+
+        let reopened = test_support::open_db_with_object_store(DATABASE, object_store).await;
+        let verification = read_batch()
+            .var_as("nodes", g().n(NodeRef::all()).count())
+            .var_as(
+                "hits",
+                g().text_search_nodes("Document", "body", "bounded", 8, None)
+                    .id(),
+            )
+            .returning(["nodes", "hits"]);
+        assert_eq!(
+            reopened
+                .query(QueryRequest::read(verification))
+                .await
+                .expect("reopened graph and text index remain deletion-clean"),
+            serde_json::json!({ "nodes": 0, "hits": [] })
+        );
+        reopened.close().await.expect("bounded text reader closes");
     }
 
     #[tokio::test]

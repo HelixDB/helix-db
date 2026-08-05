@@ -205,6 +205,7 @@ pub(crate) async fn prepare_active_text_epoch(
             limit: u64::try_from(limits.max_entities().get()).unwrap_or(u64::MAX),
         });
     }
+    validate_final_graph_states(transaction, &graphs).await?;
 
     let mut active_handles = mutations
         .active_handles()
@@ -222,13 +223,50 @@ pub(crate) async fn prepare_active_text_epoch(
     }
 
     let mut statistics = super::statistics::PreparedTextStatisticsBatch::default();
+    let statistics_marker_keys = graphs
+        .iter()
+        .flat_map(|graph| {
+            let entity = graph.entity.index_entity();
+            routes
+                .targets_for_states(
+                    entity.kind,
+                    graph.original_properties(),
+                    graph.final_properties(),
+                )
+                .iter()
+                .filter_map(|target| {
+                    let identity = match target {
+                        index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(
+                            ordinal,
+                        ) => mutations.building_identity(ordinal),
+                        index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(
+                            ordinal,
+                        ) => mutations
+                            .active_handles()
+                            .get(ordinal)
+                            .map(|handle| (handle.index_id(), handle.generation())),
+                        index_lifecycle::mutation_catalog::MutationRouteTarget::Secondary(_)
+                        | index_lifecycle::mutation_catalog::MutationRouteTarget::Vector(_) => None,
+                    }?;
+                    Some(super::statistics::entity_key(
+                        graph.scope,
+                        identity.0,
+                        identity.1,
+                        entity,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    statistics
+        .observe_rows(transaction, statistics_marker_keys)
+        .await?;
     let mut build_deltas = Vec::with_capacity(graphs.len());
     let mut destinations = BTreeMap::<DestinationKey, DestinationWork>::new();
     let mut analysis_budget =
         crate::search::text::TextAnalysisMemoryBudget::new(limits.max_input_bytes());
     let mut graph_input_bytes = 0_u64;
     for graph in &graphs {
-        validate_final_graph_state(transaction, graph).await?;
         graph_input_bytes = graph_input_bytes.saturating_add(graph.retained_input_bytes());
         let entity = graph.entity.index_entity();
         let graph_routes = routes.targets_for_states(
@@ -408,15 +446,27 @@ pub(crate) async fn prepare_active_text_epoch(
     })
 }
 
-async fn validate_final_graph_state(
+/// Validates transaction-visible graph authority in one bounded multi-get.
+async fn validate_final_graph_states(
     transaction: &DbTransaction,
-    graph: &CoalescedActiveTextMutation,
+    graphs: &[CoalescedActiveTextMutation],
 ) -> Result<()> {
-    let expected = graph.final_state.as_ref().map(|row| row.encoded().clone());
-    if transaction.get(graph.graph_key()).await? != expected {
-        return Err(HelixDbError::InvariantViolation(
-            "Active text graph row disagrees with its coalesced final state".to_string(),
-        ));
+    const GRAPH_ROWS_PER_CHUNK: usize = 512;
+
+    for chunk in graphs.chunks(GRAPH_ROWS_PER_CHUNK) {
+        let keys = chunk
+            .iter()
+            .map(CoalescedActiveTextMutation::graph_key)
+            .collect::<Vec<_>>();
+        let values = transaction.multi_get(&keys).await?;
+        for (graph, observed) in chunk.iter().zip(values) {
+            let expected = graph.final_state.as_ref().map(|row| row.encoded().clone());
+            if observed != expected {
+                return Err(HelixDbError::InvariantViolation(
+                    "Active text graph row disagrees with its coalesced final state".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -663,16 +713,30 @@ async fn prepare_destination(
     let logical_version = index_lifecycle::TextLogicalVersion::new(next_revision.get())
         .expect("a non-zero manifest revision forms a logical version");
 
-    let mut state_writes = Vec::with_capacity(live.len() + retirements.len());
-    for (entity, document) in &live {
-        let state_key = scoped_key(
-            key.scope,
-            index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
-                root: root_typed,
-                entity: *entity,
-            }),
-        );
-        let state_bytes = transaction.get(&state_key).await?;
+    let state_requests = live
+        .iter()
+        .map(|(entity, document)| (*entity, document.requires_existing_live_state, true))
+        .chain(retirements.iter().map(|entity| (*entity, true, false)))
+        .map(|(entity, requires_live, next_live)| {
+            let state_key = scoped_key(
+                key.scope,
+                index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+                    root: root_typed,
+                    entity,
+                }),
+            );
+            (entity, requires_live, next_live, state_key)
+        })
+        .collect::<Vec<_>>();
+    let state_keys = state_requests
+        .iter()
+        .map(|(_, _, _, key)| key.clone())
+        .collect::<Vec<_>>();
+    let state_values = transaction.multi_get(&state_keys).await?;
+    let mut state_writes = Vec::with_capacity(state_requests.len());
+    for ((entity, requires_live, next_live, state_key), state_bytes) in
+        state_requests.into_iter().zip(state_values)
+    {
         observations.push(RowObservation {
             key: state_key.clone(),
             value: state_bytes.clone(),
@@ -680,38 +744,13 @@ async fn prepare_destination(
         validate_existing_state(
             state_bytes.as_deref(),
             &key,
-            *entity,
+            entity,
             root.revision().get(),
-            document.requires_existing_live_state,
+            requires_live,
         )?;
         state_writes.push(PreparedRow {
             key: state_key,
-            value: encode_state(&key, *entity, logical_version, true),
-        });
-    }
-    for entity in &retirements {
-        let state_key = scoped_key(
-            key.scope,
-            index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
-                root: root_typed,
-                entity: *entity,
-            }),
-        );
-        let state_bytes = transaction.get(&state_key).await?;
-        observations.push(RowObservation {
-            key: state_key.clone(),
-            value: state_bytes.clone(),
-        });
-        validate_existing_state(
-            state_bytes.as_deref(),
-            &key,
-            *entity,
-            root.revision().get(),
-            true,
-        )?;
-        state_writes.push(PreparedRow {
-            key: state_key,
-            value: encode_state(&key, *entity, logical_version, false),
+            value: encode_state(&key, entity, logical_version, next_live),
         });
     }
     state_writes.sort_by(|left, right| left.key.cmp(&right.key));

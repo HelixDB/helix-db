@@ -125,6 +125,8 @@ impl MutationIndexContext {
         transaction: &slatedb::DbTransaction,
         graph: crate::index_lifecycle::graph_mutation::GraphMutationTransition,
         text_limits: crate::config::ActiveTextMutationLimits,
+        object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
+        database: &str,
     ) -> Result<(), crate::HelixDbError> {
         let routes = self.routes.targets_for(&graph);
         self.secondary_runtime
@@ -146,8 +148,22 @@ impl MutationIndexContext {
                     | crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(_)
             )
         });
-        self.active_text_runtime
-            .collect_routed(graph, text_relevant, text_limits)
+        match self
+            .active_text_runtime
+            .try_collect_routed(graph, text_relevant, text_limits)?
+        {
+            crate::index_v2::text::active_runtime::ActiveTextCollection::Collected => Ok(()),
+            crate::index_v2::text::active_runtime::ActiveTextCollection::DrainRequired(
+                mutation,
+            ) => {
+                self.flush_topology(transaction).await?;
+                self.flush_secondary(transaction).await?;
+                self.flush_active_vectors(transaction).await?;
+                self.flush_active_text(transaction, text_limits, object_store, database)
+                    .await?;
+                self.active_text_runtime.consume_admissible(mutation)
+            }
+        }
     }
 
     /// Borrows the transaction-local topology collector.
