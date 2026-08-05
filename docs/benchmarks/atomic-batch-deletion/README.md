@@ -128,3 +128,25 @@ the stored samples.
   public or persisted contract changes.
 - The final commit boundary remains `topology -> secondary -> vector -> text ->
   commit`, followed by awaited cache publication. No detached work was added.
+
+## Validation evidence
+
+- `cargo test --workspace` passed after installing the locked
+  `sdks/typescript` dependencies required by the CLI's offline tarball test.
+- The feature-complete `db` suite passed serially with
+  `production-coverage,index-v2-lifecycle-testing`: 1,203 library tests, 192
+  encoding tests, 41 public production contracts, 27 internal contracts, 12
+  vector-planner contracts, and every lifecycle/row/fence contract. Four
+  release-only scale tests remain intentionally ignored.
+- All 1,203 library tests and every integration contract also passed under
+  nightly branch instrumentation. LLVM 23 then crashed with `SIGSEGV` while
+  aggregating the whole-crate report. Source-scoped reports from the preserved
+  profile succeeded for 17 of 19 changed production files; only
+  `mutation.rs` and `secondary.rs` reproduce the reporter crash.
+- Representative changed-file branch coverage is 100% for `topology.rs`,
+  89.52% for vector `mutation.rs`, 83.33% for `index_context.rs`, 81.25% for
+  `tx.rs`, 78.26% for vector `active.rs`, and 72% for text
+  `active_runtime.rs`. These percentages describe compiler branches, while
+  the focused tests separately exercise every new ADT state and transition.
+- Doc tests, workspace/all-target Clippy with warnings denied, formatting, and
+  whitespace validation pass at the committed head.
