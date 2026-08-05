@@ -169,5 +169,54 @@ fn percentile(values: &[u64], percentile: usize) -> u64 {
 }
 
 fn improvement(baseline: u64, candidate: u64) -> f64 {
+    assert_ne!(baseline, 0, "baseline p95 must be non-zero");
     (baseline as f64 - candidate as f64) / baseline as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use db::production_coverage::{DeletionBenchmarkCachePolicy, DeletionBenchmarkWorkload};
+
+    use super::*;
+
+    fn case() -> DeletionBenchmarkCase {
+        DeletionBenchmarkCase::try_supported(
+            DeletionBenchmarkWorkload::ChainNodes,
+            500,
+            DeletionBenchmarkCachePolicy::Warm,
+        )
+        .expect("comparison case validates")
+    }
+
+    #[test]
+    fn uniform_runs_have_an_exact_deterministic_interval() {
+        let baseline = vec![vec![100; 25]; 5];
+        let candidate = vec![vec![80; 25]; 5];
+
+        let first = compare(case(), &baseline, &candidate);
+        let second = compare(case(), &baseline, &candidate);
+
+        assert_eq!(first.baseline_p95_ns, 100);
+        assert_eq!(first.candidate_p95_ns, 80);
+        assert_eq!(first.improvement_fraction, 0.2);
+        assert_eq!(first.improvement_ci95_low, 0.2);
+        assert_eq!(first.improvement_ci95_high, 0.2);
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap(),
+            "the fixed seed must make identical comparisons byte deterministic"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires at least five independent runs")]
+    fn merge_blocking_comparison_rejects_too_few_processes() {
+        validate_runs("baseline", &vec![vec![1; 25]; 4]);
+    }
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        assert_eq!(percentile(&[1, 2, 3, 4, 100], 95), 100);
+        assert_eq!(percentile(&[1, 2, 3, 4, 100], 50), 3);
+    }
 }
