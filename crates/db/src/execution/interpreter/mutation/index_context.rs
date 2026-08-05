@@ -133,7 +133,16 @@ impl MutationIndexContext {
         object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
         database: &str,
     ) -> Result<(), crate::HelixDbError> {
-        if graph.after().is_some() {
+        let routes_include_vector = {
+            let routes = self.routes.targets_for(&graph);
+            routes.iter().any(|target| {
+                matches!(
+                    target,
+                    crate::index_v2::mutation_catalog::MutationRouteTarget::Vector(_)
+                )
+            })
+        };
+        if graph.after().is_some() && routes_include_vector {
             self.flush_active_vector_deletions(transaction).await?;
         }
         let routes = self.routes.targets_for(&graph);

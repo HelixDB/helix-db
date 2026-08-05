@@ -2033,18 +2033,23 @@ impl<D: Distance> VectorIndex<D> {
 
             let originals = layers
                 .iter()
-                .filter_map(|&layer| {
+                .map(|&layer| {
                     let row = MutationOpCache::<D>::node_row_id(layer, node_id);
                     mutation_cache
                         .neighbor(row)
-                        .map(|cached| (row, cached.current().clone()))
+                        .map(|cached| (layer, row, cached.current().clone()))
+                        .ok_or_else(|| {
+                            HelixDbError::InvariantViolation(format!(
+                                "snapshotted vector deletion row vanished from the mutation cache: node={node_id}, layer={layer}"
+                            ))
+                        })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             mutation_cache.invalidate_items(node_id);
             mutation_cache.invalidate_simhash(node_id);
             mutation_cache.put_simhash(node_id, None);
             mutation_cache.invalidate_neighbors(node_id);
-            for (&layer, (row, original)) in layers.iter().zip(originals) {
+            for (layer, row, original) in originals {
                 mutation_cache.install_loaded_neighbor(row, NeighborRowValue::KnownAbsent);
                 mutation_cache.record_neighbor_change(row, original);
                 mutation_cache.put_item(layer, node_id, None, 0);
