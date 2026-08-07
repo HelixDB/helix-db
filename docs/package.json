@@ -8,6 +8,6 @@
     "add-llms-directive": "node scripts/add-llms-directive.mjs"
   },
   "dependencies": {
-    "mintlify": "^4.2.245"
+    "mintlify": "^4.2.782"
   }
 }
