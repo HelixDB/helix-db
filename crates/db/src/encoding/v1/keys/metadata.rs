@@ -197,6 +197,10 @@ pub(crate) fn write_receipt_key_scoped(
     data_metadata_key_scoped(scope, &name)
 }
 
+pub(crate) fn write_receipt_scan_prefix_scoped(scope: DataScope) -> Bytes {
+    data_metadata_key_scoped(scope, WRITE_RECEIPT_PREFIX)
+}
+
 fn data_metadata_key_scoped(scope: DataScope, name: &[u8]) -> Bytes {
     Key::Data {
         scope,

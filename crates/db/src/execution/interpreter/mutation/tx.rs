@@ -55,6 +55,38 @@ impl<'db> ExecutionContext<'db> {
         Ok(())
     }
 
+    /// Deletes a bounded sample of expired receipt rows from the current
+    /// tenant. New unique writes therefore keep steady-state receipt storage
+    /// proportional to the live replay window.
+    pub(in crate::execution::interpreter) async fn prune_expired_write_receipts(
+        &mut self,
+        prefix: &[u8],
+        now_unix_ms: u64,
+        scan_limit: usize,
+    ) -> Result<()> {
+        let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
+            return Err(HelixDbError::InvariantViolation(
+                "write receipt cleanup requires an active request transaction".to_string(),
+            ));
+        };
+        let mut rows = active.txn.scan_prefix(prefix, ..).await?;
+        let mut expired = Vec::new();
+        for _ in 0..scan_limit {
+            let Some(row) = rows.next().await? else {
+                break;
+            };
+            let receipt = values::write_receipt::WriteReceiptValue::decode(&row.value)?;
+            if receipt.expires_at_unix_ms() <= now_unix_ms {
+                expired.push(row.key);
+            }
+        }
+        drop(rows);
+        for key in expired {
+            active.txn.delete(key)?;
+        }
+        Ok(())
+    }
+
     /// Opens the request transaction before the first plan step.
     ///
     /// The transaction, catalog snapshot, and cache write set enter the request

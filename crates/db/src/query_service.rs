@@ -1808,6 +1808,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_write_prunes_an_expired_receipt_in_the_same_transaction() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-prune".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(Arc::clone(&db));
+        let expired_id = [7; keys::metadata::WRITE_RECEIPT_ID_LEN];
+        let expired = WriteReceiptOptions::try_new(expired_id, 1, 8 * 1024 * 1024)
+            .expect("expired receipt options remain structurally valid");
+        service
+            .execute_idempotent_write_scoped_controlled(
+                add_one_request("ReceiptPruned"),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                expired,
+            )
+            .await
+            .expect("expired receipt write commits");
+        let expired_key =
+            keys::metadata::write_receipt_key_scoped(DataScope::LegacyUnscoped, &expired_id);
+        assert!(db.inner_db().get(&expired_key).await.unwrap().is_some());
+
+        service
+            .execute_idempotent_write_scoped_controlled(
+                add_one_request("ReceiptPruneTrigger"),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                write_receipt_options(8, 8 * 1024 * 1024),
+            )
+            .await
+            .expect("new write commits and prunes expired receipt");
+
+        assert!(db.inner_db().get(&expired_key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn receipt_ids_are_isolated_by_tenant_scope() {
         let db = Arc::new(
             HelixDB::open(HelixDbSource::InMemory {

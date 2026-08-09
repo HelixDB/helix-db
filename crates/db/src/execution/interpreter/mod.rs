@@ -48,6 +48,8 @@ use crate::encoding::v1::values;
 use crate::error::{HelixDbError, Result};
 use crate::HelixDB;
 
+const WRITE_RECEIPT_GC_SCAN_LIMIT: usize = 64;
+
 /// Step-by-step executor for planner executable IR.
 pub struct Interpreter<'db> {
     db: &'db HelixDB,
@@ -241,6 +243,16 @@ impl<'db> Interpreter<'db> {
                 self.ctx.abort_request_write_scope();
                 return Ok(PreparedWrite::Replayed(receipt));
             }
+        }
+        let receipt_prefix =
+            keys::metadata::write_receipt_scan_prefix_scoped(self.ctx.tenant_scope);
+        if let Err(error) = self
+            .ctx
+            .prune_expired_write_receipts(&receipt_prefix, now_unix_ms, WRITE_RECEIPT_GC_SCAN_LIMIT)
+            .await
+        {
+            self.ctx.abort_request_write_scope();
+            return Err(error);
         }
 
         if let Err(error) = self.ctx.check_execution_deadline() {
