@@ -863,6 +863,15 @@ impl QueryServiceError {
         matches!(self, Self::Db(HelixDbError::QueryDeadlineExceeded))
     }
 
+    /// Returns true when a writer fence made the durable commit outcome
+    /// ambiguous. Receipt-aware transports may safely retry this exact write.
+    pub fn is_commit_outcome_unknown(&self) -> bool {
+        matches!(
+            self,
+            Self::Db(HelixDbError::WriterFencedCommitOutcomeUnknown)
+        )
+    }
+
     /// Stable index lifecycle error code, when this failure belongs to that
     /// public compatibility surface.
     pub fn index_error_code(&self) -> Option<&'static str> {
@@ -2580,8 +2589,13 @@ mod tests {
             HelixDbError::TransactionConflict(_)
         ));
 
+        let unknown = QueryServiceError::Db(HelixDbError::WriterFencedCommitOutcomeUnknown);
+        assert!(unknown.is_transaction_conflict());
+        assert!(unknown.is_commit_outcome_unknown());
+
         let invalid = QueryServiceError::InvalidRequest("bad request".to_string());
         assert!(!invalid.is_transaction_conflict());
+        assert!(!invalid.is_commit_outcome_unknown());
         assert!(matches!(
             HelixDbError::from(invalid),
             HelixDbError::Query(message) if message.contains("invalid request")
