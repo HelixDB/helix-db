@@ -5,8 +5,10 @@
 //! of deserializing, planning, or serializing execution results themselves.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use helix_ast::batch::{BatchQuery, ReadBatch, WriteBatch};
 use helix_ast::query::{QueryRequest, QueryRequestType, QueryValue};
 use helix_metrics::{query, query::transport::OssQueryMetrics};
@@ -14,9 +16,11 @@ use helix_planner::{context::ParamBindings, diagnostics::PlannerDiagnostics, ir:
 use serde::ser::Serializer;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use sha2::{Digest as _, Sha256};
 
 use crate::encoding::keys::tenant::DataScope;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
+use crate::encoding::v1::{keys, values};
 use crate::error::HelixDbError;
 use crate::execution::interpreter::{ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue};
 use crate::execution_control::ExecutionControl;
@@ -130,6 +134,102 @@ impl HelixQueryService {
         )
         .await
     }
+
+    /// Execute one tenant-scoped write with an atomic replay receipt.
+    ///
+    /// A successful graph mutation and its exact public response commit in the
+    /// same serializable SlateDB transaction. Retrying the same request ID and
+    /// payload returns the stored response without executing the mutation.
+    pub async fn execute_idempotent_write_scoped_controlled(
+        &self,
+        request: QueryRequest,
+        tenant_scope: DataScope,
+        execution_control: ExecutionControl,
+        receipt: WriteReceiptOptions,
+    ) -> std::result::Result<QueryExecution, QueryServiceError> {
+        let observation = self
+            .query_metrics
+            .as_ref()
+            .and_then(|_| QueryObservation::capture(&request, None));
+        let started_at = std::time::Instant::now();
+        let result = execute_idempotent_write_on_scoped(
+            self.db.as_ref(),
+            request,
+            tenant_scope,
+            execution_control,
+            receipt,
+        )
+        .await;
+        if let (Some(query_metrics), Some(observation)) = (self.query_metrics.as_ref(), observation)
+        {
+            let observed = result.as_ref().map(QueryExecution::response);
+            let _ = query_metrics.record(observation.event(observed, started_at.elapsed()));
+        }
+        result
+    }
+}
+
+/// Validated bounded storage policy for one idempotent write receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteReceiptOptions {
+    request_id: [u8; keys::metadata::WRITE_RECEIPT_ID_LEN],
+    expires_at_unix_ms: u64,
+    max_response_bytes: NonZeroUsize,
+}
+
+impl WriteReceiptOptions {
+    /// Build a receipt policy. Nil IDs and zero expiry are rejected because
+    /// they cannot identify a live bounded replay window.
+    pub fn try_new(
+        request_id: [u8; keys::metadata::WRITE_RECEIPT_ID_LEN],
+        expires_at_unix_ms: u64,
+        max_response_bytes: usize,
+    ) -> std::result::Result<Self, QueryServiceError> {
+        if request_id == [0; keys::metadata::WRITE_RECEIPT_ID_LEN] {
+            return Err(QueryServiceError::InvalidRequest(
+                "write receipt request ID must not be nil".to_string(),
+            ));
+        }
+        if expires_at_unix_ms == 0 {
+            return Err(QueryServiceError::InvalidRequest(
+                "write receipt expiry must not be zero".to_string(),
+            ));
+        }
+        let Some(max_response_bytes) = NonZeroUsize::new(max_response_bytes) else {
+            return Err(QueryServiceError::InvalidRequest(
+                "write receipt response limit must not be zero".to_string(),
+            ));
+        };
+        Ok(Self {
+            request_id,
+            expires_at_unix_ms,
+            max_response_bytes,
+        })
+    }
+}
+
+/// Public query response plus replay evidence for the transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryExecution {
+    response: QueryResponse,
+    replayed: bool,
+}
+
+impl QueryExecution {
+    /// Borrow the public query response.
+    pub const fn response(&self) -> &QueryResponse {
+        &self.response
+    }
+
+    /// Returns whether storage served a previously committed receipt.
+    pub const fn replayed(&self) -> bool {
+        self.replayed
+    }
+
+    /// Consume the execution wrapper.
+    pub fn into_response(self) -> QueryResponse {
+        self.response
+    }
 }
 
 pub(crate) async fn execute_query_on_observed(
@@ -192,7 +292,7 @@ pub(crate) async fn execute_query_on_scoped_observed(
         Err(error) => Err(error.into()),
     };
     if let (Some(query_metrics), Some(observation)) = (query_metrics, observation) {
-        let _ = query_metrics.record(observation.event(&result, started_at.elapsed()));
+        let _ = query_metrics.record(observation.event(result.as_ref(), started_at.elapsed()));
     }
     result
 }
@@ -221,7 +321,7 @@ impl QueryObservation {
 
     fn event(
         self,
-        result: &std::result::Result<QueryResponse, QueryServiceError>,
+        result: std::result::Result<&QueryResponse, &QueryServiceError>,
         latency: std::time::Duration,
     ) -> query::QueryEvent {
         let outcome = match result {
@@ -246,7 +346,6 @@ impl QueryObservation {
             }
         };
         let planner_diagnostics = result
-            .as_ref()
             .ok()
             .and_then(|response| serde_json::to_value(response.diagnostics()).ok());
         query::QueryEvent::now(
@@ -272,9 +371,13 @@ fn query_error_type(error: &QueryServiceError) -> query::QueryErrorType {
             query::QueryErrorType::InvalidRequest
         }
         QueryServiceError::Db(_) => query::QueryErrorType::Execution,
-        QueryServiceError::JsonSerialize(_) | QueryServiceError::Serialize(_) => {
-            query::QueryErrorType::Internal
+        QueryServiceError::WriteReceiptConflict => query::QueryErrorType::Conflict,
+        QueryServiceError::WriteReceiptResponseTooLarge { .. } => {
+            query::QueryErrorType::InvalidRequest
         }
+        QueryServiceError::JsonSerialize(_)
+        | QueryServiceError::Serialize(_)
+        | QueryServiceError::Deserialize(_) => query::QueryErrorType::Internal,
     }
 }
 
@@ -316,6 +419,138 @@ async fn execute_validated(
         .await?;
     let (_, diagnostics) = planning.into_parts();
     QueryResponse::from_execution_result_with_diagnostics(result, diagnostics)
+}
+
+async fn execute_idempotent_write_on_scoped(
+    db: &HelixDB,
+    request: QueryRequest,
+    tenant_scope: DataScope,
+    execution_control: ExecutionControl,
+    receipt: WriteReceiptOptions,
+) -> std::result::Result<QueryExecution, QueryServiceError> {
+    if request.request_type() != QueryRequestType::Write {
+        return Err(QueryServiceError::InvalidRequest(
+            "write receipts are valid only for write requests".to_string(),
+        ));
+    }
+    let request_bytes = request
+        .to_json_bytes()
+        .map_err(|error| QueryServiceError::InvalidRequest(error.to_string()))?;
+    let request_hash: [u8; values::write_receipt::REQUEST_HASH_LEN] =
+        Sha256::digest(&request_bytes).into();
+    let receipt_key = keys::metadata::write_receipt_key_scoped(tenant_scope, &receipt.request_id);
+
+    for attempt in 0..3 {
+        let query = ValidatedQuery::from_request(request.clone())?;
+        let result = execute_validated_idempotent(
+            db,
+            query,
+            tenant_scope,
+            execution_control,
+            &receipt_key,
+            request_hash,
+            receipt,
+        )
+        .await;
+        if attempt < 2 && matches!(&result, Err(error) if error.is_transaction_conflict()) {
+            continue;
+        }
+        return result;
+    }
+    unreachable!("bounded idempotent write attempts always return")
+}
+
+async fn execute_validated_idempotent(
+    db: &HelixDB,
+    query: ValidatedQuery,
+    tenant_scope: DataScope,
+    execution_control: ExecutionControl,
+    receipt_key: &Bytes,
+    request_hash: [u8; values::write_receipt::REQUEST_HASH_LEN],
+    receipt_options: WriteReceiptOptions,
+) -> std::result::Result<QueryExecution, QueryServiceError> {
+    execution_control.check()?;
+    let ValidatedQuery::Write { batch, parameters } = query else {
+        return Err(QueryServiceError::InvalidRequest(
+            "write receipts are valid only for write requests".to_string(),
+        ));
+    };
+    if db.is_reader_mode() {
+        return Err(HelixDbError::WriterModeRequired {
+            actual: db.mode().as_str(),
+        }
+        .into());
+    }
+    let params = query_param_bindings(parameters)?;
+    let prepared = execution_control
+        .run(db.planner_context_scoped_prepared(params.clone(), tenant_scope))
+        .await?;
+    execution_control.check()?;
+    let planning = helix_planner::planning::plan_with_diagnostics(
+        &BatchQuery::Write(batch),
+        prepared.context(),
+    )?;
+    execution_control.check()?;
+    let (plan, diagnostics) = planning.into_parts();
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| QueryServiceError::InvalidRequest(error.to_string()))?
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    match db
+        .prepare_idempotent_write_scoped_controlled(
+            &plan,
+            params,
+            tenant_scope,
+            execution_control,
+            prepared.into_catalog_proof(),
+            receipt_key,
+            now_unix_ms,
+        )
+        .await?
+    {
+        crate::execution::interpreter::PreparedWrite::Replayed(receipt) => {
+            if receipt.request_hash() != &request_hash {
+                return Err(QueryServiceError::WriteReceiptConflict);
+            }
+            let response =
+                QueryResponse::from_stored_bytes(receipt.response(), receipt.diagnostics())?;
+            Ok(QueryExecution {
+                response,
+                replayed: true,
+            })
+        }
+        crate::execution::interpreter::PreparedWrite::Pending {
+            mut transaction,
+            result,
+        } => {
+            let response =
+                QueryResponse::from_execution_result_with_diagnostics(result, diagnostics)?;
+            let response_bytes = response.to_json_bytes()?;
+            if response_bytes.len() > receipt_options.max_response_bytes.get() {
+                return Err(QueryServiceError::WriteReceiptResponseTooLarge {
+                    observed: response_bytes.len(),
+                    maximum: receipt_options.max_response_bytes.get(),
+                });
+            }
+            let diagnostics_bytes =
+                sonic_rs::to_vec(response.diagnostics()).map_err(QueryServiceError::Serialize)?;
+            let receipt = values::write_receipt::WriteReceiptValue::new(
+                receipt_options.expires_at_unix_ms,
+                request_hash,
+                Bytes::from(response_bytes),
+                Bytes::from(diagnostics_bytes),
+            )
+            .map_err(HelixDbError::from)?;
+            transaction.stage_receipt(receipt_key.clone(), &receipt)?;
+            transaction.commit().await?;
+            Ok(QueryExecution {
+                response,
+                replayed: false,
+            })
+        }
+    }
 }
 
 enum ValidatedQuery {
@@ -416,6 +651,17 @@ impl QueryResponse {
     /// Serialize the response as JSON bytes.
     pub fn to_json_bytes(&self) -> std::result::Result<Vec<u8>, QueryServiceError> {
         sonic_rs::to_vec(self).map_err(QueryServiceError::Serialize)
+    }
+
+    fn from_stored_bytes(
+        response: &[u8],
+        diagnostics: &[u8],
+    ) -> std::result::Result<Self, QueryServiceError> {
+        Ok(Self {
+            returns: sonic_rs::from_slice(response).map_err(QueryServiceError::Deserialize)?,
+            diagnostics: sonic_rs::from_slice(diagnostics)
+                .map_err(QueryServiceError::Deserialize)?,
+        })
     }
 
     /// Borrow the returned values.
@@ -592,6 +838,18 @@ pub enum QueryServiceError {
     /// Response serialization failed.
     #[error("json serialization error: {0}")]
     Serialize(sonic_rs::Error),
+
+    /// A persisted response could not be decoded.
+    #[error("json deserialization error: {0}")]
+    Deserialize(sonic_rs::Error),
+
+    /// One request ID was reused for a different canonical write.
+    #[error("write receipt request ID was already used for a different request")]
+    WriteReceiptConflict,
+
+    /// The exact response cannot fit within the configured receipt bound.
+    #[error("write receipt response is {observed} bytes, maximum is {maximum}")]
+    WriteReceiptResponseTooLarge { observed: usize, maximum: usize },
 }
 
 impl QueryServiceError {
@@ -611,7 +869,12 @@ impl QueryServiceError {
         match self {
             Self::Db(error) => error.index_error_code(),
             Self::Planner(error) => error.index_error_code(),
-            Self::InvalidRequest(_) | Self::JsonSerialize(_) | Self::Serialize(_) => None,
+            Self::InvalidRequest(_)
+            | Self::JsonSerialize(_)
+            | Self::Serialize(_)
+            | Self::Deserialize(_)
+            | Self::WriteReceiptConflict
+            | Self::WriteReceiptResponseTooLarge { .. } => None,
         }
     }
 }
@@ -628,7 +891,12 @@ impl From<QueryServiceError> for HelixDbError {
             other @ (QueryServiceError::InvalidRequest(_)
             | QueryServiceError::Planner(_)
             | QueryServiceError::JsonSerialize(_)
-            | QueryServiceError::Serialize(_)) => HelixDbError::Query(other.to_string()),
+            | QueryServiceError::Serialize(_)
+            | QueryServiceError::Deserialize(_)
+            | QueryServiceError::WriteReceiptConflict
+            | QueryServiceError::WriteReceiptResponseTooLarge { .. }) => {
+                HelixDbError::Query(other.to_string())
+            }
         }
     }
 }
@@ -696,6 +964,59 @@ mod tests {
                             == helix_planner::diagnostics::SecondaryIndexKind::Equality
             )
         })
+    }
+
+    fn write_receipt_options(id: u8, max_response_bytes: usize) -> WriteReceiptOptions {
+        let expires_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test clock is after the Unix epoch")
+            .as_millis()
+            .saturating_add(60_000)
+            .try_into()
+            .unwrap_or(u64::MAX);
+        WriteReceiptOptions::try_new(
+            [id; keys::metadata::WRITE_RECEIPT_ID_LEN],
+            expires_at_unix_ms,
+            max_response_bytes,
+        )
+        .expect("test receipt options are valid")
+    }
+
+    fn add_one_request(label: &str) -> QueryRequest {
+        QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "created",
+                    g().add_n(label, Vec::<(&str, PropertyInput)>::new()),
+                )
+                .returning(["created"]),
+        )
+    }
+
+    async fn count_label(service: &HelixQueryService, label: &str) -> JsonValue {
+        count_label_scoped(service, label, DataScope::LegacyUnscoped).await
+    }
+
+    async fn count_label_scoped(
+        service: &HelixQueryService,
+        label: &str,
+        scope: DataScope,
+    ) -> JsonValue {
+        service
+            .execute_query_scoped(
+                QueryRequest::read(
+                    read_batch()
+                        .var_as("count", g().n_with_label(label).count())
+                        .returning(["count"]),
+                ),
+                scope,
+            )
+            .await
+            .expect("receipt postcondition read succeeds")
+            .returns()
+            .get("count")
+            .cloned()
+            .expect("count return exists")
     }
 
     #[test]
@@ -1287,6 +1608,249 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotent_write_replays_exact_response_without_duplicate_mutation() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-replay".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let request = add_one_request("ReceiptReplay");
+        let options = write_receipt_options(1, 8 * 1024 * 1024);
+
+        let first = service
+            .execute_idempotent_write_scoped_controlled(
+                request.clone(),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                options,
+            )
+            .await
+            .expect("first write commits");
+        let second = service
+            .execute_idempotent_write_scoped_controlled(
+                request,
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                options,
+            )
+            .await
+            .expect("duplicate write replays");
+
+        assert!(!first.replayed());
+        assert!(second.replayed());
+        assert_eq!(first.response(), second.response());
+        assert_eq!(
+            count_label(&service, "ReceiptReplay").await,
+            JsonValue::from(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_write_rejects_request_id_payload_mismatch() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-conflict".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let options = write_receipt_options(2, 8 * 1024 * 1024);
+        service
+            .execute_idempotent_write_scoped_controlled(
+                add_one_request("ReceiptOriginal"),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                options,
+            )
+            .await
+            .expect("original write commits");
+
+        let error = service
+            .execute_idempotent_write_scoped_controlled(
+                add_one_request("ReceiptDifferent"),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                options,
+            )
+            .await
+            .expect_err("different payload must not reuse a receipt ID");
+        assert!(matches!(error, QueryServiceError::WriteReceiptConflict));
+        assert_eq!(
+            count_label(&service, "ReceiptDifferent").await,
+            JsonValue::from(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_write_aborts_before_commit_when_response_exceeds_limit() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-limit".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let error = service
+            .execute_idempotent_write_scoped_controlled(
+                add_one_request("ReceiptOversized"),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                write_receipt_options(3, 1),
+            )
+            .await
+            .expect_err("oversized receipt response must abort");
+        assert!(matches!(
+            error,
+            QueryServiceError::WriteReceiptResponseTooLarge { maximum: 1, .. }
+        ));
+        assert_eq!(
+            count_label(&service, "ReceiptOversized").await,
+            JsonValue::from(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_idempotent_writes_converge_to_one_receipt() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-concurrent".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let request = add_one_request("ReceiptConcurrent");
+        let options = write_receipt_options(4, 8 * 1024 * 1024);
+        let left = service.execute_idempotent_write_scoped_controlled(
+            request.clone(),
+            DataScope::LegacyUnscoped,
+            ExecutionControl::unlimited(),
+            options,
+        );
+        let right = service.execute_idempotent_write_scoped_controlled(
+            request,
+            DataScope::LegacyUnscoped,
+            ExecutionControl::unlimited(),
+            options,
+        );
+        let (left, right) = tokio::join!(left, right);
+        let left = left.expect("left duplicate succeeds");
+        let right = right.expect("right duplicate succeeds");
+
+        assert_eq!(
+            usize::from(left.replayed()) + usize::from(right.replayed()),
+            1
+        );
+        assert_eq!(left.response(), right.response());
+        assert_eq!(
+            count_label(&service, "ReceiptConcurrent").await,
+            JsonValue::from(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_receipt_executes_again_and_replaces_the_response() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-expired".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let request = add_one_request("ReceiptExpired");
+        let expired = WriteReceiptOptions::try_new(
+            [5; keys::metadata::WRITE_RECEIPT_ID_LEN],
+            1,
+            8 * 1024 * 1024,
+        )
+        .expect("expired receipt options remain structurally valid");
+
+        let first = service
+            .execute_idempotent_write_scoped_controlled(
+                request.clone(),
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                expired,
+            )
+            .await
+            .expect("first write commits");
+        let replacement = service
+            .execute_idempotent_write_scoped_controlled(
+                request,
+                DataScope::LegacyUnscoped,
+                ExecutionControl::unlimited(),
+                write_receipt_options(5, 8 * 1024 * 1024),
+            )
+            .await
+            .expect("expired receipt is replaced");
+
+        assert!(!first.replayed());
+        assert!(!replacement.replayed());
+        assert_eq!(
+            count_label(&service, "ReceiptExpired").await,
+            JsonValue::from(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_ids_are_isolated_by_tenant_scope() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-write-receipt-tenants".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let request = add_one_request("TenantReceipt");
+        let options = write_receipt_options(6, 8 * 1024 * 1024);
+        let tenant_a = DataScope::Tenant(
+            crate::encoding::keys::tenant::TenantId::from_ulid_str("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                .expect("tenant A ULID"),
+        );
+        let tenant_b = DataScope::Tenant(
+            crate::encoding::keys::tenant::TenantId::from_ulid_str("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+                .expect("tenant B ULID"),
+        );
+
+        let first_a = service
+            .execute_idempotent_write_scoped_controlled(
+                request.clone(),
+                tenant_a,
+                ExecutionControl::unlimited(),
+                options,
+            )
+            .await
+            .expect("tenant A write commits");
+        let first_b = service
+            .execute_idempotent_write_scoped_controlled(
+                request,
+                tenant_b,
+                ExecutionControl::unlimited(),
+                options,
+            )
+            .await
+            .expect("tenant B write commits");
+
+        assert!(!first_a.replayed());
+        assert!(!first_b.replayed());
+        assert_eq!(
+            count_label_scoped(&service, "TenantReceipt", tenant_a).await,
+            JsonValue::from(1)
+        );
+        assert_eq!(
+            count_label_scoped(&service, "TenantReceipt", tenant_b).await,
+            JsonValue::from(1)
+        );
+    }
+
+    #[tokio::test]
     async fn query_response_carries_executed_plan_diagnostics_outside_result_json() {
         const SECRET_LITERAL: &str = "secret-query-value";
 
@@ -1365,7 +1929,7 @@ mod tests {
         assert!(!public_json.contains("diagnostics"));
 
         let telemetry_event = observation
-            .event(&Ok(response), std::time::Duration::from_micros(42))
+            .event(Ok(&response), std::time::Duration::from_micros(42))
             .into_telemetry()
             .expect("telemetry event");
         assert!(telemetry_event
@@ -2108,18 +2672,14 @@ mod tests {
             query::QueryErrorType::Execution
         );
 
-        let failed = observation.event(
-            &Err(QueryServiceError::Db(
-                HelixDbError::UniqueConstraintViolation {
-                    label: "User".to_owned(),
-                    property: "email".to_owned(),
-                    value: "\"secret@example.com\"".to_owned(),
-                    existing_node_id: 1,
-                    attempted_node_id: 2,
-                },
-            )),
-            std::time::Duration::from_micros(1),
-        );
+        let error = QueryServiceError::Db(HelixDbError::UniqueConstraintViolation {
+            label: "User".to_owned(),
+            property: "email".to_owned(),
+            value: "\"secret@example.com\"".to_owned(),
+            existing_node_id: 1,
+            attempted_node_id: 2,
+        });
+        let failed = observation.event(Err(&error), std::time::Duration::from_micros(1));
         let encoded = serde_json::to_string(
             &failed
                 .into_telemetry()

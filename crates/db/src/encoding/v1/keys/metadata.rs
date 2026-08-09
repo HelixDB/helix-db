@@ -12,6 +12,8 @@ pub const NEXT_NODE_ID: &[u8] = b"next_node_id";
 pub const NEXT_EDGE_ID: &[u8] = b"next_edge_id";
 const TEXT_INDEX_MANIFEST_PREFIX: &[u8] = b"text_manifest:";
 const DYNAMIC_INDEX_PREFIX: &[u8] = b"dynamic_index:";
+const WRITE_RECEIPT_PREFIX: &[u8] = b"write_receipt:";
+pub(crate) const WRITE_RECEIPT_ID_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextMetadataElement {
@@ -181,6 +183,20 @@ pub(crate) fn text_index_version_counter_key_scoped(scope: DataScope, index_name
     data_metadata_key_scoped(scope, format!("text_version:{index_name}").as_bytes())
 }
 
+/// Complete tenant-scoped key for one idempotent write receipt.
+///
+/// The receipt ID is fixed-width so caller-controlled bytes cannot overlap
+/// another metadata family or create ambiguous prefix encodings.
+pub(crate) fn write_receipt_key_scoped(
+    scope: DataScope,
+    request_id: &[u8; WRITE_RECEIPT_ID_LEN],
+) -> Bytes {
+    let mut name = Vec::with_capacity(WRITE_RECEIPT_PREFIX.len() + WRITE_RECEIPT_ID_LEN);
+    name.extend_from_slice(WRITE_RECEIPT_PREFIX);
+    name.extend_from_slice(request_id);
+    data_metadata_key_scoped(scope, &name)
+}
+
 fn data_metadata_key_scoped(scope: DataScope, name: &[u8]) -> Bytes {
     Key::Data {
         scope,
@@ -192,5 +208,34 @@ fn data_metadata_key_scoped(scope: DataScope, name: &[u8]) -> Bytes {
 impl<'a> From<&MetadataKey<'a>> for KeyPrefix {
     fn from(_: &MetadataKey<'a>) -> KeyPrefix {
         MetadataKey::key_prefix()
+    }
+}
+
+#[cfg(test)]
+mod write_receipt_tests {
+    use super::*;
+    use crate::encoding::keys::tenant::TenantId;
+
+    #[test]
+    fn write_receipt_key_is_fixed_width_and_tenant_scoped() {
+        let request_id = [0xA5; WRITE_RECEIPT_ID_LEN];
+        let legacy = write_receipt_key_scoped(DataScope::LegacyUnscoped, &request_id);
+        assert_eq!(
+            legacy.as_ref(),
+            [
+                &[KeyPrefix::Metadata.as_u8()][..],
+                WRITE_RECEIPT_PREFIX,
+                &request_id,
+            ]
+            .concat()
+        );
+
+        let tenant = TenantId::from_u128(7);
+        let scoped = write_receipt_key_scoped(DataScope::Tenant(tenant), &request_id);
+        assert_eq!(
+            &scoped[..DataScope::PREFIX_LEN],
+            tenant.as_u128().to_be_bytes().as_slice()
+        );
+        assert_eq!(&scoped[DataScope::PREFIX_LEN..], legacy.as_ref());
     }
 }

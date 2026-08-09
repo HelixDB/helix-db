@@ -34,6 +34,7 @@ pub use types::{
 };
 use types::{ExecutionValueSlot, ExecutionValueStore};
 
+use bytes::Bytes;
 use helix_ast::expr::{CompareOp, Expr, Predicate};
 use helix_planner::{context, exec, ir};
 
@@ -51,6 +52,38 @@ use crate::HelixDB;
 pub struct Interpreter<'db> {
     db: &'db HelixDB,
     ctx: ExecutionContext<'db>,
+}
+
+/// Prepared idempotent write that has not crossed its durable commit boundary.
+pub(crate) struct PendingWrite<'db> {
+    ctx: ExecutionContext<'db>,
+}
+
+impl PendingWrite<'_> {
+    /// Stages the exact public response beside the graph mutation.
+    pub(crate) fn stage_receipt(
+        &mut self,
+        key: Bytes,
+        receipt: &values::write_receipt::WriteReceiptValue,
+    ) -> Result<()> {
+        self.ctx.stage_request_write_receipt(key, receipt.encode())
+    }
+
+    /// Commits the graph mutation and receipt as one serializable transaction.
+    pub(crate) async fn commit(mut self) -> Result<()> {
+        self.ctx.commit_request_write_scope().await
+    }
+}
+
+/// Result of preparing an idempotent write request.
+pub(crate) enum PreparedWrite<'db> {
+    /// A current receipt already proves this request committed.
+    Replayed(values::write_receipt::WriteReceiptValue),
+    /// The query executed inside an uncommitted request transaction.
+    Pending {
+        transaction: Box<PendingWrite<'db>>,
+        result: ExecutionResult,
+    },
 }
 
 impl<'db> Interpreter<'db> {
@@ -170,6 +203,73 @@ impl<'db> Interpreter<'db> {
             self.ctx.close_request_read_view()?;
         }
         result
+    }
+
+    /// Executes a write plan but leaves its transaction open so the caller can
+    /// serialize and stage the public response before the durable commit.
+    pub(crate) async fn prepare_idempotent_write(
+        mut self,
+        plan: &exec::ExecutablePlan,
+        receipt_key: &[u8],
+        now_unix_ms: u64,
+    ) -> Result<PreparedWrite<'db>> {
+        if plan.kind() != ir::PlanKind::Write {
+            return Err(HelixDbError::InvariantViolation(
+                "idempotent write preparation requires a write plan".to_string(),
+            ));
+        }
+        self.ctx.check_execution_deadline()?;
+        self.ensure_writer()?;
+        self.ctx.enable_request_write_scope().await?;
+
+        let existing = match self.ctx.request_write_receipt(receipt_key).await {
+            Ok(existing) => existing,
+            Err(error) => {
+                self.ctx.abort_request_write_scope();
+                return Err(error);
+            }
+        };
+        if let Some(existing) = existing {
+            let receipt = match values::write_receipt::WriteReceiptValue::decode(&existing) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    self.ctx.abort_request_write_scope();
+                    return Err(error.into());
+                }
+            };
+            if receipt.expires_at_unix_ms() > now_unix_ms {
+                self.ctx.abort_request_write_scope();
+                return Ok(PreparedWrite::Replayed(receipt));
+            }
+        }
+
+        if let Err(error) = self.ctx.check_execution_deadline() {
+            self.ctx.abort_request_write_scope();
+            return Err(error);
+        }
+        if let Err(error) = self
+            .ctx
+            .execute_steps(plan.steps(), plan.execution_order())
+            .await
+        {
+            self.ctx.abort_request_write_scope();
+            return Err(error);
+        }
+        if let Err(error) = self.ctx.check_execution_deadline() {
+            self.ctx.abort_request_write_scope();
+            return Err(error);
+        }
+        let result = match self.ctx.finish(plan.root(), plan.returns()) {
+            Ok(result) => result,
+            Err(error) => {
+                self.ctx.abort_request_write_scope();
+                return Err(error);
+            }
+        };
+        Ok(PreparedWrite::Pending {
+            transaction: Box::new(PendingWrite { ctx: self.ctx }),
+            result,
+        })
     }
 }
 

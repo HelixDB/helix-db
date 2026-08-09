@@ -5,6 +5,7 @@
 //! writes. Canonical V2 generations remain in the transaction-owned family
 //! mutation sets.
 
+use bytes::Bytes;
 use slatedb::{DbTransaction, IsolationLevel};
 
 use super::super::runtime_context::{
@@ -24,6 +25,34 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn discard_pending_catalog_freshness(&mut self) {
         self.pending_catalog_freshness = PendingCatalogFreshness::Consumed;
         self.release_read_catalog_permit_for_ddl();
+    }
+
+    /// Reads one receipt row from the active request transaction snapshot.
+    pub(in crate::execution::interpreter) async fn request_write_receipt(
+        &self,
+        key: &[u8],
+    ) -> Result<Option<Bytes>> {
+        let RequestWriteScopeState::Active(active) = &self.request_write_scope else {
+            return Err(HelixDbError::InvariantViolation(
+                "write receipt lookup requires an active request transaction".to_string(),
+            ));
+        };
+        Ok(active.txn.get(key).await?)
+    }
+
+    /// Stages one receipt row in the active request transaction.
+    pub(in crate::execution::interpreter) fn stage_request_write_receipt(
+        &mut self,
+        key: Bytes,
+        value: Bytes,
+    ) -> Result<()> {
+        let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
+            return Err(HelixDbError::InvariantViolation(
+                "write receipt staging requires an active request transaction".to_string(),
+            ));
+        };
+        active.txn.put(key, value)?;
+        Ok(())
     }
 
     /// Opens the request transaction before the first plan step.

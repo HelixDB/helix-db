@@ -14,6 +14,7 @@ pub(crate) mod secondary;
 pub(crate) mod text_index;
 pub(crate) mod vector_generation;
 pub mod vectors;
+pub(crate) mod write_receipt;
 
 const ENCODING_TYPE_LEN: usize = core::mem::size_of::<u8>();
 const U32_LEN: usize = core::mem::size_of::<u32>();
