@@ -164,8 +164,13 @@ pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
         QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
             Status::failed_precondition(message)
         }
+        QueryServiceError::WriteReceiptConflict => Status::already_exists(message),
+        QueryServiceError::WriteReceiptResponseTooLarge { .. } => {
+            Status::resource_exhausted(message)
+        }
         QueryServiceError::Db(_)
         | QueryServiceError::JsonSerialize(_)
-        | QueryServiceError::Serialize(_) => Status::internal(message),
+        | QueryServiceError::Serialize(_)
+        | QueryServiceError::Deserialize(_) => Status::internal(message),
     }
 }

@@ -149,10 +149,12 @@ pub(super) fn service_error_response(error: QueryServiceError) -> Response {
             QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            QueryServiceError::WriteReceiptConflict => StatusCode::CONFLICT,
+            QueryServiceError::WriteReceiptResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             QueryServiceError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            QueryServiceError::JsonSerialize(_) | QueryServiceError::Serialize(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            QueryServiceError::JsonSerialize(_)
+            | QueryServiceError::Serialize(_)
+            | QueryServiceError::Deserialize(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     };
     let message = error.to_string();
