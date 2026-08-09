@@ -529,30 +529,37 @@ void IndexSpec;
 
 // ── StreamBound.literal ─────────────────────────────────────────
 
-// Upper bound: bigint above MAX_SAFE_INTEGER should throw
+// Overflow: bigint above MAX_SAFE_INTEGER should throw
 assert.throws(
   () => StreamBound.literal(BigInt(Number.MAX_SAFE_INTEGER) + 1n),
   TypeError,
   "should reject bigint above MAX_SAFE_INTEGER",
 );
 
-// Lower bound: bigint below MIN_SAFE_INTEGER should throw
+// Negative number should throw
 assert.throws(
-  () => StreamBound.literal(BigInt(Number.MIN_SAFE_INTEGER) - 1n),
+  () => StreamBound.literal(-1),
   TypeError,
-  "should reject bigint below MIN_SAFE_INTEGER",
+  "should reject negative number",
+);
+
+// Negative bigint should throw
+assert.throws(
+  () => StreamBound.literal(-1n),
+  TypeError,
+  "should reject negative bigint",
+);
+
+// Zero should NOT throw
+assert.doesNotThrow(
+  () => StreamBound.literal(0),
+  "should accept 0",
 );
 
 // Boundary: exact MAX_SAFE_INTEGER as bigint should NOT throw
 assert.doesNotThrow(
   () => StreamBound.literal(BigInt(Number.MAX_SAFE_INTEGER)),
   "should accept bigint equal to MAX_SAFE_INTEGER",
-);
-
-// Boundary: exact MIN_SAFE_INTEGER as bigint should NOT throw
-assert.doesNotThrow(
-  () => StreamBound.literal(BigInt(Number.MIN_SAFE_INTEGER)),
-  "should accept bigint equal to MIN_SAFE_INTEGER",
 );
 
 // Regular number should NOT throw
