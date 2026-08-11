@@ -10,12 +10,16 @@ export type MigrationConfig = {
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new TypeError(`MIGRATION_BATCH_SIZE must be a positive integer, received ${value ?? fallback}`);
+    throw new TypeError(
+      `MIGRATION_BATCH_SIZE must be a positive integer, received ${value ?? fallback}`,
+    );
   }
   return parsed;
 }
 
-export function configFromEnv(env: NodeJS.ProcessEnv = process.env): MigrationConfig {
+export function configFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): MigrationConfig {
   return {
     neo4jUri: env.NEO4J_URI ?? "bolt://localhost:17687",
     neo4jUser: env.NEO4J_USER ?? "neo4j",

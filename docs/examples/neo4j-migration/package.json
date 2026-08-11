@@ -7,6 +7,7 @@
     "build": "tsc --noEmit",
     "seed": "tsx src/cli/seed.ts",
     "export": "tsx src/cli/export.ts",
+    "validate": "tsx src/cli/validate.ts",
     "load": "tsx src/cli/load.ts",
     "verify": "tsx src/cli/verify.ts",
     "test": "npm run test:unit",

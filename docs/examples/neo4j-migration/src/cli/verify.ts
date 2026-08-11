@@ -11,7 +11,12 @@ const dump = await readDump(dumpPath);
 const driver = createNeo4jDriver(config);
 try {
   await Promise.all([waitForNeo4j(driver), waitForHelix(config.helixUrl)]);
-  await verifyMigration(driver, config.neo4jDatabase, new HelixHttpClient(config.helixUrl), dump);
+  await verifyMigration(
+    driver,
+    config.neo4jDatabase,
+    new HelixHttpClient(config.helixUrl),
+    dump,
+  );
   console.log("Migration verified: counts and repository results match.");
 } finally {
   await driver.close();

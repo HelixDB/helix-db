@@ -1,18 +1,37 @@
 import type { Driver } from "neo4j-driver";
 import { z } from "zod";
 import { HelixHttpClient } from "./helix-http.js";
-import { movieDetailsRequest, personFilmographyRequest } from "./helix-queries.js";
+import {
+  movieDetailsRequest,
+  personFilmographyRequest,
+} from "./helix-queries.js";
 
-const personSchema = z.object({ personId: z.string(), name: z.string(), born: z.number().int() });
-const movieSchema = z.object({ movieId: z.string(), title: z.string(), released: z.number().int(), tagline: z.string() });
+const personSchema = z.object({
+  personId: z.string(),
+  name: z.string(),
+  born: z.number().int(),
+});
+const movieSchema = z.object({
+  movieId: z.string(),
+  title: z.string(),
+  released: z.number().int(),
+  tagline: z.string(),
+});
 const castMemberSchema = personSchema.extend({ roles: z.array(z.string()) });
-const filmographyMovieSchema = movieSchema.extend({ roles: z.array(z.string()) });
+const filmographyMovieSchema = movieSchema.extend({
+  roles: z.array(z.string()),
+});
 
 export type Person = z.infer<typeof personSchema>;
 export type Movie = z.infer<typeof movieSchema>;
 export type CastMember = z.infer<typeof castMemberSchema>;
 export type FilmographyMovie = z.infer<typeof filmographyMovieSchema>;
-export type MovieDetails = { movie: Movie; cast: CastMember[]; directors: Person[]; producers: Person[] };
+export type MovieDetails = {
+  movie: Movie;
+  cast: CastMember[];
+  directors: Person[];
+  producers: Person[];
+};
 export type PersonFilmography = { person: Person; movies: FilmographyMovie[] };
 
 export interface MovieRepository {
@@ -49,7 +68,8 @@ function one(value: unknown): unknown | undefined {
 }
 
 function responseObject(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new TypeError("query response must be an object");
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError("query response must be an object");
   return value as Record<string, unknown>;
 }
 
@@ -59,13 +79,24 @@ export function normalizeMovieDetails(value: unknown): MovieDetails | null {
   if (movie === undefined || movie === null) return null;
   return {
     movie: movieSchema.parse(movie),
-    cast: z.array(castMemberSchema).parse(response.cast ?? []).sort((left, right) => left.personId.localeCompare(right.personId)),
-    directors: z.array(personSchema).parse(response.directors ?? []).sort((left, right) => left.personId.localeCompare(right.personId)),
-    producers: z.array(personSchema).parse(response.producers ?? []).sort((left, right) => left.personId.localeCompare(right.personId)),
+    cast: z
+      .array(castMemberSchema)
+      .parse(response.cast ?? [])
+      .sort((left, right) => left.personId.localeCompare(right.personId)),
+    directors: z
+      .array(personSchema)
+      .parse(response.directors ?? [])
+      .sort((left, right) => left.personId.localeCompare(right.personId)),
+    producers: z
+      .array(personSchema)
+      .parse(response.producers ?? [])
+      .sort((left, right) => left.personId.localeCompare(right.personId)),
   };
 }
 
-export function normalizePersonFilmography(value: unknown): PersonFilmography | null {
+export function normalizePersonFilmography(
+  value: unknown,
+): PersonFilmography | null {
   const response = responseObject(value);
   const person = one(response.person);
   if (person === undefined || person === null) return null;
@@ -74,7 +105,11 @@ export function normalizePersonFilmography(value: unknown): PersonFilmography | 
     movies: z
       .array(filmographyMovieSchema)
       .parse(response.movies ?? [])
-      .sort((left, right) => right.released - left.released || left.title.localeCompare(right.title)),
+      .sort(
+        (left, right) =>
+          right.released - left.released ||
+          left.title.localeCompare(right.title),
+      ),
   };
 }
 
@@ -85,7 +120,11 @@ export class Neo4jMovieRepository implements MovieRepository {
   ) {}
 
   async movieDetails(movieId: string): Promise<MovieDetails | null> {
-    const result = await this.driver.executeQuery(cypherQueries.movieDetails, { movieId }, { database: this.database, routing: "READ" });
+    const result = await this.driver.executeQuery(
+      cypherQueries.movieDetails,
+      { movieId },
+      { database: this.database, routing: "READ" },
+    );
     const record = result.records[0];
     if (record === undefined) return null;
     return normalizeMovieDetails({
@@ -97,10 +136,17 @@ export class Neo4jMovieRepository implements MovieRepository {
   }
 
   async personFilmography(personId: string): Promise<PersonFilmography | null> {
-    const result = await this.driver.executeQuery(cypherQueries.personFilmography, { personId }, { database: this.database, routing: "READ" });
+    const result = await this.driver.executeQuery(
+      cypherQueries.personFilmography,
+      { personId },
+      { database: this.database, routing: "READ" },
+    );
     const record = result.records[0];
     if (record === undefined) return null;
-    return normalizePersonFilmography({ person: record.get("person"), movies: record.get("movies") });
+    return normalizePersonFilmography({
+      person: record.get("person"),
+      movies: record.get("movies"),
+    });
   }
 }
 
@@ -108,10 +154,14 @@ export class HelixMovieRepository implements MovieRepository {
   constructor(private readonly client: HelixHttpClient) {}
 
   async movieDetails(movieId: string): Promise<MovieDetails | null> {
-    return normalizeMovieDetails(await this.client.execute(movieDetailsRequest(movieId)));
+    return normalizeMovieDetails(
+      await this.client.execute(movieDetailsRequest(movieId)),
+    );
   }
 
   async personFilmography(personId: string): Promise<PersonFilmography | null> {
-    return normalizePersonFilmography(await this.client.execute(personFilmographyRequest(personId)));
+    return normalizePersonFilmography(
+      await this.client.execute(personFilmographyRequest(personId)),
+    );
   }
 }

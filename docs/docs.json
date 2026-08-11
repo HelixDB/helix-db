@@ -177,6 +177,12 @@
               "database/helix-db/query-guides/advanced",
               "database/helix-db/query-guides/parameters"
             ]
+          },
+          {
+            "group": "Migration Guides",
+            "pages": [
+              "database/helix-db/migration-guides/from-neo4j"
+            ]
           }
         ]
       },

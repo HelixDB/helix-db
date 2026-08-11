@@ -43,6 +43,9 @@ Full walkthrough: https://docs.helix-db.com/cli/getting-started
 - [Branch, repeat, and condition queries](https://docs.helix-db.com/database/helix-db/query-guides/advanced): Compose sub-traversals and gate named entries without leaving one transaction — Page type: Guide
 - [Bind typed query parameters](https://docs.helix-db.com/database/helix-db/query-guides/parameters): Keep the operation tree stable while request values change — Page type: Guide
 
+## Migration Guides
+- [Migrate from Neo4j](https://docs.helix-db.com/database/helix-db/migration-guides/from-neo4j): Move a TypeScript Movie Graph application, its data, and its Cypher queries to HelixDB — Page type: Tutorial
+
 ## Helix Cloud — Start Here
 - [Connect to Helix Cloud](https://docs.helix-db.com/database/helix-cloud/start-here/working-with-enterprise): Send dynamic requests through a managed gateway — Page type: Guide
 - [Using the Dashboard](https://docs.helix-db.com/database/helix-cloud/start-here/using-the-dashboard): Sign in, create a workspace and project, provision a database, and test the connection — Page type: Tutorial

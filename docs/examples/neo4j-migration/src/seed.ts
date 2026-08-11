@@ -13,7 +13,11 @@ function statements(cypher: string): string[] {
     .filter((statement) => statement.length > 0);
 }
 
-export async function seedNeo4j(driver: Driver, database: string, seedPath: URL): Promise<void> {
+export async function seedNeo4j(
+  driver: Driver,
+  database: string,
+  seedPath: URL,
+): Promise<void> {
   const cypher = await readFile(seedPath, "utf8");
   const session = driver.session({ database, defaultAccessMode: "WRITE" });
   try {

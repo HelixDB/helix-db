@@ -37,6 +37,7 @@ const DATABASE_GROUP_PREFIXES = new Map([
   ['HelixDB/Start Here', 'database/helix-db/start-here/'],
   ['HelixDB/Core Concepts', 'database/helix-db/core-concepts/'],
   ['HelixDB/Query Guides', 'database/helix-db/query-guides/'],
+  ['HelixDB/Migration Guides', 'database/helix-db/migration-guides/'],
   ['Helix Cloud/Start Here', 'database/helix-cloud/start-here/'],
   ['Helix Cloud/Connect and automate', 'database/helix-cloud/connect/'],
   ['Helix Cloud/Operate', 'database/helix-cloud/operate/'],

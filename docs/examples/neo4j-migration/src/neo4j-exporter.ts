@@ -42,11 +42,17 @@ type ExportResults = {
   produced: QueryResult<RecordShape>;
 };
 
-function field<T>(record: QueryResult<RecordShape>["records"][number], name: string): T {
+function field<T>(
+  record: QueryResult<RecordShape>["records"][number],
+  name: string,
+): T {
   return record.get(name) as T;
 }
 
-export function buildDump(results: ExportResults, exportedAt: string): MovieGraphDumpV1 {
+export function buildDump(
+  results: ExportResults,
+  exportedAt: string,
+): MovieGraphDumpV1 {
   return parseMovieGraphDump({
     version: 1,
     exportedAt,
@@ -89,7 +95,11 @@ export function buildDump(results: ExportResults, exportedAt: string): MovieGrap
   });
 }
 
-export async function exportNeo4jSnapshot(driver: Driver, database: string, exportedAt = new Date().toISOString()): Promise<MovieGraphDumpV1> {
+export async function exportNeo4jSnapshot(
+  driver: Driver,
+  database: string,
+  exportedAt = new Date().toISOString(),
+): Promise<MovieGraphDumpV1> {
   const session = driver.session({ database, defaultAccessMode: "READ" });
   const transaction = session.beginTransaction();
   try {

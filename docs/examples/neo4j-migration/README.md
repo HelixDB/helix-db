@@ -7,10 +7,11 @@ snapshot, and loads it into HelixDB with replay-safe TypeScript SDK batches.
 Requirements: Node.js 20 or newer and Docker with Compose.
 
 ```bash
-npm install
+npm ci
 docker compose up -d
 npm run seed
 npm run export -- movie-graph.v1.json
+npm run validate -- movie-graph.v1.json
 npm run load -- movie-graph.v1.json
 npm run verify -- movie-graph.v1.json
 docker compose down --volumes
