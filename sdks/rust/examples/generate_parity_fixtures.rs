@@ -3040,7 +3040,114 @@ fn json_only_fixtures() -> Vec<Fixture> {
         ),
         remaining_read_contract_fixture(),
         remaining_write_contract_fixture(),
+        neo4j_migration_movie_details_fixture(),
+        neo4j_migration_filmography_fixture(),
     ]
+}
+
+fn neo4j_migration_movie_details_fixture() -> Fixture {
+    let request = read_request(
+        read_batch()
+            .var_as(
+                "movie_node",
+                g().n_with_label("Movie")
+                    .where_(Predicate::eq_param("movieId", "movie_id")),
+            )
+            .var_as(
+                "movie",
+                g().n(NodeRef::var("movie_node")).project(vec![
+                    Projection::property("movieId", "movieId"),
+                    Projection::property("title", "title"),
+                    Projection::property("released", "released"),
+                    Projection::property("tagline", "tagline"),
+                ]),
+            )
+            .var_as(
+                "cast",
+                g().n(NodeRef::var("movie_node"))
+                    .in_e(Some("ACTED_IN"))
+                    .project(vec![
+                        Projection::from_endpoint("personId", "personId"),
+                        Projection::from_endpoint("name", "name"),
+                        Projection::from_endpoint("born", "born"),
+                        Projection::property("roles", "roles"),
+                    ]),
+            )
+            .var_as(
+                "directors",
+                g().n(NodeRef::var("movie_node"))
+                    .in_e(Some("DIRECTED"))
+                    .project(vec![
+                        Projection::from_endpoint("personId", "personId"),
+                        Projection::from_endpoint("name", "name"),
+                        Projection::from_endpoint("born", "born"),
+                    ]),
+            )
+            .var_as(
+                "producers",
+                g().n(NodeRef::var("movie_node"))
+                    .in_e(Some("PRODUCED"))
+                    .project(vec![
+                        Projection::from_endpoint("personId", "personId"),
+                        Projection::from_endpoint("name", "name"),
+                        Projection::from_endpoint("born", "born"),
+                    ]),
+            )
+            .returning(["movie", "cast", "directors", "producers"]),
+    )
+    .with_query_name("movie_details");
+    json_only(
+        "915-neo4j-migration-movie-details",
+        with_params(
+            request,
+            vec![("movie_id", string("m-matrix"))],
+            vec![("movie_id", QueryParamType::String)],
+        ),
+    )
+}
+
+fn neo4j_migration_filmography_fixture() -> Fixture {
+    let request = read_request(
+        read_batch()
+            .var_as(
+                "person_node",
+                g().n_with_label("Person")
+                    .where_(Predicate::eq_param("personId", "person_id")),
+            )
+            .var_as(
+                "person",
+                g().n(NodeRef::var("person_node")).project(vec![
+                    Projection::property("personId", "personId"),
+                    Projection::property("name", "name"),
+                    Projection::property("born", "born"),
+                ]),
+            )
+            .var_as(
+                "movies",
+                g().n(NodeRef::var("person_node"))
+                    .out_e(Some("ACTED_IN"))
+                    .bind("credit")
+                    .out_n()
+                    .bind("movie")
+                    .project_bindings(vec![
+                        BindingProjection::binding("movie", "movieId", "movieId"),
+                        BindingProjection::binding("movie", "title", "title"),
+                        BindingProjection::binding("movie", "released", "released"),
+                        BindingProjection::binding("movie", "tagline", "tagline"),
+                        BindingProjection::binding("credit", "roles", "roles"),
+                    ]),
+            )
+            .returning(["person", "movies"]),
+    )
+    .with_query_name("person_filmography");
+    json_only(
+        "916-neo4j-migration-person-filmography",
+        with_params(
+            request,
+            vec![("person_id", string("p-keanu"))],
+            vec![("person_id", QueryParamType::String)],
+        ),
+    )
 }
 
 fn remaining_read_contract_fixture() -> Fixture {

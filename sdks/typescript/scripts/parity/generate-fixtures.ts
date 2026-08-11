@@ -1135,7 +1135,100 @@ function jsonOnlyFixtures(): Fixture[] {
     ),
     remainingReadContractFixture(),
     remainingWriteContractFixture(),
+    neo4jMigrationMovieDetailsFixture(),
+    neo4jMigrationFilmographyFixture(),
   ];
+}
+
+function neo4jMigrationMovieDetailsFixture(): Fixture {
+  const request = QueryRequest.read(
+    readBatch()
+      .varAs("movie_node", g().nWithLabel("Movie").where(Predicate.eqParam("movieId", "movie_id")))
+      .varAs(
+        "movie",
+        g()
+          .n(NodeRef.var("movie_node"))
+          .project([
+            Projection.property("movieId", "movieId"),
+            Projection.property("title", "title"),
+            Projection.property("released", "released"),
+            Projection.property("tagline", "tagline"),
+          ]),
+      )
+      .varAs(
+        "cast",
+        g()
+          .n(NodeRef.var("movie_node"))
+          .inE("ACTED_IN")
+          .project([
+            Projection.fromEndpoint("personId", "personId"),
+            Projection.fromEndpoint("name", "name"),
+            Projection.fromEndpoint("born", "born"),
+            Projection.property("roles", "roles"),
+          ]),
+      )
+      .varAs(
+        "directors",
+        g()
+          .n(NodeRef.var("movie_node"))
+          .inE("DIRECTED")
+          .project([
+            Projection.fromEndpoint("personId", "personId"),
+            Projection.fromEndpoint("name", "name"),
+            Projection.fromEndpoint("born", "born"),
+          ]),
+      )
+      .varAs(
+        "producers",
+        g()
+          .n(NodeRef.var("movie_node"))
+          .inE("PRODUCED")
+          .project([
+            Projection.fromEndpoint("personId", "personId"),
+            Projection.fromEndpoint("name", "name"),
+            Projection.fromEndpoint("born", "born"),
+          ]),
+      )
+      .returning(["movie", "cast", "directors", "producers"]),
+  ).withQueryName("movie_details");
+  return jsonOnly(
+    "915-neo4j-migration-movie-details",
+    withParams(request, [["movie_id", "m-matrix"]], [["movie_id", QueryParamType.string()]]),
+  );
+}
+
+function neo4jMigrationFilmographyFixture(): Fixture {
+  const request = QueryRequest.read(
+    readBatch()
+      .varAs("person_node", g().nWithLabel("Person").where(Predicate.eqParam("personId", "person_id")))
+      .varAs(
+        "person",
+        g()
+          .n(NodeRef.var("person_node"))
+          .project([Projection.property("personId", "personId"), Projection.property("name", "name"), Projection.property("born", "born")]),
+      )
+      .varAs(
+        "movies",
+        g()
+          .n(NodeRef.var("person_node"))
+          .outE("ACTED_IN")
+          .bind("credit")
+          .outN()
+          .bind("movie")
+          .projectBindings([
+            BindingProjection.binding("movie", "movieId", "movieId"),
+            BindingProjection.binding("movie", "title", "title"),
+            BindingProjection.binding("movie", "released", "released"),
+            BindingProjection.binding("movie", "tagline", "tagline"),
+            BindingProjection.binding("credit", "roles", "roles"),
+          ]),
+      )
+      .returning(["person", "movies"]),
+  ).withQueryName("person_filmography");
+  return jsonOnly(
+    "916-neo4j-migration-person-filmography",
+    withParams(request, [["person_id", "p-keanu"]], [["person_id", QueryParamType.string()]]),
+  );
 }
 
 function remainingReadContractFixture(): Fixture {

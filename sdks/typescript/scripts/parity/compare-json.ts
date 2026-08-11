@@ -4,7 +4,7 @@ import { canonicalizeJson, parseJsonStructural, structuralJsonEqual } from "../.
 import { goGeneratedRoot, pythonGeneratedRoot, rustGeneratedRoot, typescriptGeneratedRoot } from "./paths.js";
 
 const EXPECTED_RUNTIME = 233;
-const EXPECTED_JSON_ONLY = 15;
+const EXPECTED_JSON_ONLY = 17;
 
 type Generated = {
   label: "TypeScript" | "Go" | "Python";

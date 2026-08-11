@@ -78,8 +78,8 @@ func run() error {
 	if runtimeCount != 233 {
 		return fmt.Errorf("generated %d runtime fixtures, expected 233", runtimeCount)
 	}
-	if jsonOnlyCount != 15 {
-		return fmt.Errorf("generated %d json-only fixtures, expected 15", jsonOnlyCount)
+	if jsonOnlyCount != 17 {
+		return fmt.Errorf("generated %d json-only fixtures, expected 17", jsonOnlyCount)
 	}
 	if results := os.Getenv("HELIX_EMBEDDED_PARITY_RESULTS"); results != "" {
 		if err := executeEmbeddedFixtures(fixtures, results); err != nil {
@@ -863,7 +863,65 @@ func jsonOnlyFixtures() []fixture {
 		fixtureShortestPathTerminal(),
 		fixtureRemainingReadContract(),
 		fixtureRemainingWriteContract(),
+		fixtureNeo4jMigrationMovieDetails(),
+		fixtureNeo4jMigrationFilmography(),
 	}
+}
+
+func fixtureNeo4jMigrationMovieDetails() fixture {
+	q := helix.ReadQuery("movie_details")
+	movieID := q.ParamString("movie_id", "m-matrix")
+	return jsonOnly(
+		"915-neo4j-migration-movie-details",
+		q.
+			VarAs("movie_node", helix.G().NWithLabel("Movie").Where(helix.PredEq("movieId", movieID))).
+			VarAs("movie", helix.G().N(helix.NodeVar("movie_node")).Project(
+				helix.ProjectPropAs("movieId", "movieId"),
+				helix.ProjectPropAs("title", "title"),
+				helix.ProjectPropAs("released", "released"),
+				helix.ProjectPropAs("tagline", "tagline"),
+			)).
+			VarAs("cast", helix.G().N(helix.NodeVar("movie_node")).InE("ACTED_IN").Project(
+				helix.ProjectFromEndpoint("personId", "personId"),
+				helix.ProjectFromEndpoint("name", "name"),
+				helix.ProjectFromEndpoint("born", "born"),
+				helix.ProjectPropAs("roles", "roles"),
+			)).
+			VarAs("directors", helix.G().N(helix.NodeVar("movie_node")).InE("DIRECTED").Project(
+				helix.ProjectFromEndpoint("personId", "personId"),
+				helix.ProjectFromEndpoint("name", "name"),
+				helix.ProjectFromEndpoint("born", "born"),
+			)).
+			VarAs("producers", helix.G().N(helix.NodeVar("movie_node")).InE("PRODUCED").Project(
+				helix.ProjectFromEndpoint("personId", "personId"),
+				helix.ProjectFromEndpoint("name", "name"),
+				helix.ProjectFromEndpoint("born", "born"),
+			)).
+			Returning("movie", "cast", "directors", "producers"),
+	)
+}
+
+func fixtureNeo4jMigrationFilmography() fixture {
+	q := helix.ReadQuery("person_filmography")
+	personID := q.ParamString("person_id", "p-keanu")
+	return jsonOnly(
+		"916-neo4j-migration-person-filmography",
+		q.
+			VarAs("person_node", helix.G().NWithLabel("Person").Where(helix.PredEq("personId", personID))).
+			VarAs("person", helix.G().N(helix.NodeVar("person_node")).Project(
+				helix.ProjectPropAs("personId", "personId"),
+				helix.ProjectPropAs("name", "name"),
+				helix.ProjectPropAs("born", "born"),
+			)).
+			VarAs("movies", helix.G().N(helix.NodeVar("person_node")).OutE("ACTED_IN").Bind("credit").OutN().Bind("movie").ProjectBindings(
+				helix.ProjectNamedBinding("movie", "movieId", "movieId"),
+				helix.ProjectNamedBinding("movie", "title", "title"),
+				helix.ProjectNamedBinding("movie", "released", "released"),
+				helix.ProjectNamedBinding("movie", "tagline", "tagline"),
+				helix.ProjectNamedBinding("credit", "roles", "roles"),
+			)).
+			Returning("person", "movies"),
+	)
 }
 
 func fixtureRawReadSteps() fixture {

@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import shutil
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 PYTHON_ROOT = Path(__file__).resolve().parents[1]
 SDKS_ROOT = PYTHON_ROOT.parent
 sys.path.insert(0, str(PYTHON_ROOT / "src"))
 
+from parity_runtime_fixtures import (  # noqa: E402
+    base_runtime_fixtures,
+    node_permutation_fixtures,
+)
+
 from helixdb import (  # noqa: E402
     AggregateFunction,
     BatchCondition,
     BindingProjection,
     CompareOp,
-    QueryRequest as QueryRequest,
-    QueryValue,
     EdgeRef,
     Expr,
     IndexSpec,
@@ -27,6 +30,7 @@ from helixdb import (  # noqa: E402
     PropertyInput,
     PropertyValue,
     QueryParamType,
+    QueryValue,
     RepeatConfig,
     ShortestPathDirection,
     Step,
@@ -39,9 +43,8 @@ from helixdb import (  # noqa: E402
     sub,
     write_batch,
 )
-from parity_runtime_fixtures import (  # noqa: E402
-    base_runtime_fixtures,
-    node_permutation_fixtures,
+from helixdb import (
+    QueryRequest as QueryRequest,
 )
 
 OUTPUT_ROOT = SDKS_ROOT / "tests" / "parity" / "generated" / "python"
@@ -131,9 +134,7 @@ def raw_read_steps() -> Fixture:
                             ]
                         )
                     ),
-                    Step.edge_has(
-                        "weight", PropertyInput.value(PropertyValue.f64(1.0))
-                    ),
+                    Step.edge_has("weight", PropertyInput.value(PropertyValue.f64(1.0))),
                     Step.edge_has_label("FOLLOWS"),
                     Step.order_by("weight", Order.DESC),
                     Step.edge_properties(),
@@ -261,9 +262,7 @@ def raw_write_steps() -> Fixture:
 
 def query_value_shapes() -> Fixture:
     request = QueryRequest.read(
-        read_batch()
-        .var_as("empty", g().n_with_label("Missing").count())
-        .returning(["empty"])
+        read_batch().var_as("empty", g().n_with_label("Missing").count()).returning(["empty"])
     )
     return json_only(
         "902-query-value-and-param-type-shapes",
@@ -359,9 +358,7 @@ def reference_shapes() -> Fixture:
         )
         .var_as(
             "edge_var",
-            Traversal.from_steps(
-                [Step.e(EdgeRef.var("edge_ids")), Step.label()], "edges"
-            ),
+            Traversal.from_steps([Step.e(EdgeRef.var("edge_ids")), Step.label()], "edges"),
         )
         .returning(["all_nodes", "node_ids", "node_var", "edge_ids", "edge_var"])
     )
@@ -452,11 +449,7 @@ def nested_read_shapes() -> Fixture:
                     ]
                 )
             )
-            .where(
-                Predicate.compare(
-                    Expr.prop("metadata.score"), CompareOp.GT, Expr.val(10)
-                )
-            )
+            .where(Predicate.compare(Expr.prop("metadata.score"), CompareOp.GT, Expr.val(10)))
             .order_by_multiple([("metadata.score", Order.DESC), ("name", Order.ASC)])
             .project(
                 [
@@ -471,9 +464,7 @@ def nested_read_shapes() -> Fixture:
         )
         .var_as(
             "nested_map",
-            g()
-            .n_with_label("ParityNested")
-            .value_map(["metadata.externalID", "metadata.score"]),
+            g().n_with_label("ParityNested").value_map(["metadata.externalID", "metadata.score"]),
         )
         .var_as(
             "nested_edges",
@@ -585,15 +576,11 @@ def range_index_direction() -> Fixture:
         write_batch()
         .var_as(
             "node_desc",
-            g().create_index_if_not_exists(
-                IndexSpec.node_range_desc("ParityUser", "age")
-            ),
+            g().create_index_if_not_exists(IndexSpec.node_range_desc("ParityUser", "age")),
         )
         .var_as(
             "edge_desc",
-            g().create_index_if_not_exists(
-                IndexSpec.edge_range_desc("FOLLOWS", "weight")
-            ),
+            g().create_index_if_not_exists(IndexSpec.edge_range_desc("FOLLOWS", "weight")),
         )
         .var_as(
             "node_asc",
@@ -669,15 +656,9 @@ def remaining_read_contract() -> Fixture:
                         Expr.val(PropertyValue.date_time(1_777_000_000_000)),
                     ),
                     Projection.expr("f32", Expr.val(PropertyValue.f32(1.25))),
-                    Projection.expr(
-                        "bytes", Expr.val(PropertyValue.bytes([1, 2, 3]))
-                    ),
-                    Projection.expr(
-                        "i64_array", Expr.val(PropertyValue.i64_array([1, 2, 3]))
-                    ),
-                    Projection.expr(
-                        "f64_array", Expr.val(PropertyValue.f64_array([1.25, 2.5]))
-                    ),
+                    Projection.expr("bytes", Expr.val(PropertyValue.bytes([1, 2, 3]))),
+                    Projection.expr("i64_array", Expr.val(PropertyValue.i64_array([1, 2, 3]))),
+                    Projection.expr("f64_array", Expr.val(PropertyValue.f64_array([1.25, 2.5]))),
                     Projection.expr("add", Expr.val(4).add(Expr.val(1))),
                     Projection.expr("sub", Expr.val(4).sub(Expr.val(1))),
                     Projection.expr("mul", Expr.val(4).mul(Expr.val(2))),
@@ -747,24 +728,15 @@ def remaining_read_contract() -> Fixture:
         )
         .var_as(
             "repeat_before",
-            g()
-            .n(NodeRef.id(1))
-            .repeat(RepeatConfig.new(sub().out()).emit_before())
-            .count(),
+            g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out()).emit_before()).count(),
         )
         .var_as(
             "repeat_after",
-            g()
-            .n(NodeRef.id(1))
-            .repeat(RepeatConfig.new(sub().out()).emit_after())
-            .count(),
+            g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out()).emit_after()).count(),
         )
         .var_as(
             "repeat_all",
-            g()
-            .n(NodeRef.id(1))
-            .repeat(RepeatConfig.new(sub().out()).emit_all())
-            .count(),
+            g().n(NodeRef.id(1)).repeat(RepeatConfig.new(sub().out()).emit_all()).count(),
         )
         .var_as(
             "shortest_out",
@@ -786,9 +758,7 @@ def remaining_read_contract() -> Fixture:
         )
         .var_as(
             "vector_edges",
-            g()
-            .vector_search_edges("FOLLOWS", "embedding", [1.0, 0.0], 5)
-            .edge_properties(),
+            g().vector_search_edges("FOLLOWS", "embedding", [1.0, 0.0], 5).edge_properties(),
         )
         .var_as(
             "vector_nodes_within",
@@ -882,9 +852,7 @@ def remaining_write_contract() -> Fixture:
         write_batch()
         .var_as(
             "edge_equality",
-            g().create_index_if_not_exists(
-                IndexSpec.edge_equality("FOLLOWS", "since")
-            ),
+            g().create_index_if_not_exists(IndexSpec.edge_equality("FOLLOWS", "since")),
         )
         .var_as(
             "node_euclidean",
@@ -913,6 +881,129 @@ def remaining_write_contract() -> Fixture:
     return json_only("914-remaining-write-contract", request)
 
 
+def neo4j_migration_movie_details() -> Fixture:
+    request = QueryRequest.read(
+        read_batch()
+        .var_as(
+            "movie_node",
+            g().n_with_label("Movie").where(Predicate.eq_param("movieId", "movie_id")),
+        )
+        .var_as(
+            "movie",
+            g()
+            .n(NodeRef.var("movie_node"))
+            .project(
+                [
+                    Projection.property("movieId", "movieId"),
+                    Projection.property("title", "title"),
+                    Projection.property("released", "released"),
+                    Projection.property("tagline", "tagline"),
+                ]
+            ),
+        )
+        .var_as(
+            "cast",
+            g()
+            .n(NodeRef.var("movie_node"))
+            .in_e("ACTED_IN")
+            .project(
+                [
+                    Projection.from_endpoint("personId", "personId"),
+                    Projection.from_endpoint("name", "name"),
+                    Projection.from_endpoint("born", "born"),
+                    Projection.property("roles", "roles"),
+                ]
+            ),
+        )
+        .var_as(
+            "directors",
+            g()
+            .n(NodeRef.var("movie_node"))
+            .in_e("DIRECTED")
+            .project(
+                [
+                    Projection.from_endpoint("personId", "personId"),
+                    Projection.from_endpoint("name", "name"),
+                    Projection.from_endpoint("born", "born"),
+                ]
+            ),
+        )
+        .var_as(
+            "producers",
+            g()
+            .n(NodeRef.var("movie_node"))
+            .in_e("PRODUCED")
+            .project(
+                [
+                    Projection.from_endpoint("personId", "personId"),
+                    Projection.from_endpoint("name", "name"),
+                    Projection.from_endpoint("born", "born"),
+                ]
+            ),
+        )
+        .returning(["movie", "cast", "directors", "producers"]),
+        "movie_details",
+    )
+    return json_only(
+        "915-neo4j-migration-movie-details",
+        with_params(
+            request,
+            [("movie_id", "m-matrix")],
+            [("movie_id", QueryParamType.string())],
+        ),
+    )
+
+
+def neo4j_migration_filmography() -> Fixture:
+    request = QueryRequest.read(
+        read_batch()
+        .var_as(
+            "person_node",
+            g().n_with_label("Person").where(Predicate.eq_param("personId", "person_id")),
+        )
+        .var_as(
+            "person",
+            g()
+            .n(NodeRef.var("person_node"))
+            .project(
+                [
+                    Projection.property("personId", "personId"),
+                    Projection.property("name", "name"),
+                    Projection.property("born", "born"),
+                ]
+            ),
+        )
+        .var_as(
+            "movies",
+            g()
+            .n(NodeRef.var("person_node"))
+            .out_e("ACTED_IN")
+            .bind("credit")
+            .out_n()
+            .bind("movie")
+            .project_bindings(
+                [
+                    BindingProjection.binding("movie", "movieId", "movieId"),
+                    BindingProjection.binding("movie", "title", "title"),
+                    BindingProjection.binding("movie", "released", "released"),
+                    BindingProjection.binding("movie", "tagline", "tagline"),
+                    BindingProjection.binding("credit", "roles", "roles"),
+                ]
+            ),
+        )
+        .returning(["person", "movies"]),
+        "person_filmography",
+    )
+    return json_only(
+        "916-neo4j-migration-person-filmography",
+        with_params(
+            request,
+            [("person_id", "p-keanu")],
+            [("person_id", QueryParamType.string())],
+        ),
+    )
+
+
 def main() -> None:
     runtime_fixtures = [*base_runtime_fixtures(), *node_permutation_fixtures()]
     json_only_fixtures = [
@@ -931,15 +1022,13 @@ def main() -> None:
         shortest_path(),
         remaining_read_contract(),
         remaining_write_contract(),
+        neo4j_migration_movie_details(),
+        neo4j_migration_filmography(),
     ]
     if len(runtime_fixtures) != 233:
-        raise RuntimeError(
-            f"generated {len(runtime_fixtures)} runtime fixtures, expected 233"
-        )
-    if len(json_only_fixtures) != 15:
-        raise RuntimeError(
-            f"generated {len(json_only_fixtures)} JSON-only fixtures, expected 15"
-        )
+        raise RuntimeError(f"generated {len(runtime_fixtures)} runtime fixtures, expected 233")
+    if len(json_only_fixtures) != 17:
+        raise RuntimeError(f"generated {len(json_only_fixtures)} JSON-only fixtures, expected 17")
     names = [name for name, _ in runtime_fixtures]
     names.extend(fixture.name for fixture in json_only_fixtures)
     if len(set(names)) != len(names):
@@ -951,9 +1040,7 @@ def main() -> None:
     runtime_output.mkdir(parents=True)
     json_only_output.mkdir(parents=True)
     for name, request in runtime_fixtures:
-        (runtime_output / f"{name}.json").write_text(
-            request.to_json_string(), encoding="utf-8"
-        )
+        (runtime_output / f"{name}.json").write_text(request.to_json_string(), encoding="utf-8")
     for fixture in json_only_fixtures:
         (json_only_output / f"{fixture.name}.json").write_text(
             fixture.request.to_json_string(), encoding="utf-8"
