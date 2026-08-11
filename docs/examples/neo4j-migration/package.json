@@ -1,0 +1,27 @@
+{
+  "name": "helixdb-neo4j-migration-guide",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "seed": "tsx src/cli/seed.ts",
+    "export": "tsx src/cli/export.ts",
+    "load": "tsx src/cli/load.ts",
+    "verify": "tsx src/cli/verify.ts",
+    "test": "npm run test:unit",
+    "test:unit": "tsx --test test/model-and-dump.test.ts test/helix-http-and-queries.test.ts test/loader-and-repositories.test.ts",
+    "test:coverage": "npm run build && node --import tsx --test --experimental-test-coverage --test-coverage-lines=90 test/model-and-dump.test.ts test/helix-http-and-queries.test.ts test/loader-and-repositories.test.ts",
+    "test:e2e": "tsx --test test/e2e.test.ts"
+  },
+  "dependencies": {
+    "@helix-db/helix-db": "3.0.3",
+    "neo4j-driver": "6.2.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3"
+  }
+}

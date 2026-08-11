@@ -1,0 +1,15 @@
+name: helixdb-neo4j-migration-guide
+
+services:
+  neo4j:
+    image: neo4j:5.26.29-community
+    environment:
+      NEO4J_AUTH: neo4j/migration-password
+    ports:
+      - "17474:7474"
+      - "17687:7687"
+
+  helix:
+    image: ghcr.io/helixdb/helixdb:v0.0.3
+    ports:
+      - "16969:8080"

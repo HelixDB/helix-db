@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "exportedAt": "2026-08-11T00:00:00.000Z",
+  "nodes": [
+    {
+      "kind": "movie",
+      "movieId": "m-matrix",
+      "title": "The Matrix",
+      "released": 1999,
+      "tagline": "Welcome to the Real World"
+    },
+    {
+      "kind": "movie",
+      "movieId": "m-matrix-reloaded",
+      "title": "The Matrix Reloaded",
+      "released": 2003,
+      "tagline": "Free your mind"
+    },
+    {
+      "kind": "person",
+      "personId": "p-carrie",
+      "name": "Carrie-Anne Moss",
+      "born": 1967
+    },
+    {
+      "kind": "person",
+      "personId": "p-joel",
+      "name": "Joel Silver",
+      "born": 1952
+    },
+    {
+      "kind": "person",
+      "personId": "p-keanu",
+      "name": "Keanu Reeves",
+      "born": 1964
+    },
+    {
+      "kind": "person",
+      "personId": "p-lana",
+      "name": "Lana Wachowski",
+      "born": 1965
+    },
+    {
+      "kind": "person",
+      "personId": "p-laurence",
+      "name": "Laurence Fishburne",
+      "born": 1961
+    }
+  ],
+  "relationships": [
+    {
+      "kind": "acted_in",
+      "relationshipId": "r-acted-carrie-matrix",
+      "fromPersonId": "p-carrie",
+      "toMovieId": "m-matrix",
+      "roles": [
+        "Trinity"
+      ]
+    },
+    {
+      "kind": "acted_in",
+      "relationshipId": "r-acted-carrie-reloaded",
+      "fromPersonId": "p-carrie",
+      "toMovieId": "m-matrix-reloaded",
+      "roles": [
+        "Trinity"
+      ]
+    },
+    {
+      "kind": "acted_in",
+      "relationshipId": "r-acted-keanu-matrix",
+      "fromPersonId": "p-keanu",
+      "toMovieId": "m-matrix",
+      "roles": [
+        "Neo"
+      ]
+    },
+    {
+      "kind": "acted_in",
+      "relationshipId": "r-acted-keanu-reloaded",
+      "fromPersonId": "p-keanu",
+      "toMovieId": "m-matrix-reloaded",
+      "roles": [
+        "Neo"
+      ]
+    },
+    {
+      "kind": "acted_in",
+      "relationshipId": "r-acted-laurence-matrix",
+      "fromPersonId": "p-laurence",
+      "toMovieId": "m-matrix",
+      "roles": [
+        "Morpheus"
+      ]
+    },
+    {
+      "kind": "acted_in",
+      "relationshipId": "r-acted-laurence-reloaded",
+      "fromPersonId": "p-laurence",
+      "toMovieId": "m-matrix-reloaded",
+      "roles": [
+        "Morpheus"
+      ]
+    },
+    {
+      "kind": "directed",
+      "relationshipId": "r-directed-lana-matrix",
+      "fromPersonId": "p-lana",
+      "toMovieId": "m-matrix"
+    },
+    {
+      "kind": "directed",
+      "relationshipId": "r-directed-lana-reloaded",
+      "fromPersonId": "p-lana",
+      "toMovieId": "m-matrix-reloaded"
+    },
+    {
+      "kind": "produced",
+      "relationshipId": "r-produced-joel-matrix",
+      "fromPersonId": "p-joel",
+      "toMovieId": "m-matrix"
+    },
+    {
+      "kind": "produced",
+      "relationshipId": "r-produced-joel-reloaded",
+      "fromPersonId": "p-joel",
+      "toMovieId": "m-matrix-reloaded"
+    }
+  ]
+}
