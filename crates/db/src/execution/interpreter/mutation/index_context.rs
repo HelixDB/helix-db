@@ -152,8 +152,8 @@ impl MutationIndexContext {
             .active_text_runtime
             .try_collect_routed(graph, text_relevant, text_limits)?
         {
-            crate::index_v2::text::active_runtime::ActiveTextCollection::Collected => Ok(()),
-            crate::index_v2::text::active_runtime::ActiveTextCollection::DrainRequired(
+            crate::index_lifecycle::text::active_runtime::ActiveTextCollection::Collected => Ok(()),
+            crate::index_lifecycle::text::active_runtime::ActiveTextCollection::DrainRequired(
                 mutation,
             ) => {
                 self.flush_topology(transaction).await?;

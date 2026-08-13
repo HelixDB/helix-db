@@ -643,21 +643,21 @@ async fn open_fixture_db(
             HelixDB::open_with_object_store(database.to_string(), object_store).await
         }
         DeletionBenchmarkLifecycle::Building => {
-            #[cfg(feature = "index-v2-lifecycle-testing")]
+            #[cfg(feature = "index-lifecycle-testing")]
             {
-                HelixDB::open_with_object_store_for_index_v2_lifecycle_testing(
+                HelixDB::open_with_object_store_for_index_lifecycle_testing(
                     database.to_string(),
                     object_store,
                     crate::config::DbConfig::new(),
-                    crate::index_v2_lifecycle_testing::LifecycleTestScheduling::Explicit,
+                    crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
                 )
                 .await
             }
-            #[cfg(not(feature = "index-v2-lifecycle-testing"))]
+            #[cfg(not(feature = "index-lifecycle-testing"))]
             {
                 let _ = (database, object_store);
                 Err(HelixDbError::Config(
-                    "Building deletion benchmarks require index-v2-lifecycle-testing".to_string(),
+                    "Building deletion benchmarks require index-lifecycle-testing".to_string(),
                 ))
             }
         }
@@ -678,9 +678,9 @@ async fn install_building_indexes(
     db: &HelixDB,
     case: DeletionBenchmarkCase,
 ) -> Result<(), HelixDbError> {
-    #[cfg(feature = "index-v2-lifecycle-testing")]
+    #[cfg(feature = "index-lifecycle-testing")]
     {
-        let controller = crate::index_v2_lifecycle_testing::LifecycleTestController::new();
+        let controller = crate::index_lifecycle_testing::LifecycleTestController::new();
         for definition in benchmark_index_definitions(case.indexes)? {
             controller
                 .create_index(
@@ -694,18 +694,18 @@ async fn install_building_indexes(
         db.refresh_runtime_catalog(crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped)
             .await
     }
-    #[cfg(not(feature = "index-v2-lifecycle-testing"))]
+    #[cfg(not(feature = "index-lifecycle-testing"))]
     {
         let _ = (db, case);
         Err(HelixDbError::Config(
-            "Building deletion benchmarks require index-v2-lifecycle-testing".to_string(),
+            "Building deletion benchmarks require index-lifecycle-testing".to_string(),
         ))
     }
 }
 
 fn benchmark_index_definitions(
     indexes: DeletionBenchmarkIndexes,
-) -> Result<Vec<crate::index_v2::ValidatedDynamicIndexDefinition>, HelixDbError> {
+) -> Result<Vec<crate::index_lifecycle::ValidatedDynamicIndexDefinition>, HelixDbError> {
     let includes_secondary = matches!(
         indexes,
         DeletionBenchmarkIndexes::Secondary | DeletionBenchmarkIndexes::All
