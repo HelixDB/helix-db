@@ -618,7 +618,7 @@ mod tests {
         let limits = SearchIndexBackfillLimits::default().active_text_mutation();
         assert_eq!(limits.max_entities().get(), 512);
         let mutations = super::super::mutation::TextMutationSet::empty();
-        let routes = crate::index_v2::mutation_catalog::MutationRouteCatalog::default();
+        let routes = crate::index_lifecycle::mutation_catalog::MutationRouteCatalog::default();
         let mut runtime = ActiveTextMutationRuntime::new();
         let deleted = properties("deleted");
         let mut drained_epochs = 0;

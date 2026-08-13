@@ -138,7 +138,7 @@ impl MutationIndexContext {
             routes.iter().any(|target| {
                 matches!(
                     target,
-                    crate::index_v2::mutation_catalog::MutationRouteTarget::Vector(_)
+                    crate::index_lifecycle::mutation_catalog::MutationRouteTarget::Vector(_)
                 )
             })
         };

@@ -94,14 +94,14 @@ HELIX_DELETION_BENCH_INDEXES=vector \
 HELIX_DELETION_BENCH_LIFECYCLE=active \
 HELIX_DELETION_BENCH_SOURCE_COMMIT=<revision> \
 cargo bench -p db --bench deletion_batches \
-  --features production-coverage,index-v2-lifecycle-testing
+  --features production-coverage,index-lifecycle-testing
 ```
 
 Compare raw files with:
 
 ```bash
 cargo run --release -p db --example deletion_benchmark_compare \
-  --features production-coverage,index-v2-lifecycle-testing -- \
+  --features production-coverage,index-lifecycle-testing -- \
   <parent.jsonl> <candidate.jsonl>
 ```
 
@@ -134,7 +134,7 @@ the stored samples.
 - `cargo test --workspace` passed after installing the locked
   `sdks/typescript` dependencies required by the CLI's offline tarball test.
 - The feature-complete `db` suite passed serially with
-  `production-coverage,index-v2-lifecycle-testing`: 1,203 library tests, 192
+  `production-coverage,index-lifecycle-testing`: 1,203 library tests, 192
   encoding tests, 41 public production contracts, 27 internal contracts, 12
   vector-planner contracts, and every lifecycle/row/fence contract. Four
   release-only scale tests remain intentionally ignored.

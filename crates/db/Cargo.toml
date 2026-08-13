@@ -121,7 +121,7 @@ required-features = ["production-coverage"]
 [[bench]]
 name = "deletion_batches"
 harness = false
-required-features = ["production-coverage", "index-v2-lifecycle-testing"]
+required-features = ["production-coverage", "index-lifecycle-testing"]
 
 [[example]]
 name = "deletion_benchmark_compare"
