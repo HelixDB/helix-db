@@ -238,17 +238,13 @@ pub(crate) async fn prepare_active_text_epoch(
                     let identity = match target {
                         index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(
                             ordinal,
-                        ) => {
-                            mutations.building_identity(ordinal)
-                        }
+                        ) => mutations.building_identity(ordinal),
                         index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(
                             ordinal,
-                        ) => {
-                            mutations
-                                .active_handles()
-                                .get(ordinal)
-                                .map(|handle| (handle.index_id(), handle.generation()))
-                        }
+                        ) => mutations
+                            .active_handles()
+                            .get(ordinal)
+                            .map(|handle| (handle.index_id(), handle.generation())),
                         index_lifecycle::mutation_catalog::MutationRouteTarget::Secondary(_)
                         | index_lifecycle::mutation_catalog::MutationRouteTarget::Vector(_) => None,
                     }?;
