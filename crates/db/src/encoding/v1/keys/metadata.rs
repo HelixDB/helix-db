@@ -235,11 +235,12 @@ mod write_receipt_tests {
         );
 
         let tenant = TenantId::from_u128(7);
-        let scoped = write_receipt_key_scoped(DataScope::Tenant(tenant), &request_id);
+        let tenant_scope = DataScope::Tenant(tenant);
+        let scoped = write_receipt_key_scoped(tenant_scope, &request_id);
+        assert_eq!(tenant_scope.strip_key(&scoped), Some(legacy.as_ref()));
         assert_eq!(
-            &scoped[..DataScope::PREFIX_LEN],
-            tenant.as_u128().to_be_bytes().as_slice()
+            DataScope::Tenant(TenantId::from_u128(8)).strip_key(&scoped),
+            None
         );
-        assert_eq!(&scoped[DataScope::PREFIX_LEN..], legacy.as_ref());
     }
 }
