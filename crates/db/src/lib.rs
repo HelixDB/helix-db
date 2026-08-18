@@ -1058,7 +1058,10 @@ impl HelixDB {
             )
             .build()
             .await?;
-        index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        match index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await {
+            Ok(()) | Err(HelixDbError::WriterMigrationRequired { .. }) => {}
+            Err(error) => return Err(error),
+        }
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1099,7 +1102,10 @@ impl HelixDB {
             }
         }
         let reader = builder.build().await?;
-        index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        match index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await {
+            Ok(()) | Err(HelixDbError::WriterMigrationRequired { .. }) => {}
+            Err(error) => return Err(error),
+        }
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -3102,6 +3108,47 @@ mod tests {
             .expect("reader observes latest epoch");
         assert_eq!(reader.storage_writer_epoch().map(NonZeroU64::get), Some(12));
         reader.close().await.expect("reader closes");
+    }
+
+    #[cfg(feature = "migration-parity")]
+    #[tokio::test]
+    async fn old_storage_reader_stays_available_until_managed_writer_migrates() {
+        let token =
+            ProcessLocalDatabaseToken::new("facade-reader-before-writer-migration").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let fixture = HelixDB::open(source()).await.expect("fixture writer opens");
+        fixture
+            .migration_parity_make_storage_v2_fixture()
+            .await
+            .expect("fixture becomes exact storage version two");
+        fixture
+            .migration_parity_inner_db()
+            .unwrap()
+            .delete(b"\xFFkv_migration_ready:index_storage_v4_cleanup")
+            .await
+            .expect("version four cleanup marker is removed");
+        fixture.close().await.expect("fixture writer closes");
+
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("compatible old storage remains readable");
+        assert_eq!(reader.mode(), HelixDbMode::ReadOnly);
+        reader.close().await.expect("old-storage reader closes");
+
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(2).unwrap(),
+        )
+        .await
+        .expect("managed writer owns and completes migration");
+        writer.close().await.expect("migrated writer closes");
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("reader reopens after migration");
+        reader.close().await.expect("migrated reader closes");
     }
 
     #[tokio::test]
