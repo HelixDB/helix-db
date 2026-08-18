@@ -261,7 +261,7 @@ impl<'db> Interpreter<'db> {
         }
         if let Err(error) = self
             .ctx
-            .execute_steps(plan.steps(), plan.execution_order())
+            .execute_steps(plan.steps(), plan.execution_order(), plan.root())
             .await
         {
             self.ctx.abort_request_write_scope();
