@@ -1630,27 +1630,6 @@ impl HelixDB {
         .await
     }
 
-    pub(crate) async fn prepare_idempotent_write_scoped_controlled(
-        &self,
-        plan: &exec::ExecutablePlan,
-        params: ParamBindings,
-        tenant_scope: DataScope,
-        execution_control: execution_control::ExecutionControl,
-        proof: CatalogRefreshProof,
-        receipt_key: &[u8],
-        now_unix_ms: u64,
-    ) -> Result<execution::interpreter::PreparedWrite<'_>> {
-        Interpreter::new_scoped_controlled_prepared(
-            self,
-            params,
-            tenant_scope,
-            execution_control,
-            proof,
-        )
-        .prepare_idempotent_write(plan, receipt_key, now_unix_ms)
-        .await
-    }
-
     /// Execute an SDK-built query request.
     pub async fn query(&self, request: QueryRequest) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();

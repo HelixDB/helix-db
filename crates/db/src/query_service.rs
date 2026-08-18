@@ -498,17 +498,15 @@ async fn execute_validated_idempotent(
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX);
-    match db
-        .prepare_idempotent_write_scoped_controlled(
-            &plan,
-            params,
-            tenant_scope,
-            execution_control,
-            prepared.into_catalog_proof(),
-            receipt_key,
-            now_unix_ms,
-        )
-        .await?
+    match crate::execution::interpreter::Interpreter::new_scoped_controlled_prepared(
+        db,
+        params,
+        tenant_scope,
+        execution_control,
+        prepared.into_catalog_proof(),
+    )
+    .prepare_idempotent_write(&plan, receipt_key, now_unix_ms)
+    .await?
     {
         crate::execution::interpreter::PreparedWrite::Replayed(receipt) => {
             if receipt.request_hash() != &request_hash {
