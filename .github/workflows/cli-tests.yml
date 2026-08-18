@@ -107,7 +107,10 @@ jobs:
   docs-smoke:
     name: Quickstart CLI smoke test
     if: github.event_name != 'schedule'
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    # amd64: ghcr.io/helixdb/helixdb:v0.0.4 is pulled by tag with no --platform
+    # override, so this must run on the same architecture as the default
+    # manifest the CLI resolves in the documented (unqualified) workflow.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
