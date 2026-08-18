@@ -821,6 +821,27 @@ impl HelixDB {
         Ok(db.with_embedded_query_metrics().await)
     }
 
+    /// Opens a managed writer using one exact monotonic SlateDB fencing epoch.
+    ///
+    /// The open fails before the writer WAL fence is published when an equal
+    /// or newer epoch is already durable. Callers must persist the epoch before
+    /// invoking this method and must never reuse it for another open attempt.
+    pub async fn open_managed_writer_with_config(
+        source: HelixDbSource,
+        config: DbConfig,
+        writer_epoch: NonZeroU64,
+    ) -> Result<Self> {
+        let (path, object_store) = source.into_parts()?;
+        Self::open_writer_inner_with_index_scheduling(
+            path,
+            object_store,
+            config,
+            Some(writer_epoch),
+            IndexLifecycleScheduling::Configured,
+        )
+        .await
+    }
+
     /// Opens a database for a transport server that owns its metrics recorder.
     #[doc(hidden)]
     pub async fn open_for_server(source: HelixDbSource) -> Result<Self> {
@@ -903,6 +924,7 @@ impl HelixDB {
             path,
             object_store,
             config,
+            None,
             IndexLifecycleScheduling::Configured,
         )
         .await
@@ -913,6 +935,7 @@ impl HelixDB {
         path: String,
         object_store: Arc<dyn ObjectStore>,
         config: DbConfig,
+        writer_epoch: Option<NonZeroU64>,
         index_scheduling: IndexLifecycleScheduling,
     ) -> Result<Self> {
         let vector_memory_settings = *config.cache().vector_memory();
@@ -924,6 +947,9 @@ impl HelixDB {
                     .slate()
                     .to_writer_settings(config.cache().object_store_cache()),
             );
+        if let Some(writer_epoch) = writer_epoch {
+            builder = builder.with_writer_epoch(writer_epoch);
+        }
 
         match config.cache().mode() {
             CacheMode::VectorMemoryOnly => builder = builder.with_db_cache_disabled(),
@@ -1272,6 +1298,17 @@ impl HelixDB {
             HelixStorage::Writer(writer) => writer.db().snapshot().await?.seq(),
         };
         Ok(DatabaseSequence(sequence))
+    }
+
+    /// Returns the latest SlateDB writer fencing epoch visible to this handle.
+    ///
+    /// Fresh storage has no writer epoch until its first writer open.
+    pub fn storage_writer_epoch(&self) -> Option<NonZeroU64> {
+        let epoch = match self.storage() {
+            HelixStorage::Reader(reader) => reader.manifest().writer_epoch(),
+            HelixStorage::Writer(writer) => writer.db().manifest().writer_epoch(),
+        };
+        NonZeroU64::new(epoch)
     }
 
     /// Flushes an acknowledged writer state for reader-replica publication.
@@ -3023,6 +3060,48 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(reader.object_store(), &expected_store,));
         reader.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_writer_epoch_rejects_delayed_stale_open() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-writer-epoch").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(11).unwrap(),
+        )
+        .await
+        .expect("epoch 11 writer opens");
+        assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(11));
+        writer.close().await.expect("epoch 11 writer closes");
+
+        let stale = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(10).unwrap(),
+        )
+        .await;
+        assert!(stale.is_err(), "delayed epoch 10 open must be fenced");
+
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(12).unwrap(),
+        )
+        .await
+        .expect("epoch 12 writer opens");
+        assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(12));
+        writer.close().await.expect("epoch 12 writer closes");
+
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("reader observes latest epoch");
+        assert_eq!(reader.storage_writer_epoch().map(NonZeroU64::get), Some(12));
+        reader.close().await.expect("reader closes");
     }
 
     #[tokio::test]
