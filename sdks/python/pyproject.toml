@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,13 @@ version = "0.3.4"
 description = "Python SDK for the HelixDB query DSL and client"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "HelixDB" }]
 keywords = ["helixdb", "graph", "vector", "database", "dsl"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -24,7 +24,7 @@ classifiers = [
 dependencies = ["httpx>=0.28.1,<1"]
 
 [project.optional-dependencies]
-dev = ["coverage>=7.10,<8", "ruff>=0.12,<1"]
+dev = ["build>=1.2,<2", "coverage>=7.10,<8", "ruff>=0.12,<1"]
 
 [project.urls]
 Homepage = "https://github.com/HelixDB/helix-db"

@@ -9,6 +9,7 @@ description = "Embedded HelixDB runtime and native graph algorithms for the Heli
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "HelixDB" }]
 keywords = ["helixdb", "graph", "vector", "database", "embedded"]
 classifiers = [
