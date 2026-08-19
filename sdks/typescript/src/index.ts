@@ -326,11 +326,15 @@ export class QueryBuilder<R = unknown> {
   /** Attach a query and target `POST /v2/query`. */
   query(query: QueryRequest): QueryExecutionRequest<R> {
     return new QueryExecutionRequest<R>({
-      backend: this.backend,
+      backend: snapshotBackend(this.backend),
       headers: { ...this.headers },
       query,
     });
   }
+}
+
+function snapshotBackend(backend: ClientBackend): ClientBackend {
+  return backend.kind === "server" ? { ...backend } : backend;
 }
 
 export class QueryExecutionRequest<R = unknown> {

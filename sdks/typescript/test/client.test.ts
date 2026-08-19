@@ -211,6 +211,17 @@ for (const databaseId of ["", "   "]) {
 
 {
   const server = await spawnCaptureServer();
+  const client = Client.managed(server.base, "db_initial");
+  const request = client.query(sampleRequest());
+  client.withDatabaseId("db_later");
+  await request.send();
+  const req = await server.captured;
+  await server.close();
+  assert.equal(req.headers["x-helix-tenant-id"], "db_initial");
+}
+
+{
+  const server = await spawnCaptureServer();
   const client = new Client(server.base).withDatabaseId(" ");
   await assert.rejects(
     client.query(sampleRequest()).send(),
