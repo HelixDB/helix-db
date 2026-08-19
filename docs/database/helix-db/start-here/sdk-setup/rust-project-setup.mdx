@@ -59,7 +59,8 @@ let request = find_users("acme".to_string(), 25);
 let response: serde_json::Value = client.query(request).send().await?;
 ```
 
-Use `.with_api_key(Some("hx_..."))` for Helix Cloud. Request-builder options can
+Use `Client::managed(Some("https://..."), "db_...")?.with_api_key(Some("hx_..."))`
+for Helix Cloud. Request-builder options can
 require the writer, require a warm read, or control durability waiting.
 
 ## Build without the macro

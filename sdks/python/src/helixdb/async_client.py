@@ -16,6 +16,7 @@ from ._client_common import (
     remote_error,
     serialize_query,
     validate_base_url,
+    validate_database_id,
 )
 from .client import (
     EmbeddedCacheConfig,
@@ -33,6 +34,8 @@ Timeout = float | httpx.Timeout | None
 class _ServerBackend:
     base_url: str
     api_key: str | None
+    database_id: str | None
+    require_database_id: bool
     http_client: httpx.AsyncClient
     timeout: Timeout
 
@@ -60,6 +63,8 @@ class _ServerRequestBackend:
     state: _ClientState
     base_url: str
     api_key: str | None
+    database_id: str | None
+    require_database_id: bool
     http_client: httpx.AsyncClient
     timeout: Timeout
 
@@ -97,6 +102,7 @@ class AsyncClient:
         url: str | None = None,
         *,
         api_key: str | None = None,
+        database_id: str | None = None,
         timeout: Timeout = None,
         limits: httpx.Limits | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -113,6 +119,8 @@ class AsyncClient:
             _ServerBackend(
                 validate_base_url(url),
                 api_key,
+                database_id,
+                False,
                 httpx.AsyncClient(**client_options),
                 timeout,
             )
@@ -130,6 +138,7 @@ class AsyncClient:
         url: str | None = None,
         *,
         api_key: str | None = None,
+        database_id: str | None = None,
         timeout: Timeout = None,
         limits: httpx.Limits | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -139,10 +148,36 @@ class AsyncClient:
         return cls(
             url,
             api_key=api_key,
+            database_id=database_id,
             timeout=timeout,
             limits=limits,
             transport=transport,
         )
+
+    @classmethod
+    def managed(
+        cls,
+        url: str | None,
+        *,
+        api_key: str | None = None,
+        database_id: str,
+        timeout: Timeout = None,
+        limits: httpx.Limits | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> "AsyncClient":
+        validate_database_id(database_id, required=True)
+        client = cls(
+            url,
+            api_key=api_key,
+            database_id=database_id,
+            timeout=timeout,
+            limits=limits,
+            transport=transport,
+        )
+        backend = client._state.backend
+        if isinstance(backend, _ServerBackend):
+            client._state.backend = replace(backend, require_database_id=True)
+        return client
 
     @classmethod
     async def embedded(
@@ -204,6 +239,16 @@ class AsyncClient:
             raise HelixError.invalid_request("client is closed")
         return self
 
+    def with_database_id(self, database_id: str | None = None) -> "AsyncClient":
+        """Set or clear the managed database ID sent as ``x-helix-tenant-id``."""
+
+        backend = self._state.backend
+        if isinstance(backend, _ServerBackend):
+            self._state.backend = replace(backend, database_id=database_id)
+        elif backend is _ClosedBackend.CLOSED:
+            raise HelixError.invalid_request("client is closed")
+        return self
+
     def _request_backend(self) -> _RequestBackend:
         backend = self._state.backend
         if isinstance(backend, _ServerBackend):
@@ -211,6 +256,8 @@ class AsyncClient:
                 self._state,
                 backend.base_url,
                 backend.api_key,
+                backend.database_id,
+                backend.require_database_id,
                 backend.http_client,
                 backend.timeout,
             )
@@ -347,6 +394,8 @@ class AsyncQueryExecutionRequest:
         prepared = prepare_request(
             self._backend.base_url,
             self._backend.api_key,
+            self._backend.database_id,
+            self._backend.require_database_id,
             dict(self._headers),
             self._query,
         )

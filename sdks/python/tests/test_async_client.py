@@ -78,7 +78,9 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 "server",
                 "embedded",
                 "embedded_reader",
+                "managed",
                 "with_api_key",
+                "with_database_id",
                 "request_builder",
                 "query",
                 "execute",
@@ -122,9 +124,10 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
             calls.append(request)
             return httpx.Response(200, json={"ok": True})
 
-        async with AsyncClient(
+        async with AsyncClient.managed(
             "http://127.0.0.1:6969/base",
             api_key="hx_secret",
+            database_id="db_123",
             timeout=5.0,
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
             transport=httpx.MockTransport(handler),
@@ -142,11 +145,30 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         request = calls[0]
         self.assertEqual(str(request.url), "http://127.0.0.1:6969/v2/query")
         self.assertEqual(request.headers["authorization"], "Bearer hx_secret")
+        self.assertEqual(request.headers["x-helix-tenant-id"], "db_123")
         self.assertEqual(request.headers["x-helix-require-writer"], "true")
         self.assertEqual(request.headers["x-helix-warm"], "true")
         self.assertEqual(request.headers["x-helix-await-durable"], "false")
         self.assertEqual(request.extensions["timeout"]["read"], 0.25)
         self.assertEqual(json.loads(request.content)["request_type"], "read")
+
+    async def test_managed_client_rejects_missing_or_empty_database_id(self) -> None:
+        for database_id in ("", "   "):
+            with self.subTest(database_id=database_id):
+                with self.assertRaisesRegex(HelixError, "database ID"):
+                    AsyncClient.managed("http://127.0.0.1:6969", database_id=database_id)
+
+        calls: list[httpx.Request] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        async with AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            client.with_database_id(" ")
+            with self.assertRaisesRegex(HelixError, "database ID"):
+                await client.query(read_request())
+        self.assertEqual(calls, [])
 
     async def test_default_timeout_is_disabled(self) -> None:
         calls: list[httpx.Request] = []

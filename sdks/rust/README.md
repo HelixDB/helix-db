@@ -158,8 +158,11 @@ use helix_db::Client;
 // Defaults to http://localhost:6969 when `url` is None.
 let client = Client::new(None)?;
 
-// Or point at a remote cluster and attach an API key:
-let client = Client::new(Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"))?
+// Or point at Helix Cloud with an API key and dashboard database ID:
+let client = Client::managed(
+    Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"),
+    "db_your_database_id",
+)?
     .with_api_key(Some("hx_your_api_key"));
 ```
 
@@ -219,7 +222,10 @@ struct AddUserResponse {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new(Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"))?
+    let client = Client::managed(
+        Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"),
+        "db_your_database_id",
+    )?
         .with_api_key(Some("hx_your_api_key"));
 
     // Building the request is infallible — no `?` needed here.

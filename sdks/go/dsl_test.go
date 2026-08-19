@@ -646,16 +646,18 @@ func TestBatchDecodersCoverClosedVariantsAndMalformedShapes(t *testing.T) {
 func TestClientExec(t *testing.T) {
 	var capturedPath string
 	var capturedAuth string
+	var capturedDatabaseID string
 	var capturedWriter string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
 		capturedAuth = r.Header.Get("Authorization")
+		capturedDatabaseID = r.Header.Get("x-helix-tenant-id")
 		capturedWriter = r.Header.Get("x-helix-require-writer")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"users":[{"$id":9223372036854775807,"name":"Alice"}]}`))
 	}))
 	defer server.Close()
-	client, err := NewClient(server.URL, WithAPIKey("hx_secret"))
+	client, err := NewClient(server.URL, WithAPIKey("hx_secret"), WithDatabaseID("db_123"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,11 +668,35 @@ func TestClientExec(t *testing.T) {
 	if capturedPath != "/v2/query" {
 		t.Fatalf("unexpected path %s", capturedPath)
 	}
-	if capturedAuth != "Bearer hx_secret" || capturedWriter != "true" {
-		t.Fatalf("headers not set: auth=%q writer=%q", capturedAuth, capturedWriter)
+	if capturedAuth != "Bearer hx_secret" || capturedDatabaseID != "db_123" || capturedWriter != "true" {
+		t.Fatalf("headers not set: auth=%q database=%q writer=%q", capturedAuth, capturedDatabaseID, capturedWriter)
 	}
 	if got := out.Users[0].ID.String(); got != "9223372036854775807" {
 		t.Fatalf("large id lost precision: %s", got)
+	}
+}
+
+func TestManagedClientRequiresDatabaseID(t *testing.T) {
+	for _, databaseID := range []string{"", "  "} {
+		t.Run(databaseID, func(t *testing.T) {
+			if _, err := NewManagedClient("http://localhost:6969", databaseID); err == nil {
+				t.Fatal("expected empty database ID to be rejected")
+			}
+		})
+	}
+
+	client, err := NewManagedClient("http://localhost:6969", "db_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil {
+		t.Fatal("expected managed client")
+	}
+	client.WithDatabaseID(" ")
+	err = client.Exec(context.Background(), findUsers("acme", 1), nil)
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) || helixErr.Kind != ErrorInvalidRequest {
+		t.Fatalf("expected invalid database ID error, got %v", err)
 	}
 }
 

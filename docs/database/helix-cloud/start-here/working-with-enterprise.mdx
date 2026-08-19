@@ -31,33 +31,39 @@ gateway
 <CodeGroup>
 
 ```rust Rust
-let client = helix_db::Client::new(Some("https://cluster.helix-db.com"))?
+let client = helix_db::Client::managed(
+    Some("https://cluster.helix-db.com"),
+    "db_your_database_id",
+)?
     .with_api_key(Some("hx_your_api_key"));
 ```
 
 ```ts TypeScript
 const client = Client
-  .server("https://cluster.helix-db.com")
+  .managed("https://cluster.helix-db.com", "db_your_database_id")
   .withApiKey("hx_your_api_key");
 ```
 
 ```go Go
-client, err := helix.NewClient(
+client, err := helix.NewManagedClient(
 	"https://cluster.helix-db.com",
+	"db_your_database_id",
 	helix.WithAPIKey("hx_your_api_key"),
 )
 ```
 
 ```python Python
-client = Client(
+client = Client.managed(
     "https://cluster.helix-db.com",
+    database_id="db_your_database_id",
     api_key="hx_your_api_key",
 )
 ```
 
 </CodeGroup>
 
-Each client sends the same operation-tree request body:
+Each client sends the database ID in the canonical `x-helix-tenant-id` header and the
+same operation-tree request body:
 
 ```json JSON
 {
