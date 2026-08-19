@@ -56,7 +56,7 @@ struct TextSearchAccess<'a> {
 }
 
 impl<'db> ExecutionContext<'db> {
-    pub(in crate::execution::interpreter::access) async fn vector_search_results(
+    pub(in crate::execution::interpreter) async fn vector_search_results(
         &self,
         element_type: VectorElementType,
         label: &ir::NonEmptyString,
@@ -203,7 +203,7 @@ impl<'db> ExecutionContext<'db> {
             .collect())
     }
 
-    pub(in crate::execution::interpreter::access) async fn text_search_hits(
+    pub(in crate::execution::interpreter) async fn text_search_hits(
         &self,
         element_type: TextElementType,
         label: &ir::NonEmptyString,

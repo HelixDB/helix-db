@@ -6,6 +6,8 @@ fn seed_rule_set_runs_through_cascades_optimizer() {
     assert_eq!(rules.registry().rule_count(), KnownRuleId::ALL.len());
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),

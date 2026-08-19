@@ -938,15 +938,108 @@ mod tests {
     use slatedb::{Db, IsolationLevel};
 
     use super::*;
-    use crate::encoding::v1::keys::vectors::VectorSimHashKey;
+    use crate::encoding::v1::keys::vectors::{VectorItemKey, VectorSimHashKey};
     use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+    use crate::index_lifecycle::IndexElementKind;
+    use crate::search::vector::VectorDistanceMetric;
+
+    async fn database(label: &str) -> Db {
+        Db::builder(
+            format!("legacy-vector-retirement-{label}-{}", uuid::Uuid::new_v4()),
+            Arc::new(InMemory::new()),
+        )
+        .build()
+        .await
+        .expect("retirement test database opens")
+    }
+
+    fn running_job(stage: MigrationStage) -> MigrationJob {
+        let mut job = MigrationJob::new(
+            super::super::MigrationId::LegacyVectorPhysicalCleanup,
+            super::super::MigrationMode::BlockingStartup,
+        );
+        job.state = MigrationJobState::Running {
+            stage,
+            resume_after_key: None,
+            processed_rows: 0,
+        };
+        job
+    }
+
+    fn vector_definition() -> ValidatedVectorIndexDefinition {
+        ValidatedVectorIndexDefinition::try_new(
+            IndexElementKind::Node,
+            "Document",
+            "embedding",
+            None::<String>,
+            3,
+            VectorDistanceMetric::Cosine,
+            16,
+            32,
+            64,
+            0.5,
+            4,
+            0.75,
+            false,
+            0.25,
+        )
+        .expect("retirement test vector definition validates")
+    }
+
+    fn owner_catalog(
+        index_id: IndexId,
+        generation: IndexGenerationId,
+    ) -> LegacyVectorRetirementCatalog {
+        LegacyVectorRetirementCatalog {
+            active: BTreeMap::from([((index_id, generation), vector_definition())]),
+            sources: Vec::new(),
+        }
+    }
+
+    fn encoded_reservation(reservation: LegacyVectorPhysicalReservation) -> Bytes {
+        encode_metadata_value(&IndexV2MetadataValue::LegacyVectorPhysicalReservation(
+            reservation,
+        ))
+    }
+
+    fn core_key(scope: DataScope, physical_id: VectorPhysicalIndexId, metadata: bool) -> Bytes {
+        let key = if metadata {
+            VectorKey::IndexMetadata(VectorIndexMetadataKey::new(physical_id.get()))
+        } else {
+            VectorKey::TxnGuard(VectorTxnGuardKey::new(physical_id.get()))
+        };
+        Key::Data {
+            scope,
+            kind: DataKeyKind::Vector(key),
+        }
+        .to_bytes()
+    }
+
+    fn lane_key(
+        scope: DataScope,
+        physical_id: VectorPhysicalIndexId,
+        lane: VectorStorageLane,
+        entity_id: u64,
+    ) -> Bytes {
+        let key = match lane {
+            VectorStorageLane::Hot => {
+                VectorKey::SimHash(VectorSimHashKey::new(physical_id.get(), entity_id))
+            }
+            VectorStorageLane::Layer0 => {
+                VectorKey::Vector(VectorItemKey::new(physical_id.get(), entity_id, entity_id))
+            }
+            VectorStorageLane::Core => panic!("core rows use core_key"),
+        };
+        Key::Data {
+            scope,
+            kind: DataKeyKind::Vector(key),
+        }
+        .to_bytes()
+    }
 
     #[tokio::test]
     async fn dedicated_cleanup_batch_obeys_exact_row_and_combined_byte_limits() {
-        let db = Db::builder("legacy-vector-retirement-bounds", Arc::new(InMemory::new()))
-            .build()
-            .await
-            .unwrap();
+        let db = database("bounds").await;
         let physical_id = VectorPhysicalIndexId::new(91).unwrap();
         let reservation = LegacyVectorPhysicalReservation::RetiringSource {
             index_id: IndexId::new(7).unwrap(),
@@ -978,15 +1071,7 @@ mod tests {
         .to_bytes();
         db.put(&first_key, encode_simhash(1)).await.unwrap();
         db.put(&second_key, encode_simhash(2)).await.unwrap();
-        let mut job = MigrationJob::new(
-            super::super::MigrationId::LegacyVectorPhysicalCleanup,
-            super::super::MigrationMode::BlockingStartup,
-        );
-        job.state = MigrationJobState::Running {
-            stage: MigrationStage::LegacyVectorHotRows,
-            resume_after_key: None,
-            processed_rows: 0,
-        };
+        let job = running_job(MigrationStage::LegacyVectorHotRows);
         let row_bounded = config::MigrationTuning::default()
             .with_batch_rows(config::MigrationBatchRows::new(1).expect("one row is positive"));
         let measurement = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1052,6 +1137,566 @@ mod tests {
         exact_limit.commit().await.unwrap();
         assert!(db.get(&first_key).await.unwrap().is_none());
         assert!(db.get(&second_key).await.unwrap().is_some());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inactive_jobs_and_empty_scans_are_exact_stage_completions() {
+        let db = database("inactive").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let mut job = running_job(MigrationStage::LegacyVectorHotRows);
+        job.complete();
+        let tuning = config::MigrationTuning::default();
+        let catalog = LegacyVectorRetirementCatalog {
+            active: BTreeMap::new(),
+            sources: Vec::new(),
+        };
+
+        assert_eq!(
+            fence_sources_batch(
+                &transaction,
+                DataScope::LegacyUnscoped,
+                tuning,
+                &job,
+                &catalog,
+            )
+            .await
+            .unwrap(),
+            MigrationBatch::StageComplete
+        );
+        for lane in [VectorStorageLane::Hot, VectorStorageLane::Layer0] {
+            assert_eq!(
+                delete_dedicated_lane_batch(
+                    &transaction,
+                    DataScope::LegacyUnscoped,
+                    tuning,
+                    &job,
+                    lane,
+                )
+                .await
+                .unwrap(),
+                MigrationBatch::StageComplete
+            );
+        }
+        assert_eq!(
+            delete_core_batch(&transaction, DataScope::LegacyUnscoped, tuning, &job,)
+                .await
+                .unwrap(),
+            MigrationBatch::StageComplete
+        );
+        assert_eq!(
+            delete_definitions_batch(
+                &transaction,
+                DataScope::LegacyUnscoped,
+                tuning,
+                &job,
+                &catalog,
+            )
+            .await
+            .unwrap(),
+            MigrationBatch::StageComplete
+        );
+        assert_eq!(
+            release_reservations_batch(
+                &transaction,
+                DataScope::LegacyUnscoped,
+                tuning,
+                &job,
+                &catalog,
+            )
+            .await
+            .unwrap(),
+            MigrationBatch::StageComplete
+        );
+
+        job = running_job(MigrationStage::LegacyVectorHotRows);
+        assert_eq!(
+            delete_dedicated_lane_batch(
+                &transaction,
+                DataScope::LegacyUnscoped,
+                tuning,
+                &job,
+                VectorStorageLane::Hot,
+            )
+            .await
+            .unwrap(),
+            MigrationBatch::StageComplete
+        );
+        transaction.rollback();
+        db.close().await.unwrap();
+    }
+
+    #[test]
+    fn catalog_owner_and_namespace_matching_fail_closed() {
+        let index_id = IndexId::new(7).unwrap();
+        let generation = IndexGenerationId::new(3).unwrap();
+        let definition = vector_definition();
+        let exact = LegacyVectorRetirementSource {
+            owner: ActiveVectorOwner {
+                index_id,
+                generation,
+                definition: definition.clone(),
+            },
+            exact_name: Some("exact".to_string()),
+            tenant_prefix: None,
+        };
+        let tenant = LegacyVectorRetirementSource {
+            owner: ActiveVectorOwner {
+                index_id,
+                generation,
+                definition: definition.clone(),
+            },
+            exact_name: None,
+            tenant_prefix: Some("tenant:".to_string()),
+        };
+        let catalog = LegacyVectorRetirementCatalog {
+            active: BTreeMap::from([((index_id, generation), definition.clone())]),
+            sources: vec![exact, tenant],
+        };
+
+        assert_eq!(
+            catalog.active_owner(index_id, generation).unwrap(),
+            &definition
+        );
+        assert_eq!(
+            catalog.source_for_name("exact").unwrap().owner.index_id,
+            index_id
+        );
+        assert_eq!(
+            catalog
+                .source_for_name("tenant:one")
+                .unwrap()
+                .owner
+                .generation,
+            generation
+        );
+        assert!(matches!(
+            catalog.active_owner(index_id, IndexGenerationId::new(4).unwrap()),
+            Err(HelixDbError::MigrationRequired { .. })
+        ));
+        assert!(matches!(
+            catalog.source_for_name("orphan"),
+            Err(HelixDbError::MigrationRequired { .. })
+        ));
+
+        let ambiguous = LegacyVectorRetirementCatalog {
+            active: catalog.active,
+            sources: vec![
+                LegacyVectorRetirementSource {
+                    owner: ActiveVectorOwner {
+                        index_id,
+                        generation,
+                        definition: definition.clone(),
+                    },
+                    exact_name: Some("tenant:one".to_string()),
+                    tenant_prefix: None,
+                },
+                LegacyVectorRetirementSource {
+                    owner: ActiveVectorOwner {
+                        index_id,
+                        generation,
+                        definition,
+                    },
+                    exact_name: None,
+                    tenant_prefix: Some("tenant:".to_string()),
+                },
+            ],
+        };
+        assert!(matches!(
+            ambiguous.source_for_name("tenant:one"),
+            Err(HelixDbError::IndexCatalogCorruption(_))
+        ));
+        assert_eq!(
+            reservation_key(VectorPhysicalIndexId::new(9).unwrap()),
+            IndexKey::Global {
+                kind: GlobalKey::LegacyVectorPhysicalReservation(
+                    VectorPhysicalIndexId::new(9).unwrap()
+                ),
+            }
+            .to_bytes()
+        );
+        assert!(decode_reservation(&encoded_reservation(
+            LegacyVectorPhysicalReservation::LegacySource
+        ))
+        .is_ok());
+        assert!(decode_reservation(&encode_metadata_value(
+            &IndexV2MetadataValue::LogicalIndexIdWatermark(
+                crate::index_lifecycle::LogicalIndexIdWatermark {
+                    next_id: IndexId::new(1).unwrap(),
+                },
+            ),
+        ))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn dedicated_lanes_preserve_unowned_rows_and_reject_unfenced_sources() {
+        let scope = DataScope::LegacyUnscoped;
+        let db = database("dedicated-states").await;
+        let index_id = IndexId::new(7).unwrap();
+        let generation = IndexGenerationId::new(3).unwrap();
+        let states = [
+            (31, None, false),
+            (
+                32,
+                Some(LegacyVectorPhysicalReservation::AdoptedActive {
+                    index_id,
+                    generation,
+                }),
+                false,
+            ),
+            (
+                33,
+                Some(LegacyVectorPhysicalReservation::RetiringSource {
+                    index_id,
+                    generation,
+                }),
+                true,
+            ),
+        ];
+        for (raw_id, reservation, deleted) in states {
+            let physical_id = VectorPhysicalIndexId::new(raw_id).unwrap();
+            let key = lane_key(scope, physical_id, VectorStorageLane::Layer0, raw_id);
+            db.put(&key, Bytes::from_static(b"row")).await.unwrap();
+            if let Some(reservation) = reservation {
+                db.put(
+                    reservation_key(physical_id),
+                    encoded_reservation(reservation),
+                )
+                .await
+                .unwrap();
+            }
+            let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            let batch = delete_dedicated_lane_batch(
+                &transaction,
+                scope,
+                config::MigrationTuning::default(),
+                &running_job(MigrationStage::LegacyVectorLayer0Rows),
+                VectorStorageLane::Layer0,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(batch, MigrationBatch::Advanced { rows: 1, .. }));
+            transaction.commit().await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap().is_none(), deleted);
+            if !deleted {
+                db.delete(&key).await.unwrap();
+            }
+        }
+
+        for (raw_id, reservation) in [
+            (41, LegacyVectorPhysicalReservation::LegacySource),
+            (
+                42,
+                LegacyVectorPhysicalReservation::AdoptionBuilding {
+                    index_id,
+                    generation,
+                    operation_id: crate::index_lifecycle::IndexOperationId::new(
+                        uuid::Uuid::from_u128(5),
+                    )
+                    .unwrap(),
+                },
+            ),
+        ] {
+            let physical_id = VectorPhysicalIndexId::new(raw_id).unwrap();
+            let key = lane_key(scope, physical_id, VectorStorageLane::Hot, raw_id);
+            db.put(&key, Bytes::from_static(b"row")).await.unwrap();
+            db.put(
+                reservation_key(physical_id),
+                encoded_reservation(reservation),
+            )
+            .await
+            .unwrap();
+            let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            assert!(matches!(
+                delete_dedicated_lane_batch(
+                    &transaction,
+                    scope,
+                    config::MigrationTuning::default(),
+                    &running_job(MigrationStage::LegacyVectorHotRows),
+                    VectorStorageLane::Hot,
+                )
+                .await,
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+            transaction.rollback();
+            db.delete(&key).await.unwrap();
+            db.delete(reservation_key(physical_id)).await.unwrap();
+        }
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn core_cleanup_deletes_only_fenced_owner_rows_and_honors_byte_limits() {
+        let scope = DataScope::LegacyUnscoped;
+        let db = database("core").await;
+        let index_id = IndexId::new(7).unwrap();
+        let generation = IndexGenerationId::new(3).unwrap();
+        let retiring_id = VectorPhysicalIndexId::new(51).unwrap();
+        let adopted_id = VectorPhysicalIndexId::new(52).unwrap();
+        for (physical_id, reservation) in [
+            (
+                retiring_id,
+                LegacyVectorPhysicalReservation::RetiringSource {
+                    index_id,
+                    generation,
+                },
+            ),
+            (
+                adopted_id,
+                LegacyVectorPhysicalReservation::AdoptedActive {
+                    index_id,
+                    generation,
+                },
+            ),
+        ] {
+            db.put(
+                reservation_key(physical_id),
+                encoded_reservation(reservation),
+            )
+            .await
+            .unwrap();
+            for metadata in [true, false] {
+                db.put(
+                    core_key(scope, physical_id, metadata),
+                    Bytes::from_static(b"core"),
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let one_row = config::MigrationTuning::default()
+            .with_batch_rows(config::MigrationBatchRows::new(1).expect("one row is positive"));
+        let measure = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let MigrationBatch::Advanced { source_bytes, .. } = delete_core_batch(
+            &measure,
+            scope,
+            one_row,
+            &running_job(MigrationStage::LegacyVectorCoreRows),
+        )
+        .await
+        .unwrap() else {
+            panic!("one reservation is measured")
+        };
+        measure.rollback();
+
+        let below = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert!(matches!(
+            delete_core_batch(
+                &below,
+                scope,
+                one_row.with_batch_bytes(
+                    config::MigrationBatchBytes::new(source_bytes as usize - 1).unwrap()
+                ),
+                &running_job(MigrationStage::LegacyVectorCoreRows),
+            )
+            .await,
+            Err(HelixDbError::Config(_))
+        ));
+        below.rollback();
+
+        let exact = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        delete_core_batch(
+            &exact,
+            scope,
+            one_row
+                .with_batch_bytes(config::MigrationBatchBytes::new(source_bytes as usize).unwrap()),
+            &running_job(MigrationStage::LegacyVectorCoreRows),
+        )
+        .await
+        .unwrap();
+        exact.commit().await.unwrap();
+        for metadata in [true, false] {
+            assert!(db
+                .get(core_key(scope, retiring_id, metadata))
+                .await
+                .unwrap()
+                .is_none());
+            assert!(db
+                .get(core_key(scope, adopted_id, metadata))
+                .await
+                .unwrap()
+                .is_some());
+        }
+
+        db.put(
+            reservation_key(retiring_id),
+            encoded_reservation(LegacyVectorPhysicalReservation::LegacySource),
+        )
+        .await
+        .unwrap();
+        let unfenced = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert!(matches!(
+            delete_core_batch(
+                &unfenced,
+                scope,
+                config::MigrationTuning::default(),
+                &running_job(MigrationStage::LegacyVectorCoreRows),
+            )
+            .await,
+            Err(HelixDbError::MigrationRequired { .. })
+        ));
+        unfenced.rollback();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reservation_release_requires_exact_owner_and_empty_physical_lanes() {
+        let scope = DataScope::LegacyUnscoped;
+        let db = database("release").await;
+        let index_id = IndexId::new(7).unwrap();
+        let generation = IndexGenerationId::new(3).unwrap();
+        let catalog = owner_catalog(index_id, generation);
+        let physical_id = VectorPhysicalIndexId::new(61).unwrap();
+        let reservation = LegacyVectorPhysicalReservation::RetiringSource {
+            index_id,
+            generation,
+        };
+        db.put(
+            reservation_key(physical_id),
+            encoded_reservation(reservation),
+        )
+        .await
+        .unwrap();
+
+        for (label, residue) in [
+            ("metadata", core_key(scope, physical_id, true)),
+            (
+                "hot",
+                lane_key(scope, physical_id, VectorStorageLane::Hot, 1),
+            ),
+            (
+                "layer-zero",
+                lane_key(scope, physical_id, VectorStorageLane::Layer0, 1),
+            ),
+        ] {
+            db.put(&residue, Bytes::copy_from_slice(label.as_bytes()))
+                .await
+                .unwrap();
+            let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            assert!(matches!(
+                release_reservations_batch(
+                    &transaction,
+                    scope,
+                    config::MigrationTuning::default(),
+                    &running_job(MigrationStage::ReleaseLegacyVectorReservations),
+                    &catalog,
+                )
+                .await,
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+            transaction.rollback();
+            db.delete(residue).await.unwrap();
+        }
+
+        let one_row = config::MigrationTuning::default()
+            .with_batch_rows(config::MigrationBatchRows::new(1).expect("one row is positive"));
+        let measurement = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let MigrationBatch::Advanced { source_bytes, .. } = release_reservations_batch(
+            &measurement,
+            scope,
+            one_row,
+            &running_job(MigrationStage::ReleaseLegacyVectorReservations),
+            &catalog,
+        )
+        .await
+        .unwrap() else {
+            panic!("empty fenced reservation is measured")
+        };
+        measurement.rollback();
+
+        let below = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert!(matches!(
+            release_reservations_batch(
+                &below,
+                scope,
+                one_row.with_batch_bytes(
+                    config::MigrationBatchBytes::new(source_bytes as usize - 1).unwrap()
+                ),
+                &running_job(MigrationStage::ReleaseLegacyVectorReservations),
+                &catalog,
+            )
+            .await,
+            Err(HelixDbError::Config(_))
+        ));
+        below.rollback();
+
+        let exact = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        release_reservations_batch(
+            &exact,
+            scope,
+            one_row
+                .with_batch_bytes(config::MigrationBatchBytes::new(source_bytes as usize).unwrap()),
+            &running_job(MigrationStage::ReleaseLegacyVectorReservations),
+            &catalog,
+        )
+        .await
+        .unwrap();
+        exact.commit().await.unwrap();
+        assert!(db
+            .get(reservation_key(physical_id))
+            .await
+            .unwrap()
+            .is_none());
+
+        let adopted_id = VectorPhysicalIndexId::new(62).unwrap();
+        db.put(
+            reservation_key(adopted_id),
+            encoded_reservation(LegacyVectorPhysicalReservation::AdoptedActive {
+                index_id,
+                generation,
+            }),
+        )
+        .await
+        .unwrap();
+        let adopted = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert!(matches!(
+            release_reservations_batch(
+                &adopted,
+                scope,
+                config::MigrationTuning::default(),
+                &running_job(MigrationStage::ReleaseLegacyVectorReservations),
+                &catalog,
+            )
+            .await
+            .unwrap(),
+            MigrationBatch::Advanced { rows: 1, .. }
+        ));
+        adopted.commit().await.unwrap();
+        assert!(db.get(reservation_key(adopted_id)).await.unwrap().is_some());
+
+        for (raw_id, reservation) in [
+            (63, LegacyVectorPhysicalReservation::LegacySource),
+            (
+                64,
+                LegacyVectorPhysicalReservation::RetiringSource {
+                    index_id,
+                    generation: IndexGenerationId::new(4).unwrap(),
+                },
+            ),
+        ] {
+            let physical_id = VectorPhysicalIndexId::new(raw_id).unwrap();
+            db.put(
+                reservation_key(physical_id),
+                encoded_reservation(reservation),
+            )
+            .await
+            .unwrap();
+            let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            assert!(matches!(
+                release_reservations_batch(
+                    &transaction,
+                    scope,
+                    config::MigrationTuning::default(),
+                    &running_job(MigrationStage::ReleaseLegacyVectorReservations),
+                    &catalog,
+                )
+                .await,
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+            transaction.rollback();
+            db.delete(reservation_key(physical_id)).await.unwrap();
+        }
         db.close().await.unwrap();
     }
 }

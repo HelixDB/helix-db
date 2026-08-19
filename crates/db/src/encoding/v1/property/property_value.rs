@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use crate::encoding::property::{datetime_millis_to_rfc3339, sortable_i64_index_string};
-use crate::encoding::v1::property::canonical_number::CanonicalNumber;
+use crate::encoding::v1::property::canonical_number::{self, CanonicalNumber};
 
 ///
 /// Supports primitive types (bool, i64, f64, string, bytes) and arrays.
@@ -128,8 +128,8 @@ impl PropertyValue {
             (
                 PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_),
                 PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_),
-            ) => CanonicalNumber::from_property(self)
-                .zip(CanonicalNumber::from_property(other))
+            ) => canonical_number::from_property(self)
+                .zip(canonical_number::from_property(other))
                 .map(|(left, right)| left.cmp(&right)),
             (PropertyValue::DateTime(left), PropertyValue::DateTime(right)) => {
                 Some(left.cmp(right))
@@ -167,8 +167,8 @@ impl PropertyValue {
                     PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_),
                     PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_),
                 ) => match (
-                    CanonicalNumber::from_property(self),
-                    CanonicalNumber::from_property(other),
+                    canonical_number::from_property(self),
+                    canonical_number::from_property(other),
                 ) {
                     (Some(left), Some(right)) => left.cmp(&right),
                     (None, None) => numeric_bits(self).cmp(&numeric_bits(other)),
@@ -206,8 +206,8 @@ impl PropertyValue {
             (
                 PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_),
                 PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_),
-            ) => CanonicalNumber::from_property(self)
-                .zip(CanonicalNumber::from_property(other))
+            ) => canonical_number::from_property(self)
+                .zip(canonical_number::from_property(other))
                 .is_some_and(|(left, right)| left == right),
             (PropertyValue::DateTime(a), PropertyValue::DateTime(b)) => a == b,
             (PropertyValue::String(a), PropertyValue::String(b)) => a == b,
@@ -857,5 +857,135 @@ mod tests {
             PropertyValue::from(object.clone()),
             PropertyValue::Object(object)
         );
+    }
+
+    #[test]
+    fn total_order_is_exhaustive_deterministic_and_lexicographic() {
+        let ranked = [
+            PropertyValue::Null,
+            PropertyValue::Bool(false),
+            PropertyValue::I64(0),
+            PropertyValue::DateTime(0),
+            PropertyValue::String(String::new()),
+            PropertyValue::Bytes(Vec::new()),
+            PropertyValue::I64Array(Vec::new()),
+            PropertyValue::F64Array(Vec::new()),
+            PropertyValue::F32Array(Vec::new()),
+            PropertyValue::StringArray(Vec::new()),
+            PropertyValue::Array(Vec::new()),
+            PropertyValue::Object(BTreeMap::new()),
+        ];
+        assert!(ranked.windows(2).all(|pair| {
+            pair[0].total_order(&pair[1]) == Ordering::Less
+                && pair[1].total_order(&pair[0]) == Ordering::Greater
+        }));
+        assert!(ranked
+            .iter()
+            .all(|value| value.total_order(value) == Ordering::Equal));
+
+        let scalar_pairs = [
+            (PropertyValue::Bool(false), PropertyValue::Bool(true)),
+            (PropertyValue::I64(-1), PropertyValue::F64(0.0)),
+            (PropertyValue::DateTime(1), PropertyValue::DateTime(2)),
+            (
+                PropertyValue::String("a".to_string()),
+                PropertyValue::String("b".to_string()),
+            ),
+            (PropertyValue::Bytes(vec![1]), PropertyValue::Bytes(vec![2])),
+            (
+                PropertyValue::I64Array(vec![1]),
+                PropertyValue::I64Array(vec![2]),
+            ),
+            (
+                PropertyValue::StringArray(vec!["a".to_string()]),
+                PropertyValue::StringArray(vec!["b".to_string()]),
+            ),
+        ];
+        assert!(scalar_pairs
+            .iter()
+            .all(|(left, right)| left.total_order(right) == Ordering::Less));
+
+        let nan64_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan64_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        assert_eq!(
+            PropertyValue::F64(1.0).total_order(&PropertyValue::F64(nan64_a)),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::F64(nan64_a).total_order(&PropertyValue::F32(1.0)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            PropertyValue::F64(nan64_a).total_order(&PropertyValue::F64(nan64_b)),
+            nan64_a.to_bits().cmp(&nan64_b.to_bits())
+        );
+
+        assert_eq!(
+            PropertyValue::F64Array(vec![1.0, 2.0])
+                .total_order(&PropertyValue::F64Array(vec![1.0, 3.0])),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::F64Array(vec![1.0])
+                .total_order(&PropertyValue::F64Array(vec![1.0, 2.0])),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::F32Array(vec![1.0, 3.0])
+                .total_order(&PropertyValue::F32Array(vec![1.0, 2.0])),
+            Ordering::Greater
+        );
+        assert_eq!(
+            PropertyValue::F32Array(vec![1.0])
+                .total_order(&PropertyValue::F32Array(vec![1.0, 2.0])),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::Array(vec![PropertyValue::I64(1)])
+                .total_order(&PropertyValue::Array(vec![PropertyValue::I64(2)])),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::Array(vec![PropertyValue::I64(1)]).total_order(&PropertyValue::Array(
+                vec![PropertyValue::I64(1), PropertyValue::Null]
+            )),
+            Ordering::Less
+        );
+
+        let left = BTreeMap::from([("a".to_string(), PropertyValue::I64(1))]);
+        let right_key = BTreeMap::from([("b".to_string(), PropertyValue::I64(1))]);
+        let right_value = BTreeMap::from([("a".to_string(), PropertyValue::I64(2))]);
+        let right_len = BTreeMap::from([
+            ("a".to_string(), PropertyValue::I64(1)),
+            ("b".to_string(), PropertyValue::I64(2)),
+        ]);
+        assert_eq!(
+            PropertyValue::Object(left.clone()).total_order(&PropertyValue::Object(right_key)),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::Object(left.clone()).total_order(&PropertyValue::Object(right_value)),
+            Ordering::Less
+        );
+        assert_eq!(
+            PropertyValue::Object(left).total_order(&PropertyValue::Object(right_len)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn numeric_array_equality_rejects_lengths_nan_and_distinct_values() {
+        assert!(
+            !PropertyValue::F64Array(vec![1.0]).eq_value(&PropertyValue::F64Array(vec![1.0, 2.0]))
+        );
+        assert!(!PropertyValue::F64Array(vec![f64::NAN])
+            .eq_value(&PropertyValue::F64Array(vec![f64::NAN])));
+        assert!(!PropertyValue::F64Array(vec![1.0]).eq_value(&PropertyValue::F64Array(vec![2.0])));
+        assert!(
+            !PropertyValue::F32Array(vec![1.0]).eq_value(&PropertyValue::F32Array(vec![1.0, 2.0]))
+        );
+        assert!(!PropertyValue::F32Array(vec![f32::NAN])
+            .eq_value(&PropertyValue::F32Array(vec![f32::NAN])));
+        assert!(!PropertyValue::F32Array(vec![1.0]).eq_value(&PropertyValue::F32Array(vec![2.0])));
     }
 }

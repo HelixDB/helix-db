@@ -8,34 +8,35 @@
 
 use db::encoding::error::EncodingError;
 use db::error::HelixDbError;
+use helix_ast::error_code;
 use thiserror::Error;
 
 /// Error type returned by the HelixDB UniFFI bindings.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum HelixError {
     /// Invalid configuration.
-    #[error("{message}")]
-    InvalidConfig { message: String },
+    #[error("{msg}")]
+    InvalidConfig { error: String, msg: String },
 
     /// Invalid request body or API usage.
-    #[error("{message}")]
-    InvalidRequest { message: String },
+    #[error("{msg}")]
+    InvalidRequest { error: String, msg: String },
 
     /// Query planning failed.
-    #[error("{message}")]
-    Planner { message: String },
+    #[error("{msg}")]
+    Planner { error: String, msg: String },
 
     /// Storage failed.
-    #[error("{message}")]
-    Storage { message: String },
+    #[error("{msg}")]
+    Storage { error: String, msg: String },
 
     /// Transaction failed.
-    #[error("{message}")]
-    Transaction { message: String },
+    #[error("{msg}")]
+    Transaction { error: String, msg: String },
 
     /// Internal failure.
-    #[error("{message}")]
-    Internal { message: String },
+    #[error("{msg}")]
+    Internal { error: String, msg: String },
 }
 
 impl From<HelixDbError> for HelixError {
@@ -48,15 +49,23 @@ impl From<HelixDbError> for HelixError {
     /// request-view changes remain transaction failures so foreign callers can
     /// apply the same retry policy as a storage transaction conflict.
     fn from(error: HelixDbError) -> Self {
-        let message = error.to_string();
+        let error_code = error.error_code().to_string();
+        let msg = error.to_string();
         if error.is_invalid_vector_input() {
-            return Self::InvalidRequest { message };
+            return Self::InvalidRequest {
+                error: error_code,
+                msg,
+            };
         }
         match error {
             HelixDbError::Config(_)
             | HelixDbError::InvalidVectorConfig(_)
-            | HelixDbError::IndexDefinitionConflict { .. } => Self::InvalidConfig { message },
+            | HelixDbError::IndexDefinitionConflict { .. } => Self::InvalidConfig {
+                error: error_code,
+                msg,
+            },
             HelixDbError::Query(_)
+            | HelixDbError::InvalidQueryJson(_)
             | HelixDbError::Encoding(EncodingError::InvalidTenantId(_))
             | HelixDbError::IndexBusy { .. }
             | HelixDbError::IndexOperationNotFound { .. }
@@ -65,18 +74,30 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::InvalidIndexSourceData { .. }
             | HelixDbError::SecondaryIndexValue(_)
             | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode => {
-                Self::InvalidRequest { message }
+                Self::InvalidRequest {
+                    error: error_code,
+                    msg,
+                }
             }
             HelixDbError::WriterModeRequired { .. } | HelixDbError::ReaderModeRequired { .. } => {
-                Self::InvalidRequest { message }
+                Self::InvalidRequest {
+                    error: error_code,
+                    msg,
+                }
             }
             HelixDbError::TransactionConflict(_)
             | HelixDbError::RequestReadViewChanged
             | HelixDbError::StaleIndexGeneration { .. }
-            | HelixDbError::WriterFencedCommitOutcomeUnknown => Self::Transaction { message },
+            | HelixDbError::WriterFencedCommitOutcomeUnknown => Self::Transaction {
+                error: error_code,
+                msg,
+            },
             HelixDbError::Storage(_)
             | HelixDbError::ObjectStore(_)
-            | HelixDbError::DatabaseClosed => Self::Storage { message },
+            | HelixDbError::DatabaseClosed => Self::Storage {
+                error: error_code,
+                msg,
+            },
             HelixDbError::Encoding(_)
             | HelixDbError::InvalidNodeId(_)
             | HelixDbError::NodeNotFound(_)
@@ -100,7 +121,10 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::IndexCatalogCorruption(_)
             | HelixDbError::LegacyZeroNormCosineVector { .. }
             | HelixDbError::QueryDeadlineExceeded
-            | HelixDbError::InvariantViolation(_) => Self::Internal { message },
+            | HelixDbError::InvariantViolation(_) => Self::Internal {
+                error: error_code,
+                msg,
+            },
         }
     }
 }
@@ -109,7 +133,8 @@ impl From<tokio::task::JoinError> for HelixError {
     /// Converts a failed binding-runtime task without unwinding across FFI.
     fn from(error: tokio::task::JoinError) -> Self {
         Self::Internal {
-            message: format!("embedded runtime task failed: {error}"),
+            error: error_code::QueryErrorCode::InternalError.to_string(),
+            msg: format!("embedded runtime task failed: {error}"),
         }
     }
 }
@@ -174,7 +199,8 @@ mod tests {
     fn query_deadlines_do_not_expand_the_stable_binding_error_contract() {
         assert!(matches!(
             HelixError::from(HelixDbError::QueryDeadlineExceeded),
-            HelixError::Internal { message } if message.contains("deadline")
+            HelixError::Internal { error, msg }
+                if error == "query_deadline_exceeded" && msg.contains("deadline")
         ));
     }
 
@@ -196,8 +222,9 @@ mod tests {
             HelixError::from(HelixDbError::InvalidIndexSourceData {
                 reason: "indexed document is missing its tenant property".to_string(),
             }),
-            HelixError::InvalidRequest { message }
-                if message.contains("indexed document is missing its tenant property")
+            HelixError::InvalidRequest { error, msg }
+                if error == "invalid_index_source_data"
+                    && msg.contains("indexed document is missing its tenant property")
         ));
     }
 
@@ -268,8 +295,8 @@ mod tests {
 
         assert!(matches!(
             HelixError::from(error),
-            HelixError::Internal { message }
-                if message.contains("embedded runtime task failed")
+            HelixError::Internal { error, msg }
+                if error == "internal_error" && msg.contains("embedded runtime task failed")
         ));
     }
 

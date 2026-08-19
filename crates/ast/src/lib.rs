@@ -33,6 +33,7 @@
 #![deny(unsafe_code)]
 
 pub mod batch;
+pub mod error_code;
 pub mod expr;
 pub mod graph;
 pub mod index;

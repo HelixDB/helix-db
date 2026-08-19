@@ -126,7 +126,7 @@ async fn execute_embedded_fixtures(
                 Ok(response) => break response,
                 // Embedded errors preserve retry classification in their DB
                 // details even though the SDK error surface is transport-neutral.
-                Err(HelixError::EmbeddedError { details })
+                Err(HelixError::EmbeddedError { details, .. })
                     if details.contains("Transaction error: transaction conflict")
                         && attempt + 1 < TRANSACTION_CONFLICT_ATTEMPTS =>
                 {

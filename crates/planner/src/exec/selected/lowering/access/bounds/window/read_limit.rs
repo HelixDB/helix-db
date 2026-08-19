@@ -5,7 +5,7 @@ use super::pushdown::physical_access_with_window_limit;
 use crate::exec::ExecAccessReadLimit;
 use crate::{logical, physical};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(in crate::exec::selected::lowering) struct WindowAccessReadPlan {
     access: physical::PhysicalAccess,
     read_limit: ExecAccessReadLimit,

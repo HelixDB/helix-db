@@ -21,12 +21,6 @@ async fn stream_projection_terminal_and_property_shapes_are_explicit() {
     let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
 
     assert_eq!(
-        ctx.project(ExecutionValue::Stream(rows()), &ir::ProjectionPlan::Count)
-            .await
-            .expect("count projection succeeds"),
-        ExecutionValue::Count(3)
-    );
-    assert_eq!(
         ctx.project(
             ExecutionValue::Stream(Vec::new()),
             &ir::ProjectionPlan::Exists,

@@ -7,7 +7,7 @@ use crate::{ir, properties};
 ///
 /// Payload and effect semantics live in the logical source contract and
 /// delivered properties; this enum only records the selected physical shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhysicalPipelineOp {
     /// Identity operation.
@@ -48,7 +48,7 @@ pub enum PhysicalPipelineOp {
 ///
 /// assert_eq!(pipeline.ops().len(), 1);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhysicalPipeline {
     ops: ir::AtLeast<PhysicalPipelineOp, 1>,
 }

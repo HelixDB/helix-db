@@ -55,6 +55,16 @@ fn rewrite_root_expr(
                 ))
             })
         }
+        logical::LogicalExpr::StreamCardinality(cardinality) => {
+            rewrite_root_stream(cardinality.input(), indexes, planner_limits).map(|input| {
+                logical::LogicalExpr::StreamCardinality(
+                    logical::StreamCardinality::new(input).with_planning_bindings(
+                        cardinality.params().clone(),
+                        cardinality.late_bound_params().clone(),
+                    ),
+                )
+            })
+        }
         logical::LogicalExpr::StreamProject(project) => {
             rewrite_root_stream(project.input(), indexes, planner_limits).map(|input| {
                 logical::LogicalExpr::StreamProject(logical::StreamProject::new(

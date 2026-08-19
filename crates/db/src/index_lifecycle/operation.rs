@@ -1536,3 +1536,1034 @@ impl From<IndexV2ModelError> for IndexOperationModelError {
         Self::InvalidBlocker("nested V2 model validation failed")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index_lifecycle::{IndexComponent, TextManifestRevision};
+
+    fn cursor(value: u8) -> IndexCursor {
+        IndexCursor::try_new(Bytes::from(vec![value])).unwrap()
+    }
+
+    fn source() -> SourceScanProgress {
+        SourceScanProgress {
+            inclusive_upper_bound: cursor(1),
+            cursor: Some(cursor(2)),
+            counters: OperationCounters::default(),
+        }
+    }
+
+    fn prefix() -> PrefixScanProgress {
+        PrefixScanProgress {
+            cursor: Some(cursor(3)),
+            counters: OperationCounters::default(),
+        }
+    }
+
+    fn identity(family: IndexIdentityFamily) -> IndexIdentity {
+        IndexIdentity::new(
+            family,
+            IndexElementKind::Node,
+            IndexComponent::try_new("label", "Document").unwrap(),
+            IndexComponent::try_new("property", "value").unwrap(),
+        )
+    }
+
+    fn identity_family(family: IndexOperationFamily) -> IndexIdentityFamily {
+        match family {
+            IndexOperationFamily::Secondary => IndexIdentityFamily::SecondaryEquality,
+            IndexOperationFamily::Vector => IndexIdentityFamily::Vector,
+            IndexOperationFamily::Text => IndexIdentityFamily::Text,
+        }
+    }
+
+    fn record(
+        progress: IndexOperationProgress,
+        execution_state: IndexOperationExecutionState,
+    ) -> IndexOperationRecord {
+        let family = progress.family();
+        IndexOperationRecord::try_new(
+            IndexOperationId::from_bytes([7; 16]).unwrap(),
+            IndexId::new(2).unwrap(),
+            identity(identity_family(family)),
+            IndexGenerationId::new(3).unwrap(),
+            IndexRevision::new(4).unwrap(),
+            IndexOperationRevision::new(5).unwrap(),
+            progress.kind(),
+            family,
+            progress,
+            6,
+            execution_state,
+        )
+        .unwrap()
+    }
+
+    fn secondary_constructing() -> IndexOperationProgress {
+        IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+            SecondaryBuildStage::Scan(source()),
+        ))
+    }
+
+    fn vector_constructing() -> IndexOperationProgress {
+        IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::Scan(source()),
+        ))
+    }
+
+    fn text_constructing() -> IndexOperationProgress {
+        IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+            TextBuildStage::ScanSource(source()),
+        ))
+    }
+
+    fn claim(writer: u8, sequence: u64) -> OperationClaim {
+        OperationClaim {
+            writer_epoch: WriterEpoch::from_bytes([writer; 16]).unwrap(),
+            sequence: ClaimSequence::new(sequence).unwrap(),
+        }
+    }
+
+    #[test]
+    fn cursor_and_manifest_checkpoints_reject_every_invalid_boundary() {
+        assert_eq!(
+            IndexCursor::try_new(Bytes::new()).unwrap().as_bytes().len(),
+            0
+        );
+        assert_eq!(
+            IndexCursor::try_new(Bytes::from(vec![0; INDEX_CURSOR_MAX_LEN + 1])),
+            Err(IndexOperationModelError::OversizedCursor {
+                actual: INDEX_CURSOR_MAX_LEN + 1,
+                maximum: INDEX_CURSOR_MAX_LEN,
+            })
+        );
+
+        let invalid = [
+            (4, 0, 3, 1, 1, "partition page count must be non-zero"),
+            (4, 3, 0, 1, 1, "partition split count must be non-zero"),
+            (
+                4,
+                3,
+                3,
+                0,
+                1,
+                "incomplete partition must have consumed at least page zero",
+            ),
+            (
+                4,
+                3,
+                3,
+                1,
+                0,
+                "an observed non-empty page must contribute a split",
+            ),
+            (4, 3, 3, 4, 3, "next page exceeds the root page count"),
+            (
+                4,
+                3,
+                3,
+                3,
+                3,
+                "partition counts, next page, split total, or minimum root revision disagree",
+            ),
+            (
+                4,
+                3,
+                3,
+                2,
+                1,
+                "partition counts, next page, split total, or minimum root revision disagree",
+            ),
+            (
+                4,
+                3,
+                2,
+                1,
+                3,
+                "partition counts, next page, split total, or minimum root revision disagree",
+            ),
+            (
+                4,
+                3,
+                2,
+                1,
+                1,
+                "partition counts, next page, split total, or minimum root revision disagree",
+            ),
+            (
+                3,
+                3,
+                3,
+                1,
+                1,
+                "partition counts, next page, split total, or minimum root revision disagree",
+            ),
+        ];
+        for (revision, pages, splits, next_page, observed, reason) in invalid {
+            assert_eq!(
+                TextManifestPartitionValidation::try_new(
+                    [9; 32],
+                    TextManifestRevision::new(revision).unwrap(),
+                    pages,
+                    splits,
+                    next_page,
+                    observed,
+                ),
+                Err(IndexOperationModelError::InvalidTextManifestValidationProgress(reason))
+            );
+        }
+
+        let partition = TextManifestPartitionValidation::try_new(
+            [9; 32],
+            TextManifestRevision::new(4).unwrap(),
+            3,
+            4,
+            2,
+            2,
+        )
+        .unwrap();
+        assert_eq!(partition.partition_fingerprint(), &[9; 32]);
+        assert_eq!(partition.root_revision().get(), 4);
+        assert_eq!(partition.page_count(), 3);
+        assert_eq!(partition.split_count(), 4);
+        assert_eq!(partition.next_page(), 2);
+        assert_eq!(partition.observed_split_count(), 2);
+
+        let counters = OperationCounters {
+            entities: 1,
+            input_bytes: 2,
+            output_operations: 3,
+            output_bytes: 4,
+        };
+        assert_eq!(
+            TextManifestPageValidationProgress::try_new(None, Some(partition), counters),
+            Err(
+                IndexOperationModelError::InvalidTextManifestValidationProgress(
+                    "an incomplete partition requires its last complete page cursor"
+                )
+            )
+        );
+        let pages =
+            TextManifestPageValidationProgress::try_new(Some(cursor(8)), Some(partition), counters)
+                .unwrap();
+        assert_eq!(pages.cursor().unwrap().as_bytes().as_ref(), &[8]);
+        assert!(pages.partition().is_some());
+        assert_eq!(pages.counters(), counters);
+        let initial = TextManifestPageValidationProgress::initial(counters);
+        assert!(initial.cursor().is_none());
+        assert!(initial.partition().is_none());
+
+        for progress in [
+            TextManifestValidationProgress::initial(counters),
+            TextManifestValidationProgress::Roots(PrefixScanProgress {
+                cursor: None,
+                counters,
+            }),
+            TextManifestValidationProgress::EntityStates(PrefixScanProgress {
+                cursor: None,
+                counters,
+            }),
+        ] {
+            assert_eq!(progress.counters(), counters);
+        }
+    }
+
+    #[test]
+    fn progress_variants_validate_and_map_only_their_encoded_cursors() {
+        let pages = TextManifestPageValidationProgress::try_new(
+            Some(cursor(4)),
+            None,
+            OperationCounters::default(),
+        )
+        .unwrap();
+        let legacy = LegacyVectorValidationProgress {
+            lane: LegacyVectorValidationLane::Hot,
+            cursor: Some(cursor(5)),
+            counters: OperationCounters::default(),
+        };
+        let directory = LegacyVectorDirectoryValidationProgress {
+            cursor: Some(cursor(6)),
+            expected_markers: 2,
+            verified_markers: 1,
+            counters: OperationCounters::default(),
+        };
+        let none = NoCursorProgress::default();
+        let cases = vec![
+            (secondary_constructing(), 2, true, false),
+            (
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                    SecondaryBuildStage::CatchUp(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                    SecondaryBuildStage::Validate(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                    SecondaryBuildStage::Activate(none),
+                )),
+                0,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(
+                    SecondaryCleanupProgress::DeleteEntries(prefix()),
+                )),
+                1,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(
+                    SecondaryCleanupProgress::DeleteDeltas(prefix()),
+                )),
+                1,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(
+                    SecondaryCleanupProgress::Finalize(none),
+                )),
+                0,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::SecondaryCleanup(SecondaryCleanupProgress::DeleteEntries(
+                    prefix(),
+                )),
+                1,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::SecondaryCleanup(SecondaryCleanupProgress::DeleteDeltas(
+                    prefix(),
+                )),
+                1,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::SecondaryCleanup(SecondaryCleanupProgress::Finalize(none)),
+                0,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::AdoptLegacy(legacy.clone()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::ValidateAdoptedDirectory(directory.clone()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (vector_constructing(), 2, true, false),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::CatchUp(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::ValidateDescriptor(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::Activate(none),
+                )),
+                0,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
+                    VectorCleanupProgress::RetireCache(none),
+                )),
+                0,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
+                    VectorCleanupProgress::DeletePhysical(prefix()),
+                )),
+                1,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
+                    VectorCleanupProgress::DeleteDeltas(prefix()),
+                )),
+                1,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
+                    VectorCleanupProgress::Finalize(none),
+                )),
+                0,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::RetireCache(none)),
+                0,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeletePhysical(
+                    prefix(),
+                )),
+                1,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorCleanup(
+                    VectorCleanupProgress::DeleteDeltas(prefix()),
+                ),
+                1,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(none)),
+                0,
+                false,
+                false,
+            ),
+            (text_constructing(), 2, true, false),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::ScanPartitions(source()),
+                )),
+                2,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::CatchUp(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::Compact(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::PrepareManifests(prefix()),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::ValidateManifests(TextManifestValidationProgress::Pages(pages)),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::ValidateManifests(TextManifestValidationProgress::Roots(
+                        prefix(),
+                    )),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::ValidateManifests(
+                        TextManifestValidationProgress::EntityStates(prefix()),
+                    ),
+                )),
+                1,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::Activate(none),
+                )),
+                0,
+                true,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Aborting(
+                    TextCleanupProgress::DeleteMetadata(prefix()),
+                )),
+                1,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::TextBuild(TextBuildProgress::Aborting(
+                    TextCleanupProgress::Finalize(none),
+                )),
+                0,
+                false,
+                true,
+            ),
+            (
+                IndexOperationProgress::TextCleanup(TextCleanupProgress::DeleteMetadata(prefix())),
+                1,
+                false,
+                false,
+            ),
+            (
+                IndexOperationProgress::TextCleanup(TextCleanupProgress::Finalize(none)),
+                0,
+                false,
+                false,
+            ),
+        ];
+
+        for (mut progress, expected_cursors, constructing, aborting) in cases {
+            assert!(progress.cursors_are_valid(|_| true));
+            assert_eq!(progress.is_constructing_build(), constructing);
+            assert_eq!(progress.is_aborting_build(), aborting);
+            let mut mapped = 0;
+            progress
+                .try_map_cursors(&mut |_| {
+                    mapped += 1;
+                    Ok::<_, ()>(cursor(99))
+                })
+                .unwrap();
+            assert_eq!(mapped, expected_cursors);
+        }
+
+        let mut no_cursor = IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::AdoptLegacy(LegacyVectorValidationProgress::initial()),
+        ));
+        no_cursor
+            .try_map_cursors(&mut |_| -> Result<_, ()> { unreachable!() })
+            .unwrap();
+        assert!(no_cursor.cursors_are_valid(|_| false));
+
+        let invalid_directory = IndexOperationProgress::VectorBuild(
+            VectorBuildProgress::Constructing(VectorBuildStage::ValidateAdoptedDirectory(
+                LegacyVectorDirectoryValidationProgress {
+                    cursor: None,
+                    expected_markers: 1,
+                    verified_markers: 2,
+                    counters: OperationCounters::default(),
+                },
+            )),
+        );
+        assert!(!invalid_directory.cursors_are_valid(|_| true));
+
+        let mut failing = secondary_constructing();
+        assert_eq!(
+            failing.try_map_cursors(&mut |_| Err::<IndexCursor, _>("map failed")),
+            Err("map failed")
+        );
+        assert!(!secondary_constructing().cursors_are_valid(|_| false));
+    }
+
+    #[test]
+    fn claim_blocker_execution_and_schedule_contracts_cover_every_variant() {
+        assert_eq!(
+            ClaimSequence::new(0),
+            Err(IndexOperationModelError::ZeroClaimSequence)
+        );
+        assert_eq!(ClaimSequence::new(9).unwrap().get(), 9);
+        assert_eq!(
+            LegacyVectorValidationProgress::initial().lane,
+            LegacyVectorValidationLane::Core
+        );
+        assert_eq!(
+            LegacyVectorValidationLane::Core.next(),
+            Some(LegacyVectorValidationLane::Hot)
+        );
+        assert_eq!(
+            LegacyVectorValidationLane::Hot.next(),
+            Some(LegacyVectorValidationLane::Layer0)
+        );
+        assert_eq!(LegacyVectorValidationLane::Layer0.next(), None);
+        assert_eq!(
+            LegacyVectorDirectoryValidationProgress::initial(3, OperationCounters::default())
+                .expected_markers,
+            3
+        );
+
+        let size_blockers = [
+            IndexOperationBlocker::OversizedEntity {
+                entity_kind: IndexElementKind::Node,
+                entity_id: IndexEntityId::new(1),
+                observed: 4,
+                limit: 4,
+            },
+            IndexOperationBlocker::ManifestLimit {
+                partition: super::super::TextPartition::Unpartitioned,
+                observed: 3,
+                limit: 4,
+            },
+        ];
+        for blocker in size_blockers {
+            assert_eq!(
+                blocker.validate(),
+                Err(IndexOperationModelError::InvalidBlocker(
+                    "observed size must exceed limit"
+                ))
+            );
+        }
+        for blocker in [
+            IndexOperationBlocker::InvalidSourceData {
+                entity_kind: IndexElementKind::Node,
+                entity_id: IndexEntityId::new(1),
+            },
+            IndexOperationBlocker::UniquenessViolation {
+                first_entity_id: IndexEntityId::new(1),
+                second_entity_id: IndexEntityId::new(2),
+            },
+            IndexOperationBlocker::OversizedEntity {
+                entity_kind: IndexElementKind::Edge,
+                entity_id: IndexEntityId::new(3),
+                observed: 5,
+                limit: 4,
+            },
+            IndexOperationBlocker::ManifestLimit {
+                partition: super::super::TextPartition::Unpartitioned,
+                observed: 5,
+                limit: 4,
+            },
+            IndexOperationBlocker::ObjectStoreConfigurationUnavailable,
+            IndexOperationBlocker::InvariantViolation,
+            IndexOperationBlocker::InvalidLegacyPhysical,
+        ] {
+            assert_eq!(blocker.validate(), Ok(()));
+        }
+
+        for (state, name) in [
+            (
+                IndexOperationExecutionState::Queued {
+                    not_before_unix_millis: None,
+                },
+                "queued",
+            ),
+            (
+                IndexOperationExecutionState::Claimed(claim(1, 1)),
+                "claimed",
+            ),
+            (
+                IndexOperationExecutionState::Blocked(IndexOperationBlocker::InvariantViolation),
+                "blocked",
+            ),
+            (
+                IndexOperationExecutionState::Completed(IndexOperationOutcome::DropSucceeded),
+                "completed",
+            ),
+        ] {
+            assert_eq!(state.name(), name);
+        }
+
+        let first_writer = WriterEpoch::from_bytes([1; 16]).unwrap();
+        let second_writer = WriterEpoch::from_bytes([2; 16]).unwrap();
+        let immediate = IndexOperationQueueSchedule::Immediate;
+        let progress = IndexOperationQueueSchedule::DelayedAfterProgress {
+            not_before_unix_millis: 10,
+        };
+        let failure = IndexOperationQueueSchedule::DelayedAfterTransientFailure {
+            not_before_unix_millis: 10,
+            failed_writer_epoch: first_writer,
+        };
+        assert_eq!(immediate.not_before_unix_millis(), None);
+        assert_eq!(progress.not_before_unix_millis(), Some(10));
+        assert_eq!(failure.not_before_unix_millis(), Some(10));
+        assert!(!immediate.transient_failure_from(first_writer));
+        assert!(failure.transient_failure_from(first_writer));
+        assert!(!failure.transient_failure_from(second_writer));
+        assert!(immediate.is_eligible_for(first_writer, 0));
+        assert!(!progress.is_eligible_for(first_writer, 9));
+        assert!(progress.is_eligible_for(first_writer, 10));
+        assert!(!failure.is_eligible_for(first_writer, 9));
+        assert!(failure.is_eligible_for(first_writer, 10));
+        assert!(failure.is_eligible_for(second_writer, 0));
+    }
+
+    #[test]
+    fn record_constructor_rejects_every_cross_field_mismatch() {
+        let progress = secondary_constructing();
+        let base = |kind, family, identity_family, execution_state, schedule| {
+            IndexOperationRecord::try_new_with_queue_schedule(
+                IndexOperationId::from_bytes([7; 16]).unwrap(),
+                IndexId::new(2).unwrap(),
+                identity(identity_family),
+                IndexGenerationId::new(3).unwrap(),
+                IndexRevision::new(4).unwrap(),
+                IndexOperationRevision::new(5).unwrap(),
+                kind,
+                family,
+                progress.clone(),
+                0,
+                execution_state,
+                schedule,
+            )
+        };
+        let queued = IndexOperationExecutionState::Queued {
+            not_before_unix_millis: None,
+        };
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Vector,
+                IndexIdentityFamily::Vector,
+                queued.clone(),
+                Some(IndexOperationQueueSchedule::Immediate),
+            ),
+            Err(IndexOperationModelError::ProgressFamilyMismatch)
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Drop,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryEquality,
+                queued.clone(),
+                Some(IndexOperationQueueSchedule::Immediate),
+            ),
+            Err(IndexOperationModelError::ProgressKindMismatch)
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::Text,
+                queued.clone(),
+                Some(IndexOperationQueueSchedule::Immediate),
+            ),
+            Err(IndexOperationModelError::IdentityFamilyMismatch)
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryRange,
+                IndexOperationExecutionState::Completed(IndexOperationOutcome::DropSucceeded),
+                None,
+            ),
+            Err(IndexOperationModelError::CompletionKindMismatch)
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryEquality,
+                IndexOperationExecutionState::Completed(IndexOperationOutcome::Build(
+                    BuildOperationOutcome::Aborted,
+                )),
+                None,
+            ),
+            Err(IndexOperationModelError::CompletionProgressMismatch)
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryEquality,
+                IndexOperationExecutionState::Blocked(IndexOperationBlocker::OversizedEntity {
+                    entity_kind: IndexElementKind::Node,
+                    entity_id: IndexEntityId::new(1),
+                    observed: 1,
+                    limit: 1,
+                }),
+                None,
+            ),
+            Err(IndexOperationModelError::InvalidBlocker(
+                "observed size must exceed limit"
+            ))
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryEquality,
+                queued.clone(),
+                None,
+            ),
+            Err(IndexOperationModelError::InvalidQueueSchedule(
+                "queued operation has no schedule"
+            ))
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryEquality,
+                queued,
+                Some(IndexOperationQueueSchedule::DelayedAfterProgress {
+                    not_before_unix_millis: 1,
+                }),
+            ),
+            Err(IndexOperationModelError::InvalidQueueSchedule(
+                "queued deadline disagrees with schedule"
+            ))
+        );
+        assert_eq!(
+            base(
+                IndexOperationKind::Build,
+                IndexOperationFamily::Secondary,
+                IndexIdentityFamily::SecondaryEquality,
+                IndexOperationExecutionState::Claimed(claim(1, 1)),
+                Some(IndexOperationQueueSchedule::Immediate),
+            ),
+            Err(IndexOperationModelError::InvalidQueueSchedule(
+                "non-queued operation has a schedule"
+            ))
+        );
+
+        let aborting = IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(
+            SecondaryCleanupProgress::Finalize(NoCursorProgress::default()),
+        ));
+        let completed_abort = record(
+            aborting,
+            IndexOperationExecutionState::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Aborted,
+            )),
+        );
+        assert!(matches!(
+            completed_abort.execution_state(),
+            IndexOperationExecutionState::Completed(_)
+        ));
+        let completed_drop = record(
+            IndexOperationProgress::TextCleanup(TextCleanupProgress::Finalize(
+                NoCursorProgress::default(),
+            )),
+            IndexOperationExecutionState::Completed(IndexOperationOutcome::DropSucceeded),
+        );
+        assert_eq!(completed_drop.kind(), IndexOperationKind::Drop);
+    }
+
+    #[test]
+    fn operation_transitions_preserve_contracts_and_reject_wrong_states() {
+        let queued = record(
+            secondary_constructing(),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: Some(10),
+            },
+        );
+        assert_eq!(queued.operation_id().as_bytes(), &[7; 16]);
+        assert_eq!(queued.index_id().get(), 2);
+        assert_eq!(
+            queued.identity().family(),
+            IndexIdentityFamily::SecondaryEquality
+        );
+        assert_eq!(queued.generation().get(), 3);
+        assert_eq!(queued.index_record_revision().get(), 4);
+        assert_eq!(queued.operation_revision().get(), 5);
+        assert_eq!(queued.family(), IndexOperationFamily::Secondary);
+        assert!(queued.progress().is_constructing_build());
+        assert_eq!(queued.attempt(), 6);
+        assert_eq!(
+            queued.queue_schedule().unwrap().not_before_unix_millis(),
+            Some(10)
+        );
+        let mut mapped_calls = 0;
+        let mapped = queued
+            .try_map_cursors(|_| {
+                mapped_calls += 1;
+                Ok::<_, ()>(cursor(42))
+            })
+            .unwrap();
+        assert_eq!(mapped_calls, 2);
+        assert_eq!(mapped.operation_revision(), queued.operation_revision());
+
+        let claimed = queued.claim(claim(1, 1)).unwrap();
+        assert_eq!(claimed.attempt(), 7);
+        assert_eq!(claimed.operation_revision().get(), 6);
+        let replaced = claimed.claim(claim(2, 2)).unwrap();
+        assert_eq!(replaced.attempt(), 8);
+
+        let progressed = claimed.progressed(secondary_constructing()).unwrap();
+        assert!(matches!(
+            progressed.execution_state(),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None
+            }
+        ));
+        let progressed_after = claimed
+            .progressed_after(secondary_constructing(), 20)
+            .unwrap();
+        assert_eq!(
+            progressed_after.queue_schedule(),
+            Some(IndexOperationQueueSchedule::DelayedAfterProgress {
+                not_before_unix_millis: 20
+            })
+        );
+        let failed = claimed.transient_failure(30).unwrap();
+        assert!(failed
+            .queue_schedule()
+            .unwrap()
+            .transient_failure_from(WriterEpoch::from_bytes([1; 16]).unwrap()));
+
+        let blocked = claimed
+            .block(IndexOperationBlocker::InvariantViolation)
+            .unwrap();
+        assert!(matches!(
+            blocked.execution_state(),
+            IndexOperationExecutionState::Blocked(_)
+        ));
+        assert!(matches!(
+            blocked.retry().unwrap().execution_state(),
+            IndexOperationExecutionState::Queued { .. }
+        ));
+        let completed = claimed
+            .complete(
+                IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
+                IndexRevision::new(8).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(completed.index_record_revision().get(), 8);
+
+        for transition in [
+            queued.progressed(secondary_constructing()),
+            queued.progressed_after(secondary_constructing(), 1),
+            queued.transient_failure(1),
+            queued.block(IndexOperationBlocker::InvariantViolation),
+            queued.complete(
+                IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
+                IndexRevision::new(9).unwrap(),
+            ),
+            queued.retry(),
+        ] {
+            assert!(matches!(
+                transition,
+                Err(IndexOperationModelError::IllegalExecutionTransition { .. })
+            ));
+        }
+        assert!(matches!(
+            blocked.claim(claim(1, 2)),
+            Err(IndexOperationModelError::IllegalExecutionTransition { .. })
+        ));
+
+        for progress in [
+            secondary_constructing(),
+            vector_constructing(),
+            text_constructing(),
+        ] {
+            let aborted = record(
+                progress,
+                IndexOperationExecutionState::Queued {
+                    not_before_unix_millis: None,
+                },
+            )
+            .begin_abort(IndexRevision::new(10).unwrap())
+            .unwrap();
+            assert!(aborted.progress().is_aborting_build());
+            assert_eq!(aborted.index_record_revision().get(), 10);
+        }
+        let already_aborting = record(
+            IndexOperationProgress::TextBuild(TextBuildProgress::Aborting(
+                TextCleanupProgress::Finalize(NoCursorProgress::default()),
+            )),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        );
+        assert!(matches!(
+            already_aborting.begin_abort(IndexRevision::new(10).unwrap()),
+            Err(IndexOperationModelError::IllegalExecutionTransition { .. })
+        ));
+        assert!(matches!(
+            completed.begin_abort(IndexRevision::new(10).unwrap()),
+            Err(IndexOperationModelError::IllegalExecutionTransition { .. })
+        ));
+
+        let vector_completed = record(
+            vector_constructing(),
+            IndexOperationExecutionState::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Succeeded,
+            )),
+        );
+        assert_eq!(
+            vector_completed
+                .rebind_completed_index_revision(IndexRevision::new(11).unwrap())
+                .unwrap()
+                .index_record_revision()
+                .get(),
+            11
+        );
+        let queued_vector = record(
+            vector_constructing(),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        );
+        assert!(matches!(
+            queued_vector.rebind_completed_index_revision(IndexRevision::new(11).unwrap()),
+            Err(IndexOperationModelError::IllegalExecutionTransition { .. })
+        ));
+        assert!(matches!(
+            completed.rebind_completed_index_revision(IndexRevision::new(11).unwrap()),
+            Err(IndexOperationModelError::IllegalExecutionTransition { .. })
+        ));
+
+        let saturated = IndexOperationRecord::try_new(
+            IndexOperationId::from_bytes([7; 16]).unwrap(),
+            IndexId::new(2).unwrap(),
+            identity(IndexIdentityFamily::SecondaryEquality),
+            IndexGenerationId::new(3).unwrap(),
+            IndexRevision::new(4).unwrap(),
+            IndexOperationRevision::new(u64::MAX).unwrap(),
+            IndexOperationKind::Build,
+            IndexOperationFamily::Secondary,
+            secondary_constructing(),
+            u32::MAX,
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            saturated.claim(claim(1, 1)),
+            Err(IndexOperationModelError::InvalidBlocker(
+                "nested V2 model validation failed"
+            ))
+        ));
+        assert_eq!(
+            IndexOperationModelError::from(IndexId::new(0).unwrap_err()),
+            IndexOperationModelError::InvalidBlocker("nested V2 model validation failed")
+        );
+    }
+}

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ir, logical};
+use crate::{error, ir, logical};
 use helix_ast::expr::{CompareOp, Expr, Predicate};
 use helix_ast::graph::NodeRef;
 
@@ -112,4 +112,22 @@ fn source_stream_collapses_static_predicates_before_filtering() {
         logical::LogicalExpr::AccessPath(logical::AccessPath::Edge(path))
             if matches!(path.source().as_ref(), ir::EdgeAccessPlan::Empty)
     ));
+}
+
+#[test]
+fn source_stream_propagates_missing_ordinary_equality_bindings() {
+    for root in [
+        AstNode::NodesWhere {
+            predicate: Predicate::eq_param("status", "missing"),
+        },
+        AstNode::EdgesWhere {
+            predicate: Predicate::eq_param("status", "missing"),
+        },
+    ] {
+        assert!(matches!(
+            source_stream_from_ast(&context::PlannerContext::default(), &root),
+            Err(error::PlannerError::MissingPlanningEqualityParameter { param })
+                if param.as_ref() == "missing"
+        ));
+    }
 }

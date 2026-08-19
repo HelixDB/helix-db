@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 helix-ast = { path = "../ast" }
+helix-value-semantics = { path = "../value-semantics" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -12,7 +13,12 @@ thiserror = "2"
 [dev-dependencies]
 criterion = "0.8"
 helix-ast = { path = "../ast", features = ["test-utils"] }
+proptest = "1"
 
 [[bench]]
 name = "planner_scalability"
+harness = false
+
+[[bench]]
+name = "v2_plan_quality"
 harness = false

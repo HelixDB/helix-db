@@ -105,6 +105,7 @@ pub(super) fn selected_optimizer_group(
         }
         exec::SelectedExecutableRunRoot::Pipeline(root) => root.provenance().optimizer().group(),
         exec::SelectedExecutableRunRoot::Terminal(root) => root.provenance().optimizer().group(),
+        exec::SelectedExecutableRunRoot::Count(root) => root.provenance().optimizer().group(),
     }
 }
 

@@ -62,14 +62,10 @@ fn cascades_mutation_roots_preserve_index_inputs_dependencies_and_payloads() {
         ExecOp::Access { plan }
             if matches!(
                 plan.as_ref(),
-                ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, value, .. })
+                ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, value, .. } })
                     if key.label == "Audit"
                         && key.property == "event_id"
-                        && matches!(
-                            value,
-                            IndexValue::Literal(value)
-                                if value.as_property_value().as_str() == Some("evt-1")
-                        )
+                        && value.literal().as_property_value().as_str() == Some("evt-1")
             )
     ));
     assert!(matches!(
@@ -84,14 +80,10 @@ fn cascades_mutation_roots_preserve_index_inputs_dependencies_and_payloads() {
         ExecOp::Access { plan }
             if matches!(
                 plan.as_ref(),
-                ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, value, .. })
+                ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, value, .. } })
                     if key.label == "MENTIONS"
                         && key.property == "event_id"
-                        && matches!(
-                            value,
-                            IndexValue::Literal(value)
-                                if value.as_property_value().as_str() == Some("evt-1")
-                        )
+                        && value.literal().as_property_value().as_str() == Some("evt-1")
             )
     ));
     assert!(matches!(
@@ -106,14 +98,10 @@ fn cascades_mutation_roots_preserve_index_inputs_dependencies_and_payloads() {
         ExecOp::Access { plan }
             if matches!(
                 plan.as_ref(),
-                ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, value, .. })
+                ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, value, .. } })
                     if key.label == "User"
                         && key.property == "username"
-                        && matches!(
-                            value,
-                            IndexValue::Literal(value)
-                                if value.as_property_value().as_str() == Some("alice")
-                        )
+                        && value.literal().as_property_value().as_str() == Some("alice")
             )
     ));
     assert!(matches!(

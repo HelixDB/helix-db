@@ -36,15 +36,19 @@ async fn terminal_chain_counts_scalar_terminal_items() {
             test_support::step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
             test_support::step(
                 3,
                 vec![first_count_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputScalars {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
         ],
@@ -128,8 +132,10 @@ async fn scalar_terminal_windows_and_distinct_execute_as_scalar_items() {
             test_support::step(
                 4,
                 vec![limited_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputScalars {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
         ],
@@ -155,8 +161,10 @@ async fn scalar_terminal_windows_and_distinct_execute_as_scalar_items() {
             test_support::step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
             test_support::step(3, vec![first_count_id], exec::ExecOp::Distinct),

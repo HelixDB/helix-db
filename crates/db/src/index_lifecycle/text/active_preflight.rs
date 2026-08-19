@@ -171,7 +171,7 @@ impl ActiveTextMutationMeasurements {
     }
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/index_lifecycle_active_text_preflight.rs"]
 pub(crate) mod production_contracts;
 
@@ -184,6 +184,11 @@ mod tests {
         SearchIndexBackfillLimits, SearchIndexBatchLimits, TextBackfillCompactionLimits,
         TextBuildArtifactLimits,
     };
+
+    #[test]
+    fn production_active_text_preflight_matrix_runs_in_workspace_tests() {
+        production_contracts::run();
+    }
 
     /// Constructs distinct ceilings so every rejection identifies one resource.
     fn limits() -> ActiveTextMutationLimits {

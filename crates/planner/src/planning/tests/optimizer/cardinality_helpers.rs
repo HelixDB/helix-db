@@ -178,7 +178,7 @@ fn hard_cardinality_upper_bounds_cover_plan_internal_ceiling_contracts() {
         })),
         None
     );
-    for projection in [ProjectionPlan::Count, ProjectionPlan::Exists] {
+    for projection in [ProjectionPlan::Exists] {
         assert_eq!(
             hard_cardinality_upper_bound(&PhysicalOp::Project {
                 input: Box::new(node_points.clone()),

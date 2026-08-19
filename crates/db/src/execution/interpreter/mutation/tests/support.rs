@@ -185,8 +185,10 @@ pub(super) fn access_label_count_plan(label: &str) -> exec::ExecutablePlan {
             step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
         ],

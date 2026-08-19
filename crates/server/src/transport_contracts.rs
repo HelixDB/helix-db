@@ -457,6 +457,16 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
         .await
         .unwrap_err();
     assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+    assert!(malformed.message().starts_with("invalid query JSON:"));
+    assert_eq!(
+        malformed
+            .metadata()
+            .get(grpc::HELIX_ERROR_CODE_METADATA)
+            .expect("malformed-query status includes an error code")
+            .to_str()
+            .expect("error codes are ASCII"),
+        "invalid_query_json"
+    );
 
     let oversized = grpc
         .raw_query(QueryJsonRequest {
@@ -468,6 +478,15 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
         .await
         .unwrap_err();
     assert_eq!(oversized.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(
+        oversized
+            .metadata()
+            .get(grpc::HELIX_ERROR_CODE_METADATA)
+            .expect("oversized-query status includes an error code")
+            .to_str()
+            .expect("error codes are ASCII"),
+        "invalid_request_body"
+    );
 
     grpc.close().await.unwrap();
 }
@@ -487,6 +506,15 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .await
         .unwrap();
     assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    let malformed_body = to_bytes(malformed.into_body(), 4_096).await.unwrap();
+    let malformed_json: serde_json::Value =
+        serde_json::from_slice(&malformed_body).expect("malformed-query error is JSON");
+    assert_eq!(malformed_json["error"], "invalid_query_json");
+    assert!(malformed_json["msg"]
+        .as_str()
+        .expect("error message is a string")
+        .starts_with("invalid query JSON:"));
+    assert_eq!(malformed_json.get("code"), None);
 
     let oversized = router
         .clone()
@@ -498,6 +526,15 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .await
         .unwrap();
     assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+    let oversized_body = to_bytes(oversized.into_body(), 4_096).await.unwrap();
+    let oversized_json: serde_json::Value =
+        serde_json::from_slice(&oversized_body).expect("oversized-query error is JSON");
+    assert_eq!(oversized_json["error"], "invalid_request_body");
+    assert!(oversized_json["msg"]
+        .as_str()
+        .expect("error message is a string")
+        .starts_with("failed to read request body:"));
+    assert_eq!(oversized_json.get("code"), None);
 
     let write = QueryRequest::write(batch::write_batch());
     let incompatible = router
@@ -510,6 +547,15 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .await
         .unwrap();
     assert_eq!(incompatible.status(), StatusCode::BAD_REQUEST);
+    let incompatible_body = to_bytes(incompatible.into_body(), 4_096).await.unwrap();
+    let incompatible_json: serde_json::Value =
+        serde_json::from_slice(&incompatible_body).expect("option error is JSON");
+    assert_eq!(incompatible_json["error"], "invalid_request_option");
+    assert_eq!(
+        incompatible_json["msg"],
+        "x-helix-warm is only valid for read requests"
+    );
+    assert_eq!(incompatible_json.get("code"), None);
 
     db.close().await.unwrap();
 }
@@ -660,6 +706,15 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         .await
         .unwrap_err();
     assert_eq!(require_writer.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        require_writer
+            .metadata()
+            .get(grpc::HELIX_ERROR_CODE_METADATA)
+            .expect("writer routing status includes an error code")
+            .to_str()
+            .expect("error codes are ASCII"),
+        "invalid_request_option"
+    );
 
     let write_on_reader = read_transport
         .raw_query(QueryJsonRequest {
@@ -673,6 +728,15 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         .await
         .unwrap_err();
     assert_eq!(write_on_reader.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        write_on_reader
+            .metadata()
+            .get(grpc::HELIX_ERROR_CODE_METADATA)
+            .expect("reader-mode write status includes an error code")
+            .to_str()
+            .expect("error codes are ASCII"),
+        "writer_mode_required"
+    );
 
     read_transport.close().await.unwrap();
     writer.close().await.unwrap();

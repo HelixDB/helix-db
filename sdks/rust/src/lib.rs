@@ -74,6 +74,7 @@ pub mod dsl;
 pub mod graph;
 pub mod lifecycle;
 
+pub use helix_ast::error_code::{QueryErrorCode, UnknownQueryErrorCode};
 pub use lifecycle::*;
 
 #[cfg(feature = "embedded")]
@@ -181,6 +182,8 @@ pub enum HelixError {
     /// available.
     #[error("Got Error from server: {details}")]
     RemoteError {
+        /// Static server code, including unknown future values.
+        code: Option<String>,
         /// Server-provided error text, or a fallback description of the status.
         details: String,
     },
@@ -201,9 +204,25 @@ pub enum HelixError {
     #[cfg(feature = "embedded")]
     #[error("Embedded DB error: {details}")]
     EmbeddedError {
+        /// Static embedded error code.
+        code: String,
         /// Error text from the embedded DB layer.
         details: String,
     },
+}
+
+impl HelixError {
+    /// Return the stable query error code when the failure has one.
+    #[must_use]
+    pub fn error_code(&self) -> Option<&str> {
+        match self {
+            Self::RemoteError { code, .. } => code.as_deref(),
+            Self::InvalidRequest { .. } => Some(QueryErrorCode::InvalidRequest.as_str()),
+            #[cfg(feature = "embedded")]
+            Self::EmbeddedError { code, .. } => Some(code),
+            Self::ReqwestError(_) | Self::SerializationError(_) | Self::InvalidURL(_) => None,
+        }
+    }
 }
 
 impl Client {
@@ -366,8 +385,35 @@ impl Client {
 #[cfg(feature = "embedded")]
 fn embedded_error(error: db::error::HelixDbError) -> HelixError {
     HelixError::EmbeddedError {
+        code: error.error_code().to_string(),
         details: error.to_string(),
     }
+}
+
+#[derive(Deserialize)]
+struct QueryErrorEnvelope {
+    error: String,
+    msg: Option<String>,
+    code: Option<String>,
+}
+
+fn remote_error(response_body: String, fallback: String) -> HelixError {
+    let parsed = sonic_rs::from_str::<QueryErrorEnvelope>(&response_body);
+    let (code, details) = match parsed {
+        Ok(envelope) => match envelope.msg {
+            Some(msg) => (Some(envelope.error), msg),
+            None => (envelope.code, envelope.error),
+        },
+        Err(_) => (
+            None,
+            if response_body.is_empty() {
+                fallback
+            } else {
+                response_body
+            },
+        ),
+    };
+    HelixError::RemoteError { code, details }
 }
 
 /// Fluent builder for a single request, produced by [`Client::query`].
@@ -475,15 +521,14 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                         .await
                         .map(|bytes| bytes.to_vec())
                         .map_err(Into::into),
-                    code => match response.text().await {
-                        Ok(details) => Err(HelixError::RemoteError { details }),
-                        Err(_) => Err(HelixError::RemoteError {
-                            details: code.canonical_reason().map_or_else(
-                                || format!("unknown error with code: {code}"),
-                                str::to_string,
-                            ),
-                        }),
-                    },
+                    status => {
+                        let fallback = status.canonical_reason().map_or_else(
+                            || format!("unknown error with code: {status}"),
+                            str::to_string,
+                        );
+                        let response_body = response.text().await.unwrap_or_default();
+                        Err(remote_error(response_body, fallback))
+                    }
                 }
             }
             #[cfg(feature = "embedded")]
@@ -1135,6 +1180,43 @@ mod client_tests {
         assert!(server_backend(&cleared).api_key.is_none());
     }
 
+    #[test]
+    fn remote_errors_parse_new_legacy_future_and_fallback_contracts() {
+        let cases = [
+            (
+                r#"{"error":"index_not_found","msg":"missing index"}"#,
+                Some("index_not_found"),
+                "missing index",
+            ),
+            (
+                r#"{"error":"legacy message","code":"index_not_found"}"#,
+                Some("index_not_found"),
+                "legacy message",
+            ),
+            (
+                r#"{"error":"future_code","msg":"future message"}"#,
+                Some("future_code"),
+                "future message",
+            ),
+            (
+                r#"{"error":"message without a code"}"#,
+                None,
+                "message without a code",
+            ),
+            ("not JSON", None, "not JSON"),
+            ("", None, "Bad Request"),
+        ];
+
+        for (body, expected_code, expected_details) in cases {
+            let error = remote_error(body.to_string(), "Bad Request".to_string());
+            assert_eq!(error.error_code(), expected_code);
+            let HelixError::RemoteError { details, .. } = error else {
+                panic!("remote parser always returns a remote error");
+            };
+            assert_eq!(details, expected_details);
+        }
+    }
+
     // ---- Header assembly ----------------------------------------------------
 
     #[test]
@@ -1260,6 +1342,7 @@ mod client_tests {
             .expect_err("embedded reader should reject writes");
 
         assert!(matches!(err, HelixError::EmbeddedError { .. }));
+        assert_eq!(err.error_code(), Some("writer_mode_required"));
         assert!(err.to_string().contains("writer mode"));
     }
 

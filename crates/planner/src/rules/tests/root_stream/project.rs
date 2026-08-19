@@ -17,7 +17,7 @@ fn stream_project_implementation_rule_appends_typed_terminal_pipeline() {
             node_access_path(ir::NodeAccessPlan::AllScan),
             predicate,
         ))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let alternative = physical_alternative(rule.apply(optimizer::RuleInput {
@@ -65,7 +65,7 @@ fn stream_project_implementation_rule_supports_variable_source_root_stream() {
     };
     let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         logical::RootStream::VariableSource(logical::VariableSource::new(name("users"))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let alternative = physical_alternative(rule.apply(optimizer::RuleInput {
@@ -106,7 +106,7 @@ fn stream_project_implementation_rule_supports_control_flow_root_stream() {
     };
     let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         logical::RootStream::Branch(Box::new(optional_branch(node_all_expr(), edge_all_expr()))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let alternative = physical_alternative(rule.apply(optimizer::RuleInput {
@@ -153,7 +153,7 @@ fn stream_project_implementation_rule_supports_control_flow_root_pipeline_stream
     .unwrap();
     let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         logical::RootStream::Pipeline(Box::new(pipeline)),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let alternative = physical_alternative(rule.apply(optimizer::RuleInput {
@@ -195,7 +195,7 @@ fn stream_project_implementation_rule_supports_reserved_root_stream() {
             ))),
             ir::ReservedOp::Fold,
         ))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let alternative = physical_alternative(rule.apply(optimizer::RuleInput {
@@ -238,7 +238,7 @@ fn stream_project_implementation_rule_supports_control_flow_reserved_root_stream
             ))),
             ir::ReservedOp::Fold,
         ))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let alternative = physical_alternative(rule.apply(optimizer::RuleInput {

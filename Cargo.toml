@@ -10,6 +10,7 @@ members = [
     "crates/db",
     "crates/metrics",
     "crates/db-testkit",
+    "crates/value-semantics",
 ]
 exclude = ["bindings/uniffi-bindgen"]
 resolver = "3"

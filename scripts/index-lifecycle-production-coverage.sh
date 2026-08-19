@@ -70,7 +70,7 @@ jq -e '
 case "$#" in
     0)
         cargo llvm-cov --version >/dev/null
-        TEMP_ROOT="$(mktemp -d "${TMPDIR:-/private/tmp}/helix-proper-index-lifecycle-coverage.XXXXXX")"
+        TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/helix-proper-index-lifecycle-coverage.XXXXXX")"
         BROAD_REPORT="$TEMP_ROOT/broad.json"
         DENOMINATOR_REPORT="$TEMP_ROOT/denominator.json"
 

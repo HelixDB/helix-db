@@ -1258,3 +1258,7 @@ mod tests {
             .expect("destination conflict database closes");
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_active_batch.rs"]
+mod external_contracts;

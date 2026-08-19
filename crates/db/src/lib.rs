@@ -2,6 +2,9 @@
 
 //! Helix database runtime, storage, query execution, and index lifecycle API.
 
+#[cfg(test)]
+extern crate self as db;
+
 pub mod config;
 pub mod encoding;
 pub mod error;
@@ -27,6 +30,28 @@ pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken}
 #[cfg(feature = "production-coverage")]
 #[path = "../tests/production_support/mod.rs"]
 pub mod production_coverage;
+#[cfg(all(test, not(feature = "production-coverage")))]
+#[path = "../tests/production_support/index_lifecycle_text_rows.rs"]
+mod production_text_lifecycle_rows;
+#[cfg(all(test, not(feature = "production-coverage")))]
+pub mod production_coverage {
+    /// Verifies the complete durable row graph for one settled text generation.
+    pub async fn index_lifecycle_text_steady_state_contracts(
+        db: &crate::HelixDB,
+        expected_live_entities: usize,
+    ) {
+        crate::production_text_lifecycle_rows::verify_steady_state(db, expected_live_entities)
+            .await;
+    }
+
+    /// Verifies that terminal cleanup removed every generation-owned text row.
+    pub async fn index_lifecycle_text_dropped_row_contracts(db: &crate::HelixDB) {
+        crate::production_text_lifecycle_rows::verify_dropped(db).await;
+    }
+}
+#[cfg(test)]
+#[path = "../tests/production_text_lifecycle.rs"]
+mod production_text_lifecycle_workspace_tests;
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -823,7 +848,7 @@ impl HelixDB {
         .await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "production-coverage"))]
     async fn open_with_object_store_for_tests_inner(
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
@@ -1488,6 +1513,7 @@ impl HelixDB {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
             params,
+            late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
             runtime_feedback: Default::default(),
@@ -1506,6 +1532,7 @@ impl HelixDB {
         let indexes = self.runtime_catalog_snapshot_scoped(tenant_scope).await?;
         Ok(PlannerContext {
             params,
+            late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
             runtime_feedback: Default::default(),
@@ -1554,6 +1581,7 @@ impl HelixDB {
         Ok(PreparedPlannerContext {
             context: PlannerContext {
                 params,
+                late_bound_params: Default::default(),
                 indexes,
                 stats: Default::default(),
                 runtime_feedback: Default::default(),
@@ -1679,7 +1707,7 @@ impl HelixDB {
         tenant_scope: DataScope,
     ) -> Result<Vec<u8>> {
         let request = sonic_rs::from_slice::<QueryRequest>(request_json)
-            .map_err(|err| HelixDbError::Query(format!("invalid query JSON: {err}")))?;
+            .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
         query_service::execute_query_on_scoped_observed(
             self,

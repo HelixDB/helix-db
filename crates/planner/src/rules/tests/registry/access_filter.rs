@@ -5,6 +5,8 @@ fn seed_rule_set_explores_access_filter_before_access_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -53,6 +55,8 @@ fn seed_rule_set_explores_catalog_indexed_access_filters_before_implementation()
     let optimizer = rules.optimizer();
     let key = catalog::ScopedPropertyKey::try_new("User", "age").unwrap();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -75,9 +79,9 @@ fn seed_rule_set_explores_catalog_indexed_access_filters_before_implementation()
     assert!(matches!(
         &best.expr,
         physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::EqualityIndex,
+            access: physical::PhysicalAccess::NodeExact(exact),
             ..
-        }
+        } if matches!(exact.as_ref(), exec::ExecNodeAccessPlan::Bitmap { .. })
     ));
 }
 
@@ -88,6 +92,8 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_intersections() {
     let age_key = range_key("User", "age", helix_ast::index::RangeIndexDirection::Asc);
     let score_key = catalog::ScopedPropertyKey::try_new("User", "score").unwrap();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -116,9 +122,14 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_intersections() {
     assert!(matches!(
         &best.expr,
         physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::SetIntersection,
+            access: physical::PhysicalAccess::NodeExact(exact),
             ..
-        }
+        } if matches!(
+            exact.as_ref(),
+            exec::ExecNodeAccessPlan::SecondarySet {
+                set: exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. }
+            }
+        )
     ));
 }
 
@@ -128,6 +139,8 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_unions() {
     let optimizer = rules.optimizer();
     let age_key = catalog::ScopedPropertyKey::try_new("User", "age").unwrap();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -154,8 +167,15 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_unions() {
     assert!(matches!(
         &best.expr,
         physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::SetUnion,
+            access: physical::PhysicalAccess::NodeExact(exact),
             ..
-        }
+        } if matches!(
+            exact.as_ref(),
+            exec::ExecNodeAccessPlan::SecondarySet {
+                set: exec::ExecNodeSecondarySetPlan::Bitmap(
+                    exec::ExecNodeBitmapExpr::BatchedUnionRead { .. }
+                )
+            }
+        )
     ));
 }

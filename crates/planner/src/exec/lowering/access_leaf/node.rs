@@ -102,11 +102,7 @@ pub(in crate::exec) fn node_exec_access(plan: SimpleNodeAccessLeaf<'_>) -> ExecN
             label: label.clone(),
         },
         SimpleNodeAccessLeaf::EqualityIndex { index, key, value } => {
-            ExecNodeAccessPlan::EqualityIndex {
-                index: index.clone(),
-                key: key.clone(),
-                value: value.clone(),
-            }
+            ExecNodeAccessPlan::exact_equality(index.clone(), key.clone(), value.clone())
         }
         SimpleNodeAccessLeaf::RangeIndex { index, key, range } => ExecNodeAccessPlan::RangeIndex {
             index: index.clone(),

@@ -18,6 +18,8 @@ pub enum SelectedRootConstructionError {
     RootTerminalPhysicalSuffixMismatch,
     /// A recursive selected root-stream input was paired with a parent-local prefix.
     RecursiveRootStreamInputNonLocalizedPrefix,
+    /// The selected count input did not match the physical program dependency shape.
+    CountInputMismatch,
 }
 
 /// A selected ordinary alternative wrapper could not be built because its

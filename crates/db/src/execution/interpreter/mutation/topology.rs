@@ -342,7 +342,7 @@ impl TopologyMutationRuntime {
                 .all(|mutation| *mutation == MembershipMutation::Present)
             {
                 let additions = mutations.keys().copied().collect::<RoaringTreemap>();
-                transaction.merge(
+                transaction.merge_commutative(
                     &key,
                     secondary::SecondaryEqualityValue::encode_ids(&additions),
                 )?;
@@ -388,7 +388,7 @@ impl TopologyMutationRuntime {
                         AdjacencyDirection::In => additions.add_in(neighbor),
                     }
                 }
-                transaction.merge(&key, edges::encode_edges(&additions))?;
+                transaction.merge_commutative(&key, edges::encode_edges(&additions))?;
                 self.staged_keys.insert(key);
                 continue;
             }
@@ -505,7 +505,7 @@ mod tests {
 
     use super::*;
 
-    async fn transaction(name: &str) -> DbTransaction {
+    async fn database(name: &str) -> Db {
         Db::builder(
             format!("topology-mutation-runtime/{name}"),
             Arc::new(InMemory::new()),
@@ -514,9 +514,251 @@ mod tests {
         .build()
         .await
         .expect("topology test database opens")
-        .begin(IsolationLevel::SerializableSnapshot)
-        .await
-        .expect("topology test transaction opens")
+    }
+
+    async fn transaction(name: &str) -> DbTransaction {
+        database(name)
+            .await
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("topology test transaction opens")
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum RaceRow {
+        NodeLabel(&'static str),
+        OutAdjacency(u64),
+    }
+
+    impl RaceRow {
+        fn stage(
+            self,
+            runtime: &mut TopologyMutationRuntime,
+            scope: DataScope,
+            id: u64,
+            mutation: MembershipMutation,
+        ) {
+            match (self, mutation) {
+                (Self::NodeLabel(label), MembershipMutation::Present) => {
+                    runtime.add_node_label(scope, label, id).unwrap();
+                }
+                (Self::NodeLabel(label), MembershipMutation::Absent) => {
+                    runtime.remove_node_label(scope, label, id).unwrap();
+                }
+                (Self::OutAdjacency(node), MembershipMutation::Present) => {
+                    runtime
+                        .add_adjacency(scope, node, id, helix_planner::ir::ExpandDirection::Out)
+                        .unwrap();
+                }
+                (Self::OutAdjacency(node), MembershipMutation::Absent) => {
+                    runtime
+                        .remove_adjacency(scope, node, id, helix_planner::ir::ExpandDirection::Out)
+                        .unwrap();
+                }
+            }
+        }
+
+        async fn ids(self, db: &Db, scope: DataScope) -> Vec<u64> {
+            match self {
+                Self::NodeLabel(label) => secondary::SecondaryEqualityValue::decode(
+                    &db.get(node_label_key(scope, label))
+                        .await
+                        .unwrap()
+                        .expect("node label race row exists"),
+                )
+                .unwrap()
+                .into_ids()
+                .iter()
+                .collect(),
+                Self::OutAdjacency(node) => edges::decode_edges(
+                    &db.get(
+                        Key::Data {
+                            scope,
+                            kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
+                        }
+                        .to_bytes(),
+                    )
+                    .await
+                    .unwrap()
+                    .expect("adjacency race row exists"),
+                )
+                .unwrap()
+                .iter_out()
+                .collect(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_add_only_rows_commit_and_preserve_every_topology_membership() {
+        let db = database("concurrent-add-only").await;
+        let scope = DataScope::LegacyUnscoped;
+        let left = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let right = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let mut left_runtime = TopologyMutationRuntime::default();
+        let mut right_runtime = TopologyMutationRuntime::default();
+
+        left_runtime.add_node_label(scope, "User", 1).unwrap();
+        right_runtime.add_node_label(scope, "User", 2).unwrap();
+        left_runtime.add_edge_pair(scope, 10, 20, 100).unwrap();
+        right_runtime.add_edge_pair(scope, 10, 20, 101).unwrap();
+        left_runtime
+            .add_edge_label(scope, 1, 9, "FOLLOWS", 100)
+            .unwrap();
+        right_runtime
+            .add_edge_label(scope, 1, 10, "FOLLOWS", 101)
+            .unwrap();
+        left_runtime
+            .add_edge_label(scope, 11, 2, "FOLLOWS", 102)
+            .unwrap();
+        right_runtime
+            .add_edge_label(scope, 12, 2, "FOLLOWS", 103)
+            .unwrap();
+        left_runtime
+            .add_adjacency(scope, 50, 60, helix_planner::ir::ExpandDirection::Both)
+            .unwrap();
+        right_runtime
+            .add_adjacency(scope, 50, 61, helix_planner::ir::ExpandDirection::Both)
+            .unwrap();
+
+        left_runtime.prepare(&left).await.unwrap();
+        right_runtime.prepare(&right).await.unwrap();
+        left_runtime.consume_prepared().unwrap();
+        right_runtime.consume_prepared().unwrap();
+        left.commit().await.unwrap();
+        right.commit().await.unwrap();
+
+        let bitmap_ids = |key| async {
+            secondary::SecondaryEqualityValue::decode(
+                &db.get(key).await.unwrap().expect("topology bitmap exists"),
+            )
+            .unwrap()
+            .into_ids()
+            .iter()
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(bitmap_ids(node_label_key(scope, "User")).await, vec![1, 2]);
+        assert_eq!(
+            bitmap_ids(edge_pair_key(scope, 10, 20)).await,
+            vec![100, 101]
+        );
+        assert_eq!(
+            bitmap_ids(edge_label_neighbor_key(
+                scope,
+                EdgeDirection::Out,
+                1,
+                "FOLLOWS",
+            ))
+            .await,
+            vec![9, 10]
+        );
+        assert_eq!(
+            bitmap_ids(edge_label_neighbor_key(
+                scope,
+                EdgeDirection::In,
+                2,
+                "FOLLOWS",
+            ))
+            .await,
+            vec![11, 12]
+        );
+        assert_eq!(
+            bitmap_ids(global_edge_label_key(scope, "FOLLOWS")).await,
+            vec![100, 101, 102, 103]
+        );
+        let adjacency = edges::decode_edges(
+            &db.get(
+                Key::Data {
+                    scope,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(50)),
+                }
+                .to_bytes(),
+            )
+            .await
+            .unwrap()
+            .expect("adjacency row exists"),
+        )
+        .unwrap();
+        assert_eq!(adjacency.iter_out().collect::<Vec<_>>(), vec![60, 61]);
+        assert_eq!(adjacency.iter_in().collect::<Vec<_>>(), vec![60, 61]);
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn topology_insert_remove_races_conflict_in_both_commit_orders() {
+        let db = database("insert-remove-races").await;
+        let scope = DataScope::LegacyUnscoped;
+        let cases = [
+            (RaceRow::NodeLabel("insert-first"), true),
+            (RaceRow::NodeLabel("remove-first"), false),
+            (RaceRow::OutAdjacency(100), true),
+            (RaceRow::OutAdjacency(101), false),
+        ];
+
+        for (row, insert_commits_first) in cases {
+            let seed = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut seed_runtime = TopologyMutationRuntime::default();
+            row.stage(&mut seed_runtime, scope, 1, MembershipMutation::Present);
+            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.consume_prepared().unwrap();
+            seed.commit().await.unwrap();
+
+            let insert = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let remove = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut insert_runtime = TopologyMutationRuntime::default();
+            row.stage(&mut insert_runtime, scope, 2, MembershipMutation::Present);
+            insert_runtime.prepare(&insert).await.unwrap();
+            insert_runtime.consume_prepared().unwrap();
+            let mut remove_runtime = TopologyMutationRuntime::default();
+            row.stage(&mut remove_runtime, scope, 1, MembershipMutation::Absent);
+            remove_runtime.prepare(&remove).await.unwrap();
+            remove_runtime.consume_prepared().unwrap();
+
+            let retry_mutation = if insert_commits_first {
+                insert.commit().await.unwrap();
+                let error = remove.commit().await.expect_err("remove must conflict");
+                assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
+                MembershipMutation::Absent
+            } else {
+                remove.commit().await.unwrap();
+                let error = insert.commit().await.expect_err("insert must conflict");
+                assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
+                MembershipMutation::Present
+            };
+
+            let retry = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut retry_runtime = TopologyMutationRuntime::default();
+            row.stage(
+                &mut retry_runtime,
+                scope,
+                if insert_commits_first { 1 } else { 2 },
+                retry_mutation,
+            );
+            retry_runtime.prepare(&retry).await.unwrap();
+            retry_runtime.consume_prepared().unwrap();
+            retry.commit().await.unwrap();
+            assert_eq!(row.ids(&db, scope).await, vec![2]);
+        }
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

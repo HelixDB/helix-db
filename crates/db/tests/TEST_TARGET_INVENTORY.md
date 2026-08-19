@@ -36,6 +36,8 @@ The final inventory reports exactly:
 | `secondary_lifecycle_public_step_contract` | `test` | `crates/db/tests/secondary_lifecycle_public_step_contract.rs` | Checks the public bounded-step lifecycle boundary. |
 | `text_correctness_support` | `test` | `crates/db/tests/text_correctness_support.rs` | Checks shared text correctness support independently. |
 | `writer_fence_contract` | `test` | `crates/db/tests/writer_fence_contract.rs` | Proves a newer SlateDB writer claims its epoch before open returns and an already-open transaction from the old writer is rejected as fenced. |
+| `embedded_write_latency` | `bench` | `crates/db/benches/embedded_write_latency.rs` | Measures fixed in-memory and disk embedded write latency through the public client boundary. |
+| `fts_prefilter` | `bench` | `crates/db/benches/fts_prefilter.rs` | Measures exact traversal-scoped full-text prefiltering against the production text lifecycle. |
 | `secondary_equality_hot_path` | `bench` | `crates/db/benches/secondary_equality_hot_path.rs` | Measures 50-index V4 equality write and read throughput, latency, and allocations. |
 | `secondary_equality_read_scale` | `bench` | `crates/db/benches/secondary_equality_read_scale.rs` | Measures equality lookup cost over the 10,000-node shared-value fixture. |
 | `text_transaction_batching` | `bench` | `crates/db/benches/text_transaction_batching.rs` | Measures text transaction batching. |

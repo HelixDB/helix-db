@@ -222,6 +222,7 @@ pub(crate) async fn open_db_with_object_store(
         .expect("object-store db opens")
 }
 
+#[cfg(test)]
 pub(crate) async fn open_reader_with_config(config: TestDbConfig) -> HelixDB {
     HelixDB::open_reader_with_object_store_for_tests_inner(
         config.database.clone(),
@@ -409,4 +410,24 @@ pub(crate) async fn add_edge_with_properties(
         panic!("edge write should return an edge row");
     };
     *id
+}
+
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) async fn run_production_contracts() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let config = in_memory_config_with_store("interpreter-support-contracts", Arc::clone(&store))
+        .with_range_desc_index("User", "rank")
+        .with_edge_range_desc_index("KNOWS", "rank");
+    assert_eq!(config.indexes.len(), 2);
+    assert!(Arc::ptr_eq(&config.object_store(), &store));
+
+    let plan = subplan(vec![step(1, Vec::new(), exec::ExecOp::Noop)], 1);
+    assert_eq!(plan.root(), exec::ExecStepId::new(1).unwrap());
+
+    let db = open_db_with_object_store("interpreter-support-graph", store).await;
+    let alice = add_user(&db, "alice").await;
+    let bob = add_user(&db, "bob").await;
+    let edge = add_edge(&db, alice, bob, "KNOWS").await;
+    assert_ne!(alice, bob);
+    assert_ne!(edge, u64::MAX);
 }

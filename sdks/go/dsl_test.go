@@ -707,6 +707,43 @@ func TestClientExecConflictError(t *testing.T) {
 	}
 }
 
+func TestClientExecParsesNewLegacyFutureMissingAndMalformedErrors(t *testing.T) {
+	cases := []struct {
+		body    string
+		code    QueryErrorCode
+		details string
+	}{
+		{`{"error":"index_not_found","msg":"missing index"}`, QueryErrorCode("index_not_found"), "missing index"},
+		{`{"error":"legacy message","code":"index_not_found"}`, QueryErrorCode("index_not_found"), "legacy message"},
+		{`{"error":"future_code","msg":"future message"}`, QueryErrorCode("future_code"), "future message"},
+		{`{"error":"message without code"}`, QueryErrorCode(""), "message without code"},
+		{"not JSON", QueryErrorCode(""), "not JSON"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(testCase.body))
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = client.Exec(context.Background(), findUsers("acme", 25), nil)
+			var helixErr *HelixError
+			if !errors.As(err, &helixErr) {
+				t.Fatalf("expected HelixError, got %T", err)
+			}
+			if helixErr.Code != testCase.code || helixErr.Details != testCase.details {
+				t.Fatalf("unexpected remote error: code=%q details=%q", helixErr.Code, helixErr.Details)
+			}
+		})
+	}
+}
+
 func TestClientAPIKeyMutationIsRaceSafe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

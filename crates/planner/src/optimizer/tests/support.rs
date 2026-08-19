@@ -245,6 +245,8 @@ pub(super) fn alternative_with_element(
 
 pub(super) fn config() -> optimizer::OptimizerConfig {
     optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: context::OptimizerLimits {
             memo_groups: properties::PositiveUsize::new(8).unwrap(),
             memo_expressions: properties::PositiveUsize::new(8).unwrap(),

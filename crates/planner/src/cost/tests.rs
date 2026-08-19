@@ -110,6 +110,10 @@ fn storage_cost_profile_overrides_cover_every_tunable_field() {
                 "range_next": 6,
                 "cpu_predicate_eval": 7,
                 "stream_operator_eval": 8,
+                "bitmap_decode_per_id": 23,
+                "secondary_set_per_id": 24,
+                "secondary_row_materialization_per_id": 25,
+                "authoritative_verify_per_id": 26,
                 "sort_setup": 9,
                 "sort_per_row": 10,
                 "barrier_overhead": 11,
@@ -118,8 +122,10 @@ fn storage_cost_profile_overrides_cover_every_tunable_field() {
                 "task_overhead": 14,
                 "default_key_read_bytes": 15,
                 "default_materialized_row_bytes": 16,
+                "default_bitmap_id_bytes": 27,
                 "default_unknown_scan_rows": 17,
                 "default_equality_index_rows": 18,
+                "default_range_index_rows": 28,
                 "default_unique_equality_rows": 1,
                 "max_parallel_kv_reads": 20,
                 "close_key_multi_get_batch": 21,
@@ -136,6 +142,16 @@ fn storage_cost_profile_overrides_cover_every_tunable_field() {
     assert_eq!(profile.range_next, LatencyEstimate::micros(6));
     assert_eq!(profile.cpu_predicate_eval, LatencyEstimate::micros(7));
     assert_eq!(profile.stream_operator_eval, LatencyEstimate::micros(8));
+    assert_eq!(profile.bitmap_decode_per_id, LatencyEstimate::micros(23));
+    assert_eq!(profile.secondary_set_per_id, LatencyEstimate::micros(24));
+    assert_eq!(
+        profile.secondary_row_materialization_per_id,
+        LatencyEstimate::micros(25)
+    );
+    assert_eq!(
+        profile.authoritative_verify_per_id,
+        LatencyEstimate::micros(26)
+    );
     assert_eq!(profile.sort_setup, LatencyEstimate::micros(9));
     assert_eq!(profile.sort_per_row, LatencyEstimate::micros(10));
     assert_eq!(profile.barrier_overhead, LatencyEstimate::micros(11));
@@ -147,8 +163,10 @@ fn storage_cost_profile_overrides_cover_every_tunable_field() {
         profile.default_materialized_row_bytes,
         ByteEstimate::bytes(16)
     );
+    assert_eq!(profile.default_bitmap_id_bytes, ByteEstimate::bytes(27));
     assert_eq!(profile.default_unknown_scan_rows, EstimatedRows::rows(17));
     assert_eq!(profile.default_equality_index_rows, EstimatedRows::rows(18));
+    assert_eq!(profile.default_range_index_rows, EstimatedRows::rows(28));
     assert_eq!(
         profile.default_unique_equality_rows,
         UniqueEqualityRows::rows(1).unwrap()
@@ -193,6 +211,7 @@ fn cost_vectors_scale_without_repeat_loops() {
     let cost = CostVector {
         latency: LatencyEstimate::micros(3),
         object_reads: 2,
+        authoritative_graph_reads: 4,
         multi_get_calls: 1,
         range_seeks: 1,
         range_nexts: 5,
@@ -206,12 +225,41 @@ fn cost_vectors_scale_without_repeat_loops() {
 
     assert_eq!(scaled.latency, LatencyEstimate::micros(9));
     assert_eq!(scaled.object_reads, 6);
+    assert_eq!(scaled.authoritative_graph_reads, 12);
     assert_eq!(scaled.multi_get_calls, 3);
     assert_eq!(scaled.range_nexts, 15);
     assert_eq!(scaled.cpu_units, 21);
     assert_eq!(scaled.bytes, ByteEstimate::bytes(33));
     assert_eq!(scaled.peak_memory, ByteEstimate::bytes(13));
     assert_eq!(scaled.parallel_width, 4);
+}
+
+#[test]
+fn v2_secondary_costs_distinguish_bitmap_unique_null_range_and_batch_io() {
+    let profile = StorageCostProfile::default();
+    let rows = EstimatedRows::rows(4);
+
+    let bitmap = profile.bitmap_equality_lookup(rows);
+    assert_eq!(bitmap.object_reads, 1);
+    assert_eq!(bitmap.range_seeks, 0);
+    assert_eq!(bitmap.authoritative_graph_reads, 0);
+
+    let batch = profile.bitmap_equality_batch(PositiveUsize::new(3).unwrap(), rows);
+    assert_eq!(batch.object_reads, 3);
+    assert_eq!(batch.multi_get_calls, 1);
+    assert_eq!(batch.range_seeks, 0);
+
+    let unique = profile.unique_equality_lookup(EstimatedRows::rows(1));
+    assert_eq!(unique.object_reads, 2);
+    assert_eq!(unique.authoritative_graph_reads, 1);
+
+    let null = profile.null_equality_scan(rows);
+    assert_eq!(null.range_seeks, 1);
+    assert_eq!(null.authoritative_graph_reads, 4);
+
+    let range = profile.secondary_range_lookup(rows);
+    assert_eq!(range.range_nexts, 4);
+    assert_eq!(range.authoritative_graph_reads, 4);
 }
 
 #[test]

@@ -10,7 +10,7 @@ use crate::logical::access::{
 use crate::logical::pure::{FilterChain, FilterPushdown, PurePipeline};
 use crate::logical::root::{
     RootBranch, RootIndexDdl, RootMutation, RootPipeline, RootRepeat, RootShortestPath,
-    StreamAggregate, StreamProject, StreamReserved, StreamVariableWrite,
+    StreamAggregate, StreamCardinality, StreamProject, StreamReserved, StreamVariableWrite,
 };
 use crate::logical::variables::VariableSource;
 use crate::properties;
@@ -50,6 +50,8 @@ pub enum LogicalExpr {
     StreamReserved(StreamReserved),
     /// Projection terminal applied directly to a supported root stream.
     StreamProject(StreamProject),
+    /// Cardinality terminal applied directly to a supported root stream.
+    StreamCardinality(StreamCardinality),
     /// Aggregation terminal applied directly to a supported root stream.
     StreamAggregate(StreamAggregate),
     /// State-writing variable terminal applied directly to a supported root stream.
@@ -105,6 +107,8 @@ pub enum LogicalExprKind {
     StreamReserved,
     /// `LogicalExpr::StreamProject`.
     StreamProject,
+    /// `LogicalExpr::StreamCardinality`.
+    StreamCardinality,
     /// `LogicalExpr::StreamAggregate`.
     StreamAggregate,
     /// `LogicalExpr::StreamVariableWrite`.
@@ -125,7 +129,7 @@ pub enum LogicalExprKind {
 
 impl LogicalExprKind {
     /// All top-level logical expression families.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Pure,
         Self::VariableSource,
         Self::PurePipeline,
@@ -140,6 +144,7 @@ impl LogicalExprKind {
         Self::RootPipeline,
         Self::StreamReserved,
         Self::StreamProject,
+        Self::StreamCardinality,
         Self::StreamAggregate,
         Self::StreamVariableWrite,
         Self::RootMutation,
@@ -169,6 +174,7 @@ impl LogicalExpr {
             Self::RootPipeline(_) => LogicalExprKind::RootPipeline,
             Self::StreamReserved(_) => LogicalExprKind::StreamReserved,
             Self::StreamProject(_) => LogicalExprKind::StreamProject,
+            Self::StreamCardinality(_) => LogicalExprKind::StreamCardinality,
             Self::StreamAggregate(_) => LogicalExprKind::StreamAggregate,
             Self::StreamVariableWrite(_) => LogicalExprKind::StreamVariableWrite,
             Self::RootMutation(_) => LogicalExprKind::RootMutation,
@@ -197,6 +203,7 @@ impl LogicalExpr {
             Self::RootPipeline(pipeline) => pipeline.effect(),
             Self::StreamReserved(reserved) => reserved.effect(),
             Self::StreamProject(project) => project.effect(),
+            Self::StreamCardinality(cardinality) => cardinality.effect(),
             Self::StreamAggregate(aggregate) => aggregate.effect(),
             Self::StreamVariableWrite(_)
             | Self::RootMutation(_)

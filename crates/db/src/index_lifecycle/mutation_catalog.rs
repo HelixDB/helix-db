@@ -669,3 +669,7 @@ mod tests {
         db.close().await.expect("fixture database closes");
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/index_lifecycle_mutation_catalog_contracts.rs"]
+mod external_contracts;

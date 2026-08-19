@@ -93,7 +93,7 @@ fn selected_root_stream_input_recurses_through_supported_root_stream_variants() 
         &ctx,
         &logical::RootStream::Project(Box::new(logical::StreamProject::new(
             support::variable_stream(),
-            ir::ProjectionPlan::Count,
+            ir::ProjectionPlan::Exists,
         ))),
         &mut metrics,
     )

@@ -39,7 +39,10 @@ impl TryFrom<EmbeddedCacheConfig> for db::config::CacheConfig {
     type Error = HelixError;
 
     fn try_from(value: EmbeddedCacheConfig) -> Result<Self, Self::Error> {
-        let invalid = |message: String| HelixError::InvalidConfig { message };
+        let invalid = |msg: String| HelixError::InvalidConfig {
+            error: helix_ast::error_code::QueryErrorCode::InvalidConfiguration.to_string(),
+            msg,
+        };
         let vector_memory = db::config::VectorMemorySettings::try_new(
             db::config::VectorMemoryBudget::bounded(value.vector_memory_bytes)
                 .map_err(|error| invalid(error.to_string()))?,
@@ -472,6 +475,11 @@ mod tests {
             .await
             .expect_err("invalid query JSON should fail");
 
-        assert!(matches!(err, HelixError::InvalidRequest { .. }));
+        assert!(matches!(
+            err,
+            HelixError::InvalidRequest { error, msg }
+                if error == "invalid_query_json"
+                    && msg.starts_with("Query error: invalid query JSON:")
+        ));
     }
 }

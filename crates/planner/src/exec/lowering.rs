@@ -12,6 +12,7 @@ mod access_leaf;
 mod conditions;
 mod contracts;
 mod costing;
+mod secondary_set;
 
 pub(in crate::exec) use self::access_leaf::{
     edge_exec_access, node_exec_access, SimpleEdgeAccessLeaf, SimpleNodeAccessLeaf,
@@ -33,6 +34,7 @@ use self::costing::parallel_merge_cost;
 pub(in crate::exec) use self::costing::{
     edge_access_cost, foreach_subplan_cost, node_access_cost, predicate_cost_for_rows,
 };
+pub(crate) use self::secondary_set::{edge_secondary_set, node_secondary_set};
 
 pub(in crate::exec) struct ExecutableDagBuilder<'a> {
     pub(in crate::exec) profile: &'a cost::StorageCostProfile,

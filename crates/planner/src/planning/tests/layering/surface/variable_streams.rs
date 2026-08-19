@@ -31,27 +31,22 @@ fn single_run_executable_entrypoint_uses_cascades_selected_variable_source_proje
 
     let plan = crate::planning::plan_read_batch(&batch, &PlannerContext::default()).unwrap();
 
-    assert_eq!(plan.steps().len(), 2);
+    assert_eq!(plan.steps().len(), 1);
     assert!(plan.metrics().memo_groups >= 1);
     assert_eq!(plan.metrics().alternatives_considered, 1);
     assert!(matches!(
         &plan.steps()[0].op,
-        crate::exec::ExecOp::Variable {
-            op: crate::exec::ExecVariableOp::SourceInject { variable }
-        } if variable.as_ref() == "users"
+        crate::exec::ExecOp::Count { plan }
+            if matches!(
+                plan.as_ref(),
+                ExecCountPlan::RuntimeInput {
+                    input: ExecRuntimeInputPlan::Variable(variable),
+                    ..
+                } if variable.as_ref() == "users"
+            )
     ));
     assert!(matches!(
-        &plan.steps()[1].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count
-        }
-    ));
-    assert_eq!(
-        plan.steps()[1].dependencies,
-        vec![crate::exec::ExecStepId::new(1).unwrap()]
-    );
-    assert!(matches!(
-        &plan.steps()[1].output,
+        &plan.steps()[0].output,
         BatchOutputPlan::Bind(name) if name.as_ref() == "count"
     ));
 }
@@ -98,33 +93,16 @@ fn single_run_executable_entrypoint_uses_cascades_selected_variable_source_pipel
 
     let plan = crate::planning::plan_read_batch(&batch, &PlannerContext::default()).unwrap();
 
-    assert_eq!(plan.steps().len(), 3);
+    assert_eq!(plan.steps().len(), 1);
     assert!(plan.metrics().memo_groups >= 2);
     assert_eq!(plan.metrics().alternatives_considered, 2);
     assert!(matches!(
         &plan.steps()[0].op,
-        crate::exec::ExecOp::Variable {
-            op: crate::exec::ExecVariableOp::SourceInject { variable }
-        } if variable.as_ref() == "users"
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::Stream(_))
     ));
     assert!(matches!(
-        &plan.steps()[1].op,
-        crate::exec::ExecOp::Variable {
-            op: crate::exec::ExecVariableOp::Stream(StreamVariableOp::Select(variable))
-        } if variable.as_ref() == "cached"
-    ));
-    assert!(matches!(
-        &plan.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count
-        }
-    ));
-    assert_eq!(
-        plan.steps()[2].dependencies,
-        vec![crate::exec::ExecStepId::new(2).unwrap()]
-    );
-    assert!(matches!(
-        &plan.steps()[2].output,
+        &plan.steps()[0].output,
         BatchOutputPlan::Bind(name) if name.as_ref() == "count"
     ));
 }

@@ -4,6 +4,7 @@ package helix
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -24,5 +25,30 @@ func TestGeneratedEmbeddedClientExecutesQuery(t *testing.T) {
 	}
 	if len(response.Users) != 0 {
 		t.Fatalf("expected no users in a new embedded database, got %d", len(response.Users))
+	}
+}
+
+func TestGeneratedEmbeddedErrorPreservesCodeAndMessage(t *testing.T) {
+	client, err := NewEmbeddedClient(InMemorySource{Database: "go-generated-embedded-error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close generated embedded client: %v", err)
+		}
+	})
+
+	_, err = client.embedded.QueryJson([]byte("{"))
+	var queryErr nativeQueryError
+	if !errors.As(err, &queryErr) {
+		t.Fatalf("expected generated query error, got %T: %v", err, err)
+	}
+	code, msg := queryErr.QueryError()
+	if code != QueryErrorCode("invalid_query_json") {
+		t.Fatalf("unexpected error code: %q", code)
+	}
+	if msg == "" {
+		t.Fatal("generated error message is empty")
 	}
 }

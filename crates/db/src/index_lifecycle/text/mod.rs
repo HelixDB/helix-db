@@ -33,6 +33,8 @@ pub(crate) mod mutation;
 mod projection;
 pub(crate) mod serving;
 pub(crate) mod statistics;
+#[cfg(test)]
+mod test_support;
 #[cfg(feature = "production-coverage")]
 pub(crate) use serving::production_contracts::run as run_serving_contracts;
 pub(crate) mod active_compaction;

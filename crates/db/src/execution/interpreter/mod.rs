@@ -6,6 +6,7 @@
 
 mod access;
 mod control;
+mod count;
 mod ddl;
 mod dependencies;
 mod dispatch;
@@ -20,7 +21,8 @@ mod state;
 mod storage;
 mod stream;
 mod subplan;
-#[cfg(test)]
+#[cfg(any(test, feature = "production-coverage"))]
+#[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
 mod test_support;
 mod types;
 
@@ -46,6 +48,12 @@ use crate::encoding::property::Property;
 use crate::encoding::v1::values;
 use crate::error::{HelixDbError, Result};
 use crate::HelixDB;
+
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) async fn run_cardinality_production_contracts() {
+    access::run_production_contracts().await;
+    count::run_production_contracts().await;
+}
 
 /// Step-by-step executor for planner executable IR.
 pub struct Interpreter<'db> {
@@ -244,6 +252,7 @@ impl RequestSideEffects {
             exec::ExecOp::Repeat { plan } => Self::subplan(&plan.body),
             exec::ExecOp::ForEach { body, .. } => Self::subplan(body),
             exec::ExecOp::Access { .. }
+            | exec::ExecOp::Count { .. }
             | exec::ExecOp::KvRead(_)
             | exec::ExecOp::Expand { .. }
             | exec::ExecOp::VectorSearch { .. }

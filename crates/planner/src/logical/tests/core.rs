@@ -79,6 +79,13 @@ fn logical_expr_separates_pure_and_barrier_effects() {
         properties::EffectKind::Pure
     );
     assert_eq!(
+        StreamCardinality::new(RootStream::Access(AccessStream::Path(node_access_path(
+            ir::NodeAccessPlan::AllScan,
+        ))))
+        .effect(),
+        properties::EffectKind::Pure
+    );
+    assert_eq!(
         LogicalExpr::StreamVariableWrite(StreamVariableWrite::new(
             RootStream::Access(AccessStream::Path(node_access_path(
                 ir::NodeAccessPlan::AllScan,
@@ -113,7 +120,7 @@ fn logical_expr_separates_pure_and_barrier_effects() {
     assert_eq!(
         LogicalExpr::StreamProject(StreamProject::new(
             RootStream::Pipeline(Box::new(stateful_root_pipeline)),
-            ir::ProjectionPlan::Count,
+            ir::ProjectionPlan::Exists,
         ))
         .effect(),
         properties::EffectKind::Barrier

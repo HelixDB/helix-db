@@ -1,12 +1,14 @@
 //! Contract tests for database, cache, and index configuration validation.
 
 use super::{
-    scoped_secondary_index_property, CacheConfig, CacheMode, DbConfig, DiskCacheConfig,
-    EdgeEncoding, EdgeUpdatePolicy, FtsHybridCacheConfig, FtsMemoryCacheConfig, FtsWarmConfig,
-    HelixConfig, NonEmptyPathBuf, ObjectStoreWarmLevel, RangeIndexDirection, RuntimeIndexCatalog,
+    scoped_secondary_index_property, CacheConfig, CacheMode, CacheWarmMode, DbConfig,
+    DiskCacheConfig, EdgeEncoding, EdgeUpdatePolicy, FtsHybridCacheConfig, FtsMemoryCacheConfig,
+    FtsWarmConfig, HelixConfig, MigrationActiveIntervalMillis, MigrationBatchBytes,
+    MigrationBatchRows, MigrationIdleIntervalMillis, MigrationTuning, MigrationWorkerMode,
+    NonEmptyPathBuf, ObjectStoreWarmLevel, RangeIndexDirection, RuntimeIndexCatalog,
     SearchIndexBackfillLimits, SecondaryIndexDefinition, SecondaryIndexElementType,
     SecondaryIndexKind, SecondaryIndexLifecycleBatchRows, SimHasherCacheSettings,
-    SlateHybridCacheConfig, SlateMemoryCacheConfig, SlateObjectStoreCacheSettings,
+    SlateHybridCacheConfig, SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig,
     TextAnalyzerKind, TextElementType, TextIndexDefinition, VectorElementType,
     VectorIndexDefinition, VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
 };
@@ -407,6 +409,118 @@ fn cache_constructor_edges_and_accessors_are_explicit_contracts() {
 }
 
 #[test]
+fn warm_mode_and_slate_cache_contracts_cover_every_variant_and_bound() {
+    for (input, expected) in [
+        (" BLOCKING ", CacheWarmMode::Blocking),
+        ("background", CacheWarmMode::Background),
+        ("Off", CacheWarmMode::Off),
+    ] {
+        assert_eq!(input.parse::<CacheWarmMode>().unwrap(), expected);
+    }
+    assert!("eager"
+        .parse::<CacheWarmMode>()
+        .unwrap_err()
+        .contains("expected blocking, background, or off"));
+
+    let memory = SlateMemoryCacheConfig::try_new(u64::MAX, 1).unwrap();
+    assert_eq!(memory.block_bytes(), u64::MAX);
+    assert_eq!(memory.metadata_bytes(), 1);
+    assert_eq!(memory.total_bytes(), u64::MAX);
+
+    let background = SlateWarmConfig::background(2, 3).unwrap();
+    let blocking = SlateWarmConfig::blocking(4, 5).unwrap();
+    for (warm, mode, concurrency, limit) in [
+        (SlateWarmConfig::Off, CacheWarmMode::Off, 1, 0),
+        (background, CacheWarmMode::Background, 2, 3),
+        (blocking, CacheWarmMode::Blocking, 4, 5),
+    ] {
+        assert_eq!(warm.mode(), mode);
+        assert_eq!(warm.concurrency(), concurrency);
+        assert_eq!(warm.startup_sst_limit(), limit);
+    }
+    assert!(SlateWarmConfig::background(1, 0).is_err());
+    assert!(SlateWarmConfig::blocking(0, 1).is_err());
+
+    assert!(SlateObjectStoreCacheSettings::try_new(
+        "",
+        None,
+        1,
+        false,
+        ObjectStoreWarmLevel::Off,
+        None,
+        1,
+    )
+    .is_err());
+    let uncapped = SlateObjectStoreCacheSettings::try_new(
+        "/tmp/uncapped-object-store",
+        None,
+        2,
+        false,
+        ObjectStoreWarmLevel::Off,
+        None,
+        3,
+    )
+    .unwrap()
+    .to_slate_options();
+    assert_eq!(uncapped.max_cache_size_bytes, None);
+    assert_eq!(uncapped.scan_interval, None);
+}
+
+#[test]
+fn fts_cache_contracts_cover_every_mode_accessor_and_invalid_tier() {
+    let background = FtsWarmConfig::background(2, Some(3)).unwrap();
+    let blocking = FtsWarmConfig::blocking(4, None).unwrap();
+    for (warm, mode, concurrency, generation_limit) in [
+        (FtsWarmConfig::Off, CacheWarmMode::Off, 1, None),
+        (background.clone(), CacheWarmMode::Background, 2, Some(3)),
+        (blocking, CacheWarmMode::Blocking, 4, None),
+    ] {
+        assert_eq!(warm.mode(), mode);
+        assert_eq!(warm.concurrency(), concurrency);
+        assert_eq!(warm.startup_generation_limit(), generation_limit);
+    }
+    assert!(FtsWarmConfig::background(1, Some(0)).is_err());
+    assert!(FtsWarmConfig::blocking(0, None).is_err());
+
+    let memory = FtsMemoryCacheConfig::try_new(7, background.clone(), 11).unwrap();
+    assert_eq!(memory.memory_bytes(), 7);
+    assert_eq!(memory.warm(), &background);
+    assert_eq!(memory.warm_mode(), CacheWarmMode::Background);
+    assert_eq!(memory.warm_concurrency(), 2);
+    assert_eq!(memory.startup_generation_limit(), Some(3));
+    assert_eq!(
+        memory.generation_grace_period(),
+        std::time::Duration::from_secs(11)
+    );
+
+    let hybrid =
+        FtsHybridCacheConfig::try_new(13, "/tmp/fts-complete", 17, background.clone(), 19).unwrap();
+    assert_eq!(hybrid.memory_bytes(), 13);
+    assert_eq!(
+        hybrid.disk().root(),
+        std::path::Path::new("/tmp/fts-complete")
+    );
+    assert_eq!(hybrid.warm(), &background);
+    assert_eq!(hybrid.warm_mode(), CacheWarmMode::Background);
+    assert_eq!(hybrid.warm_concurrency(), 2);
+    assert_eq!(hybrid.startup_generation_limit(), Some(3));
+    assert_eq!(
+        hybrid.generation_grace_period(),
+        std::time::Duration::from_secs(19)
+    );
+    assert_eq!(
+        hybrid.disk_root(),
+        std::path::PathBuf::from("/tmp/fts-complete")
+    );
+    assert_eq!(hybrid.disk_bytes(), 17);
+
+    assert!(FtsHybridCacheConfig::try_new(0, "/tmp/fts", 1, FtsWarmConfig::Off, 1).is_err());
+    assert!(FtsHybridCacheConfig::try_new(1, "", 1, FtsWarmConfig::Off, 1).is_err());
+    assert!(FtsHybridCacheConfig::try_new(1, "/tmp/fts", 0, FtsWarmConfig::Off, 1).is_err());
+    assert!(FtsHybridCacheConfig::try_new(1, "/tmp/fts", 1, FtsWarmConfig::Off, 0).is_err());
+}
+
+#[test]
 fn cache_config_represents_vector_only_memory_and_hybrid_states() {
     let vector_only =
         CacheConfig::new(VectorMemorySettings::default(), CacheMode::VectorMemoryOnly);
@@ -457,6 +571,119 @@ fn cache_config_represents_vector_only_memory_and_hybrid_states() {
     );
     assert_eq!(hybrid.fts_memory_bytes(), 32);
     assert_eq!(hybrid.fts_disk_bytes(), 64);
+}
+
+#[test]
+fn cache_config_projects_every_optional_fts_and_warm_lane() {
+    let vector_only =
+        CacheConfig::new(VectorMemorySettings::default(), CacheMode::VectorMemoryOnly);
+    assert_eq!(vector_only.slate_warm(), None);
+    assert_eq!(vector_only.fts_memory_bytes(), 0);
+    assert_eq!(vector_only.fts_disk_root(), None);
+    assert_eq!(vector_only.fts_disk_bytes(), 0);
+    assert_eq!(vector_only.fts_warm_mode(), CacheWarmMode::Off);
+    assert_eq!(vector_only.fts_warm_concurrency(), 1);
+    assert_eq!(vector_only.fts_startup_generation_limit(), None);
+    assert_eq!(
+        vector_only.fts_generation_grace_period(),
+        std::time::Duration::from_secs(300)
+    );
+
+    let memory_without_fts = CacheConfig::new(
+        VectorMemorySettings::default(),
+        CacheMode::Memory {
+            slate_db: SlateMemoryCacheConfig::try_new(1, 1).unwrap(),
+            slate_warm: SlateWarmConfig::Off,
+            fts: None,
+        },
+    );
+    assert_eq!(memory_without_fts.slate_warm(), Some(&SlateWarmConfig::Off));
+    assert_eq!(memory_without_fts.fts_memory_bytes(), 0);
+    assert_eq!(memory_without_fts.fts_disk_root(), None);
+    assert_eq!(memory_without_fts.fts_warm_mode(), CacheWarmMode::Off);
+    assert_eq!(memory_without_fts.fts_warm_concurrency(), 1);
+    assert_eq!(memory_without_fts.fts_startup_generation_limit(), None);
+
+    let memory_fts =
+        FtsMemoryCacheConfig::try_new(23, FtsWarmConfig::blocking(29, Some(31)).unwrap(), 37)
+            .unwrap();
+    let memory_with_fts = CacheConfig::new(
+        VectorMemorySettings::default(),
+        CacheMode::Memory {
+            slate_db: SlateMemoryCacheConfig::try_new(1, 1).unwrap(),
+            slate_warm: SlateWarmConfig::background(2, 3).unwrap(),
+            fts: Some(memory_fts),
+        },
+    );
+    assert_eq!(memory_with_fts.fts_memory_bytes(), 23);
+    assert_eq!(memory_with_fts.fts_warm_mode(), CacheWarmMode::Blocking);
+    assert_eq!(memory_with_fts.fts_warm_concurrency(), 29);
+    assert_eq!(memory_with_fts.fts_startup_generation_limit(), Some(31));
+    assert_eq!(
+        memory_with_fts.fts_generation_grace_period(),
+        std::time::Duration::from_secs(37)
+    );
+
+    let object_store = SlateObjectStoreCacheSettings::try_new(
+        "/tmp/cache-config-object-store",
+        None,
+        1,
+        false,
+        ObjectStoreWarmLevel::Off,
+        None,
+        1,
+    )
+    .unwrap();
+    let hybrid_without_fts = CacheConfig::new(
+        VectorMemorySettings::default(),
+        CacheMode::Hybrid {
+            slate_db: SlateHybridCacheConfig::try_new(1, "/tmp/cache-config-slate", 1).unwrap(),
+            object_store: object_store.clone(),
+            slate_warm: SlateWarmConfig::blocking(2, 3).unwrap(),
+            fts: None,
+        },
+    );
+    assert!(matches!(
+        hybrid_without_fts.slate_warm(),
+        Some(SlateWarmConfig::Blocking { .. })
+    ));
+    assert_eq!(hybrid_without_fts.fts_memory_bytes(), 0);
+    assert_eq!(hybrid_without_fts.fts_disk_root(), None);
+    assert_eq!(hybrid_without_fts.fts_disk_bytes(), 0);
+    assert_eq!(hybrid_without_fts.fts_warm_mode(), CacheWarmMode::Off);
+    assert_eq!(hybrid_without_fts.fts_warm_concurrency(), 1);
+    assert_eq!(hybrid_without_fts.fts_startup_generation_limit(), None);
+
+    let hybrid_fts = FtsHybridCacheConfig::try_new(
+        41,
+        "/tmp/cache-config-fts",
+        43,
+        FtsWarmConfig::background(47, None).unwrap(),
+        53,
+    )
+    .unwrap();
+    let hybrid_with_fts = CacheConfig::new(
+        VectorMemorySettings::default(),
+        CacheMode::Hybrid {
+            slate_db: SlateHybridCacheConfig::try_new(1, "/tmp/cache-config-slate", 1).unwrap(),
+            object_store,
+            slate_warm: SlateWarmConfig::Off,
+            fts: Some(hybrid_fts),
+        },
+    );
+    assert_eq!(hybrid_with_fts.fts_memory_bytes(), 41);
+    assert_eq!(
+        hybrid_with_fts.fts_disk_root(),
+        Some(std::path::PathBuf::from("/tmp/cache-config-fts"))
+    );
+    assert_eq!(hybrid_with_fts.fts_disk_bytes(), 43);
+    assert_eq!(hybrid_with_fts.fts_warm_mode(), CacheWarmMode::Background);
+    assert_eq!(hybrid_with_fts.fts_warm_concurrency(), 47);
+    assert_eq!(hybrid_with_fts.fts_startup_generation_limit(), None);
+    assert_eq!(
+        hybrid_with_fts.fts_generation_grace_period(),
+        std::time::Duration::from_secs(53)
+    );
 }
 
 #[test]
@@ -528,6 +755,60 @@ fn vector_memory_config_rejects_invalid_zero_values() {
     assert_eq!(defaults.bytes(), 32 * 1024 * 1024);
     assert_eq!(defaults.entries(), 64);
     assert_eq!(defaults.maximum_f32_dimension(), 131_072);
+}
+
+#[test]
+fn migration_tuning_types_reject_zero_and_project_every_replacement() {
+    assert_eq!(MigrationBatchRows::new(0), None);
+    assert_eq!(MigrationBatchBytes::new(0), None);
+    assert_eq!(MigrationActiveIntervalMillis::new(0), None);
+    assert_eq!(MigrationIdleIntervalMillis::new(0), None);
+
+    let rows = MigrationBatchRows::new(2).unwrap();
+    let bytes = MigrationBatchBytes::new(3).unwrap();
+    let active = MigrationActiveIntervalMillis::new(5).unwrap();
+    let idle = MigrationIdleIntervalMillis::new(7).unwrap();
+    assert_eq!(rows.get(), 2);
+    assert_eq!(bytes.get(), 3);
+    assert_eq!(active.get(), 5);
+    assert_eq!(idle.get(), 7);
+
+    let defaults = MigrationTuning::default();
+    assert_eq!(defaults.worker_mode(), MigrationWorkerMode::Background);
+    assert_eq!(
+        defaults.batch_rows().get(),
+        MigrationTuning::DEFAULT_BATCH_ROWS
+    );
+    assert_eq!(
+        defaults.batch_bytes().get(),
+        MigrationTuning::DEFAULT_BATCH_BYTES
+    );
+    assert_eq!(
+        defaults.active_interval_millis().get(),
+        MigrationTuning::DEFAULT_ACTIVE_INTERVAL_MILLIS
+    );
+    assert_eq!(
+        defaults.idle_interval_millis().get(),
+        MigrationTuning::DEFAULT_IDLE_INTERVAL_MILLIS
+    );
+
+    let tuned = defaults
+        .with_worker_mode(MigrationWorkerMode::Disabled)
+        .with_batch_rows(rows)
+        .with_batch_bytes(bytes)
+        .with_active_interval(active)
+        .with_active_interval_millis(active)
+        .with_idle_interval(idle)
+        .with_idle_interval_millis(idle);
+    assert_eq!(tuned.worker_mode(), MigrationWorkerMode::Disabled);
+    assert_eq!(tuned.batch_rows(), rows);
+    assert_eq!(tuned.batch_bytes(), bytes);
+    assert_eq!(tuned.active_interval_millis(), active);
+    assert_eq!(tuned.idle_interval_millis(), idle);
+
+    let throughput = super::IndexLifecycleThroughputTuning::default();
+    let config = DbConfig::new().with_index_lifecycle_throughput_tuning(throughput);
+    assert_eq!(config.index_lifecycle_throughput(), throughput);
 }
 
 #[test]
@@ -681,6 +962,10 @@ fn secondary_index_definition_constructors_preserve_validated_semantics() {
     assert!(unique.is_unique_node_equality());
     assert!(unique.is_node());
     assert!(!unique.is_edge());
+    assert!(!SecondaryIndexDefinition::edge_equality("LIKES", "kind")
+        .unwrap()
+        .unique());
+    assert!(SecondaryIndexDefinition::node_equality("User\u{1f}internal", "email").is_err());
 }
 
 #[test]
@@ -692,7 +977,7 @@ fn runtime_index_catalog_dynamic_insertion_covers_all_iterators() {
             .unwrap();
     let text = TextIndexDefinition::new_node("Doc", "body").unwrap();
 
-    let mut catalog = RuntimeIndexCatalog::new();
+    let mut catalog = RuntimeIndexCatalog::default();
     for definition in [
         SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
         SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
@@ -707,6 +992,8 @@ fn runtime_index_catalog_dynamic_insertion_covers_all_iterators() {
     catalog.insert_dynamic_index(&v2_secondary(edge_range.clone()));
     catalog.insert_dynamic_index(&v2_vector(vector.clone()));
     catalog.insert_dynamic_index(&v2_text(text.clone()));
+    catalog.insert_dynamic_index(&v2_vector(vector));
+    catalog.insert_dynamic_index(&v2_text(text));
 
     let node_email = scoped_secondary_index_property("User", "email");
     let node_slug = scoped_secondary_index_property("User", "slug");
@@ -728,6 +1015,12 @@ fn runtime_index_catalog_dynamic_insertion_covers_all_iterators() {
     assert!(catalog.contains_edge_range_desc_scoped(&edge_created));
     assert!(!catalog.contains_edge_range_scoped(&edge_created));
     assert!(!catalog.contains_node_equality_scoped("not-scoped"));
+    assert!(!catalog.contains_node_range_scoped("not-scoped"));
+    assert!(!catalog.contains_node_range_desc_scoped("not-scoped"));
+    assert!(!catalog.contains_edge_equality_scoped("not-scoped"));
+    assert!(!catalog.contains_edge_range_scoped("not-scoped"));
+    assert!(!catalog.contains_edge_range_desc_scoped("not-scoped"));
+    assert!(!catalog.has_scoped_equality_index("", "property"));
 
     assert!(catalog.node_equality_indexes().any(|key| key == node_email));
     assert!(catalog

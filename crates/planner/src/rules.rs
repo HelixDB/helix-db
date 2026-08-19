@@ -1,4 +1,5 @@
 mod access;
+mod cardinality;
 mod contracts;
 mod core;
 mod physical_contracts;
@@ -6,7 +7,9 @@ mod registry;
 mod root;
 mod stream;
 
-pub use self::{access::*, contracts::*, core::*, registry::SeedRuleSet, root::*, stream::*};
+pub use self::{
+    access::*, cardinality::*, contracts::*, core::*, registry::SeedRuleSet, root::*, stream::*,
+};
 
 pub(crate) use self::access::{missing_index_candidates, CandidateIndexKind};
 

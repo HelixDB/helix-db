@@ -137,6 +137,8 @@ impl<'db> ExecutionContext<'db> {
             execution_control: self.execution_control,
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
+            #[cfg(test)]
+            deadline_checks_remaining: std::sync::atomic::AtomicUsize::new(usize::MAX),
         })
     }
 

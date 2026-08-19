@@ -107,7 +107,7 @@ fn selected_reserved_root_stream_project_lowers_to_native_dag() {
         alternative,
         SelectedRootTerminal::Project {
             input: reserved_source_input(),
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         },
         ir::BatchOutputPlan::Bind(name("count")),
         &profile,
@@ -129,7 +129,7 @@ fn selected_reserved_root_stream_project_lowers_to_native_dag() {
     assert!(matches!(
         &plan.steps()[2].op,
         ExecOp::Project {
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         }
     ));
     assert_eq!(plan.steps()[2].dependencies, vec![plan.steps()[1].id]);

@@ -38,7 +38,7 @@ pub(super) struct PreparedActiveTextRetirement {
     measurements: ActiveTextMutationMeasurements,
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 impl PreparedActiveTextRetirement {
     /// Returns exact work contributed to request-level resource admission.
     pub(super) const fn measurements(&self) -> ActiveTextMutationMeasurements {
@@ -47,7 +47,7 @@ impl PreparedActiveTextRetirement {
 }
 
 /// Fully revalidated retirement rows ready for infallible staging.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ValidatedActiveTextRetirement {
     prepared: PreparedActiveTextRetirement,
@@ -208,7 +208,7 @@ pub(super) async fn prepare_active_text_retirement(
 }
 
 /// Revalidates one retirement without staging either replacement row.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(super) async fn validate_active_text_retirement(
     transaction: &DbTransaction,
     prepared: &PreparedActiveTextRetirement,
@@ -226,7 +226,7 @@ pub(super) async fn validate_active_text_retirement(
 }
 
 /// Stages one retirement only after every request input has validated.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(super) fn stage_validated_active_text_retirement(
     transaction: &DbTransaction,
     validated: ValidatedActiveTextRetirement,
@@ -241,7 +241,7 @@ fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/index_lifecycle_active_text_retirement.rs"]
 pub(crate) mod production_contracts;
 
@@ -258,6 +258,11 @@ mod tests {
         SearchIndexBackfillLimits, SearchIndexBatchLimits, SecondaryIndexDefinition,
         TextAnalyzerKind, TextBackfillCompactionLimits, TextBuildArtifactLimits,
     };
+
+    #[tokio::test]
+    async fn production_active_text_retirement_matrix_runs_in_workspace_tests() {
+        production_contracts::run().await;
+    }
     use crate::encoding::v1::keys::tenant::DataScope;
     use crate::encoding::v2::keys::Key;
     use crate::index_lifecycle::{

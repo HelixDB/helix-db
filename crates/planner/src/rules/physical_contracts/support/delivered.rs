@@ -111,7 +111,7 @@ pub(in crate::rules) fn project_output_delivered(
     projection: &ir::ProjectionPlan,
 ) -> properties::DeliveredProperties {
     match projection {
-        ir::ProjectionPlan::Count | ir::ProjectionPlan::Exists => properties::DeliveredProperties {
+        ir::ProjectionPlan::Exists => properties::DeliveredProperties {
             cardinality: properties::CardinalityBounds::exact(1),
             materialization: properties::Materialization::Materialized,
             effect: input.effect,
@@ -127,6 +127,17 @@ pub(in crate::rules) fn project_output_delivered(
             element: None,
             ..input
         },
+    }
+}
+
+pub(in crate::rules) fn cardinality_output_delivered(
+    input: properties::DeliveredProperties,
+) -> properties::DeliveredProperties {
+    properties::DeliveredProperties {
+        cardinality: properties::CardinalityBounds::exact(1),
+        materialization: properties::Materialization::Materialized,
+        effect: input.effect,
+        ..properties::DeliveredProperties::default()
     }
 }
 

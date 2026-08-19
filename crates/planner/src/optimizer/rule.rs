@@ -18,6 +18,22 @@ pub struct RuleInput<'a> {
     pub indexes: &'a catalog::IndexCatalogSnapshot,
 }
 
+impl<'a> RuleInput<'a> {
+    /// Request bindings and scoped late-bound names carried by a logical
+    /// cardinality expression.
+    pub fn cardinality_bindings(
+        &self,
+    ) -> Option<(
+        &'a context::ParamBindings,
+        &'a std::collections::BTreeSet<crate::ir::NonEmptyString>,
+    )> {
+        let logical::LogicalExpr::StreamCardinality(cardinality) = self.expr else {
+            return None;
+        };
+        Some((cardinality.params(), cardinality.late_bound_params()))
+    }
+}
+
 /// Non-empty rule effect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

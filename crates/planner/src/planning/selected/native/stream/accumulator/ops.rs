@@ -3,16 +3,22 @@
 use helix_ast::expr::{Predicate, StreamBound};
 
 use super::NativeAccessStream;
-use crate::{analysis, error, ir, logical};
+use crate::planning::selected::native::equality_bindings;
+use crate::{analysis, context, error, ir, logical};
 
 impl NativeAccessStream {
     /// Append a residual predicate filter.
     pub(in crate::planning::selected::native) fn filter(
         self,
+        ctx: &context::PlannerContext,
         predicate: &Predicate,
     ) -> Result<Self, error::PlannerError> {
-        let _ = analysis::prune_statically_impossible_branches(predicate)?;
-        Ok(self.filter_plan(ir::PredicatePlan::new(predicate.clone())?))
+        let _ = ir::PredicatePlan::new(predicate.clone())?;
+        let predicate = equality_bindings::predicate(ctx, predicate)?;
+        let predicate_plan = ir::PredicatePlan::new(predicate.clone())
+            .expect("specializing a validated equality preserves predicate validity");
+        let _ = analysis::prune_statically_impossible_branches(&predicate)?;
+        Ok(self.filter_plan(predicate_plan))
     }
 
     /// Append an already validated residual predicate filter.

@@ -5,6 +5,9 @@ Both transports accept at most 16 MiB of query JSON, preserve stable index
 error codes, reject writer-only routing on reader handles, and can wait for a
 writer flush before acknowledging a durable write.
 
+See the [query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx)
+for the HTTP `error`/`msg` envelope, gRPC metadata contract, and complete catalog.
+
 HTTP endpoints:
 
 - `POST /v2/query` executes a serialized `QueryRequest`.

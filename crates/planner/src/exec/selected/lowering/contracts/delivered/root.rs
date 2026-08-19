@@ -16,6 +16,7 @@ pub(in crate::exec::selected::lowering) fn selected_root_stream_input_delivered_
         SelectedRootStreamInput::Repeat(root) => root.alternative().delivered().clone(),
         SelectedRootStreamInput::Pipeline(root) => root.alternative().delivered().clone(),
         SelectedRootStreamInput::Terminal(root) => root.alternative().delivered().clone(),
+        SelectedRootStreamInput::Count(root) => root.alternative().delivered().clone(),
     }
 }
 

@@ -35,7 +35,6 @@ fn cascades_terminal_roots_preserve_index_access_and_terminal_ops() {
     );
 
     for plan in [
-        &count,
         &exists,
         &id,
         &label,
@@ -52,7 +51,6 @@ fn cascades_terminal_roots_preserve_index_access_and_terminal_ops() {
         assert_no_exec_window(plan);
     }
     for plan in [
-        &count,
         &exists,
         &id,
         &label,
@@ -63,15 +61,14 @@ fn cascades_terminal_roots_preserve_index_access_and_terminal_ops() {
     ] {
         assert_selected_rule(plan, KnownRuleId::SeedStreamProject);
     }
+    assert_selected_rule(&count, KnownRuleId::SeedStreamCardinality);
     for plan in [&group_count, &aggregate] {
         assert_selected_rule(plan, KnownRuleId::SeedStreamAggregate);
     }
 
     assert!(matches!(
-        first_exec_op(&count, |op| matches!(op, ExecOp::Project { .. })),
-        ExecOp::Project {
-            projection: ProjectionPlan::Count
-        }
+        first_exec_op(&count, |op| matches!(op, ExecOp::Count { .. })),
+        ExecOp::Count { .. }
     ));
     assert!(matches!(
         first_exec_op(&exists, |op| matches!(op, ExecOp::Project { .. })),
@@ -238,7 +235,7 @@ fn assert_indexed_user_access(plan: &ExecutablePlan) {
     assert!(
         matches!(
             unwrapped_first_exec_access(plan),
-            ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
                 if key.label == "User" && key.property == "username"
         ),
         "expected User.username equality access, got {:?}",

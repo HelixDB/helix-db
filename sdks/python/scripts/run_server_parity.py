@@ -442,7 +442,9 @@ def _assert_post_drop_sync(client: Client, fixtures: list[tuple[str, QueryReques
         try:
             client.query(_required_fixture(fixtures, name))
         except HelixError as error:
-            if "index_not_found" in str(error):
+            if error.code == "index_not_found" or (
+                error.code is None and "index_not_found" in str(error)
+            ):
                 continue
             raise
         raise RuntimeError(f"sync {name} unexpectedly succeeded after index DROP")
@@ -455,7 +457,9 @@ async def _assert_post_drop_async(
         try:
             await client.query(_required_fixture(fixtures, name))
         except HelixError as error:
-            if "index_not_found" in str(error):
+            if error.code == "index_not_found" or (
+                error.code is None and "index_not_found" in str(error)
+            ):
                 continue
             raise
         raise RuntimeError(f"async {name} unexpectedly succeeded after index DROP")

@@ -14,8 +14,10 @@ async fn multi_dependency_input_rejects_mixed_stream_and_scalar_outputs() {
             test_support::step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
             test_support::step(3, vec![access_id, count_id], exec::ExecOp::Noop),

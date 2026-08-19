@@ -30,6 +30,26 @@ impl ExecutableDagBuilder<'_> {
     ) -> Result<ExecStepId, ExecPlanError> {
         let read_limit =
             read_limit.elide_if_covered_by_hard_upper(exec::edge_access_hard_upper_bound(plan));
+        if matches!(
+            plan,
+            ir::EdgeAccessPlan::Union(_) | ir::EdgeAccessPlan::Intersect(_)
+        ) && let Some(set) = exec::edge_secondary_set(plan)
+        {
+            let exec_access = read_limit.apply_to(exec::ExecAccessPlan::Edge(
+                exec::ExecEdgeAccessPlan::SecondarySet { set },
+            ));
+            return self.push_step(StepDraft {
+                dependencies,
+                output,
+                condition,
+                op: ExecOp::Access {
+                    plan: Box::new(exec_access),
+                },
+                schedule: ExecSchedule::Pipeline,
+                delivered: edge_access_delivered_properties(plan),
+                cost: edge_access_cost(plan, self.profile),
+            });
+        }
         match plan {
             ir::EdgeAccessPlan::PointIds { ids } => self.push_selected_point_ids(
                 exec::ElementKeyspace::EdgeEndpoints,

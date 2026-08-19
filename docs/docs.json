@@ -175,7 +175,8 @@
               "database/helix-db/query-guides/filtering",
               "database/helix-db/query-guides/projections",
               "database/helix-db/query-guides/advanced",
-              "database/helix-db/query-guides/parameters"
+              "database/helix-db/query-guides/parameters",
+              "database/helix-db/query-guides/error-handling"
             ]
           }
         ]

@@ -21,7 +21,7 @@ fn root_stream_access_rewrite_rule_pushes_direct_filters_through_root_wrappers()
         )),
         logical::LogicalExpr::StreamProject(logical::StreamProject::new(
             filtered_user_root(),
-            ir::ProjectionPlan::Count,
+            ir::ProjectionPlan::Exists,
         )),
         logical::LogicalExpr::StreamAggregate(logical::StreamAggregate::new(
             filtered_user_root(),
@@ -64,7 +64,7 @@ fn root_stream_access_rewrite_rule_preserves_pipeline_suffix_after_index_rewrite
     .unwrap();
     let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     let rewritten = logical_expr(rule.apply(optimizer::RuleInput {
@@ -95,7 +95,7 @@ fn root_stream_access_rewrite_rule_declines_non_access_inputs() {
     let rule = RootStreamAccessRewriteRule::default();
     let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         logical::RootStream::VariableSource(logical::VariableSource::new(name("users"))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     assert_eq!(
@@ -155,7 +155,7 @@ fn assert_indexed_root_input(expr: &logical::LogicalExpr) {
         }
         logical::LogicalExpr::StreamProject(project) => {
             assert_indexed_root_stream(project.input());
-            assert_eq!(project.projection(), &ir::ProjectionPlan::Count);
+            assert_eq!(project.projection(), &ir::ProjectionPlan::Exists);
         }
         logical::LogicalExpr::StreamAggregate(aggregate) => {
             assert_indexed_root_stream(aggregate.input());

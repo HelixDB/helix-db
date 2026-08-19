@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use db::query_service::{QueryMode, QueryServiceError};
+use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use tokio::sync::watch;
 use tonic::transport::Server;
@@ -8,6 +9,8 @@ use tonic::{Request, Response, Status};
 
 use crate::state::ServerState;
 use crate::MAX_QUERY_BODY_BYTES;
+
+pub(crate) const HELIX_ERROR_CODE_METADATA: &str = "helix-error-code";
 
 pub mod pb {
     tonic::include_proto!("helixdb.server.v1");
@@ -67,12 +70,19 @@ impl HelixDbServer for GrpcService {
         );
         let request = request.into_inner();
         if request.body.len() > MAX_QUERY_BODY_BYTES {
-            return Err(Status::resource_exhausted(format!(
-                "query body exceeds {MAX_QUERY_BODY_BYTES} bytes"
-            )));
+            return Err(status_with_error_code(
+                tonic::Code::ResourceExhausted,
+                error_code::QueryErrorCode::InvalidRequestBody,
+                format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
+            ));
         }
-        let query = sonic_rs::from_slice::<QueryRequest>(&request.body)
-            .map_err(|error| Status::invalid_argument(format!("invalid query JSON: {error}")))?;
+        let query = sonic_rs::from_slice::<QueryRequest>(&request.body).map_err(|error| {
+            status_with_error_code(
+                tonic::Code::InvalidArgument,
+                error_code::QueryErrorCode::InvalidQueryJson,
+                format!("invalid query JSON: {error}"),
+            )
+        })?;
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -132,17 +142,23 @@ fn validate_options_for_request_type(
     db_mode: db::HelixDbMode,
 ) -> Result<(), Status> {
     if warm_only && request_type != QueryRequestType::Read {
-        return Err(Status::invalid_argument(
+        return Err(status_with_error_code(
+            tonic::Code::InvalidArgument,
+            error_code::QueryErrorCode::InvalidRequestOption,
             "warm_only is only valid for read requests",
         ));
     }
     if await_durable && request_type != QueryRequestType::Write {
-        return Err(Status::invalid_argument(
+        return Err(status_with_error_code(
+            tonic::Code::InvalidArgument,
+            error_code::QueryErrorCode::InvalidRequestOption,
             "await_durable is only valid for write requests",
         ));
     }
     if require_writer && db_mode != db::HelixDbMode::Writer {
-        return Err(Status::unavailable(
+        return Err(status_with_error_code(
+            tonic::Code::Unavailable,
+            error_code::QueryErrorCode::InvalidRequestOption,
             "request requires a writer but this server is read-only",
         ));
     }
@@ -150,22 +166,118 @@ fn validate_options_for_request_type(
 }
 
 pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
-    if error.is_transaction_conflict() {
-        return Status::aborted(error.to_string());
-    }
+    let error_code = error.error_code();
     let message = error.to_string();
-    match error {
-        QueryServiceError::InvalidRequest(_) | QueryServiceError::Planner(_) => {
-            Status::invalid_argument(message)
+    let code = if error.is_transaction_conflict() {
+        tonic::Code::Aborted
+    } else {
+        match error {
+            QueryServiceError::InvalidRequest(_) | QueryServiceError::Planner(_) => {
+                tonic::Code::InvalidArgument
+            }
+            QueryServiceError::Db(error) if error.is_invalid_vector_input() => {
+                tonic::Code::InvalidArgument
+            }
+            QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
+                tonic::Code::FailedPrecondition
+            }
+            QueryServiceError::Db(_)
+            | QueryServiceError::JsonSerialize(_)
+            | QueryServiceError::Serialize(_) => tonic::Code::Internal,
         }
-        QueryServiceError::Db(error) if error.is_invalid_vector_input() => {
-            Status::invalid_argument(message)
+    };
+    status_with_error_code(code, error_code, message)
+}
+
+fn status_with_error_code(
+    status_code: tonic::Code,
+    error_code: error_code::QueryErrorCode,
+    message: impl Into<String>,
+) -> Status {
+    let mut status = Status::new(status_code, message.into());
+    status.metadata_mut().insert(
+        HELIX_ERROR_CODE_METADATA,
+        tonic::metadata::MetadataValue::from_static(error_code.as_str()),
+    );
+    status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_statuses_keep_messages_and_attach_static_codes() {
+        let cases = [
+            (
+                QueryServiceError::InvalidRequest("bad request".to_string()),
+                tonic::Code::InvalidArgument,
+                "invalid_request",
+            ),
+            (
+                QueryServiceError::Db(db::error::HelixDbError::TransactionConflict(
+                    "retry".to_string(),
+                )),
+                tonic::Code::Aborted,
+                "transaction_conflict",
+            ),
+            (
+                QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired {
+                    actual: "reader",
+                }),
+                tonic::Code::FailedPrecondition,
+                "writer_mode_required",
+            ),
+            (
+                QueryServiceError::Db(db::error::HelixDbError::IndexNotFound(
+                    "documents".to_string(),
+                )),
+                tonic::Code::Internal,
+                "index_not_found",
+            ),
+        ];
+
+        for (error, expected_status_code, expected_error_code) in cases {
+            let expected_message = error.to_string();
+            let status = status_from_service_error(error);
+            assert_eq!(status.code(), expected_status_code);
+            assert_eq!(status.message(), expected_message);
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(HELIX_ERROR_CODE_METADATA)
+                    .expect("query statuses include an error code")
+                    .to_str()
+                    .expect("error codes are ASCII"),
+                expected_error_code
+            );
         }
-        QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
-            Status::failed_precondition(message)
-        }
-        QueryServiceError::Db(_)
-        | QueryServiceError::JsonSerialize(_)
-        | QueryServiceError::Serialize(_) => Status::internal(message),
+    }
+
+    #[test]
+    fn request_option_statuses_attach_the_request_option_code() {
+        let status = validate_options_for_request_type(
+            true,
+            false,
+            false,
+            QueryRequestType::Write,
+            db::HelixDbMode::Writer,
+        )
+        .expect_err("warm-only writes are invalid");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "warm_only is only valid for read requests"
+        );
+        assert_eq!(
+            status
+                .metadata()
+                .get(HELIX_ERROR_CODE_METADATA)
+                .expect("query statuses include an error code")
+                .to_str()
+                .expect("error codes are ASCII"),
+            "invalid_request_option"
+        );
     }
 }

@@ -5,14 +5,14 @@ use helix_planner::{ir, properties};
 use super::*;
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::execution::interpreter::access) struct SearchReadLimit<'a> {
+pub(in crate::execution::interpreter) struct SearchReadLimit<'a> {
     pub(in crate::execution::interpreter::access::search) search_limit: &'a ir::SearchLimitPlan,
     pub(in crate::execution::interpreter::access::search) access_limit:
         Option<properties::PositiveUsize>,
 }
 
 impl<'a> SearchReadLimit<'a> {
-    pub(in crate::execution::interpreter::access) const fn new(
+    pub(in crate::execution::interpreter) const fn new(
         search_limit: &'a ir::SearchLimitPlan,
         access_limit: Option<properties::PositiveUsize>,
     ) -> Self {

@@ -10,7 +10,29 @@ pub(in crate::rules) fn edge_access_contract(
     storage: &cost::StorageCostProfile,
     stats: &context::StatsSnapshot,
 ) -> AccessPhysicalContract {
-    shared::access_contract::<EdgeAccessFamily>(plan, storage, stats)
+    let contract = shared::access_contract::<EdgeAccessFamily>(plan, storage, stats);
+    let exact = match plan {
+        ir::EdgeAccessPlan::Union(_) | ir::EdgeAccessPlan::Intersect(_) => {
+            exec::edge_secondary_set(plan).map(|set| exec::ExecEdgeAccessPlan::SecondarySet { set })
+        }
+        ir::EdgeAccessPlan::Empty
+        | ir::EdgeAccessPlan::PointIds { .. }
+        | ir::EdgeAccessPlan::FromParam { .. }
+        | ir::EdgeAccessPlan::FromVar { .. }
+        | ir::EdgeAccessPlan::AllScan
+        | ir::EdgeAccessPlan::LabelScan { .. }
+        | ir::EdgeAccessPlan::EqualityIndex { .. }
+        | ir::EdgeAccessPlan::RangeIndex { .. }
+        | ir::EdgeAccessPlan::VectorSearch { .. }
+        | ir::EdgeAccessPlan::TextSearch { .. }
+        | ir::EdgeAccessPlan::ScanThenFilter { .. } => None,
+    };
+    match exact {
+        Some(exact) => {
+            contract.with_access(crate::physical::PhysicalAccess::EdgeExact(Box::new(exact)))
+        }
+        None => contract,
+    }
 }
 
 struct EdgeAccessFamily;
@@ -41,10 +63,19 @@ impl shared::AccessSourceFamily for EdgeAccessFamily {
             ir::EdgeAccessPlan::LabelScan { label } => {
                 shared::AccessSourceParts::LabelScan { label }
             }
-            ir::EdgeAccessPlan::EqualityIndex { key, .. } => {
+            ir::EdgeAccessPlan::EqualityIndex { index, key, value } => {
                 shared::AccessSourceParts::EqualityIndex {
+                    access: crate::physical::PhysicalAccess::EdgeExact(Box::new(
+                        exec::ExecEdgeAccessPlan::exact_equality(
+                            index.clone(),
+                            key.clone(),
+                            value.clone(),
+                        ),
+                    )),
+                    index_id: &index.index_id,
                     key,
                     kind: shared::EqualityIndexKind::NonUnique,
+                    semantics: value.semantics(),
                 }
             }
             ir::EdgeAccessPlan::RangeIndex { key, .. } => {

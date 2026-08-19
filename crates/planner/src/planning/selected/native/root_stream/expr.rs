@@ -46,6 +46,9 @@ pub(in crate::planning::selected::native) fn root_stream_from_expr(
         logical::LogicalExpr::StreamProject(project) => {
             Ok(logical::RootStream::Project(Box::new(project)))
         }
+        logical::LogicalExpr::StreamCardinality(cardinality) => {
+            Ok(logical::RootStream::Cardinality(Box::new(cardinality)))
+        }
         logical::LogicalExpr::StreamAggregate(aggregate) => {
             Ok(logical::RootStream::Aggregate(Box::new(aggregate)))
         }

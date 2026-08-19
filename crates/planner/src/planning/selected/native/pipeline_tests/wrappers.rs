@@ -187,7 +187,7 @@ fn native_pipeline_lowers_stream_wrappers_above_terminals() {
         assert!(matches!(
             expr,
             logical::LogicalExpr::RootPipeline(pipeline)
-                if matches!(pipeline.input(), logical::RootStream::Project(_))
+                if matches!(pipeline.input(), logical::RootStream::Cardinality(_))
                     && matches!(pipeline.ops(), [op] if expected.matches(op))
         ));
     });
@@ -205,7 +205,7 @@ fn native_pipeline_lowers_stream_wrappers_above_terminals() {
     assert!(matches!(
         ordered,
         logical::LogicalExpr::RootPipeline(pipeline)
-            if matches!(pipeline.input(), logical::RootStream::Project(_))
+            if matches!(pipeline.input(), logical::RootStream::Cardinality(_))
                 && matches!(
                     pipeline.ops(),
                     [

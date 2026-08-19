@@ -3,19 +3,19 @@
 use super::super::source;
 use crate::physical;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::exec::selected::lowering) enum SelectedAccessFilterPipelineMatch<'a> {
     Matched(&'a physical::PhysicalAccess),
     NotMatched(SelectedAccessFilterPipelineMismatch),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::exec::selected::lowering) enum SelectedAccessFilterPipelineMismatch {
     AccessPrefix(SelectedAccessPipelineMismatch),
     PhysicalSuffixMismatch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::exec::selected::lowering) enum SelectedAccessPipelineMatch<'a> {
     Matched(SelectedAccessPipelineParts<'a>),
     NotMatched(SelectedAccessPipelineMismatch),
@@ -28,7 +28,7 @@ pub(in crate::exec::selected::lowering) enum SelectedAccessPipelineMismatch {
     PhysicalAccessMismatch(source::SelectedAccessPathMismatch),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::exec::selected::lowering) struct SelectedAccessPipelineParts<'a> {
     access: &'a physical::PhysicalAccess,
     ops: &'a [physical::PhysicalPipelineOp],

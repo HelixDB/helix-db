@@ -13,6 +13,7 @@ import (
 )
 
 type ErrorKind string
+type QueryErrorCode string
 
 const (
 	ErrorNetwork             ErrorKind = "Network"
@@ -29,6 +30,7 @@ var ErrNativeBindingsUnavailable = errors.New("helix embedded native bindings ar
 
 type HelixError struct {
 	Kind       ErrorKind
+	Code       QueryErrorCode
 	Details    string
 	StatusCode int
 	Err        error
@@ -62,6 +64,20 @@ type Client struct {
 type nativeDB interface {
 	QueryJson([]byte) ([]byte, error)
 	Close() error
+}
+
+type nativeQueryError interface {
+	error
+	QueryError() (QueryErrorCode, string)
+}
+
+func embeddedError(err error) *HelixError {
+	result := &HelixError{Kind: ErrorEmbedded, Err: err, Details: err.Error()}
+	var queryErr nativeQueryError
+	if errors.As(err, &queryErr) {
+		result.Code, result.Details = queryErr.QueryError()
+	}
+	return result
 }
 
 type HelixDbSource interface {
@@ -165,6 +181,9 @@ func newEmbeddedClient(source HelixDbSource, cache *EmbeddedCacheConfig, reader 
 		if errors.Is(err, ErrNativeBindingsUnavailable) {
 			kind = ErrorEmbeddedUnavailable
 		}
+		if kind == ErrorEmbedded {
+			return nil, embeddedError(err)
+		}
 		return nil, &HelixError{Kind: kind, Err: err, Details: err.Error()}
 	}
 	client := &Client{embedded: db, httpClient: http.DefaultClient}
@@ -235,11 +254,15 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	}
 	if c.embedded != nil {
 		if options.writerOnly || options.warmOnly || options.awaitDurability != nil {
-			return &HelixError{Kind: ErrorInvalidRequest, Details: "exec options require server mode"}
+			return &HelixError{
+				Kind:    ErrorInvalidRequest,
+				Code:    QueryErrorCode("invalid_request"),
+				Details: "exec options require server mode",
+			}
 		}
 		response, err := c.embedded.QueryJson(body)
 		if err != nil {
-			return &HelixError{Kind: ErrorEmbedded, Err: err, Details: err.Error()}
+			return embeddedError(err)
 		}
 		if out == nil || len(response) == 0 {
 			return nil
@@ -286,11 +309,7 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 		return &HelixError{Kind: ErrorNetwork, Err: err, Details: err.Error()}
 	}
 	if resp.StatusCode != http.StatusOK {
-		details := string(respBody)
-		if details == "" {
-			details = resp.Status
-		}
-		remoteErr := &HelixError{Kind: ErrorRemote, Details: details, StatusCode: resp.StatusCode}
+		remoteErr := decodeRemoteError(respBody, resp.Status, resp.StatusCode)
 		if resp.StatusCode == http.StatusConflict {
 			remoteErr.Err = ErrConflict
 		}
@@ -312,7 +331,40 @@ func (c *Client) Close() error {
 		return nil
 	}
 	if err := c.embedded.Close(); err != nil {
-		return &HelixError{Kind: ErrorEmbedded, Err: err, Details: err.Error()}
+		return embeddedError(err)
 	}
 	return nil
+}
+
+func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError {
+	var envelope struct {
+		Error string  `json:"error"`
+		Msg   *string `json:"msg"`
+		Code  *string `json:"code"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Error != "" {
+		if envelope.Msg != nil {
+			return &HelixError{
+				Kind:       ErrorRemote,
+				Code:       QueryErrorCode(envelope.Error),
+				Details:    *envelope.Msg,
+				StatusCode: statusCode,
+			}
+		}
+		code := QueryErrorCode("")
+		if envelope.Code != nil {
+			code = QueryErrorCode(*envelope.Code)
+		}
+		return &HelixError{
+			Kind:       ErrorRemote,
+			Code:       code,
+			Details:    envelope.Error,
+			StatusCode: statusCode,
+		}
+	}
+	details := string(body)
+	if details == "" {
+		details = fallback
+	}
+	return &HelixError{Kind: ErrorRemote, Details: details, StatusCode: statusCode}
 }

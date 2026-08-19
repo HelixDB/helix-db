@@ -56,6 +56,14 @@ impl VectorEntityId {
             VectorEntityKind::Edge => Self::Edge(entity_id),
         }
     }
+
+    /// Returns the graph-local ID after the generation descriptor has already
+    /// proven the element family at the search boundary.
+    pub(crate) const fn local_id(self) -> u64 {
+        match self {
+            Self::Node(id) | Self::Edge(id) => id,
+        }
+    }
 }
 
 /// Explicit public materialization contract for vector score units.

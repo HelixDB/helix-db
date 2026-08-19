@@ -98,6 +98,9 @@ remains supported as a deprecated compatibility alias.
 
 `HelixError.kind` distinguishes `Network`, `Remote`, `Serialization`,
 `InvalidUrl`, `InvalidRequest`, `EmbeddedUnavailable`, and `Embedded` failures.
+`HelixError.code` preserves the static server or embedded code separately from
+`details`. See the canonical
+[query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx).
 
 ## Parameter Schemas
 

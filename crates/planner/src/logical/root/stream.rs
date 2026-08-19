@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    RootBranch, RootMutation, RootPipeline, RootRepeat, StreamAggregate, StreamProject,
-    StreamReserved, StreamVariableWrite,
+    RootBranch, RootMutation, RootPipeline, RootRepeat, StreamAggregate, StreamCardinality,
+    StreamProject, StreamReserved, StreamVariableWrite,
 };
 use crate::logical::{AccessStream, VariableSource};
 use crate::properties;
@@ -44,6 +44,8 @@ pub enum RootStream {
     Reserved(Box<StreamReserved>),
     /// Projection terminal that can feed a later root operator.
     Project(Box<StreamProject>),
+    /// Cardinality terminal that can feed a later root operator.
+    Cardinality(Box<StreamCardinality>),
     /// Aggregation terminal that can feed a later root operator.
     Aggregate(Box<StreamAggregate>),
     /// State-writing variable terminal that can feed a later root operator.
@@ -62,6 +64,7 @@ impl RootStream {
             Self::Pipeline(pipeline) => pipeline.effect(),
             Self::Reserved(reserved) => reserved.effect(),
             Self::Project(project) => project.effect(),
+            Self::Cardinality(cardinality) => cardinality.effect(),
             Self::Aggregate(aggregate) => aggregate.effect(),
             Self::VariableWrite(_) => properties::EffectKind::Barrier,
         }

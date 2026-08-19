@@ -5,6 +5,8 @@ fn seed_rule_set_explores_access_set_simplification_before_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -40,6 +42,8 @@ fn seed_rule_set_explores_range_intersection_before_access_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -73,6 +77,8 @@ fn seed_rule_set_explores_equality_range_intersection_before_access_implementati
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -98,9 +104,9 @@ fn seed_rule_set_explores_equality_range_intersection_before_access_implementati
     assert!(matches!(
         &best.expr,
         physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::EqualityIndex,
+            access: physical::PhysicalAccess::NodeExact(exact),
             ..
-        }
+        } if matches!(exact.as_ref(), exec::ExecNodeAccessPlan::Bitmap { .. })
     ));
 }
 
@@ -109,6 +115,8 @@ fn seed_rule_set_explores_equality_range_union_before_access_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -144,6 +152,8 @@ fn seed_rule_set_explores_access_contradiction_before_access_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -177,6 +187,8 @@ fn seed_rule_set_explores_access_subsumption_before_access_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -200,8 +212,8 @@ fn seed_rule_set_explores_access_subsumption_before_access_implementation() {
     assert!(matches!(
         &best.expr,
         physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::EqualityIndex,
+            access: physical::PhysicalAccess::NodeExact(exact),
             ..
-        }
+        } if matches!(exact.as_ref(), exec::ExecNodeAccessPlan::Bitmap { .. })
     ));
 }

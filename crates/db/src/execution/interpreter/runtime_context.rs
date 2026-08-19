@@ -283,10 +283,12 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
         crate::execution_control::ExecutionControl,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) deadline_checks_remaining: AtomicUsize,
 }
 
 impl<'db> ExecutionContext<'db> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(in crate::execution::interpreter) fn new(
         db: &'db HelixDB,
         params: context::ParamBindings,
@@ -348,6 +350,8 @@ impl<'db> ExecutionContext<'db> {
             execution_control,
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
+            #[cfg(test)]
+            deadline_checks_remaining: AtomicUsize::new(usize::MAX),
         }
     }
 
@@ -379,6 +383,12 @@ impl<'db> ExecutionContext<'db> {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) fn fail_deadline_after(&self, successful_checks: usize) {
+        self.deadline_checks_remaining
+            .store(successful_checks, Ordering::Relaxed);
+    }
+
     /// Borrows the active request transaction without exposing state transitions.
     pub(in crate::execution::interpreter) fn active_write_tx(&self) -> Option<&ActiveWriteTx> {
         self.request_write_scope.active()
@@ -395,6 +405,17 @@ impl<'db> ExecutionContext<'db> {
     }
 
     pub(in crate::execution::interpreter) fn check_execution_deadline(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.deadline_checks_remaining.load(Ordering::Relaxed) != usize::MAX
+            && self
+                .deadline_checks_remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_err()
+        {
+            return Err(HelixDbError::QueryDeadlineExceeded);
+        }
         self.execution_control.check()
     }
 }

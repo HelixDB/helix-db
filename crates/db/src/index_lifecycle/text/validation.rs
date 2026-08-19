@@ -761,3 +761,293 @@ fn progressed(stage: TextBuildStage) -> IndexOperationStepResult {
 fn corruption(message: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(message.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::{Db, IsolationLevel};
+
+    use super::*;
+    use crate::index_lifecycle::text::test_support;
+    use crate::index_lifecycle::{IndexElementKind, IndexEntityId, TextManifestRevision};
+
+    async fn stage_database(
+        selection: ValidationSelection,
+        transaction: &DbTransaction,
+    ) -> IndexOperationStepResult {
+        let ValidationSelection::Database(prepared) = selection else {
+            panic!("fixture must select database-only validation")
+        };
+        prepared.stage(transaction).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_validation_lanes_preserve_exact_progress_and_activation_prerequisites() {
+        let db = Db::open("text-validation-empty-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text validation test database opens");
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let operation = test_support::operation();
+        let definition = ValidatedTextIndexDefinition::try_from_runtime(
+            &crate::config::TextIndexDefinition::new_node("Document", "body").unwrap(),
+        )
+        .unwrap();
+        let scope = DataScope::LegacyUnscoped;
+        let limits = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+        let counters = OperationCounters::default();
+
+        let page_selection = select(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &TextManifestValidationProgress::Pages(TextManifestPageValidationProgress::initial(
+                counters,
+            )),
+            limits,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            stage_database(page_selection, &transaction).await,
+            IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(TextBuildStage::ValidateManifests(
+                    TextManifestValidationProgress::Roots(_)
+                ))
+            ))
+        ));
+
+        let root_selection = select(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &TextManifestValidationProgress::Roots(PrefixScanProgress {
+                cursor: None,
+                counters,
+            }),
+            limits,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            stage_database(root_selection, &transaction).await,
+            IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(TextBuildStage::ValidateManifests(
+                    TextManifestValidationProgress::EntityStates(_)
+                ))
+            ))
+        ));
+
+        let entity_progress = TextManifestValidationProgress::EntityStates(PrefixScanProgress {
+            cursor: None,
+            counters,
+        });
+        assert!(matches!(
+            stage_database(
+                select(
+                    &transaction,
+                    scope,
+                    &operation,
+                    &definition,
+                    &entity_progress,
+                    limits,
+                )
+                .await
+                .unwrap(),
+                &transaction,
+            )
+            .await,
+            IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(TextBuildStage::Activate(_))
+            ))
+        ));
+
+        let delta_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::BuildDelta(index_keys::IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity: index_keys::IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(7),
+                },
+            }),
+        );
+        transaction
+            .put(delta_key.clone(), Bytes::from_static(b"delta"))
+            .unwrap();
+        assert!(matches!(
+            stage_database(
+                select(
+                    &transaction,
+                    scope,
+                    &operation,
+                    &definition,
+                    &entity_progress,
+                    limits,
+                )
+                .await
+                .unwrap(),
+                &transaction,
+            )
+            .await,
+            IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(TextBuildStage::CatchUp(_))
+            ))
+        ));
+        transaction.delete(delta_key).unwrap();
+
+        let artifact =
+            test_support::artifact_row(scope, &operation, TextPartition::Unpartitioned, 0, 1);
+        transaction.put(artifact.0, artifact.1).unwrap();
+        assert!(matches!(
+            stage_database(
+                select(
+                    &transaction,
+                    scope,
+                    &operation,
+                    &definition,
+                    &entity_progress,
+                    limits,
+                )
+                .await
+                .unwrap(),
+                &transaction,
+            )
+            .await,
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn page_validation_checks_root_blobs_limits_and_stale_observations() {
+        let db = Db::open("text-validation-page-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text page validation test database opens");
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let operation = test_support::operation();
+        let definition = ValidatedTextIndexDefinition::try_from_runtime(
+            &crate::config::TextIndexDefinition::new_node("Document", "body").unwrap(),
+        )
+        .unwrap();
+        let scope = DataScope::LegacyUnscoped;
+        let partition = TextPartition::Unpartitioned;
+        let root_key_typed = index_keys::TextManifestRootKey {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+            partition: partition.fingerprint(),
+        };
+        let root_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestRoot(root_key_typed),
+        );
+        let root_value = index_values::encode_manifest_root(
+            &work::TextManifestRootValue::try_new(
+                operation.index_id(),
+                operation.generation(),
+                partition.clone(),
+                TextManifestRevision::new(2).unwrap(),
+                1,
+                1,
+            )
+            .unwrap(),
+        );
+        let page_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
+                root: root_key_typed,
+                page: 0,
+            }),
+        );
+        let page_value = index_values::encode_manifest_page(
+            &work::TextManifestPageValue::try_new(
+                operation.index_id(),
+                operation.generation(),
+                partition,
+                0,
+                vec![test_support::split(1, 128)],
+            )
+            .unwrap(),
+        );
+        transaction
+            .put(root_key.clone(), root_value.clone())
+            .unwrap();
+        transaction
+            .put(page_key.clone(), page_value.clone())
+            .unwrap();
+
+        let progress = TextManifestValidationProgress::Pages(
+            TextManifestPageValidationProgress::initial(OperationCounters::default()),
+        );
+        let low_limit = select(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &progress,
+            test_support::batch_limits(1, u64::MAX, u64::MAX),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            stage_database(low_limit, &transaction).await,
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit { .. })
+        ));
+
+        let selection = select(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &progress,
+            test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX),
+        )
+        .await
+        .unwrap();
+        let ValidationSelection::Page(page) = selection else {
+            panic!("valid page selects an explicit blob-validation plan")
+        };
+        assert_eq!(page.blobs(), &[work::BlobRef::new([1; 32], 128)]);
+        assert!(matches!(
+            page.stage(&transaction).await.unwrap(),
+            IndexOperationStepResult::Progressed(_)
+        ));
+        let blocked = page.into_database_with_result(IndexOperationStepResult::Blocked(
+            IndexOperationBlocker::InvariantViolation,
+        ));
+        assert!(matches!(
+            blocked.stage(&transaction).await.unwrap(),
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
+        ));
+
+        let stale = select(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &progress,
+            test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX),
+        )
+        .await
+        .unwrap();
+        transaction
+            .put(root_key, Bytes::from_static(b"stale-root"))
+            .unwrap();
+        let ValidationSelection::Page(stale) = stale else {
+            panic!("fixture prepares before the root becomes stale")
+        };
+        assert!(matches!(
+            stale.stage(&transaction).await.unwrap(),
+            IndexOperationStepResult::TransientFailure
+        ));
+
+        transaction.put(page_key, page_value).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_validation.rs"]
+mod external_contracts;

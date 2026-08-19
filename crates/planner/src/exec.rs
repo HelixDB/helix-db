@@ -2,6 +2,7 @@
 use crate::{catalog, cost, ir, logical, physical, properties, trace};
 
 mod access;
+mod count;
 mod error;
 mod ids;
 mod kv;
@@ -14,6 +15,7 @@ pub mod selected;
 mod validation;
 
 pub use self::access::*;
+pub use self::count::*;
 pub use self::error::ExecPlanError;
 pub use self::ids::*;
 pub use self::kv::*;
@@ -32,6 +34,7 @@ pub(in crate::exec) use self::lowering::{
     skip_delivered_properties, stream_bound_literal, stream_range_literal_bounds,
     ExecutableDagBuilder, SimpleEdgeAccessLeaf, SimpleNodeAccessLeaf, StepDraft,
 };
+pub(crate) use self::lowering::{edge_secondary_set, node_secondary_set};
 pub use self::metrics::PlannerMetrics;
 pub use self::op::*;
 pub use self::order::*;

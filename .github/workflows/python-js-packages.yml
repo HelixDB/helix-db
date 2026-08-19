@@ -10,6 +10,7 @@ on:
       - "crates/**"
       - "sdks/python/**"
       - "sdks/typescript/**"
+      - "LICENSE"
       - "Cargo.toml"
       - "Cargo.lock"
   push:
@@ -21,6 +22,7 @@ on:
       - "crates/**"
       - "sdks/python/**"
       - "sdks/typescript/**"
+      - "LICENSE"
       - "Cargo.toml"
       - "Cargo.lock"
 
@@ -41,6 +43,7 @@ jobs:
           python -m pip install --upgrade build twine
           python -m build --sdist --wheel --outdir dist sdks/python
           python -m twine check dist/*
+          python sdks/python/scripts/validate_package_license.py dist/*
           python -m pip install --force-reinstall dist/*.whl
           python -m unittest discover -s sdks/python/tests -v
       - uses: actions/upload-artifact@v4

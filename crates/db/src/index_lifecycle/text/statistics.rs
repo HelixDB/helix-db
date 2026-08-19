@@ -1087,3 +1087,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_statistics_contracts.rs"]
+mod external_contracts;

@@ -5,6 +5,8 @@ fn seed_rule_set_simplifies_empty_root_control_flow_before_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),

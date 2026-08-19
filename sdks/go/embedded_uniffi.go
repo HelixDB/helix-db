@@ -22,13 +22,13 @@ func openEmbedded(source HelixDbSource, reader bool, cache *EmbeddedCacheConfig)
 			}
 			db, err := native.HelixDbOpenReaderWithConfig(nativeSource, nativeCache)
 			if err != nil {
-				return nil, err
+				return nil, wrapNativeQueryError(err)
 			}
 			return &uniffiDatabase{db: db}, nil
 		}
 		db, err := native.HelixDbOpenReader(nativeSource)
 		if err != nil {
-			return nil, err
+			return nil, wrapNativeQueryError(err)
 		}
 		return &uniffiDatabase{db: db}, nil
 	}
@@ -39,13 +39,13 @@ func openEmbedded(source HelixDbSource, reader bool, cache *EmbeddedCacheConfig)
 		}
 		db, err := native.HelixDbOpenWithConfig(nativeSource, nativeCache)
 		if err != nil {
-			return nil, err
+			return nil, wrapNativeQueryError(err)
 		}
 		return &uniffiDatabase{db: db}, nil
 	}
 	db, err := native.HelixDbOpen(nativeSource)
 	if err != nil {
-		return nil, err
+		return nil, wrapNativeQueryError(err)
 	}
 	return &uniffiDatabase{db: db}, nil
 }
@@ -73,8 +73,52 @@ func nativeCacheConfig(cache EmbeddedCacheConfig) (native.EmbeddedCacheConfig, e
 
 type uniffiDatabase struct{ db *native.HelixDb }
 
-func (d *uniffiDatabase) QueryJson(request []byte) ([]byte, error) { return d.db.QueryJson(request) }
-func (d *uniffiDatabase) Close() error                             { return d.db.Close() }
+func (d *uniffiDatabase) QueryJson(request []byte) ([]byte, error) {
+	response, err := d.db.QueryJson(request)
+	if err != nil {
+		return nil, wrapNativeQueryError(err)
+	}
+	return response, nil
+}
+
+func (d *uniffiDatabase) Close() error {
+	if err := d.db.Close(); err != nil {
+		return wrapNativeQueryError(err)
+	}
+	return nil
+}
+
+type uniffiQueryError struct {
+	code  QueryErrorCode
+	msg   string
+	cause error
+}
+
+func (e *uniffiQueryError) Error() string                        { return e.msg }
+func (e *uniffiQueryError) Unwrap() error                        { return e.cause }
+func (e *uniffiQueryError) QueryError() (QueryErrorCode, string) { return e.code, e.msg }
+
+func wrapNativeQueryError(err error) error {
+	var code string
+	var msg string
+	switch value := errors.Unwrap(err).(type) {
+	case *native.HelixErrorInvalidConfig:
+		code, msg = value.Error_, value.Msg
+	case *native.HelixErrorInvalidRequest:
+		code, msg = value.Error_, value.Msg
+	case *native.HelixErrorPlanner:
+		code, msg = value.Error_, value.Msg
+	case *native.HelixErrorStorage:
+		code, msg = value.Error_, value.Msg
+	case *native.HelixErrorTransaction:
+		code, msg = value.Error_, value.Msg
+	case *native.HelixErrorInternal:
+		code, msg = value.Error_, value.Msg
+	default:
+		return err
+	}
+	return &uniffiQueryError{code: QueryErrorCode(code), msg: msg, cause: err}
+}
 func (d *uniffiDatabase) Graph(request []byte, spec graphLoadSpec) (graphBackend, error) {
 	value, err := d.db.Graph(request, nativeGraphSpec(spec))
 	if err != nil {

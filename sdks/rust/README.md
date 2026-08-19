@@ -183,7 +183,9 @@ Optional header toggles can be chained before choosing the query kind:
 
 `send()` is generic over the deserialized response type `R` and returns `Result<R, HelixError>`.
 `HelixError` distinguishes transport errors, non-success responses from the server (`RemoteError`),
-serialization failures, and invalid URLs.
+serialization failures, and invalid URLs. Use `error.error_code()` to branch on a
+static code without parsing the diagnostic. See the canonical
+[query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx).
 
 A successful warm read returns `204 No Content` with no query payload after at
 least one eligible backend succeeds. Chain `.writer_only().warm_only()` to warm

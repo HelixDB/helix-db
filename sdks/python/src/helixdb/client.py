@@ -14,7 +14,7 @@ from ._client_common import (
     decode_response,
     parse_execute_options,
     prepare_request,
-    remote_details,
+    remote_error,
     serialize_query,
     validate_base_url,
 )
@@ -56,7 +56,7 @@ class Client:
         except HelixError:
             raise
         except Exception as exc:
-            raise HelixError.embedded(str(exc), cause=exc) from exc
+            raise HelixError.from_embedded(exc) from exc
         return client
 
     @classmethod
@@ -78,7 +78,7 @@ class Client:
         except HelixError:
             raise
         except Exception as exc:
-            raise HelixError.embedded(str(exc), cause=exc) from exc
+            raise HelixError.from_embedded(exc) from exc
         return client
 
     def with_api_key(self, api_key: str | None = None) -> "Client":
@@ -102,7 +102,7 @@ class Client:
             except HelixError:
                 raise
             except Exception as exc:
-                raise HelixError.embedded(str(exc), cause=exc) from exc
+                raise HelixError.from_embedded(exc) from exc
             return decode_response(bytes(response))
         return self.request_builder().query(request).send()
 
@@ -141,7 +141,7 @@ class Client:
             except HelixError:
                 raise
             except Exception as exc:
-                raise HelixError.embedded(str(exc), cause=exc) from exc
+                raise HelixError.from_embedded(exc) from exc
         return self.request_builder().query(request).send_bytes()
 
     def close(self) -> None:
@@ -151,7 +151,7 @@ class Client:
             except HelixError:
                 raise
             except Exception as exc:
-                raise HelixError.embedded(str(exc), cause=exc) from exc
+                raise HelixError.from_embedded(exc) from exc
 
 
 HelixDBClient = Client
@@ -260,16 +260,18 @@ class QueryExecutionRequest:
                 response_body = response.read()
                 reason = getattr(response, "reason", "") or f"unknown error with code: {status}"
         except HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace") or exc.reason or str(exc)
-            raise HelixError.remote(details, status_code=exc.code) from exc
+            raise remote_error(
+                exc.read(),
+                exc.reason or str(exc),
+                status_code=exc.code,
+            ) from exc
         except URLError as exc:
             raise HelixError.network(str(exc.reason), cause=exc) from exc
         except OSError as exc:
             raise HelixError.network(str(exc), cause=exc) from exc
 
         if status != 200:
-            details = remote_details(response_body, reason)
-            raise HelixError.remote(details, status_code=status)
+            raise remote_error(response_body, reason, status_code=status)
         return response_body
 
     def send(self) -> Any:

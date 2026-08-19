@@ -18,8 +18,7 @@ pub(in crate::exec) fn reserved_schedule(op: &ir::ReservedOp) -> ExecSchedule {
 
 pub(in crate::exec) fn project_schedule(projection: &ir::ProjectionPlan) -> ExecSchedule {
     match projection {
-        ir::ProjectionPlan::Count
-        | ir::ProjectionPlan::Exists
+        ir::ProjectionPlan::Exists
         | ir::ProjectionPlan::ProjectBindings {
             dedup: ir::ProjectionDedupMode::Distinct,
             ..

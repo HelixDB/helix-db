@@ -3965,22 +3965,19 @@ fn public_edge_indexed_read_plan(
 fn public_indexed_read_plan(family: PublicMutationFamily, ordinal: u64) -> exec::ExecutablePlan {
     let access_id = exec::ExecStepId::new(1).expect("public lifecycle access ID is positive");
     let access = match family {
-        PublicMutationFamily::Secondary => exec::ExecNodeAccessPlan::EqualityIndex {
-            index: catalog::NodeEqualityIndexMeta::new(public_name(&format!(
+        PublicMutationFamily::Secondary => exec::ExecNodeAccessPlan::exact_equality(
+            catalog::NodeEqualityIndexMeta::new(public_name(&format!(
                 "node_eq:{PUBLIC_MUTATION_LABEL}:{PUBLIC_MUTATION_PROPERTY}"
             ))),
-            key: catalog::ScopedPropertyKey::try_new(
-                PUBLIC_MUTATION_LABEL,
-                PUBLIC_MUTATION_PROPERTY,
-            )
-            .expect("public lifecycle equality key validates"),
-            value: ir::IndexValue::Literal(
+            catalog::ScopedPropertyKey::try_new(PUBLIC_MUTATION_LABEL, PUBLIC_MUTATION_PROPERTY)
+                .expect("public lifecycle equality key validates"),
+            ir::IndexValue::Literal(
                 ir::SecondaryIndexLiteral::new(AstPropertyValue::String(format!(
                     "inserted-{ordinal}"
                 )))
                 .expect("public lifecycle equality literal is indexable"),
             ),
-        },
+        ),
         PublicMutationFamily::Vector => {
             let AstPropertyValue::F32Array(query) = family.inserted_value(ordinal) else {
                 unreachable!("vector public mutation fixture returns a vector")

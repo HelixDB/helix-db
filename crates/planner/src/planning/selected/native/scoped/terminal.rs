@@ -32,7 +32,7 @@ pub(super) fn terminal_expr_from_ast(
     let (input, payload) = terminal_op.into_parts();
     root_stream::required_root_stream_from_ast(ctx, input, scope).map(|input| {
         ScopedTerminalRoot::Terminal(Box::new(native_terminal::terminal_expr_from_payload(
-            input, payload,
+            ctx, input, payload,
         )))
     })
 }
@@ -53,7 +53,7 @@ mod tests {
             )
             .unwrap(),
             ScopedTerminalRoot::Terminal(expr)
-                if matches!(expr.as_ref(), logical::LogicalExpr::StreamProject(_))
+                if matches!(expr.as_ref(), logical::LogicalExpr::StreamCardinality(_))
         ));
         assert!(matches!(
             terminal_expr_from_ast(

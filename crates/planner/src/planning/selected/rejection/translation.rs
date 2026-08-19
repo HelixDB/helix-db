@@ -23,6 +23,9 @@ pub(in crate::planning::selected) fn unsupported_root_construction(
         exec::SelectedRootConstructionError::RecursiveRootStreamInputNonLocalizedPrefix => {
             Reason::SelectedRootStreamInputNonLocalizedPrefix
         }
+        exec::SelectedRootConstructionError::CountInputMismatch => {
+            Reason::SelectedCountInputMismatch
+        }
     })
 }
 

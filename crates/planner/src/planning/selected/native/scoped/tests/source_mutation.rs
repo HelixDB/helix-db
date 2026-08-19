@@ -24,7 +24,7 @@ fn scoped_roots_keep_source_mutation_stream_consumers_inside_cascades() {
     .expect_selectable("source mutation terminal is selectable");
     assert!(matches!(
         terminal.expr(),
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(project.input(), logical::RootStream::Mutation(_))
     ));
 

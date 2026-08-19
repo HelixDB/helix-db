@@ -4077,6 +4077,270 @@ the request at runtime and send it to `POST /v2/query`.
     Apply parameters to indexed sources and filters.
   </Card>
 
+# Handle query errors
+
+Page type: Reference
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Reference</Badge></div>
+
+Helix query failures expose a stable machine-readable code separately from the
+human-readable diagnostic. Branch on the code; log or display the message.
+Messages can gain context over time and are not a compatibility contract.
+
+## HTTP error envelope
+
+Every non-success response from `POST /v2/query` uses `error` for the static
+code and `msg` for the readable message:
+
+```json
+{
+  "error": "index_not_found",
+  "msg": "planner error: missing text index for `Document.body`"
+}
+```
+
+The response never adds a separate `code` field. HTTP status classifications
+are unchanged, so use both the status and static code when deciding whether to
+retry. A non-JSON response from an older proxy or intermediary is still exposed
+by each SDK as readable details with no code.
+
+## Access the code in an SDK
+
+```rust Rust
+match client.query::<serde_json::Value>(request).send().await {
+    Err(error) if error.error_code() == Some("index_not_found") => {
+        // Create the index, wait for it to become active, then retry.
+    }
+    Err(error) => return Err(error),
+    Ok(response) => println!("{response}"),
+}
+```
+
+```ts TypeScript
+try {
+  await client.query(request).send();
+} catch (cause) {
+  if (cause instanceof HelixError && cause.code === "index_not_found") {
+    // Create the index, wait for it to become active, then retry.
+  } else {
+    throw cause;
+  }
+}
+```
+
+```go Go
+if err := client.Exec(ctx, request, &response); err != nil {
+	var helixErr *helix.HelixError
+	if errors.As(err, &helixErr) && helixErr.Code == helix.QueryErrorCode("index_not_found") {
+		// Create the index, wait for it to become active, then retry.
+	} else {
+		return err
+	}
+}
+```
+
+```python Python
+try:
+    response = client.query(request)
+except HelixError as error:
+    if error.code == "index_not_found":
+        # Create the index, wait for it to become active, then retry.
+        pass
+    else:
+        raise
+```
+
+```json JSON
+{
+  "error": "index_not_found",
+  "msg": "planner error: missing text index for `Document.body`"
+}
+```
+
+Known Rust codes can also be parsed as `QueryErrorCode`. SDK wire fields remain
+open strings so a newer server's unknown future code is preserved rather than
+being collapsed or rejected.
+
+## Other query boundaries
+
+For gRPC, the status message remains human-readable and the same static code is
+attached as ASCII metadata under `helix-error-code`. gRPC status classes are
+unchanged.
+
+Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
+fields named `error` and `msg`; generated Python, Node, and Go bindings pass
+that pair into their SDK error objects. Embedded callers never need to infer a
+code from exception text.
+
+## Stability and retry rules
+
+- Existing code strings are frozen compatibility identifiers. New codes may be
+  added, so applications must preserve and safely handle unknown values.
+- A code describes the failure, not whether replaying a particular mutation is
+  safe. Retry only idempotent work or work protected by an application-level
+  idempotency key.
+- `transaction_conflict` is the only HTTP conflict classification and is
+  normally retryable with bounded backoff.
+- Availability and lifecycle failures should be retried only after the named
+  condition changes. Validation and planning failures require a corrected
+  request or schema/index configuration.
+- `internal_*`, `storage_error`, and `response_serialization_error` are opaque
+  by design. Retain the `msg` and server logs when escalating them.
+
+## Error-code reference
+
+“Correctable” means whether a caller can change its request or deployment state
+to address the failure. Statuses list the current HTTP behavior; `400/503` and
+`400/500` indicate that the same code can arise at more than one boundary.
+
+### Request validation
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `invalid_request` | The request is incompatible with the selected query mode. | 400 | After fixing the request | Yes |
+| `invalid_query_json` | The query body cannot be decoded as query JSON. | 400 | After fixing the body | Yes |
+| `invalid_request_body` | The transport cannot read the body or it exceeds the body limit. | 400 | After fixing the body | Yes |
+| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400/503 | After fixing the option or routing | Yes |
+| `invalid_query` | An embedded or encoded query payload is invalid. | 500 | After fixing the query | Yes |
+
+### Planning
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `invalid_index_operation_id` | An index lifecycle operation ID is invalid. | 400 | After fixing the ID | Yes |
+| `unsupported_edge_all_target` | An all-edges reference was used as a finite mutation target. | 400 | After changing the traversal | Yes |
+| `non_literal_index_expression` | An index operation expression is not a literal or parameter. | 400 | After changing the expression | Yes |
+| `missing_planning_equality_parameter` | A parameter needed to plan an equality lookup is not bound. | 400 | After binding the parameter | Yes |
+| `unsupported_planning_equality_parameter` | An equality parameter cannot be represented by the selected index. | 400 | After changing the parameter value | Yes |
+| `invalid_search_tenant` | A tenant was supplied for an unscoped search index. | 400 | After fixing tenant usage | Yes |
+| `invalid_search_tenant_value` | A search tenant value has the wrong shape. | 400 | After fixing the value | Yes |
+| `invalid_search_result_count` | A search result count is zero. | 400 | After using a positive count | Yes |
+| `invalid_search_result_count_expression` | A search result-count expression has the wrong shape. | 400 | After fixing the expression | Yes |
+| `invalid_search_input` | A text or vector search input has the wrong shape. | 400 | After fixing the input | Yes |
+| `invalid_batch_condition_min_size` | A batch condition has a zero minimum size. | 400 | After fixing the condition | Yes |
+| `invalid_initial_batch_condition` | The first batch entry depends on a previous result. | 400 | After reordering the batch | Yes |
+| `duplicate_property_assignment` | A mutation assigns the same property more than once. | 400 | After removing the duplicate | Yes |
+| `duplicate_property_selection` | A projection selects the same property more than once. | 400 | After removing the duplicate | Yes |
+| `duplicate_projection_alias` | A projection emits the same alias more than once. | 400 | After renaming an alias | Yes |
+| `duplicate_return_variable` | A batch returns the same variable more than once. | 400 | After removing the duplicate | Yes |
+| `duplicate_element_id` | A point lookup contains the same element ID more than once. | 400 | After deduplicating IDs | Yes |
+| `duplicate_order_key` | A sort contains the same property more than once. | 400 | After deduplicating keys | Yes |
+| `unbound_context` | A sub-traversal is missing its parent input. | 400 | After binding the context | Yes |
+| `invalid_sub_traversal_operation` | An operation is invalid inside a branch or repeat sub-traversal. | 400 | After changing the traversal | Yes |
+| `invalid_after_bind_operation` | An operation is invalid after a row-local bind. | 400 | After changing the traversal | Yes |
+| `read_only_traversal_in_write_batch` | A write batch contains a read-only traversal. | 400 | After moving the read | Yes |
+| `invalid_branch_arity` | A branch has too few traversals. | 400 | After adding a branch | Yes |
+| `invalid_batch_arity` | A batch has too few entries. | 400 | After adding an entry | Yes |
+| `invalid_repeat_emit` | A repeat emit predicate conflicts with its emit mode. | 400 | After fixing repeat options | Yes |
+| `invalid_repeat_count` | A repeat count or depth is zero. | 400 | After using a positive count | Yes |
+| `invalid_shortest_path_count` | A shortest-path count or depth is zero. | 400 | After using a positive count | Yes |
+| `invalid_order_keys` | An order operation has no sort keys. | 400 | After adding a key | Yes |
+| `invalid_projection_arity` | A projection has too few fields. | 400 | After adding a field | Yes |
+| `invalid_stream_range` | A stream range is statically inverted. | 400 | After fixing the range | Yes |
+| `invalid_stream_bound_expression` | A stream-bound expression has the wrong shape. | 400 | After fixing the expression | Yes |
+| `invalid_empty_name` | A required query name is empty. | 400 | After supplying a name | Yes |
+| `invalid_predicate_arity` | A predicate set has too few children. | 400 | After adding a predicate | Yes |
+
+### Execution
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
+| `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
+| `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
+| `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |
+| `invalid_vector_configuration` | Vector index configuration is invalid. | 500 | After fixing configuration | Yes |
+| `unique_constraint_violation` | A unique index already owns the requested value. | 500 | After choosing a unique value | Yes |
+| `unsupported_unique_index_value_type` | A unique index does not support the value type. | 500 | After changing the value | Yes |
+| `invalid_vector_dimension` | A vector has the wrong dimension. | 400 | After fixing the vector | Yes |
+| `invalid_vector_component` | A vector contains a non-finite component. | 400 | After fixing the vector | Yes |
+| `vector_component_magnitude_exceeded` | A component exceeds the score-safe magnitude. | 400 | After normalizing the vector | Yes |
+| `zero_norm_cosine_vector` | A cosine vector has zero norm. | 400 | After supplying a nonzero vector | Yes |
+
+### Index lifecycle
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
+| `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
+| `active_text_mutation_limit_exceeded` | An active text mutation exceeded an admission limit. | 500 | With a smaller mutation | Yes |
+| `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
+| `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
+| `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
+| `identifier_exhausted` | A bounded non-index-specific identifier namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_id_exhausted` | The logical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
+| `vector_physical_id_exhausted` | The vector physical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_generation_exhausted` | The index generation namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_revision_exhausted` | The index revision namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_operation_revision_exhausted` | The index-operation revision namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_already_exists` | An index with the requested identity already exists. | 500 | After using idempotent creation or a new name | Yes |
+| `index_definition_conflict` | An existing index has a conflicting definition. | 500 | After reconciling definitions | Yes |
+| `index_busy` | The index is already changing lifecycle state. | 500 | After the active operation completes | Yes |
+| `index_operation_not_found` | The requested index operation does not exist. | 500 | After fixing the operation ID | Yes |
+| `index_operation_not_abortable` | The requested operation can no longer be aborted. | 500 | No | No |
+| `index_not_found` | The required logical or physical index does not exist. | 400/500 | After creating or selecting the index | Yes |
+
+### Retryable conflicts
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
+| `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
+| `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
+| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
+
+### Availability and migration
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `database_closed` | The database handle is closed. | 500 | After reopening | Operational |
+| `invalid_configuration` | Database configuration is invalid. | 500 | After fixing configuration | Operational |
+| `migration_required` | Existing storage requires an explicit migration. | 500 | After migration | Operational |
+| `writer_migration_required` | A writer must open and migrate existing storage. | 500 | After writer migration | Operational |
+| `unsupported_index_storage_version` | Stored index data is newer than this binary supports. | 500 | After upgrading the binary | Operational |
+| `writer_mode_required` | The operation requires a writer handle. | 503 | On a writer | Operational |
+| `reader_mode_required` | The operation requires a standalone reader handle. | 500 | On a reader | Operational |
+
+### Internal failures
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `storage_error` | Storage failed outside a classified transaction conflict. | 500 | According to storage health | Operational |
+| `internal_planner_error` | An internal planner contract failed. | 400 | No automatic retry | No |
+| `response_serialization_error` | A successful result could not be serialized. | 500 | No automatic retry | No |
+| `internal_error` | An invariant, persisted-data contract, or opaque internal operation failed. | 500 | No automatic retry | No |
+
+## Migrate direct HTTP consumers
+
+The field names changed while their roles stayed the same:
+
+| Before | Now | Meaning |
+| --- | --- | --- |
+| `code` | `error` | Stable machine-readable code |
+| `error` | `msg` | Human-readable diagnostic |
+
+Old response:
+
+```json
+{
+  "error": "planner error: missing text index for `Document.body`",
+  "code": "index_not_found"
+}
+```
+
+New response:
+
+```json
+{
+  "error": "index_not_found",
+  "msg": "planner error: missing text index for `Document.body`"
+}
+```
+
+Current SDKs read both shapes during migration. Direct HTTP consumers must move
+their code branch from `code` to `error` and their diagnostic read from `error`
+to `msg`.
+
 # Connect to Helix Cloud
 
 Page type: Guide

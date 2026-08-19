@@ -49,6 +49,9 @@ impl ExecutableDagBuilder<'_> {
             SelectedExecutableRunRoot::Terminal(terminal) => {
                 self.push_selected_terminal_root(*terminal, dependencies, output, condition)
             }
+            SelectedExecutableRunRoot::Count(count) => {
+                self.push_selected_count_root(*count, dependencies, output, condition)
+            }
         }
     }
 }

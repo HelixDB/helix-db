@@ -8,7 +8,7 @@ use std::ops::Bound;
 
 use bytes::{BufMut, Bytes};
 
-use super::canonical_number::CanonicalNumber;
+use super::canonical_number::{self, CanonicalNumber};
 use super::property_value::PropertyValue;
 use crate::encoding::error::EncodingError;
 use crate::encoding::indexes::range::RangeIndexDirection;
@@ -92,7 +92,7 @@ pub(crate) fn project_range_value(
     let mut encoded = Vec::new();
     match value {
         PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_) => {
-            let Some(number) = CanonicalNumber::from_property(value) else {
+            let Some(number) = canonical_number::from_property(value) else {
                 return RangeValueProjection::NaN;
             };
             encoded.put_u8(NUMERIC_DOMAIN);
@@ -145,14 +145,14 @@ fn put_ordered_number(encoded: &mut Vec<u8>, number: CanonicalNumber) {
         CanonicalNumber::NegativeInfinity => encoded.put_u8(NEGATIVE_INFINITY_CLASS),
         CanonicalNumber::NegativeFinite(finite) => {
             encoded.put_u8(NEGATIVE_FINITE_CLASS);
-            encoded.put_u16(!biased_exponent(finite.floor_log2));
-            encoded.put_u64(!finite.normalized_significand);
+            encoded.put_u16(!biased_exponent(finite.floor_log2()));
+            encoded.put_u64(!finite.normalized_significand());
         }
         CanonicalNumber::Zero => encoded.put_u8(ZERO_CLASS),
         CanonicalNumber::PositiveFinite(finite) => {
             encoded.put_u8(POSITIVE_FINITE_CLASS);
-            encoded.put_u16(biased_exponent(finite.floor_log2));
-            encoded.put_u64(finite.normalized_significand);
+            encoded.put_u16(biased_exponent(finite.floor_log2()));
+            encoded.put_u64(finite.normalized_significand());
         }
         CanonicalNumber::PositiveInfinity => encoded.put_u8(POSITIVE_INFINITY_CLASS),
     }
@@ -435,5 +435,120 @@ mod tests {
             Bytes::from_static(&[STRING_DOMAIN, b'a'])
         )
         .is_err());
+    }
+
+    #[test]
+    fn every_unsupported_and_oversized_property_shape_is_classified_exactly() {
+        let unsupported = [
+            (PropertyValue::Null, "Null"),
+            (PropertyValue::Bool(false), "Bool"),
+            (PropertyValue::Bytes(vec![1]), "Bytes"),
+            (PropertyValue::I64Array(vec![1]), "I64Array"),
+            (PropertyValue::F64Array(vec![1.0]), "F64Array"),
+            (PropertyValue::F32Array(vec![1.0]), "F32Array"),
+            (
+                PropertyValue::StringArray(vec!["value".to_string()]),
+                "StringArray",
+            ),
+            (PropertyValue::Array(vec![PropertyValue::I64(1)]), "Array"),
+            (
+                PropertyValue::Object(std::collections::BTreeMap::from([(
+                    "key".to_string(),
+                    PropertyValue::I64(1),
+                )])),
+                "Object",
+            ),
+        ];
+        for (value, expected_type) in unsupported {
+            assert_eq!(
+                project_range_value(&value, RangeIndexDirection::Asc),
+                RangeValueProjection::Unsupported(expected_type)
+            );
+        }
+
+        let oversized = PropertyValue::String("x".repeat(MAX_RANGE_ENCODED_LEN));
+        assert_eq!(
+            project_range_value(&oversized, RangeIndexDirection::Asc),
+            RangeValueProjection::Oversized {
+                encoded_len: MAX_RANGE_ENCODED_LEN + 3,
+                maximum: MAX_RANGE_ENCODED_LEN,
+            }
+        );
+    }
+
+    #[test]
+    fn encoded_range_validation_rejects_every_malformed_numeric_and_string_shape() {
+        let malformed = [
+            Vec::new(),
+            vec![NUMERIC_DOMAIN],
+            vec![NUMERIC_DOMAIN, NEGATIVE_INFINITY_CLASS, 0],
+            vec![NUMERIC_DOMAIN, ZERO_CLASS, 0],
+            vec![NUMERIC_DOMAIN, POSITIVE_INFINITY_CLASS, 0],
+            vec![NUMERIC_DOMAIN, 0xff],
+            vec![DATETIME_DOMAIN],
+            vec![0xfe],
+            vec![STRING_DOMAIN, b'a'],
+            vec![STRING_DOMAIN, STRING_TERMINATOR],
+            vec![STRING_DOMAIN, STRING_TERMINATOR, STRING_TERMINATOR, b'x'],
+            vec![STRING_DOMAIN, STRING_TERMINATOR, 0x01],
+            vec![STRING_DOMAIN, 0xff, STRING_TERMINATOR, STRING_TERMINATOR],
+        ];
+        for encoded in malformed {
+            assert!(CanonicalRangeValue::try_from_encoded(
+                RangeIndexDirection::Asc,
+                Bytes::from(encoded),
+            )
+            .is_err());
+        }
+
+        let mut invalid_exponent = vec![0_u8; 12];
+        invalid_exponent[0] = NUMERIC_DOMAIN;
+        invalid_exponent[1] = POSITIVE_FINITE_CLASS;
+        invalid_exponent[4] = 0x80;
+        assert!(CanonicalRangeValue::try_from_encoded(
+            RangeIndexDirection::Asc,
+            Bytes::from(invalid_exponent),
+        )
+        .is_err());
+
+        let mut unnormalized_significand = vec![0_u8; 12];
+        unnormalized_significand[0] = NUMERIC_DOMAIN;
+        unnormalized_significand[1] = POSITIVE_FINITE_CLASS;
+        unnormalized_significand[2..2 + core::mem::size_of::<u16>()]
+            .copy_from_slice(&(EXPONENT_BIAS as u16).to_be_bytes());
+        assert!(CanonicalRangeValue::try_from_encoded(
+            RangeIndexDirection::Asc,
+            Bytes::from(unnormalized_significand),
+        )
+        .is_err());
+
+        assert!(CanonicalRangeValue::try_from_encoded(
+            RangeIndexDirection::Asc,
+            Bytes::from(vec![0; MAX_RANGE_ENCODED_LEN + 1]),
+        )
+        .is_err());
+        assert!(CanonicalRangeValue::try_from_encoded(
+            RangeIndexDirection::Desc,
+            Bytes::from_static(&[!0xfe]),
+        )
+        .is_err());
+
+        for direction in [RangeIndexDirection::Asc, RangeIndexDirection::Desc] {
+            for property in [
+                PropertyValue::F64(-1.0),
+                PropertyValue::F64(1.0),
+                PropertyValue::DateTime(-1),
+                PropertyValue::String("valid\0utf8".to_string()),
+            ] {
+                let projected = indexed(&property, direction);
+                let decoded = CanonicalRangeValue::try_from_encoded(
+                    direction,
+                    Bytes::copy_from_slice(projected.encoded()),
+                )
+                .unwrap();
+                assert_eq!(decoded.direction(), direction);
+                assert_eq!(decoded, projected);
+            }
+        }
     }
 }

@@ -32,6 +32,10 @@ fn restricted_vector_ranking_preserves_input_scope_for_diagnostics() {
 
 #[test]
 fn equality_and_every_range_shape_are_typed_for_nodes_and_edges() {
+    let ctx = context::PlannerContext {
+        params: context::ParamBindings::default().with_value(name("needle"), 5),
+        ..context::PlannerContext::default()
+    };
     let cases = [
         (
             Predicate::eq("value", 5),
@@ -64,14 +68,8 @@ fn equality_and_every_range_shape_are_typed_for_nodes_and_edges() {
     ];
 
     for (predicate, expected_kind) in cases {
-        let node = plan(
-            g().n_with_label_where("User", predicate.clone()),
-            &context::PlannerContext::default(),
-        );
-        let edge = plan(
-            g().e_with_label_where("FOLLOWS", predicate),
-            &context::PlannerContext::default(),
-        );
+        let node = plan(g().n_with_label_where("User", predicate.clone()), &ctx);
+        let edge = plan(g().e_with_label_where("FOLLOWS", predicate), &ctx);
 
         for (actual, expected_element, expected_label) in [
             (missing_indexes(&node), catalog::ElementKind::Node, "User"),

@@ -716,6 +716,7 @@ dependencies = [
  "helix-ast",
  "helix-metrics",
  "helix-planner",
+ "helix-value-semantics",
  "insta",
  "libc",
  "object_store 0.12.5",
@@ -729,7 +730,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "siphasher",
- "slatedb 0.14.1",
+ "slatedb 0.15.0",
  "sonic-rs",
  "stable_deref_trait",
  "tantivy 0.26.1",
@@ -800,7 +801,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -921,7 +922,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -950,6 +951,18 @@ name = "fail-parallel"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f4a147ba57fcd64323c54c8f69fd4e045456a99574163010ccf5eea3168aaa"
+dependencies = [
+ "log",
+ "once_cell",
+ "rand 0.9.5",
+ "tokio",
+]
+
+[[package]]
+name = "fail-parallel"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29b33a0187823f1fa88b36980227dc96c7504ede2288e7d2a77d9d6d88b260c"
 dependencies = [
  "log",
  "once_cell",
@@ -1629,10 +1642,15 @@ name = "helix-planner"
 version = "0.1.0"
 dependencies = [
  "helix-ast",
+ "helix-value-semantics",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
 ]
+
+[[package]]
+name = "helix-value-semantics"
+version = "0.1.0"
 
 [[package]]
 name = "hermit-abi"
@@ -1791,7 +1809,7 @@ dependencies = [
  "sha2 0.10.9",
  "siphasher",
  "slatedb 0.10.0",
- "slatedb 0.14.1",
+ "slatedb 0.15.0",
  "slatedb-common",
  "tempfile",
  "tokio",
@@ -2479,7 +2497,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2941,7 +2959,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3418,7 +3436,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3476,7 +3494,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3763,7 +3781,7 @@ dependencies = [
  "crossbeam-skiplist",
  "dotenvy",
  "duration-str",
- "fail-parallel",
+ "fail-parallel 0.5.2",
  "figment",
  "flatbuffers",
  "foyer 0.18.1",
@@ -3793,8 +3811,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.14.1"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e#dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e"
+version = "0.15.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -3807,7 +3825,7 @@ dependencies = [
  "crossbeam-skiplist",
  "dotenvy",
  "duration-str",
- "fail-parallel",
+ "fail-parallel 0.6.0",
  "figment",
  "flatbuffers",
  "foyer 0.22.3",
@@ -3838,8 +3856,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.14.1"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e#dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e"
+version = "0.15.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
 dependencies = [
  "chrono",
  "log",
@@ -3853,8 +3871,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.14.1"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e#dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e"
+version = "0.15.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4354,7 +4372,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4364,7 +4382,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5025,7 +5043,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

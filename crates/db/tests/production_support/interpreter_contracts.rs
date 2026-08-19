@@ -382,6 +382,19 @@ async fn run_value_dependency_and_row_contracts() {
     );
     context.enable_request_read_view().await.unwrap();
 
+    assert_eq!(
+        interpreter_vector_result(VectorEntityKind::Node, 7)
+            .entity_id()
+            .local_id(),
+        7
+    );
+    assert_eq!(
+        interpreter_vector_result(VectorEntityKind::Edge, 9)
+            .entity_id()
+            .local_id(),
+        9
+    );
+
     let step = |id| exec::ExecStepId::new(id).unwrap();
     let missing = context.dependency_values(&[step(7)]).unwrap_err();
     assert!(missing
@@ -581,6 +594,154 @@ async fn run_value_dependency_and_row_contracts() {
 
     context.close_request_read_view().unwrap();
     db.close().await.expect("interpreter value fixture closes");
+}
+
+/// Exercises scheduler fan-out/fan-in transfer and row projection through the
+/// unchanged production interpreter. This lives outside the measured source
+/// tree so the contract adds no test-harness lines to the production metric.
+pub(crate) async fn run_scheduler_and_projection_contracts() {
+    let db = test_support::open_db("production-scheduler-transfer-contracts").await;
+    let id = |value| exec::ExecStepId::new(value).expect("positive step ID");
+    let first = test_support::step(1, Vec::new(), exec::ExecOp::Noop);
+    let second = test_support::step(2, vec![id(1)], exec::ExecOp::Noop);
+    let third = test_support::step(3, vec![id(1)], exec::ExecOp::Noop);
+    let root = test_support::step(4, vec![id(2), id(3)], exec::ExecOp::Noop);
+    let plan = exec::ExecutablePlan::new(
+        ir::PlanKind::Read,
+        ir::ReturnPlan::None,
+        ir::AtLeast::<_, 1>::from_one_and_rest(first, vec![second, third, root]),
+        id(4),
+        helix_planner::trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .expect("fan-out/fan-in plan validates");
+    assert!(matches!(
+        &plan.execution_order().stages()[1],
+        exec::ExecExecutionStage::Parallel(_)
+    ));
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context
+        .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+        .await
+        .expect("fan-out/fan-in plan executes");
+    assert!(context.step_outputs.get(&id(4)).is_some());
+
+    let ready = (1..=5)
+        .map(|step_id| test_support::step(step_id, Vec::new(), exec::ExecOp::Noop))
+        .collect::<Vec<_>>();
+    let root = test_support::step(6, (1..=5).map(id).collect(), exec::ExecOp::Noop);
+    let mut steps = ready;
+    steps.push(root);
+    let plan = exec::ExecutablePlan::new(
+        ir::PlanKind::Read,
+        ir::ReturnPlan::None,
+        ir::AtLeast::<_, 1>::try_from_vec(steps).expect("six scheduler steps are non-empty"),
+        id(6),
+        helix_planner::trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .expect("wide scheduler plan validates");
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context
+        .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+        .await
+        .expect("wide scheduler plan executes");
+    assert!(context.step_outputs.get(&id(6)).is_some());
+    db.close().await.expect("scheduler fixture closes");
+
+    let db = test_support::open_db("production-row-projection-contracts").await;
+    let ada = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("name", AstPropertyValue::from("ada"))],
+    )
+    .await;
+    let bob = test_support::add_user(&db, "bob").await;
+    let edge = test_support::add_edge(&db, ada, bob, "KNOWS").await;
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context
+        .enable_request_read_view()
+        .await
+        .expect("projection request view opens");
+
+    let rows = || {
+        vec![
+            ExecutionRow::current(ElementRef::Node(ada)),
+            ExecutionRow::empty(),
+            ExecutionRow::current(ElementRef::Edge(edge)),
+        ]
+    };
+    assert_eq!(
+        context
+            .project(ExecutionValue::Stream(rows()), &ir::ProjectionPlan::Id)
+            .await
+            .expect("ID projection executes")
+            .len(),
+        2
+    );
+    let missing = ir::PropertyNames::new(ir::AtLeast::<_, 1>::from_one(
+        ir::NonEmptyString::new("missing").expect("property is non-empty"),
+    ))
+    .expect("one property is unique");
+    assert!(context
+        .project(
+            ExecutionValue::Stream(rows()),
+            &ir::ProjectionPlan::Values(missing),
+        )
+        .await
+        .expect("missing-value projection executes")
+        .is_empty());
+    assert_eq!(
+        context
+            .project(
+                ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(ada))]),
+                &ir::ProjectionPlan::ValueMap(ir::PropertySelection::All),
+            )
+            .await
+            .expect("value-map projection executes")
+            .len(),
+        1
+    );
+    let virtual_label = ExecutionRow::current_with_virtual_properties(
+        ElementRef::Node(u64::MAX),
+        RowVirtualProperties::from_one(
+            ir::NonEmptyString::new("$label").expect("label key is non-empty"),
+            DbPropertyValue::String("Virtual".to_string()),
+        ),
+    );
+    assert_eq!(
+        context
+            .project(
+                ExecutionValue::Stream(vec![
+                    ExecutionRow::current(ElementRef::Node(ada)),
+                    virtual_label,
+                ]),
+                &ir::ProjectionPlan::Label,
+            )
+            .await
+            .expect("label projection executes")
+            .len(),
+        2
+    );
+    assert_eq!(
+        context
+            .project(
+                ExecutionValue::Stream(vec![
+                    ExecutionRow::current(ElementRef::Node(ada)),
+                    ExecutionRow::current(ElementRef::Edge(u64::MAX)),
+                    ExecutionRow::current(ElementRef::Edge(edge)),
+                ]),
+                &ir::ProjectionPlan::EdgeProperties,
+            )
+            .await
+            .expect("edge-property projection executes")
+            .len(),
+        1
+    );
+    context
+        .close_request_read_view()
+        .expect("projection request view closes");
+    db.close().await.expect("projection fixture closes");
 }
 
 /// Seeds one canonical Active text generation before the runtime opens.
@@ -861,14 +1022,15 @@ pub(crate) async fn run_request_read_view_guards() {
             .expect("range key validates");
     for (plan, expected) in [
         (
-            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::EqualityIndex {
-                index: catalog::NodeEqualityIndexMeta::new(
-                    ir::NonEmptyString::new("guard-node-equality").expect("index ID is non-empty"),
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::exact_equality(
+                catalog::NodeEqualityIndexMeta::new(
+                    ir::NonEmptyString::new("node_eq:Document:rank")
+                        .expect("index ID is non-empty"),
                 ),
-                key: property_key.clone(),
-                value: property_value.clone(),
-            }),
-            "secondary equality lookup escaped its request read view",
+                property_key.clone(),
+                property_value.clone(),
+            )),
+            "exact secondary equality point read escaped its request read view",
         ),
         (
             exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::LabelScan {
@@ -877,14 +1039,15 @@ pub(crate) async fn run_request_read_view_guards() {
             "global edge label lookup escaped its request read view",
         ),
         (
-            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::EqualityIndex {
-                index: catalog::EdgeEqualityIndexMeta::new(
-                    ir::NonEmptyString::new("guard-edge-equality").expect("index ID is non-empty"),
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::exact_equality(
+                catalog::EdgeEqualityIndexMeta::new(
+                    ir::NonEmptyString::new("edge_eq:Document:rank")
+                        .expect("index ID is non-empty"),
                 ),
-                key: property_key,
-                value: property_value,
-            }),
-            "edge secondary equality lookup escaped its request read view",
+                property_key,
+                property_value,
+            )),
+            "exact secondary equality point read escaped its request read view",
         ),
         (
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::RangeIndex {

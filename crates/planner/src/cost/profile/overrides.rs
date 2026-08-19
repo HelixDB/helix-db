@@ -33,6 +33,10 @@ pub struct StorageCostProfileOverrides {
     range_next: Option<LatencyEstimate>,
     cpu_predicate_eval: Option<LatencyEstimate>,
     stream_operator_eval: Option<LatencyEstimate>,
+    bitmap_decode_per_id: Option<LatencyEstimate>,
+    secondary_set_per_id: Option<LatencyEstimate>,
+    secondary_row_materialization_per_id: Option<LatencyEstimate>,
+    authoritative_verify_per_id: Option<LatencyEstimate>,
     sort_setup: Option<LatencyEstimate>,
     sort_per_row: Option<LatencyEstimate>,
     barrier_overhead: Option<LatencyEstimate>,
@@ -41,8 +45,10 @@ pub struct StorageCostProfileOverrides {
     task_overhead: Option<LatencyEstimate>,
     default_key_read_bytes: Option<ByteEstimate>,
     default_materialized_row_bytes: Option<ByteEstimate>,
+    default_bitmap_id_bytes: Option<ByteEstimate>,
     default_unknown_scan_rows: Option<EstimatedRows>,
     default_equality_index_rows: Option<EstimatedRows>,
+    default_range_index_rows: Option<EstimatedRows>,
     default_unique_equality_rows: Option<UniqueEqualityRows>,
     max_parallel_kv_reads: Option<PositiveUsize>,
     close_key_multi_get_batch: Option<PositiveUsize>,
@@ -81,6 +87,18 @@ impl StorageCostProfileOverrides {
         if let Some(value) = self.stream_operator_eval {
             profile.stream_operator_eval = value;
         }
+        if let Some(value) = self.bitmap_decode_per_id {
+            profile.bitmap_decode_per_id = value;
+        }
+        if let Some(value) = self.secondary_set_per_id {
+            profile.secondary_set_per_id = value;
+        }
+        if let Some(value) = self.secondary_row_materialization_per_id {
+            profile.secondary_row_materialization_per_id = value;
+        }
+        if let Some(value) = self.authoritative_verify_per_id {
+            profile.authoritative_verify_per_id = value;
+        }
         if let Some(value) = self.sort_setup {
             profile.sort_setup = value;
         }
@@ -105,11 +123,17 @@ impl StorageCostProfileOverrides {
         if let Some(value) = self.default_materialized_row_bytes {
             profile.default_materialized_row_bytes = value;
         }
+        if let Some(value) = self.default_bitmap_id_bytes {
+            profile.default_bitmap_id_bytes = value;
+        }
         if let Some(value) = self.default_unknown_scan_rows {
             profile.default_unknown_scan_rows = value;
         }
         if let Some(value) = self.default_equality_index_rows {
             profile.default_equality_index_rows = value;
+        }
+        if let Some(value) = self.default_range_index_rows {
+            profile.default_range_index_rows = value;
         }
         if let Some(value) = self.default_unique_equality_rows {
             profile.default_unique_equality_rows = value;

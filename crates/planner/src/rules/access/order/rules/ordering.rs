@@ -2,7 +2,9 @@
 
 use super::super::super::super::physical_contracts::access_order_pipeline_contract;
 use super::super::super::super::{access_path_result, KnownRuleId, RuleId, RuleKind, RuleMetadata};
-use super::super::{access_satisfies_order, rewrite_access_order_range_direction};
+use super::super::{
+    access_order_satisfaction, rewrite_access_order_range_direction, AccessOrderSatisfaction,
+};
 use super::shared;
 use crate::{logical, optimizer};
 
@@ -34,10 +36,10 @@ impl optimizer::OptimizerRule for AccessOrderRule {
         if !order.has_order_elision_candidate() {
             return optimizer::RuleResult::NotApplicable;
         }
-        access_satisfies_order(order)
-            .then(|| order.access().clone())
-            .map(access_path_result)
-            .unwrap_or(optimizer::RuleResult::NotApplicable)
+        let AccessOrderSatisfaction::Satisfied(access) = access_order_satisfaction(order) else {
+            return optimizer::RuleResult::NotApplicable;
+        };
+        access_path_result(access)
     }
 }
 
@@ -67,7 +69,7 @@ impl optimizer::OptimizerRule for AccessOrderImplementationRule {
         let logical::LogicalExpr::AccessOrder(order) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        if order.has_order_elision_candidate() && access_satisfies_order(order) {
+        if order.has_order_elision_candidate() && access_order_satisfaction(order).is_satisfied() {
             return optimizer::RuleResult::NotApplicable;
         }
         if order.has_range_direction_candidate()

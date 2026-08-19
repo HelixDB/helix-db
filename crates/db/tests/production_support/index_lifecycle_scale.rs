@@ -132,17 +132,17 @@ fn equality_search_plan(property: &str, value: PlannerPropertyValue) -> exec::Ex
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{property}"
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, property)
+                            catalog::ScopedPropertyKey::try_new(LABEL, property)
                                 .expect("scale equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(value)
                                     .expect("scale equality literal is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),
@@ -213,19 +213,19 @@ fn traversal_prefilter_plan(group: &str) -> exec::ExecutablePlan {
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{NON_UNIQUE_PROPERTY}"
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
+                            catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
                                 .expect("traversal equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(PlannerPropertyValue::String(
                                     group.to_string(),
                                 ))
                                 .expect("traversal equality literal is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),
@@ -265,19 +265,19 @@ fn traversal_prefilter_vector_plan(group: &str, query: Vec<f32>) -> exec::Execut
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{NON_UNIQUE_PROPERTY}"
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
+                            catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
                                 .expect("traversal equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(PlannerPropertyValue::String(
                                     group.to_string(),
                                 ))
                                 .expect("traversal equality literal is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),

@@ -37,6 +37,7 @@ echo ">> Building sdist + wheel"
 
 echo ">> Validating artifacts"
 twine check dist/*
+"${PYTHON}" scripts/validate_package_license.py dist/*
 
 echo ">> Uploading to ${INDEX_NAME}"
 TWINE_USERNAME=__token__ TWINE_PASSWORD="${PYPI_TOKEN}" \

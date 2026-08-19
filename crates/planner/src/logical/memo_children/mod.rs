@@ -31,6 +31,7 @@ impl LogicalExpr {
             Self::RootPipeline(pipeline) => root_stream::pipeline_children(pipeline),
             Self::StreamReserved(reserved) => root_stream::reserved_children(reserved),
             Self::StreamProject(project) => root_stream::project_children(project),
+            Self::StreamCardinality(cardinality) => root_stream::cardinality_children(cardinality),
             Self::StreamAggregate(aggregate) => root_stream::aggregate_children(aggregate),
             Self::StreamVariableWrite(write) => root_stream::variable_write_children(write),
             Self::RootMutation(mutation) => mutation::children(mutation),

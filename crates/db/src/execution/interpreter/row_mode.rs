@@ -83,6 +83,7 @@ impl<'db> ExecutionContext<'db> {
 pub(in crate::execution::interpreter) fn op_name(op: &exec::ExecOp) -> &'static str {
     match op {
         exec::ExecOp::Access { .. } => "source()",
+        exec::ExecOp::Count { .. } => "count()",
         exec::ExecOp::KvRead(_) => "kv_read()",
         exec::ExecOp::Expand { plan } => expand_op_name(plan),
         exec::ExecOp::VectorSearch { .. } => "vector_search()",
@@ -122,7 +123,6 @@ fn expand_op_name(plan: &ir::ExpandPlan) -> &'static str {
 
 fn projection_op_name(plan: &ir::ProjectionPlan) -> &'static str {
     match plan {
-        ir::ProjectionPlan::Count => "count()",
         ir::ProjectionPlan::Exists => "exists()",
         ir::ProjectionPlan::Id => "id()",
         ir::ProjectionPlan::Label => "label()",

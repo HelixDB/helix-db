@@ -211,7 +211,7 @@ fn access_preserving_operators_propagate_properties_but_scope_changes_do_not() {
             },
         },
         exec::ExecOp::Project {
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         },
         exec::ExecOp::Aggregate {
             aggregate: ir::AggregatePlan::Group(name("group")),

@@ -160,6 +160,7 @@ impl<'a> RootStreamPipelineFamily<'a> {
             | logical::RootStream::Pipeline(_)
             | logical::RootStream::Reserved(_)
             | logical::RootStream::Project(_)
+            | logical::RootStream::Cardinality(_)
             | logical::RootStream::Aggregate(_)
             | logical::RootStream::VariableWrite(_) => Self::Localized(input),
         }

@@ -88,7 +88,7 @@ fi
 TARGET_SLATEDB_REVISION="$({
     cargo metadata --locked --manifest-path "$TOOL_MANIFEST" --format-version 1
 } | jq -er '
-    [.packages[] | select(.name == "slatedb" and .version == "0.14.1")] as $packages
+    [.packages[] | select(.name == "slatedb" and .version == "0.15.0")] as $packages
     | if ($packages | length) != 1 then
         error("expected exactly one resolved target SlateDB package")
       else

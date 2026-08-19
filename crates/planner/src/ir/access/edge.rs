@@ -79,8 +79,9 @@ pub enum EdgeAccessPlan {
         /// Result count.
         k: ir::SearchLimitPlan,
     },
-    /// Set intersection. This is an unordered access contract; callers that
-    /// need a stable property order must still request an explicit order plan.
+    /// Set intersection. A pure-secondary intersection is ordered only when a
+    /// direct range child is selected as its executable driver; otherwise it
+    /// is unordered.
     Intersect(ir::AtLeast<EdgeAccessSourcePlan, 2>),
     /// Set union.
     Union(ir::AtLeast<EdgeAccessSourcePlan, 2>),
@@ -100,6 +101,11 @@ impl AsRef<EdgeAccessPlan> for EdgeAccessPlan {
 }
 
 impl EdgeAccessPlan {
+    /// Whether every leaf can participate in one executable secondary ID set.
+    pub(crate) fn is_secondary_set_eligible(&self) -> bool {
+        analysis::secondary_set_eligible(self)
+    }
+
     /// Return the direct label proven by this single edge access operator.
     ///
     /// Set plans use [`EdgeAccessSourcePlan::common_label`] because their
@@ -157,6 +163,34 @@ mod tests {
         source(EdgeAccessPlan::LabelScan {
             label: ir::NonEmptyString::new(label).unwrap(),
         })
+    }
+
+    #[test]
+    fn secondary_set_eligibility_covers_nested_and_mixed_edge_trees() {
+        let range = EdgeAccessPlan::RangeIndex {
+            index: catalog::EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
+            key: catalog::ScopedPropertyDirectionKey::try_new(
+                "LIKES",
+                "weight",
+                helix_ast::index::RangeIndexDirection::Desc,
+            )
+            .unwrap(),
+            range: ir::IndexRange::All,
+        };
+        let nested = EdgeAccessPlan::Intersect(ir::AtLeast::from_pair(
+            source(EdgeAccessPlan::Empty),
+            source(EdgeAccessPlan::Union(ir::AtLeast::from_pair(
+                source(EdgeAccessPlan::Empty),
+                source(range.clone()),
+            ))),
+        ));
+        let mixed = EdgeAccessPlan::Intersect(ir::AtLeast::from_pair(
+            source(range),
+            source(EdgeAccessPlan::AllScan),
+        ));
+
+        assert!(nested.is_secondary_set_eligible());
+        assert!(!mixed.is_secondary_set_eligible());
     }
 
     #[test]

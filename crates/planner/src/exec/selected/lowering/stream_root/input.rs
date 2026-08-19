@@ -90,6 +90,18 @@ impl ExecutableDagBuilder<'_> {
                     condition,
                 )
             }
+            SelectedRootStreamInput::Count(count) => {
+                debug_assert!(
+                    prefix.is_empty(),
+                    "selected count input prefixes are owned by the selected count root"
+                );
+                self.push_selected_run_root(
+                    SelectedExecutableRunRoot::Count(count),
+                    dependencies,
+                    ir::BatchOutputPlan::Discard,
+                    condition,
+                )
+            }
         }
     }
 }

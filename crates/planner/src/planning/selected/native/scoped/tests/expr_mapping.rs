@@ -123,7 +123,7 @@ fn root_stream_from_expr_maps_supported_stream_roots() {
     ));
     assert!(matches!(
         root_stream::root_stream_from_expr(logical::LogicalExpr::StreamProject(
-            logical::StreamProject::new(support::variable_stream(), ir::ProjectionPlan::Count),
+            logical::StreamProject::new(support::variable_stream(), ir::ProjectionPlan::Exists),
         ))
         .unwrap(),
         logical::RootStream::Project(_)

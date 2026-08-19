@@ -128,7 +128,7 @@ mod tests {
             input: crate::exec::SelectedRootStreamInput::VariableSource(
                 logical::VariableSource::new(crate::ir::NonEmptyString::from_static("seed")),
             ),
-            projection: crate::ir::ProjectionPlan::Count,
+            projection: crate::ir::ProjectionPlan::Exists,
         };
 
         assert!(selected_root_terminal_op_matches(

@@ -13,7 +13,7 @@ from ._client_common import (
     decode_response,
     parse_execute_options,
     prepare_request,
-    remote_details,
+    remote_error,
     serialize_query,
     validate_base_url,
 )
@@ -166,7 +166,7 @@ class AsyncClient:
         except HelixError:
             raise
         except Exception as exc:
-            raise HelixError.embedded(str(exc), cause=exc) from exc
+            raise HelixError.from_embedded(exc) from exc
         return cls._from_backend(_EmbeddedBackend(native))
 
     @classmethod
@@ -191,7 +191,7 @@ class AsyncClient:
         except HelixError:
             raise
         except Exception as exc:
-            raise HelixError.embedded(str(exc), cause=exc) from exc
+            raise HelixError.from_embedded(exc) from exc
         return cls._from_backend(_EmbeddedBackend(native))
 
     def with_api_key(self, api_key: str | None = None) -> "AsyncClient":
@@ -265,7 +265,7 @@ class AsyncClient:
         try:
             await backend.native.close()
         except Exception as exc:
-            raise HelixError.embedded(str(exc), cause=exc) from exc
+            raise HelixError.from_embedded(exc) from exc
 
     async def __aenter__(self) -> "AsyncClient":
         self._request_backend()
@@ -342,7 +342,7 @@ class AsyncQueryExecutionRequest:
             except HelixError:
                 raise
             except Exception as exc:
-                raise HelixError.embedded(str(exc), cause=exc) from exc
+                raise HelixError.from_embedded(exc) from exc
 
         prepared = prepare_request(
             self._backend.base_url,
@@ -366,10 +366,7 @@ class AsyncQueryExecutionRequest:
             raise HelixError.network(str(exc), cause=exc) from exc
 
         if status != 200:
-            raise HelixError.remote(
-                remote_details(response_body, reason),
-                status_code=status,
-            )
+            raise remote_error(response_body, reason, status_code=status)
         return response_body
 
     async def send(self, *, timeout: Timeout = None) -> Any:

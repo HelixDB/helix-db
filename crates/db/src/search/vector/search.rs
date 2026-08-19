@@ -1291,7 +1291,7 @@ impl<'a> SearchObserver<'a> {
     }
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/search.rs"]
 pub(crate) mod production_contracts;
 
@@ -1312,5 +1312,10 @@ mod tests {
 
         SearchObserver::collecting(&mut destination).publish(completed);
         assert_eq!(destination.expansion_steps, 7);
+    }
+
+    #[tokio::test]
+    async fn production_search_contract_matrix_runs_in_workspace_tests() {
+        production_contracts::run().await;
     }
 }

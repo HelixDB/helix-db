@@ -42,6 +42,7 @@ Full walkthrough: https://docs.helix-db.com/cli/getting-started
 - [Shape query results](https://docs.helix-db.com/database/helix-db/query-guides/projections): Return properties, computed values, aggregates, and correlated binding rows — Page type: Guide
 - [Branch, repeat, and condition queries](https://docs.helix-db.com/database/helix-db/query-guides/advanced): Compose sub-traversals and gate named entries without leaving one transaction — Page type: Guide
 - [Bind typed query parameters](https://docs.helix-db.com/database/helix-db/query-guides/parameters): Keep the operation tree stable while request values change — Page type: Guide
+- [Handle query errors](https://docs.helix-db.com/database/helix-db/query-guides/error-handling): Branch on stable error codes while retaining diagnostic messages — Page type: Reference
 
 ## Helix Cloud — Start Here
 - [Connect to Helix Cloud](https://docs.helix-db.com/database/helix-cloud/start-here/working-with-enterprise): Send dynamic requests through a managed gateway — Page type: Guide

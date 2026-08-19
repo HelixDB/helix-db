@@ -96,7 +96,101 @@ impl StorageCostProfile {
 
     /// Cost an equality-index lookup over an estimated result count.
     pub fn equality_index_lookup(&self, estimated_rows: EstimatedRows) -> CostVector {
+        self.bitmap_equality_lookup(estimated_rows)
+            .serial(self.secondary_row_materialization(estimated_rows))
+    }
+
+    /// Cost one V4 non-unique equality bitmap point read and decode.
+    pub fn bitmap_equality_lookup(&self, estimated_rows: EstimatedRows) -> CostVector {
+        let rows = estimated_rows.as_rows();
+        CostVector {
+            latency: self
+                .object_get_latency
+                .saturating_add(self.sstable_filter_probe)
+                .saturating_add(self.bitmap_decode_per_id.saturating_mul(rows)),
+            object_reads: 1,
+            cpu_units: rows,
+            bytes: self.default_bitmap_id_bytes.saturating_mul(rows),
+            peak_memory: self.default_bitmap_id_bytes.saturating_mul(rows),
+            ..CostVector::ZERO
+        }
+    }
+
+    /// Cost one close-key `multi_get` and decode for batched V4 bitmaps.
+    pub fn bitmap_equality_batch(
+        &self,
+        values: PositiveUsize,
+        estimated_rows: EstimatedRows,
+    ) -> CostVector {
+        let rows = estimated_rows.as_rows();
+        self.multi_get(values, KeyLocality::Close)
+            .serial(CostVector {
+                latency: self.bitmap_decode_per_id.saturating_mul(rows),
+                cpu_units: rows,
+                bytes: self.default_bitmap_id_bytes.saturating_mul(rows),
+                peak_memory: self.default_bitmap_id_bytes.saturating_mul(rows),
+                ..CostVector::ZERO
+            })
+    }
+
+    /// Cost a unique-owner point read plus authoritative property verification.
+    pub fn unique_equality_lookup(&self, estimated_rows: EstimatedRows) -> CostVector {
+        self.point_gets(PositiveUsize::at_least_one(1))
+            .serial(self.authoritative_verification(estimated_rows))
+    }
+
+    /// Cost an authoritative graph scan used for null equality.
+    pub fn null_equality_scan(&self, scanned_rows: EstimatedRows) -> CostVector {
+        self.range_scan(scanned_rows)
+            .serial(self.predicate_eval(scanned_rows))
+            .serial(CostVector {
+                authoritative_graph_reads: scanned_rows.as_rows(),
+                ..CostVector::ZERO
+            })
+    }
+
+    /// Cost a V2 range scan plus authoritative verification of every candidate.
+    pub fn secondary_range_lookup(&self, estimated_rows: EstimatedRows) -> CostVector {
         self.range_scan(estimated_rows)
+            .serial(self.authoritative_verification(estimated_rows))
+    }
+
+    /// Cost authoritative graph-property verification for candidate IDs.
+    pub fn authoritative_verification(&self, estimated_rows: EstimatedRows) -> CostVector {
+        let rows = estimated_rows.as_rows();
+        CostVector {
+            latency: self.authoritative_verify_per_id.saturating_mul(rows),
+            object_reads: rows,
+            authoritative_graph_reads: rows,
+            cpu_units: rows,
+            bytes: self.default_key_read_bytes.saturating_mul(rows),
+            ..CostVector::ZERO
+        }
+    }
+
+    /// Cost a bitmap/set operation over candidate IDs.
+    pub fn secondary_set_operation(&self, estimated_rows: EstimatedRows) -> CostVector {
+        let rows = estimated_rows.as_rows();
+        CostVector {
+            latency: self.secondary_set_per_id.saturating_mul(rows),
+            cpu_units: rows,
+            peak_memory: self.default_bitmap_id_bytes.saturating_mul(rows),
+            ..CostVector::ZERO
+        }
+    }
+
+    /// Cost constructing verified result rows after all ID-set work is complete.
+    pub fn secondary_row_materialization(&self, estimated_rows: EstimatedRows) -> CostVector {
+        let rows = estimated_rows.as_rows();
+        CostVector {
+            latency: self
+                .secondary_row_materialization_per_id
+                .saturating_mul(rows),
+            cpu_units: rows,
+            bytes: self.default_materialized_row_bytes.saturating_mul(rows),
+            peak_memory: self.default_materialized_row_bytes.saturating_mul(rows),
+            ..CostVector::ZERO
+        }
     }
 
     /// Cost residual predicate evaluation for a row estimate.

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{exec, properties};
 
 /// Physical access family independent of node/edge duplication.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhysicalAccess {
     /// KV read.
@@ -12,6 +12,10 @@ pub enum PhysicalAccess {
     Empty,
     /// Runtime parameter or variable input.
     RuntimeInput,
+    /// Fully selected node access program.
+    NodeExact(Box<exec::ExecNodeAccessPlan>),
+    /// Fully selected edge access program.
+    EdgeExact(Box<exec::ExecEdgeAccessPlan>),
     /// Point reads that are costed as split batches.
     PointReads {
         /// Locality used for batch costing.
@@ -19,8 +23,6 @@ pub enum PhysicalAccess {
     },
     /// Label scan.
     LabelScan,
-    /// Equality-index lookup.
-    EqualityIndex,
     /// Range-index scan.
     RangeIndex,
     /// Vector search.

@@ -40,7 +40,7 @@ case "$SHARD" in
         exit 2
         ;;
 esac
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/private/tmp}/helix-proper-${SHARD}-coverage.XXXXXX")"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/helix-proper-${SHARD}-coverage.XXXXXX")"
 REPORT_PATH="$TEMP_ROOT/coverage.json"
 SUMMARY_PATH="$TEMP_ROOT/summary.json"
 FULL_REPORT_PATH="${WORKSPACE_COVERAGE_FULL_REPORT_PATH:-}"

@@ -22,6 +22,7 @@ mod alternative;
 mod batch;
 mod contracts;
 mod control_flow;
+mod count;
 mod entry;
 mod finish;
 mod index_ddl;

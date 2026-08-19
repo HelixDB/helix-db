@@ -9,6 +9,9 @@ pub struct CostVector {
     pub latency: LatencyEstimate,
     /// Object-store or LSM read operations.
     pub object_reads: u64,
+    /// Authoritative graph-property reads used to verify index candidates.
+    #[serde(default)]
+    pub authoritative_graph_reads: u64,
     /// `multi_get` calls.
     pub multi_get_calls: u64,
     /// Range scan seek operations.
@@ -30,6 +33,7 @@ impl CostVector {
     pub const ZERO: Self = Self {
         latency: LatencyEstimate::ZERO,
         object_reads: 0,
+        authoritative_graph_reads: 0,
         multi_get_calls: 0,
         range_seeks: 0,
         range_nexts: 0,
@@ -44,6 +48,9 @@ impl CostVector {
         Self {
             latency: self.latency.saturating_add(rhs.latency),
             object_reads: self.object_reads.saturating_add(rhs.object_reads),
+            authoritative_graph_reads: self
+                .authoritative_graph_reads
+                .saturating_add(rhs.authoritative_graph_reads),
             multi_get_calls: self.multi_get_calls.saturating_add(rhs.multi_get_calls),
             range_seeks: self.range_seeks.saturating_add(rhs.range_seeks),
             range_nexts: self.range_nexts.saturating_add(rhs.range_nexts),
@@ -59,6 +66,7 @@ impl CostVector {
         Self {
             latency: self.latency.saturating_mul(rhs),
             object_reads: self.object_reads.saturating_mul(rhs),
+            authoritative_graph_reads: self.authoritative_graph_reads.saturating_mul(rhs),
             multi_get_calls: self.multi_get_calls.saturating_mul(rhs),
             range_seeks: self.range_seeks.saturating_mul(rhs),
             range_nexts: self.range_nexts.saturating_mul(rhs),

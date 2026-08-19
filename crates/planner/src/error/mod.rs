@@ -3,6 +3,7 @@
 mod operation;
 mod search;
 
+use helix_ast::error_code;
 use helix_ast::traversal::EmitBehavior;
 use thiserror::Error;
 
@@ -58,6 +59,18 @@ pub enum PlannerError {
     NonLiteralIndexExpression {
         /// Debug rendering of the non-literal expression.
         expression: String,
+    },
+    /// An equality parameter was not bound when its algorithm had to be selected.
+    #[error("missing planning equality parameter `{param}`")]
+    MissingPlanningEqualityParameter {
+        /// Missing parameter name.
+        param: NonEmptyString,
+    },
+    /// A bound equality value cannot be represented by a secondary-index literal.
+    #[error("unsupported planning equality parameter `{param}`")]
+    UnsupportedPlanningEqualityParameter {
+        /// Unsupported parameter name.
+        param: NonEmptyString,
     },
     /// Required search index does not exist.
     #[error("missing {element:?} {kind} index for `{label}.{property}`")]
@@ -270,6 +283,88 @@ pub enum PlannerError {
 }
 
 impl PlannerError {
+    /// Stable machine-readable code for this public planning failure.
+    pub const fn error_code(&self) -> error_code::QueryErrorCode {
+        match self {
+            Self::InvalidIndexOperationId(_) => error_code::QueryErrorCode::InvalidIndexOperationId,
+            Self::InvalidExecutablePlan { .. }
+            | Self::UnsupportedCascadesPlan { .. }
+            | Self::OptimizerFailure { .. }
+            | Self::OptimizerSelectionFailure { .. } => {
+                error_code::QueryErrorCode::InternalPlannerError
+            }
+            Self::UnsupportedEdgeAllTarget => error_code::QueryErrorCode::UnsupportedEdgeAllTarget,
+            Self::NonLiteralIndexExpression { .. } => {
+                error_code::QueryErrorCode::NonLiteralIndexExpression
+            }
+            Self::MissingPlanningEqualityParameter { .. } => {
+                error_code::QueryErrorCode::MissingPlanningEqualityParameter
+            }
+            Self::UnsupportedPlanningEqualityParameter { .. } => {
+                error_code::QueryErrorCode::UnsupportedPlanningEqualityParameter
+            }
+            Self::MissingSearchIndex { .. } => error_code::QueryErrorCode::IndexNotFound,
+            Self::InvalidSearchTenant { .. } => error_code::QueryErrorCode::InvalidSearchTenant,
+            Self::InvalidSearchTenantValue { .. } => {
+                error_code::QueryErrorCode::InvalidSearchTenantValue
+            }
+            Self::InvalidSearchResultCount { .. } => {
+                error_code::QueryErrorCode::InvalidSearchResultCount
+            }
+            Self::InvalidSearchResultCountExpression { .. } => {
+                error_code::QueryErrorCode::InvalidSearchResultCountExpression
+            }
+            Self::InvalidSearchInput { .. } => error_code::QueryErrorCode::InvalidSearchInput,
+            Self::InvalidBatchConditionMinSize { .. } => {
+                error_code::QueryErrorCode::InvalidBatchConditionMinSize
+            }
+            Self::InvalidInitialBatchCondition { .. } => {
+                error_code::QueryErrorCode::InvalidInitialBatchCondition
+            }
+            Self::DuplicatePropertyAssignment { .. } => {
+                error_code::QueryErrorCode::DuplicatePropertyAssignment
+            }
+            Self::DuplicatePropertySelection { .. } => {
+                error_code::QueryErrorCode::DuplicatePropertySelection
+            }
+            Self::DuplicateProjectionAlias { .. } => {
+                error_code::QueryErrorCode::DuplicateProjectionAlias
+            }
+            Self::DuplicateReturnVariable { .. } => {
+                error_code::QueryErrorCode::DuplicateReturnVariable
+            }
+            Self::DuplicateElementId { .. } => error_code::QueryErrorCode::DuplicateElementId,
+            Self::DuplicateOrderKey { .. } => error_code::QueryErrorCode::DuplicateOrderKey,
+            Self::UnboundContext => error_code::QueryErrorCode::UnboundContext,
+            Self::InvalidSubTraversalOperation { .. } => {
+                error_code::QueryErrorCode::InvalidSubTraversalOperation
+            }
+            Self::InvalidAfterBindOperation { .. } => {
+                error_code::QueryErrorCode::InvalidAfterBindOperation
+            }
+            Self::ReadOnlyTraversalInWriteBatch { .. } => {
+                error_code::QueryErrorCode::ReadOnlyTraversalInWriteBatch
+            }
+            Self::InvalidBranchArity { .. } => error_code::QueryErrorCode::InvalidBranchArity,
+            Self::InvalidBatchArity { .. } => error_code::QueryErrorCode::InvalidBatchArity,
+            Self::InvalidRepeatEmit { .. } => error_code::QueryErrorCode::InvalidRepeatEmit,
+            Self::InvalidRepeatCount { .. } => error_code::QueryErrorCode::InvalidRepeatCount,
+            Self::InvalidShortestPathCount { .. } => {
+                error_code::QueryErrorCode::InvalidShortestPathCount
+            }
+            Self::InvalidOrderKeys => error_code::QueryErrorCode::InvalidOrderKeys,
+            Self::InvalidProjectionArity { .. } => {
+                error_code::QueryErrorCode::InvalidProjectionArity
+            }
+            Self::InvalidStreamRange { .. } => error_code::QueryErrorCode::InvalidStreamRange,
+            Self::InvalidStreamBoundExpression { .. } => {
+                error_code::QueryErrorCode::InvalidStreamBoundExpression
+            }
+            Self::InvalidEmptyName { .. } => error_code::QueryErrorCode::InvalidEmptyName,
+            Self::InvalidPredicateArity { .. } => error_code::QueryErrorCode::InvalidPredicateArity,
+        }
+    }
+
     /// Stable public index error code for planner failures that belong to the
     /// index lifecycle contract.
     pub const fn index_error_code(&self) -> Option<&'static str> {
@@ -296,6 +391,7 @@ impl From<ExprPlanError> for PlannerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helix_ast::error_code::QueryErrorCode as Code;
 
     #[test]
     fn missing_search_index_has_the_public_not_found_code() {
@@ -307,5 +403,229 @@ mod tests {
         };
 
         assert_eq!(error.index_error_code(), Some("index_not_found"));
+    }
+
+    #[test]
+    fn every_public_planner_error_arm_has_a_static_code() {
+        let name = || NonEmptyString::new("value").unwrap();
+        let internal = [
+            PlannerError::InvalidExecutablePlan {
+                error: exec::ExecPlanError::EmptyMultiGet,
+            },
+            PlannerError::UnsupportedCascadesPlan {
+                reason: "unsupported".to_string(),
+            },
+            PlannerError::OptimizerFailure {
+                memo_error: memo::MemoError::GroupIdSpaceExhausted,
+            },
+            PlannerError::OptimizerSelectionFailure {
+                selection_error: optimizer::SelectionError::NoPhysicalAlternatives {
+                    group: memo::MemoGroupId::first(),
+                },
+            },
+        ];
+        assert!(internal
+            .iter()
+            .all(|error| error.error_code() == Code::InternalPlannerError));
+
+        let errors = vec![
+            (
+                PlannerError::InvalidIndexOperationId(
+                    crate::ir::IndexOperationId::try_new("").unwrap_err(),
+                ),
+                Code::InvalidIndexOperationId,
+            ),
+            (
+                PlannerError::UnsupportedEdgeAllTarget,
+                Code::UnsupportedEdgeAllTarget,
+            ),
+            (
+                PlannerError::NonLiteralIndexExpression {
+                    expression: "param".to_string(),
+                },
+                Code::NonLiteralIndexExpression,
+            ),
+            (
+                PlannerError::MissingPlanningEqualityParameter { param: name() },
+                Code::MissingPlanningEqualityParameter,
+            ),
+            (
+                PlannerError::UnsupportedPlanningEqualityParameter { param: name() },
+                Code::UnsupportedPlanningEqualityParameter,
+            ),
+            (
+                PlannerError::MissingSearchIndex {
+                    element: ElementKind::Node,
+                    kind: SearchIndexKind::Text,
+                    label: name(),
+                    property: name(),
+                },
+                Code::IndexNotFound,
+            ),
+            (
+                PlannerError::InvalidSearchTenant {
+                    kind: SearchIndexKind::Text,
+                    index_id: name(),
+                },
+                Code::InvalidSearchTenant,
+            ),
+            (
+                PlannerError::InvalidSearchTenantValue {
+                    kind: SearchIndexKind::Text,
+                    expected: SearchTenantValueExpected::NonNullPropertyInput,
+                },
+                Code::InvalidSearchTenantValue,
+            ),
+            (
+                PlannerError::InvalidSearchResultCount {
+                    kind: SearchIndexKind::Text,
+                    actual: 0,
+                },
+                Code::InvalidSearchResultCount,
+            ),
+            (
+                PlannerError::InvalidSearchResultCountExpression {
+                    kind: SearchIndexKind::Text,
+                    expected: SearchLimitExpected::PositiveInteger,
+                },
+                Code::InvalidSearchResultCountExpression,
+            ),
+            (
+                PlannerError::InvalidSearchInput {
+                    kind: SearchIndexKind::Text,
+                    expected: SearchQueryInputExpected::NonEmptyString,
+                },
+                Code::InvalidSearchInput,
+            ),
+            (
+                PlannerError::InvalidBatchConditionMinSize { actual: 0 },
+                Code::InvalidBatchConditionMinSize,
+            ),
+            (
+                PlannerError::InvalidInitialBatchCondition {
+                    condition: InitialBatchCondition::PrevNotEmpty,
+                },
+                Code::InvalidInitialBatchCondition,
+            ),
+            (
+                PlannerError::DuplicatePropertyAssignment { property: name() },
+                Code::DuplicatePropertyAssignment,
+            ),
+            (
+                PlannerError::DuplicatePropertySelection { property: name() },
+                Code::DuplicatePropertySelection,
+            ),
+            (
+                PlannerError::DuplicateProjectionAlias { alias: name() },
+                Code::DuplicateProjectionAlias,
+            ),
+            (
+                PlannerError::DuplicateReturnVariable { name: name() },
+                Code::DuplicateReturnVariable,
+            ),
+            (
+                PlannerError::DuplicateElementId {
+                    element: ElementKind::Node,
+                    id: 1,
+                },
+                Code::DuplicateElementId,
+            ),
+            (
+                PlannerError::DuplicateOrderKey { property: name() },
+                Code::DuplicateOrderKey,
+            ),
+            (PlannerError::UnboundContext, Code::UnboundContext),
+            (
+                PlannerError::InvalidSubTraversalOperation {
+                    op: SubTraversalOp::Source,
+                },
+                Code::InvalidSubTraversalOperation,
+            ),
+            (
+                PlannerError::InvalidAfterBindOperation {
+                    op: AfterBindOp::OrderBy,
+                },
+                Code::InvalidAfterBindOperation,
+            ),
+            (
+                PlannerError::ReadOnlyTraversalInWriteBatch {
+                    op: ReadOnlyWriteOp::Bind,
+                },
+                Code::ReadOnlyTraversalInWriteBatch,
+            ),
+            (
+                PlannerError::InvalidBranchArity {
+                    op: BranchOp::Union,
+                    min: 1,
+                    actual: 0,
+                },
+                Code::InvalidBranchArity,
+            ),
+            (
+                PlannerError::InvalidBatchArity {
+                    op: BatchOp::Batch,
+                    min: 1,
+                    actual: 0,
+                },
+                Code::InvalidBatchArity,
+            ),
+            (
+                PlannerError::InvalidRepeatEmit {
+                    emit: EmitBehavior::Before,
+                },
+                Code::InvalidRepeatEmit,
+            ),
+            (
+                PlannerError::InvalidRepeatCount {
+                    field: RepeatCountField::Times,
+                    actual: 0,
+                },
+                Code::InvalidRepeatCount,
+            ),
+            (
+                PlannerError::InvalidShortestPathCount {
+                    field: ShortestPathCountField::MaxDepth,
+                    actual: 0,
+                },
+                Code::InvalidShortestPathCount,
+            ),
+            (PlannerError::InvalidOrderKeys, Code::InvalidOrderKeys),
+            (
+                PlannerError::InvalidProjectionArity {
+                    op: ProjectionOp::Project,
+                    min: 1,
+                    actual: 0,
+                },
+                Code::InvalidProjectionArity,
+            ),
+            (
+                PlannerError::InvalidStreamRange { start: 2, end: 1 },
+                Code::InvalidStreamRange,
+            ),
+            (
+                PlannerError::InvalidStreamBoundExpression {
+                    expected: StreamBoundExpected::NonNegativeInteger,
+                },
+                Code::InvalidStreamBoundExpression,
+            ),
+            (
+                PlannerError::InvalidEmptyName {
+                    field: NameField::Name,
+                },
+                Code::InvalidEmptyName,
+            ),
+            (
+                PlannerError::InvalidPredicateArity {
+                    op: PredicateSetOp::And,
+                    min: 1,
+                    actual: 0,
+                },
+                Code::InvalidPredicateArity,
+            ),
+        ];
+
+        for (error, expected) in errors {
+            assert_eq!(error.error_code(), expected, "{error}");
+        }
     }
 }

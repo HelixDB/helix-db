@@ -958,4 +958,204 @@ mod tests {
             (vec![7], Some(0x0102_0304_0506_0708))
         );
     }
+
+    #[test]
+    fn edge_delta_decoder_and_state_machine_cover_every_closed_operation() {
+        assert_eq!(decode_edge_delta(&[]), None);
+        assert_eq!(decode_edge_delta(&[0xFF]), None);
+        assert_eq!(decode_edge_delta(&[0x00]), None);
+        assert_eq!(decode_edge_delta(&[0x04]), Some((EdgeDeltaOp::ResetOut, 0)));
+        assert!(is_edge_delta(&[0x00]));
+        assert!(!is_edge_delta(&[]));
+
+        let mut state = edges::Edges::new();
+        for (operation, node_id) in [
+            (EdgeDeltaOp::AddOut, 11),
+            (EdgeDeltaOp::AddIn, 12),
+            (EdgeDeltaOp::RemoveOut, 11),
+            (EdgeDeltaOp::RemoveIn, 12),
+        ] {
+            EdgeMergeOperator::apply_delta(&mut state, operation, node_id);
+        }
+        assert_eq!(state.num_edges_out(), 0);
+        assert_eq!(state.num_edges_in(), 0);
+
+        state.add_out(13);
+        EdgeMergeOperator::apply_delta(&mut state, EdgeDeltaOp::ResetOut, 0);
+        assert_eq!(state.num_edges_out(), 0);
+
+        let mut encoded = edges::Edges::new();
+        encoded.add_out(17);
+        encoded.add_in(19);
+        EdgeMergeOperator::apply_operand(&mut state, &edges::encode_edges(&encoded));
+        EdgeMergeOperator::apply_operand(&mut state, b"not-an-edge-value");
+        assert!(state.contains_out(17));
+        assert!(state.contains_in(19));
+    }
+
+    #[test]
+    fn edge_merge_covers_existing_delta_value_and_decode_failure_contracts() {
+        let key = Bytes::from_static(b"edge");
+        let operator = EdgeMergeOperator;
+
+        let merged = operator
+            .merge(&key, Some(edge_delta(0x00, 5)), edge_delta(0x02, 7))
+            .expect("delta-valued existing state is applied");
+        let decoded = edges::decode_edges(&merged).expect("merged edges decode");
+        assert!(decoded.contains_out(5));
+        assert!(decoded.contains_in(7));
+
+        let batch = operator
+            .merge_batch(
+                &key,
+                Some(edge_delta(0x00, 3)),
+                &[edge_delta(0x04, 0), edge_delta(0x00, 9)],
+            )
+            .expect("batch deltas merge from oldest to newest");
+        let decoded = edges::decode_edges(&batch).expect("batch edges decode");
+        assert_eq!(decoded.iter_out().collect::<Vec<_>>(), Vec::<u64>::new());
+
+        assert!(operator
+            .merge(
+                &key,
+                Some(Bytes::from_static(b"malformed-base")),
+                edge_delta(0x00, 1),
+            )
+            .is_err());
+        assert!(operator
+            .merge_batch(
+                &key,
+                Some(Bytes::from_static(b"malformed-base")),
+                &[edge_delta(0x00, 1)],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn layer_zero_operand_contract_covers_clear_reset_deduplication_and_failures() {
+        let bits = 0xABCD_EF01_2345_6789_u64;
+        let mut set = vec![LAYER0_SIMHASH_SET];
+        set.extend_from_slice(&bits.to_le_bytes());
+        assert_eq!(decode_layer0_simhash_operand(&set), Some(Some(bits)));
+        assert_eq!(
+            decode_layer0_simhash_operand(&[LAYER0_SIMHASH_CLEAR]),
+            Some(None)
+        );
+        assert_eq!(decode_layer0_simhash_operand(&[LAYER0_SIMHASH_SET]), None);
+        assert_eq!(
+            decode_layer0_simhash_operand(&[LAYER0_SIMHASH_CLEAR, 0]),
+            None
+        );
+
+        let mut state = Layer0State::default();
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::AddOut, 9);
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::AddOut, 9);
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::AddOut, 3);
+        assert_eq!(state.neighbors, vec![3, 9]);
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::RemoveOut, 7);
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::RemoveOut, 3);
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::AddIn, 1);
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::RemoveIn, 1);
+        assert_eq!(state.neighbors, vec![9]);
+
+        Layer0NeighborMergeOperator::apply_operand(&mut state, &set)
+            .expect("SimHash set operand is valid");
+        assert_eq!(state.simhash_bits, Some(bits));
+        Layer0NeighborMergeOperator::apply_operand(&mut state, &[LAYER0_SIMHASH_CLEAR])
+            .expect("SimHash clear operand is valid");
+        assert_eq!(state.simhash_bits, None);
+
+        Layer0NeighborMergeOperator::apply_operand(
+            &mut state,
+            &vectors::encode_layer0_neighbors(&[4, 2]),
+        )
+        .expect("legacy neighbor value is valid");
+        assert_eq!(state.neighbors, vec![2, 4]);
+        assert_eq!(state.simhash_bits, None);
+        Layer0NeighborMergeOperator::apply_operand(
+            &mut state,
+            &vectors::encode_layer0_record(&[8], Some(bits)),
+        )
+        .expect("current layer-zero value is valid");
+        assert_eq!(state.neighbors, vec![8]);
+        assert_eq!(state.simhash_bits, Some(bits));
+
+        Layer0NeighborMergeOperator::apply_delta(&mut state, EdgeDeltaOp::ResetOut, 0);
+        assert!(state.neighbors.is_empty());
+        assert!(
+            Layer0NeighborMergeOperator::apply_operand(&mut state, b"malformed-layer-zero")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn counter_other_and_dispatch_contracts_cover_every_merge_shape() {
+        let counter = CounterMergeOperator;
+        let key = Bytes::from_static(b"counter");
+        assert_eq!(CounterMergeOperator::decode(b"short"), 0);
+        assert_eq!(CounterMergeOperator::decode(&7_i64.to_be_bytes()), 7);
+        assert_eq!(
+            CounterMergeOperator::decode(
+                &counter
+                    .merge(
+                        &key,
+                        Some(CounterMergeOperator::encode(2)),
+                        CounterMergeOperator::encode(-7),
+                    )
+                    .expect("counter merge succeeds")
+            ),
+            0
+        );
+        assert_eq!(
+            CounterMergeOperator::decode(
+                &counter
+                    .merge_batch(
+                        &key,
+                        None,
+                        &[
+                            CounterMergeOperator::encode(3),
+                            CounterMergeOperator::encode(4),
+                        ],
+                    )
+                    .expect("counter batch succeeds")
+            ),
+            7
+        );
+
+        let operator = HelixMergeOperator::new();
+        let other = Bytes::from_static(b"unowned-key");
+        assert_eq!(
+            operator
+                .merge(
+                    &other,
+                    Some(Bytes::from_static(b"old")),
+                    Bytes::from_static(b"new")
+                )
+                .expect("other merge returns the operand"),
+            Bytes::from_static(b"new")
+        );
+        assert_eq!(
+            operator
+                .merge_batch(
+                    &other,
+                    Some(Bytes::from_static(b"old")),
+                    &[Bytes::from_static(b"first"), Bytes::from_static(b"second")],
+                )
+                .expect("other batch returns its first operand"),
+            Bytes::from_static(b"first")
+        );
+        assert_eq!(
+            operator
+                .merge_batch(&other, Some(Bytes::from_static(b"old")), &[])
+                .expect("other empty batch preserves existing state"),
+            Bytes::from_static(b"old")
+        );
+        assert!(operator.merge_batch(&other, None, &[]).is_err());
+
+        assert_eq!(
+            HelixMergeOperator::key_type(&[METADATA_PREFIX]),
+            MergeKeyType::Counter
+        );
+        assert_eq!(HelixMergeOperator::key_type(&other), MergeKeyType::Other);
+    }
 }

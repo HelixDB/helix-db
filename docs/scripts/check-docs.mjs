@@ -26,6 +26,7 @@ const CORE_MULTI_SDK_PAGES = [
   'database/helix-db/query-guides/filtering',
   'database/helix-db/query-guides/projections',
   'database/helix-db/query-guides/parameters',
+  'database/helix-db/query-guides/error-handling',
 ];
 const SDK_SETUP_FILES = new Set([
   'database/helix-db/start-here/sdk-setup/rust-project-setup.mdx',
@@ -349,6 +350,47 @@ for (const slug of CORE_MULTI_SDK_PAGES) {
     if (!content.includes(fence)) {
       errors.push(`${slug}: core guide is missing ${fence.slice(3)} example`);
     }
+  }
+}
+
+const errorCodeSource = fs.readFileSync(
+  path.resolve(DOCS_ROOT, '..', 'crates/ast/src/error_code.rs'),
+  'utf8',
+);
+const asStrStart = errorCodeSource.indexOf('pub const fn as_str');
+const asStrEnd = errorCodeSource.indexOf('impl core::fmt::Display', asStrStart);
+if (asStrStart < 0 || asStrEnd < 0) {
+  errors.push('crates/ast/src/error_code.rs: cannot locate QueryErrorCode::as_str');
+} else {
+  const sourceCodes = [
+    ...errorCodeSource.slice(asStrStart, asStrEnd).matchAll(/"([a-z0-9_]+)"/g),
+  ].map((match) => match[1]);
+  const errorReference = fs.readFileSync(
+    path.join(DOCS_ROOT, 'database/helix-db/query-guides/error-handling.mdx'),
+    'utf8',
+  );
+  const documentedCodes = [
+    ...errorReference.matchAll(
+      /^\| `([a-z0-9_]+)` \| [^|]+ \| [^|]+ \| [^|]+ \| [^|]+ \|$/gm,
+    ),
+  ].map((match) => match[1]);
+  const duplicateCodes = documentedCodes.filter(
+    (code, index) => documentedCodes.indexOf(code) !== index,
+  );
+  if (duplicateCodes.length > 0) {
+    errors.push(
+      `error-handling: duplicate catalog code(s): ${[...new Set(duplicateCodes)].join(', ')}`,
+    );
+  }
+  const sourceSet = new Set(sourceCodes);
+  const documentedSet = new Set(documentedCodes);
+  const missingCodes = [...sourceSet].filter((code) => !documentedSet.has(code));
+  const unknownCodes = [...documentedSet].filter((code) => !sourceSet.has(code));
+  if (missingCodes.length > 0) {
+    errors.push(`error-handling: missing catalog code(s): ${missingCodes.join(', ')}`);
+  }
+  if (unknownCodes.length > 0) {
+    errors.push(`error-handling: unknown catalog code(s): ${unknownCodes.join(', ')}`);
   }
 }
 

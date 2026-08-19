@@ -54,7 +54,7 @@ fn pipeline_op_family_from_ast<'a>(
         | AstNode::HasLabel { .. }
         | AstNode::EdgeHasLabel { .. }
         | AstNode::HasKey { .. }
-        | AstNode::Where { .. } => filter::pipeline_op_from_ast(root),
+        | AstNode::Where { .. } => filter::pipeline_op_from_ast(ctx, root),
         AstNode::Dedup { .. }
         | AstNode::Limit { .. }
         | AstNode::Skip { .. }

@@ -7,6 +7,13 @@ pub(super) fn range_ordering_from_node_access(
 ) -> properties::DeliveredOrdering {
     match plan {
         ir::NodeAccessPlan::RangeIndex { key, .. } => range_ordering(key),
+        ir::NodeAccessPlan::Intersect(children) if plan.is_secondary_set_eligible() => children
+            .iter()
+            .find_map(|child| match child.as_ref() {
+                ir::NodeAccessPlan::RangeIndex { key, .. } => Some(range_ordering(key)),
+                _ => None,
+            })
+            .unwrap_or(properties::DeliveredOrdering::Unordered),
         _ => properties::DeliveredOrdering::Unordered,
     }
 }
@@ -16,6 +23,13 @@ pub(super) fn range_ordering_from_edge_access(
 ) -> properties::DeliveredOrdering {
     match plan {
         ir::EdgeAccessPlan::RangeIndex { key, .. } => range_ordering(key),
+        ir::EdgeAccessPlan::Intersect(children) if plan.is_secondary_set_eligible() => children
+            .iter()
+            .find_map(|child| match child.as_ref() {
+                ir::EdgeAccessPlan::RangeIndex { key, .. } => Some(range_ordering(key)),
+                _ => None,
+            })
+            .unwrap_or(properties::DeliveredOrdering::Unordered),
         _ => properties::DeliveredOrdering::Unordered,
     }
 }

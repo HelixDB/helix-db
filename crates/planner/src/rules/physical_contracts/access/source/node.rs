@@ -10,7 +10,29 @@ pub(in crate::rules) fn node_access_contract(
     storage: &cost::StorageCostProfile,
     stats: &context::StatsSnapshot,
 ) -> AccessPhysicalContract {
-    shared::access_contract::<NodeAccessFamily>(plan, storage, stats)
+    let contract = shared::access_contract::<NodeAccessFamily>(plan, storage, stats);
+    let exact = match plan {
+        ir::NodeAccessPlan::Union(_) | ir::NodeAccessPlan::Intersect(_) => {
+            exec::node_secondary_set(plan).map(|set| exec::ExecNodeAccessPlan::SecondarySet { set })
+        }
+        ir::NodeAccessPlan::Empty
+        | ir::NodeAccessPlan::PointIds { .. }
+        | ir::NodeAccessPlan::FromParam { .. }
+        | ir::NodeAccessPlan::FromVar { .. }
+        | ir::NodeAccessPlan::AllScan
+        | ir::NodeAccessPlan::LabelScan { .. }
+        | ir::NodeAccessPlan::EqualityIndex { .. }
+        | ir::NodeAccessPlan::RangeIndex { .. }
+        | ir::NodeAccessPlan::VectorSearch { .. }
+        | ir::NodeAccessPlan::TextSearch { .. }
+        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+    };
+    match exact {
+        Some(exact) => {
+            contract.with_access(crate::physical::PhysicalAccess::NodeExact(Box::new(exact)))
+        }
+        None => contract,
+    }
 }
 
 struct NodeAccessFamily;
@@ -41,13 +63,22 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
             ir::NodeAccessPlan::LabelScan { label } => {
                 shared::AccessSourceParts::LabelScan { label }
             }
-            ir::NodeAccessPlan::EqualityIndex { index, key, .. } => {
+            ir::NodeAccessPlan::EqualityIndex { index, key, value } => {
                 shared::AccessSourceParts::EqualityIndex {
+                    access: crate::physical::PhysicalAccess::NodeExact(Box::new(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            index.clone(),
+                            key.clone(),
+                            value.clone(),
+                        ),
+                    )),
+                    index_id: &index.index_id,
                     key,
                     kind: match index.uniqueness {
                         catalog::IndexUniqueness::Unique => shared::EqualityIndexKind::Unique,
                         catalog::IndexUniqueness::NonUnique => shared::EqualityIndexKind::NonUnique,
                     },
+                    semantics: value.semantics(),
                 }
             }
             ir::NodeAccessPlan::RangeIndex { key, .. } => {

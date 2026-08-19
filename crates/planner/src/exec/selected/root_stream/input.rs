@@ -3,6 +3,7 @@
 use super::pipeline::SelectedRootPipeline;
 use super::terminal::SelectedRootTerminalPlan;
 use crate::exec::selected::control_flow::{SelectedRootBranch, SelectedRootRepeat};
+use crate::exec::selected::count::SelectedRootCount;
 use crate::exec::selected::mutation::SelectedRootMutation;
 use crate::logical;
 
@@ -29,6 +30,8 @@ pub enum SelectedRootStreamInput {
     Pipeline(Box<SelectedRootPipeline>),
     /// Stream consumes another selected root-stream terminal.
     Terminal(Box<SelectedRootTerminalPlan>),
+    /// Stream consumes a selected cardinality scalar root.
+    Count(Box<SelectedRootCount>),
 }
 
 impl SelectedRootStreamInput {

@@ -1104,17 +1104,14 @@ impl MigrationJob {
             resume_after_key,
             processed_rows,
             ..
-        } = std::mem::replace(
-            &mut self.state,
-            MigrationJobState::Completed { processed_rows: 0 },
-        )
+        } = &self.state
         else {
             return;
         };
         self.state = MigrationJobState::Running {
-            stage,
-            resume_after_key,
-            processed_rows,
+            stage: *stage,
+            resume_after_key: resume_after_key.clone(),
+            processed_rows: *processed_rows,
         };
     }
 }
@@ -8629,3 +8626,7 @@ pub(crate) mod production_contracts {
         raw.close().await.expect("conflict inspection closes");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/migrations_contracts.rs"]
+mod external_contracts;

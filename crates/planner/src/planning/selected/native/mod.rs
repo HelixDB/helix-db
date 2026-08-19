@@ -13,6 +13,7 @@ mod conditions;
 mod context_usage;
 mod control_flow;
 mod entries;
+mod equality_bindings;
 mod expansion;
 mod family;
 mod index_ddl;

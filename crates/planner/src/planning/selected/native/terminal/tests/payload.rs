@@ -69,7 +69,8 @@ fn terminal_payload_contract_preserves_input_and_payload_family() {
         assert!(matches!(input, AstNode::Context));
         assert!(matches!(
             payload,
-            NativeTerminalPayload::Project(_)
+            NativeTerminalPayload::Cardinality
+                | NativeTerminalPayload::Project(_)
                 | NativeTerminalPayload::Aggregate(_)
                 | NativeTerminalPayload::Reserved(_)
         ));

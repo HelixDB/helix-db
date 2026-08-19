@@ -2,6 +2,97 @@ use super::support;
 use crate::{context, cost, exec, ir, logical, physical, properties};
 
 #[test]
+fn selected_count_root_enforces_validated_direct_row_and_scalar_dependencies() {
+    let ctx = context::PlannerContext::default();
+    let mut planner = support::selected_planner(&ctx);
+    let mut metrics = exec::PlannerMetrics::default();
+    let cardinality = || {
+        logical::LogicalExpr::StreamCardinality(logical::StreamCardinality::new(
+            support::variable_stream(),
+        ))
+    };
+    let alternative = |plan| {
+        physical::PhysicalAlternative::new(
+            physical::PhysicalExpr::Cardinality(Box::new(physical::PhysicalCountPlan::new(plan))),
+            properties::DeliveredProperties::default(),
+            cost::CostVector::ZERO,
+        )
+    };
+
+    let direct = planner
+        .selected_run_root_from_plan(
+            cardinality(),
+            alternative(exec::ExecCountPlan::Constant(2)),
+            support::optimizer_provenance(),
+            &mut metrics,
+        )
+        .expect("direct count needs no selected child");
+    assert!(matches!(direct, exec::SelectedExecutableRunRoot::Count(_)));
+
+    for plan in [
+        exec::ExecCountPlan::InputRows {
+            window: exec::ExecCountWindowPlan::identity(),
+        },
+        exec::ExecCountPlan::InputScalars {
+            window: exec::ExecCountWindowPlan::identity(),
+        },
+    ] {
+        assert_eq!(
+            planner
+                .selected_run_root_from_plan(
+                    cardinality(),
+                    alternative(plan),
+                    support::optimizer_provenance(),
+                    &mut metrics,
+                )
+                .unwrap_err(),
+            super::super::super::rejection::unsupported(
+                super::super::super::rejection::Reason::MemoChildContextMissing
+            )
+        );
+    }
+
+    let malformed = exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+        cursor: exec::ExecCountCursorPlan::Intersect {
+            driver: Box::new(exec::ExecCountCursorPlan::InputRows),
+            rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::InputRows),
+        },
+        window: exec::ExecCountWindowPlan::identity(),
+    });
+    assert_eq!(
+        planner
+            .selected_run_root_from_plan(
+                cardinality(),
+                alternative(malformed),
+                support::optimizer_provenance(),
+                &mut metrics,
+            )
+            .unwrap_err(),
+        super::super::super::rejection::unsupported(
+            super::super::super::rejection::Reason::SelectedCountInputMismatch
+        )
+    );
+
+    let cardinality = logical::StreamCardinality::new(support::variable_stream());
+    let count = physical::PhysicalCountPlan::new(exec::ExecCountPlan::Constant(1));
+    assert_eq!(
+        planner
+            .selected_count_run_root(
+                &cardinality,
+                &count,
+                noop_alternative(),
+                support::optimizer_provenance(),
+                super::super::memo_children::MemoChildPlanAvailability::Unavailable,
+                &mut metrics,
+            )
+            .unwrap_err(),
+        super::super::super::rejection::unsupported(
+            super::super::super::rejection::Reason::SelectedRootPhysicalMismatch
+        )
+    );
+}
+
+#[test]
 fn selected_run_root_from_plan_wraps_supported_selected_root_families() {
     let ctx = context::PlannerContext::default();
     let mut planner = support::selected_planner(&ctx);
@@ -68,7 +159,7 @@ fn selected_run_root_from_plan_wraps_supported_selected_root_families() {
         .selected_run_root_from_plan(
             logical::LogicalExpr::StreamProject(logical::StreamProject::new(
                 support::variable_stream(),
-                ir::ProjectionPlan::Count,
+                ir::ProjectionPlan::Exists,
             )),
             terminal_pipeline_alternative(physical::PhysicalStreamOp::Project),
             support::optimizer_provenance(),
@@ -198,7 +289,7 @@ fn selected_run_root_from_plan_rejects_selected_root_physical_mismatches() {
         (
             logical::LogicalExpr::StreamProject(logical::StreamProject::new(
                 support::variable_stream(),
-                ir::ProjectionPlan::Count,
+                ir::ProjectionPlan::Exists,
             )),
             support::barrier_alternative(),
         ),
@@ -309,7 +400,7 @@ fn selected_run_root_from_plan_rejects_selected_root_suffix_mismatches() {
             .selected_run_root_from_plan(
                 logical::LogicalExpr::StreamProject(logical::StreamProject::new(
                     support::variable_stream(),
-                    ir::ProjectionPlan::Count,
+                    ir::ProjectionPlan::Exists,
                 )),
                 aggregate_pipeline,
                 support::optimizer_provenance(),

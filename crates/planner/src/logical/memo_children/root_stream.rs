@@ -18,6 +18,10 @@ pub(super) fn project_children(project: &StreamProject) -> Vec<LogicalExpr> {
     root_stream_child(project.input())
 }
 
+pub(super) fn cardinality_children(cardinality: &StreamCardinality) -> Vec<LogicalExpr> {
+    root_stream_child(cardinality.input())
+}
+
 pub(super) fn aggregate_children(aggregate: &StreamAggregate) -> Vec<LogicalExpr> {
     root_stream_child(aggregate.input())
 }
@@ -42,6 +46,9 @@ fn root_stream_child(input: &RootStream) -> Vec<LogicalExpr> {
         }
         RootStream::Project(project) => {
             vec![LogicalExpr::StreamProject(project.as_ref().clone())]
+        }
+        RootStream::Cardinality(cardinality) => {
+            vec![LogicalExpr::StreamCardinality(cardinality.as_ref().clone())]
         }
         RootStream::Aggregate(aggregate) => {
             vec![LogicalExpr::StreamAggregate(aggregate.as_ref().clone())]

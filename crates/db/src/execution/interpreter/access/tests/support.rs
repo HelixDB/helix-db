@@ -289,14 +289,14 @@ pub(super) async fn run_limited_node_access_with_params(
         .expect("project step returns a value")
 }
 
-pub(super) fn search_index(index_name: &str) -> ir::SearchIndexPlan {
+pub(in crate::execution::interpreter) fn search_index(index_name: &str) -> ir::SearchIndexPlan {
     ir::SearchIndexPlan {
         index_id: test_support::name(index_name),
         tenant: ir::SearchTenantPlan::Unscoped,
     }
 }
 
-pub(super) fn literal_search_limit(value: usize) -> ir::SearchLimitPlan {
+pub(in crate::execution::interpreter) fn literal_search_limit(value: usize) -> ir::SearchLimitPlan {
     ir::SearchLimitPlan::Literal(NonZeroUsize::new(value).expect("positive search limit"))
 }
 
@@ -328,7 +328,7 @@ pub(super) fn parameterized_i64_between(
     )
 }
 
-pub(super) async fn seed_vector_index<D: search::vector::Distance>(
+pub(in crate::execution::interpreter) async fn seed_vector_index<D: search::vector::Distance>(
     db: &HelixDB,
     definition: &config::VectorIndexDefinition,
     vectors: &[(u64, Vec<f32>)],
@@ -438,7 +438,7 @@ pub(super) async fn seed_text_manifest(
     txn.commit().await.expect("manifest commits");
 }
 
-pub(super) async fn seed_managed_text_index(
+pub(in crate::execution::interpreter) async fn seed_managed_text_index(
     db: &HelixDB,
     definition: &config::TextIndexDefinition,
     documents: &[search::text::TextDocumentInput],

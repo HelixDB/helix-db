@@ -1,6 +1,9 @@
 use crate::{cost, physical, properties};
 
-use super::{contract::AccessPhysicalContract, delivered::access_delivered_with};
+use super::{
+    contract::AccessPhysicalContract,
+    delivered::{access_delivered_with, with_ordering},
+};
 
 pub(super) fn access_set_contract(
     element: properties::ElementKind,
@@ -14,16 +17,59 @@ pub(super) fn access_set_contract(
         .iter()
         .map(|child| child.delivered.clone())
         .collect::<Vec<_>>();
-    let child_costs = children.iter().map(|child| child.cost).collect::<Vec<_>>();
     let child_estimates = children
         .iter()
         .map(|child| child.estimated_rows)
         .collect::<Vec<_>>();
-    AccessPhysicalContract::new(
+    let rows = estimated_rows(&child_estimates);
+    let mut delivered = access_delivered_with(element, cardinality(&delivered_children));
+    let secondary_costs = children
+        .iter()
+        .map(AccessPhysicalContract::secondary_id_cost)
+        .collect::<Option<Vec<_>>>();
+    let Some(secondary_costs) = secondary_costs else {
+        let child_costs = children.iter().map(|child| child.cost).collect::<Vec<_>>();
+        return AccessPhysicalContract::new(
+            access,
+            delivered,
+            storage.parallel(&child_costs, storage.max_parallel_kv_reads),
+            rows,
+        );
+    };
+    if access == physical::PhysicalAccess::SetIntersection {
+        let ordering = children
+            .iter()
+            .find(|child| child.access == physical::PhysicalAccess::RangeIndex)
+            .map(|child| child.delivered.ordering.clone())
+            .unwrap_or(properties::DeliveredOrdering::Unordered);
+        delivered = with_ordering(delivered, ordering);
+    }
+    let batchable_equality = (access == physical::PhysicalAccess::SetUnion)
+        .then(|| {
+            let first = children.first()?.batchable_equality_identity()?;
+            children
+                .iter()
+                .all(|child| child.batchable_equality_identity() == Some(first))
+                .then_some(())
+        })
+        .flatten()
+        .is_some();
+    let id_cost = if batchable_equality {
+        storage.bitmap_equality_batch(
+            properties::PositiveUsize::at_least_one(children.len()),
+            rows,
+        )
+    } else {
+        storage
+            .parallel(&secondary_costs, storage.max_parallel_kv_reads)
+            .serial(storage.secondary_set_operation(rows))
+    };
+    AccessPhysicalContract::new_secondary(
         access,
-        access_delivered_with(element, cardinality(&delivered_children)),
-        storage.parallel(&child_costs, storage.max_parallel_kv_reads),
-        estimated_rows(&child_estimates),
+        delivered,
+        id_cost,
+        storage.secondary_row_materialization(rows),
+        rows,
     )
 }
 

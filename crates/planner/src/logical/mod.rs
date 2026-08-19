@@ -20,7 +20,7 @@ pub use self::core::{
 pub use self::pure::{FilterChain, FilterPushdown, FilterPushdownOp, PurePipeline};
 pub use self::root::{
     RootBranch, RootIndexDdl, RootMutation, RootPipeline, RootRepeat, RootShortestPath, RootStream,
-    StreamAggregate, StreamProject, StreamReserved, StreamVariableWrite,
+    StreamAggregate, StreamCardinality, StreamProject, StreamReserved, StreamVariableWrite,
 };
 pub use self::variables::{PureStreamVariableOp, StreamVariableWriteOp, VariableSource};
 

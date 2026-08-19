@@ -1,5 +1,17 @@
 use super::*;
-use crate::{cost, digest, ir, properties};
+use crate::{cost, digest, exec, ir, properties};
+
+#[test]
+fn exact_physical_access_payloads_round_trip_without_losing_element_type() {
+    for access in [
+        PhysicalAccess::NodeExact(Box::new(exec::ExecNodeAccessPlan::Empty)),
+        PhysicalAccess::EdgeExact(Box::new(exec::ExecEdgeAccessPlan::Empty)),
+    ] {
+        let encoded = serde_json::to_string(&access).unwrap();
+        let decoded: PhysicalAccess = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, access);
+    }
+}
 
 #[test]
 fn physical_alternative_preserves_delivered_properties_and_cost() {

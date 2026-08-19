@@ -6,6 +6,36 @@ use super::memo_children;
 use crate::{error, exec, logical, physical};
 
 impl SelectedCascadesPlanner<'_> {
+    pub(super) fn selected_count_run_root(
+        &mut self,
+        _cardinality: &logical::StreamCardinality,
+        count: &physical::PhysicalCountPlan,
+        alternative: physical::PhysicalAlternative,
+        provenance: exec::SelectedRootProvenance,
+        child_plans: memo_children::MemoChildPlanAvailability<'_, '_>,
+        metrics: &mut exec::PlannerMetrics,
+    ) -> Result<exec::SelectedExecutableRunRoot, error::PlannerError> {
+        let dependency = count
+            .executable()
+            .validated_dependency()
+            .map_err(|_| rejection::unsupported(rejection::Reason::SelectedCountInputMismatch))?;
+        let input = match dependency {
+            exec::ExecCountDependency::Direct => exec::SelectedCountInput::Direct,
+            exec::ExecCountDependency::Rows => {
+                let child = Box::new(self.selected_root_stream_child(child_plans, metrics)?);
+                exec::SelectedCountInput::Rows(child)
+            }
+            exec::ExecCountDependency::Scalars => {
+                let child = Box::new(self.selected_root_stream_child(child_plans, metrics)?);
+                exec::SelectedCountInput::Scalars(child)
+            }
+        };
+        Ok(exec::SelectedExecutableRunRoot::Count(Box::new(
+            exec::SelectedRootCount::new(alternative.into(), provenance, input)
+                .map_err(rejection::unsupported_root_construction)?,
+        )))
+    }
+
     pub(super) fn selected_index_ddl_run_root(
         &mut self,
         ddl: &logical::RootIndexDdl,

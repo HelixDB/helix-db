@@ -8,26 +8,17 @@ fn single_run_executable_entrypoint_uses_cascades_selected_stream_project() {
 
     let plan = crate::planning::plan_read_batch(&batch, &PlannerContext::default()).unwrap();
 
-    assert_eq!(plan.steps().len(), 2);
+    assert_eq!(plan.steps().len(), 1);
     assert!(plan.metrics().memo_groups >= 1);
     assert_eq!(plan.metrics().alternatives_considered, 1);
     assert!(matches!(
         &plan.steps()[0].op,
-        crate::exec::ExecOp::KvRead(crate::exec::KvReadPlan::RangeScan { keyspace, .. })
-            if *keyspace == crate::exec::ElementKeyspace::NodeProperty
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), crate::exec::ExecCountPlan::NodeFullScan { .. })
     ));
+    assert!(plan.steps()[0].dependencies.is_empty());
     assert!(matches!(
-        &plan.steps()[1].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count
-        }
-    ));
-    assert_eq!(
-        plan.steps()[1].dependencies,
-        vec![crate::exec::ExecStepId::new(1).unwrap()]
-    );
-    assert!(matches!(
-        &plan.steps()[1].output,
+        &plan.steps()[0].output,
         BatchOutputPlan::Bind(name) if name.as_ref() == "count"
     ));
 }
@@ -46,37 +37,28 @@ fn single_run_executable_entrypoint_uses_cascades_selected_composed_stream_proje
 
     let plan = crate::planning::plan_read_batch(&batch, &PlannerContext::default()).unwrap();
 
-    assert_eq!(plan.steps().len(), 4);
+    assert_eq!(plan.steps().len(), 1);
     assert!(plan.metrics().memo_groups >= 1);
     assert_eq!(plan.metrics().alternatives_considered, 1);
     assert!(matches!(
         &plan.steps()[0].op,
-        crate::exec::ExecOp::KvRead(crate::exec::KvReadPlan::RangeScan { keyspace, .. })
-            if *keyspace == crate::exec::ElementKeyspace::NodeProperty
+        crate::exec::ExecOp::Count { plan }
+            if matches!(
+                plan.as_ref(),
+                crate::exec::ExecCountPlan::Stream(crate::exec::ExecCountStreamPlan {
+                    cursor: crate::exec::ExecCountCursorPlan::Filter { .. },
+                    window: crate::exec::ExecCountWindowPlan {
+                        skip: crate::exec::ExecUsizeExpr::Literal(1),
+                        take: crate::exec::ExecCountTake::AtMost(
+                            crate::exec::ExecUsizeExpr::Literal(2)
+                        ),
+                    },
+                })
+            )
     ));
+    assert!(plan.steps()[0].dependencies.is_empty());
     assert!(matches!(
-        &plan.steps()[1].op,
-        crate::exec::ExecOp::Filter { predicate }
-            if matches!(predicate.as_ref(), Predicate::Eq { .. })
-    ));
-    assert!(matches!(
-        &plan.steps()[2].op,
-        crate::exec::ExecOp::Range {
-            range: StreamRangePlan::Literal(range),
-        } if range.start() == 1 && range.end() == 3
-    ));
-    assert!(matches!(
-        &plan.steps()[3].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count
-        }
-    ));
-    assert_eq!(
-        plan.steps()[3].dependencies,
-        vec![crate::exec::ExecStepId::new(3).unwrap()]
-    );
-    assert!(matches!(
-        &plan.steps()[3].output,
+        &plan.steps()[0].output,
         BatchOutputPlan::Bind(name) if name.as_ref() == "count"
     ));
 }

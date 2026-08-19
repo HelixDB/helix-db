@@ -8,8 +8,6 @@ use super::{binding, item, property};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionPlan {
-    /// Count terminal.
-    Count,
     /// Exists terminal.
     Exists,
     /// ID terminal.

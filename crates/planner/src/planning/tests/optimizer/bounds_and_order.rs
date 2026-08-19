@@ -1723,7 +1723,7 @@ fn count_terminal_strips_count_irrelevant_order_plans() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&explicit)
     else {
         panic!("expected count projection: {:?}", run_op(&explicit));
@@ -1735,7 +1735,7 @@ fn count_terminal_strips_count_irrelevant_order_plans() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&filtered)
     else {
         panic!("expected count projection: {:?}", run_op(&filtered));
@@ -1750,7 +1750,7 @@ fn count_terminal_strips_count_irrelevant_order_plans() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&skipped)
     else {
         panic!("expected count projection: {:?}", run_op(&skipped));
@@ -1766,7 +1766,7 @@ fn count_terminal_strips_count_irrelevant_order_plans() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&ranged)
     else {
         panic!("expected count projection: {:?}", run_op(&ranged));
@@ -1785,7 +1785,7 @@ fn count_terminal_strips_count_irrelevant_order_plans() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&distinct)
     else {
         panic!("expected count projection: {:?}", run_op(&distinct));
@@ -1797,7 +1797,7 @@ fn count_terminal_strips_count_irrelevant_order_plans() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&range_ordered)
     else {
         panic!("expected count projection: {:?}", run_op(&range_ordered));
@@ -1856,7 +1856,7 @@ fn count_terminal_strips_row_count_preserving_projections() {
     for plan in [value_map_count, all_binding_count] {
         let PhysicalOp::Project {
             input,
-            projection: ProjectionPlan::Count,
+            projection: ProjectionPlan::Exists,
         } = run_op(&plan)
         else {
             panic!("expected count projection: {:?}", run_op(&plan));
@@ -1869,7 +1869,7 @@ fn count_terminal_strips_row_count_preserving_projections() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&values_count)
     else {
         panic!("expected count projection: {:?}", run_op(&values_count));
@@ -1884,7 +1884,7 @@ fn count_terminal_strips_row_count_preserving_projections() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&distinct_binding_count)
     else {
         panic!(
@@ -3454,7 +3454,7 @@ fn count_and_exists_strip_top_n_or_limit_only_when_semantics_allow_it() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&count_over_top_n)
     else {
         panic!("expected count projection: {:?}", run_op(&count_over_top_n));
@@ -3470,7 +3470,7 @@ fn count_and_exists_strip_top_n_or_limit_only_when_semantics_allow_it() {
 
     let PhysicalOp::Project {
         input,
-        projection: ProjectionPlan::Count,
+        projection: ProjectionPlan::Exists,
     } = run_op(&count_over_dynamic_limit)
     else {
         panic!(
@@ -4175,7 +4175,7 @@ fn one_row_projection_terminals_strip_noop_stream_wrappers() {
             matches!(
                 run_op(&plan),
                 PhysicalOp::Project {
-                    projection: ProjectionPlan::Count,
+                    projection: ProjectionPlan::Exists,
                     ..
                 }
             ),

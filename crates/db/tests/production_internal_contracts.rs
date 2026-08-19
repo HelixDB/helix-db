@@ -259,6 +259,123 @@ async fn interpreter_request_read_view_guards_fail_closed() {
     db::production_coverage::interpreter_request_read_view_guard_contracts().await;
 }
 
+/// Exercises every exact cardinality primitive through a production-linked binary.
+#[test]
+fn interpreter_cardinality_programs_cover_exact_contracts() {
+    std::thread::Builder::new()
+        .name("exact-cardinality-production-contracts".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("cardinality production runtime builds")
+                .block_on(db::production_coverage::interpreter_cardinality_program_contracts());
+        })
+        .expect("cardinality production thread starts")
+        .join()
+        .expect("cardinality production contracts complete");
+}
+
+/// Exercises both production FTS layouts and both candidate-selection primitives.
+#[tokio::test]
+async fn text_prefilter_benchmark_covers_exact_layout_and_strategy_matrix() {
+    use db::production_coverage::{
+        FtsPrefilterBenchmarkCase, FtsPrefilterBenchmarkFixture, FtsPrefilterBenchmarkLayout,
+        FtsPrefilterBenchmarkStrategy,
+    };
+
+    assert!(FtsPrefilterBenchmarkFixture::try_new(0, 1).await.is_err());
+    assert!(FtsPrefilterBenchmarkFixture::try_new(4, 0).await.is_err());
+    assert!(FtsPrefilterBenchmarkFixture::try_new(3, 4).await.is_err());
+
+    let fixture = FtsPrefilterBenchmarkFixture::try_new(24, 3)
+        .await
+        .expect("small production FTS fixture prepares");
+    assert_eq!(fixture.document_count(), 24);
+    assert!(FtsPrefilterBenchmarkCase::try_new(
+        FtsPrefilterBenchmarkLayout::MultiSplit,
+        FtsPrefilterBenchmarkStrategy::Collector,
+        0,
+        "rareterm",
+        3,
+        fixture.document_count(),
+    )
+    .is_err());
+    assert!(FtsPrefilterBenchmarkCase::try_new(
+        FtsPrefilterBenchmarkLayout::MultiSplit,
+        FtsPrefilterBenchmarkStrategy::Collector,
+        fixture.document_count() + 1,
+        "rareterm",
+        3,
+        fixture.document_count(),
+    )
+    .is_err());
+    assert!(FtsPrefilterBenchmarkCase::try_new(
+        FtsPrefilterBenchmarkLayout::MultiSplit,
+        FtsPrefilterBenchmarkStrategy::Collector,
+        8,
+        "unsupported",
+        3,
+        fixture.document_count(),
+    )
+    .is_err());
+    assert!(FtsPrefilterBenchmarkCase::try_new(
+        FtsPrefilterBenchmarkLayout::MultiSplit,
+        FtsPrefilterBenchmarkStrategy::Collector,
+        8,
+        "rareterm",
+        0,
+        fixture.document_count(),
+    )
+    .is_err());
+
+    for layout in [
+        FtsPrefilterBenchmarkLayout::MultiSplit,
+        FtsPrefilterBenchmarkLayout::Compacted,
+    ] {
+        for strategy in [
+            FtsPrefilterBenchmarkStrategy::Collector,
+            FtsPrefilterBenchmarkStrategy::Unrestricted,
+        ] {
+            assert!(!layout.as_str().is_empty());
+            assert!(!strategy.as_str().is_empty());
+            for query in ["rareterm", "mediumterm", "commonterm"] {
+                let case = FtsPrefilterBenchmarkCase::try_new(
+                    layout,
+                    strategy,
+                    8,
+                    query,
+                    5,
+                    fixture.document_count(),
+                )
+                .expect("benchmark matrix case validates");
+                let sample = fixture
+                    .run_case(case)
+                    .await
+                    .expect("benchmark matrix case matches its exact oracle");
+                assert_eq!(sample.candidate_count, 8);
+                assert_eq!(
+                    sample.split_count,
+                    if layout.as_str() == "multi_split" {
+                        3
+                    } else {
+                        1
+                    }
+                );
+                assert!(sample.result_count <= 5);
+                assert_eq!(sample.result_digest.len(), 64);
+            }
+        }
+    }
+}
+
+/// Exercises literal secondary storage primitives without executor-side dispatch.
+#[tokio::test]
+async fn secondary_exact_storage_obeys_encoded_primitives() {
+    db::production_coverage::secondary_exact_storage_contracts().await;
+}
+
 /// Proves catalog authority excludes lifecycle publication through write-open.
 #[tokio::test]
 async fn interpreter_catalog_authority_transfers_through_write_open() {
@@ -275,6 +392,12 @@ async fn interpreter_request_modes_preserve_isolated_mutation_ownership() {
 #[tokio::test]
 async fn interpreter_topology_mutations_preserve_transactional_semantics() {
     db::production_coverage::interpreter_topology_mutation_contracts().await;
+}
+
+/// Proves parallel dependency transfer and row projections execute their encoded shapes.
+#[tokio::test]
+async fn interpreter_scheduler_and_projection_paths_are_production_linked() {
+    db::production_coverage::interpreter_scheduler_and_projection_contracts().await;
 }
 
 /// Verifies process-local writer identity and readiness through the public boundary.

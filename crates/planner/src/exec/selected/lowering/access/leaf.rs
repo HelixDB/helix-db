@@ -1,5 +1,5 @@
 use super::*;
-use crate::exec::ExecAccessReadLimit;
+use crate::exec::{self, ExecAccessReadLimit};
 
 impl ExecutableDagBuilder<'_> {
     pub(in crate::exec::selected::lowering) fn push_selected_node_access(
@@ -52,16 +52,34 @@ impl ExecutableDagBuilder<'_> {
                     output,
                     condition,
                 ),
+            physical::PhysicalAccess::NodeExact(exact_plan) => {
+                let exec_access =
+                    read_limit.apply_to(exec::ExecAccessPlan::Node(exact_plan.as_ref().clone()));
+                self.push_step(StepDraft {
+                    dependencies,
+                    output,
+                    condition,
+                    op: ExecOp::Access {
+                        plan: Box::new(exec_access),
+                    },
+                    schedule: ExecSchedule::Pipeline,
+                    delivered: access_delivered_with_read_limit(
+                        node_access_delivered_properties(plan),
+                        read_limit,
+                    ),
+                    cost: node_access_cost(plan, self.profile),
+                })
+            }
             physical::PhysicalAccess::Empty
             | physical::PhysicalAccess::RuntimeInput
             | physical::PhysicalAccess::LabelScan
-            | physical::PhysicalAccess::EqualityIndex
             | physical::PhysicalAccess::RangeIndex
             | physical::PhysicalAccess::VectorSearch
             | physical::PhysicalAccess::TextSearch
             | physical::PhysicalAccess::SetIntersection
             | physical::PhysicalAccess::SetUnion
-            | physical::PhysicalAccess::Expand => self
+            | physical::PhysicalAccess::Expand
+            | physical::PhysicalAccess::EdgeExact(_) => self
                 .push_selected_node_access_plan_with_read_limit(
                     plan,
                     read_limit,
@@ -122,16 +140,34 @@ impl ExecutableDagBuilder<'_> {
                     output,
                     condition,
                 ),
+            physical::PhysicalAccess::EdgeExact(exact_plan) => {
+                let exec_access =
+                    read_limit.apply_to(exec::ExecAccessPlan::Edge(exact_plan.as_ref().clone()));
+                self.push_step(StepDraft {
+                    dependencies,
+                    output,
+                    condition,
+                    op: ExecOp::Access {
+                        plan: Box::new(exec_access),
+                    },
+                    schedule: ExecSchedule::Pipeline,
+                    delivered: access_delivered_with_read_limit(
+                        edge_access_delivered_properties(plan),
+                        read_limit,
+                    ),
+                    cost: edge_access_cost(plan, self.profile),
+                })
+            }
             physical::PhysicalAccess::Empty
             | physical::PhysicalAccess::RuntimeInput
             | physical::PhysicalAccess::LabelScan
-            | physical::PhysicalAccess::EqualityIndex
             | physical::PhysicalAccess::RangeIndex
             | physical::PhysicalAccess::VectorSearch
             | physical::PhysicalAccess::TextSearch
             | physical::PhysicalAccess::SetIntersection
             | physical::PhysicalAccess::SetUnion
-            | physical::PhysicalAccess::Expand => self
+            | physical::PhysicalAccess::Expand
+            | physical::PhysicalAccess::NodeExact(_) => self
                 .push_selected_edge_access_plan_with_read_limit(
                     plan,
                     read_limit,

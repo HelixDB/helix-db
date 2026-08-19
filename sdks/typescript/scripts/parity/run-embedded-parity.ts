@@ -128,6 +128,17 @@ try {
   }
   const goPackage = join(goBindings, "helixdb");
   await copyFile(nativeLibrary, join(goPackage, basename(nativeLibrary)));
+  run(
+    "go",
+    ["test", "-tags", "helixdb_uniffi", "./..."],
+    goSdk,
+    900_000,
+    embeddedEnv(join(temp, "go-test-results"), "go-sdk-binding-tests", goPackage, "memory", disks.go, {
+      CGO_ENABLED: "1",
+      CGO_LDFLAGS: `-L${goPackage} -lhelixdb_uniffi`,
+      GOCACHE: join(temp, "go-build-cache"),
+    }),
+  );
 
   for (const storage of storageModes) {
     run(

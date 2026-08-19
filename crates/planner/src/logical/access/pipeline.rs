@@ -62,6 +62,11 @@ impl AccessPipeline {
         self.ops.as_ref()
     }
 
+    /// Typed pipeline operators preserving the non-empty invariant.
+    pub const fn ops_at_least(&self) -> &ir::AtLeast<StreamPipelineOp, 1> {
+        &self.ops
+    }
+
     /// First pipeline-operator family.
     pub fn head_op_kind(&self) -> StreamPipelineOpKind {
         self.ops.as_ref()[0].kind()

@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use super::*;
 
 impl<'db> ExecutionContext<'db> {
-    pub(in crate::execution::interpreter::stream) async fn eval_predicate(
+    pub(in crate::execution::interpreter) async fn eval_predicate(
         &self,
         row: &ExecutionRow,
         predicate: &Predicate,

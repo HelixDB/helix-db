@@ -60,10 +60,10 @@ fn edge_source_predicates_use_cascades_equality_indexes_in_executable_plan() {
 
     assert!(matches!(
         first_exec_access(&plan),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, value, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, value, .. } })
             if key.label == "FOLLOWS"
                 && key.property == "status"
-                && matches!(value, IndexValue::Literal(_))
+                && value.literal().as_property_value().as_str() == Some("active")
     ));
     assert!(plan
         .steps()

@@ -44,9 +44,8 @@ fn single_run_executable_entrypoint_uses_cascades_selected_control_reserved_stre
     );
     assert!(matches!(
         &plan.steps()[3].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
     assert_eq!(
         plan.steps()[3].dependencies,

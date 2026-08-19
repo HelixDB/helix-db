@@ -146,27 +146,40 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
     assert_eq!(label.cost, storage.range_scan(cost::EstimatedRows::rows(4)));
     assert_eq!(
         equality.cost,
-        storage.range_scan(cost::EstimatedRows::rows(7))
+        storage
+            .bitmap_equality_lookup(cost::EstimatedRows::rows(7))
+            .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(7)))
     );
-    assert_eq!(range.cost, storage.range_scan(cost::EstimatedRows::rows(9)));
+    assert_eq!(
+        range.cost,
+        storage
+            .secondary_range_lookup(cost::EstimatedRows::rows(9))
+            .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(9)))
+    );
     assert_eq!(
         filtered.cost,
         storage
-            .range_scan(cost::EstimatedRows::rows(7))
+            .bitmap_equality_lookup(cost::EstimatedRows::rows(7))
+            .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(7)))
             .serial(storage.predicate_eval(cost::EstimatedRows::rows(7)))
     );
     assert_eq!(filtered.estimated_rows, cost::EstimatedRows::rows(7));
     assert_eq!(
         unique_filtered.cost,
         storage
-            .equality_index_lookup(cost::EstimatedRows::rows(1))
+            .unique_equality_lookup(cost::EstimatedRows::rows(1))
+            .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(1)))
             .serial(storage.predicate_eval(cost::EstimatedRows::rows(1)))
     );
     assert_eq!(unique_filtered.estimated_rows, cost::EstimatedRows::rows(1));
     assert_eq!(
         unique_missing_stats_filtered.cost,
         unique_missing_stats_storage
-            .equality_index_lookup(cost::EstimatedRows::ZERO)
+            .unique_equality_lookup(cost::EstimatedRows::ZERO)
+            .serial(
+                unique_missing_stats_storage
+                    .secondary_row_materialization(cost::EstimatedRows::ZERO),
+            )
             .serial(unique_missing_stats_storage.predicate_eval(cost::EstimatedRows::ZERO))
     );
     assert_eq!(

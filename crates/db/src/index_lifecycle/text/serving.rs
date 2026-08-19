@@ -500,7 +500,7 @@ fn corruption(message: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(message.into())
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/index_lifecycle_text_serving.rs"]
 pub(crate) mod production_contracts;
 
@@ -517,6 +517,11 @@ mod tests {
         IndexOperationId, IndexRecordV2, IndexRevision, IndexStateTransition, PhysicalGeneration,
         ValidatedDynamicIndexDefinition,
     };
+
+    #[tokio::test]
+    async fn production_text_serving_matrix_runs_in_workspace_tests() {
+        production_contracts::run().await;
+    }
 
     /// Opens one isolated in-memory SlateDB fixture.
     async fn test_db(name: &str) -> Db {

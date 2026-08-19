@@ -194,7 +194,7 @@ fn native_batch_boundary_accepts_source_mutation_stream_consumers() {
             exec::SelectedInitialExecutableBatchEntry::Run(entry)
         ) if matches!(
             entry.root,
-            exec::SelectedExecutableRunRoot::Terminal(_)
+            exec::SelectedExecutableRunRoot::Count(_)
         )
     ));
 }
@@ -222,7 +222,7 @@ fn native_batch_boundary_accepts_reserved_terminal_chains() {
             exec::SelectedInitialExecutableBatchEntry::Run(entry)
         ) if matches!(
             entry.root,
-            exec::SelectedExecutableRunRoot::Terminal(_)
+            exec::SelectedExecutableRunRoot::Count(_)
         )
     ));
 }

@@ -11,6 +11,10 @@ fn source(plan: ir::NodeAccessPlan) -> ir::NodeAccessSourcePlan {
     ir::NodeAccessSourcePlan::new(plan).unwrap()
 }
 
+fn edge_source(plan: ir::EdgeAccessPlan) -> ir::EdgeAccessSourcePlan {
+    ir::EdgeAccessSourcePlan::new(plan).unwrap()
+}
+
 fn literal_search_limit(value: usize) -> ir::SearchLimitPlan {
     ir::SearchLimitPlan::Literal(NonZeroUsize::new(value).unwrap())
 }
@@ -19,6 +23,14 @@ fn node_range(direction: helix_ast::index::RangeIndexDirection) -> ir::NodeAcces
     ir::NodeAccessPlan::RangeIndex {
         index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new("User", "age", direction).unwrap(),
+        range: ir::IndexRange::All,
+    }
+}
+
+fn edge_range(direction: helix_ast::index::RangeIndexDirection) -> ir::EdgeAccessPlan {
+    ir::EdgeAccessPlan::RangeIndex {
+        index: catalog::EdgeRangeIndexMeta::try_new("edge_range").unwrap(),
+        key: catalog::ScopedPropertyDirectionKey::try_new("FOLLOWS", "score", direction).unwrap(),
         range: ir::IndexRange::All,
     }
 }
@@ -90,6 +102,35 @@ fn delivered_properties_preserve_range_order_and_key_locality() {
     let scan = delivered::node_access_delivered_properties(&ir::NodeAccessPlan::AllScan);
     assert_eq!(scan.key_locality, properties::KeyLocality::Unknown);
     assert_eq!(scan.ordering, properties::DeliveredOrdering::Unordered);
+}
+
+#[test]
+fn delivered_properties_do_not_inherit_nested_intersection_ordering() {
+    let nested_node = source(ir::NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
+        source(node_range(helix_ast::index::RangeIndexDirection::Desc)),
+        source(ir::NodeAccessPlan::Empty),
+    )));
+    let node = ir::NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
+        nested_node,
+        source(ir::NodeAccessPlan::Empty),
+    ));
+    let nested_edge = edge_source(ir::EdgeAccessPlan::Intersect(ir::AtLeast::from_pair(
+        edge_source(edge_range(helix_ast::index::RangeIndexDirection::Desc)),
+        edge_source(ir::EdgeAccessPlan::Empty),
+    )));
+    let edge = ir::EdgeAccessPlan::Intersect(ir::AtLeast::from_pair(
+        nested_edge,
+        edge_source(ir::EdgeAccessPlan::Empty),
+    ));
+
+    assert_eq!(
+        delivered::node_access_delivered_properties(&node).ordering,
+        properties::DeliveredOrdering::Unordered
+    );
+    assert_eq!(
+        delivered::edge_access_delivered_properties(&edge).ordering,
+        properties::DeliveredOrdering::Unordered
+    );
 }
 
 #[test]

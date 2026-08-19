@@ -129,7 +129,7 @@ mod policy;
 #[path = "../../../tests/production_support/vector/primitives.rs"]
 mod primitive_production_contracts;
 mod randomness;
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/read_fault.rs"]
 pub(crate) mod read_fault_production_support;
 mod read_index;

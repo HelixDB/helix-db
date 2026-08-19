@@ -22,12 +22,14 @@ class HelixError(Exception):
         message: str,
         *,
         details: str | None = None,
+        code: str | None = None,
         status_code: int | None = None,
         cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.details = details
+        self.code = code
         self.status_code = status_code
         self.__cause__ = cause
 
@@ -41,11 +43,18 @@ class HelixError(Exception):
         )
 
     @classmethod
-    def remote(cls, details: str, *, status_code: int | None = None) -> "HelixError":
+    def remote(
+        cls,
+        details: str,
+        *,
+        code: str | None = None,
+        status_code: int | None = None,
+    ) -> "HelixError":
         return cls(
             "Remote",
             f"got error from server: {details}",
             details=details,
+            code=code,
             status_code=status_code,
         )
 
@@ -64,7 +73,12 @@ class HelixError(Exception):
 
     @classmethod
     def invalid_request(cls, message: str) -> "HelixError":
-        return cls("InvalidRequest", f"invalid request: {message}", details=message)
+        return cls(
+            "InvalidRequest",
+            f"invalid request: {message}",
+            details=message,
+            code="invalid_request",
+        )
 
     @classmethod
     def embedded_unavailable(
@@ -78,11 +92,30 @@ class HelixError(Exception):
         )
 
     @classmethod
-    def embedded(cls, message: str, *, cause: BaseException | None = None) -> "HelixError":
+    def embedded(
+        cls,
+        message: str,
+        *,
+        code: str | None = None,
+        cause: BaseException | None = None,
+    ) -> "HelixError":
         return cls(
             "Embedded",
             f"embedded HelixDB error: {message}",
             details=message,
+            code=code,
+            cause=cause,
+        )
+
+    @classmethod
+    def from_embedded(cls, cause: BaseException) -> "HelixError":
+        """Preserve the explicit UniFFI ``error``/``msg`` pair when available."""
+
+        code = getattr(cause, "error", None)
+        message = getattr(cause, "msg", None)
+        return cls.embedded(
+            message if isinstance(message, str) else str(cause),
+            code=code if isinstance(code, str) else None,
             cause=cause,
         )
 
@@ -181,10 +214,32 @@ def decode_response(response_body: bytes) -> Any:
         raise HelixError.serialization(str(exc), cause=exc) from exc
 
 
-def remote_details(response_body: bytes, fallback: str) -> str:
-    """Prefer a server response body while tolerating invalid UTF-8."""
+def remote_error(
+    response_body: bytes,
+    fallback: str,
+    *,
+    status_code: int | None = None,
+) -> HelixError:
+    """Decode new and legacy error envelopes without rejecting future codes."""
 
-    return response_body.decode("utf-8", errors="replace") or fallback
+    text = response_body.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        msg = payload.get("msg")
+        legacy_code = payload.get("code")
+        if isinstance(error, str) and isinstance(msg, str):
+            return HelixError.remote(msg, code=error, status_code=status_code)
+        if isinstance(error, str):
+            return HelixError.remote(
+                error,
+                code=legacy_code if isinstance(legacy_code, str) else None,
+                status_code=status_code,
+            )
+    return HelixError.remote(text or fallback, status_code=status_code)
 
 
 def parse_execute_options(options: Mapping[str, Any], *, embedded: bool) -> ExecuteOptions:

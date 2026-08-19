@@ -21,7 +21,7 @@ fn selected_executable_batch_lowers_control_root_pipeline_terminal_with_selected
     );
     let terminal_delivered = project_delivered_properties(
         pipeline_alternative.delivered.clone(),
-        &ir::ProjectionPlan::Count,
+        &ir::ProjectionPlan::Exists,
     );
     let terminal_cost = profile.stream_operator(profile.default_unknown_scan_rows);
     let terminal_alternative = physical::PhysicalAlternative::new(
@@ -57,7 +57,7 @@ fn selected_executable_batch_lowers_control_root_pipeline_terminal_with_selected
                                 plan: expand.clone(),
                             }),
                         ))),
-                        projection: ir::ProjectionPlan::Count,
+                        projection: ir::ProjectionPlan::Exists,
                     },
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("count")),
@@ -85,7 +85,7 @@ fn selected_executable_batch_lowers_control_root_pipeline_terminal_with_selected
     assert!(matches!(
         &plan.steps()[3].op,
         ExecOp::Project {
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         }
     ));
     assert_eq!(plan.steps()[3].dependencies, vec![plan.steps()[2].id]);

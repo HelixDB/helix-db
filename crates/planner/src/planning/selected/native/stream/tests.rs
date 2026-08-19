@@ -17,7 +17,10 @@ fn name(value: &str) -> ir::NonEmptyString {
 #[test]
 fn native_access_stream_lowers_to_specific_single_op_contracts() {
     let filter = nodes()
-        .filter(&Predicate::eq("age", 42))
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("age", 42),
+        )
         .unwrap()
         .into_logical_expr()
         .unwrap();
@@ -39,7 +42,10 @@ fn native_access_stream_lowers_to_specific_single_op_contracts() {
 #[test]
 fn native_access_stream_lowers_composed_ops_to_pipeline_contract() {
     let pipeline = nodes()
-        .filter(&Predicate::eq("active", true))
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("active", true),
+        )
         .unwrap()
         .limit(&StreamBound::expr(Expr::param("limit")))
         .unwrap()
@@ -129,4 +135,16 @@ fn native_access_stream_validates_stream_bounds() {
         invalid_range,
         Err(error::PlannerError::InvalidStreamRange { start: 8, end: 2 })
     ));
+}
+
+#[test]
+fn native_access_stream_filter_propagates_each_validation_stage() {
+    let ctx = crate::context::PlannerContext::default();
+    for predicate in [
+        Predicate::eq("", 1),
+        Predicate::eq_param("status", "missing"),
+        Predicate::eq("$label", ""),
+    ] {
+        assert!(nodes().filter(&ctx, &predicate).is_err());
+    }
 }
