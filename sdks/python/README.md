@@ -30,6 +30,18 @@ request = query.to_query_request()
 result = Client("http://localhost:6969").query(request)
 ```
 
+For Helix Cloud, provide the dashboard database ID with the API key. The client
+sends it in the canonical `x-helix-tenant-id` header:
+
+```python
+client = Client.managed(
+    "https://cluster.helix-db.com",
+    database_id="db_your_database_id",
+    api_key="hx_your_api_key",
+)
+result = client.query(request)
+```
+
 ## Async Client
 
 Reuse one `AsyncClient` so its HTTPX connection pool can serve many requests.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -16,6 +17,7 @@ type ErrorKind string
 type QueryErrorCode string
 
 const (
+	DatabaseIDHeader                   = "x-helix-tenant-id"
 	ErrorNetwork             ErrorKind = "Network"
 	ErrorRemote              ErrorKind = "Remote"
 	ErrorSerialization       ErrorKind = "Serialization"
@@ -54,11 +56,14 @@ func IsConflict(err error) bool {
 }
 
 type Client struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	embedded   nativeDB
-	apiKeyMu   sync.RWMutex
-	apiKey     string
+	baseURL           *url.URL
+	httpClient        *http.Client
+	embedded          nativeDB
+	apiKeyMu          sync.RWMutex
+	apiKey            string
+	databaseIDMu      sync.RWMutex
+	databaseID        *string
+	requireDatabaseID bool
 }
 
 type nativeDB interface {
@@ -148,6 +153,12 @@ func WithAPIKey(apiKey string) ClientOption {
 	return func(c *Client) { c.setAPIKey(apiKey) }
 }
 
+// WithDatabaseID configures the managed database sent in the
+// x-helix-tenant-id header for server requests.
+func WithDatabaseID(databaseID string) ClientOption {
+	return func(c *Client) { c.setDatabaseID(databaseID) }
+}
+
 func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	if baseURL == "" {
 		baseURL = "http://localhost:6969"
@@ -162,6 +173,24 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	client := &Client{baseURL: parsed, httpClient: http.DefaultClient}
 	for _, opt := range opts {
 		opt(client)
+	}
+	if databaseID, required := client.getDatabaseConfig(); databaseID != nil {
+		if err := validateDatabaseID(databaseID, required); err != nil {
+			return nil, err
+		}
+	}
+	return client, nil
+}
+
+// NewManagedClient creates a server client that requires a database ID and
+// sends it using the canonical x-helix-tenant-id header.
+func NewManagedClient(baseURL, databaseID string, opts ...ClientOption) (*Client, error) {
+	client, err := NewClient(baseURL, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if err := client.setManagedDatabaseID(databaseID); err != nil {
+		return nil, err
 	}
 	return client, nil
 }
@@ -203,6 +232,14 @@ func NewEmbeddedReaderClientWithConfig(source HelixDbSource, cache EmbeddedCache
 
 func (c *Client) WithAPIKey(apiKey string) *Client { c.setAPIKey(apiKey); return c }
 func (c *Client) ClearAPIKey() *Client             { c.setAPIKey(""); return c }
+func (c *Client) WithDatabaseID(databaseID string) *Client {
+	c.setDatabaseID(databaseID)
+	return c
+}
+func (c *Client) ClearDatabaseID() *Client {
+	c.clearDatabaseID()
+	return c
+}
 func (c *Client) BaseURL() string {
 	if c == nil || c.baseURL == nil {
 		return ""
@@ -224,6 +261,63 @@ func (c *Client) getAPIKey() string {
 	apiKey := c.apiKey
 	c.apiKeyMu.RUnlock()
 	return apiKey
+}
+
+func (c *Client) setDatabaseID(databaseID string) {
+	if c == nil {
+		return
+	}
+	c.databaseIDMu.Lock()
+	c.databaseID = &databaseID
+	c.databaseIDMu.Unlock()
+}
+
+func (c *Client) clearDatabaseID() {
+	if c == nil {
+		return
+	}
+	c.databaseIDMu.Lock()
+	c.databaseID = nil
+	c.databaseIDMu.Unlock()
+}
+
+func (c *Client) setManagedDatabaseID(databaseID string) error {
+	if err := validateDatabaseID(&databaseID, true); err != nil {
+		return err
+	}
+	c.databaseIDMu.Lock()
+	c.databaseID = &databaseID
+	c.requireDatabaseID = true
+	c.databaseIDMu.Unlock()
+	return nil
+}
+
+func (c *Client) getDatabaseConfig() (*string, bool) {
+	c.databaseIDMu.RLock()
+	defer c.databaseIDMu.RUnlock()
+	if c.databaseID == nil {
+		return nil, c.requireDatabaseID
+	}
+	databaseID := *c.databaseID
+	return &databaseID, c.requireDatabaseID
+}
+
+func validateDatabaseID(databaseID *string, required bool) error {
+	if required && databaseID == nil {
+		return &HelixError{
+			Kind:    ErrorInvalidRequest,
+			Code:    QueryErrorCode("invalid_request"),
+			Details: "managed clients require a database ID",
+		}
+	}
+	if databaseID != nil && strings.TrimSpace(*databaseID) == "" {
+		return &HelixError{
+			Kind:    ErrorInvalidRequest,
+			Code:    QueryErrorCode("invalid_request"),
+			Details: "database ID must not be empty",
+		}
+	}
+	return nil
 }
 
 type execOptions struct {
@@ -277,6 +371,10 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	if c.baseURL == nil {
 		return &HelixError{Kind: ErrorInvalidURL, Details: "nil server client"}
 	}
+	databaseID, requireDatabaseID := c.getDatabaseConfig()
+	if err := validateDatabaseID(databaseID, requireDatabaseID); err != nil {
+		return err
+	}
 	endpoint := c.baseURL.ResolveReference(&url.URL{Path: "/v2/query"})
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
@@ -285,6 +383,9 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey := c.getAPIKey(); apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if databaseID != nil {
+		httpReq.Header.Set(DatabaseIDHeader, *databaseID)
 	}
 	if options.writerOnly {
 		httpReq.Header.Set("x-helix-require-writer", "true")
