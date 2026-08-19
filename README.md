@@ -37,15 +37,23 @@ Helix primarily operates with a graph + vector data model, but it also supports 
 
 The Helix CLI runs and manages local instances and talks to Helix Cloud.
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
 Already installed? Update to the latest version with `helix update`.
 
 ### 2. The quickest path — `helix chef`
 
-`helix chef` is an interactive, one-shot bootstrapper. It installs the HelixDB query skills and docs MCP, scaffolds a project, starts a local instance, seeds some example data, and writes a `HELIX_CHEF_PROMPT.md`. If a coding agent is available (Claude Code, Codex, or OpenCode), it can hand off and build a working app — frontend and all — from a one-line description of what you want.
+`helix chef` is an interactive, one-shot bootstrapper. It installs the HelixDB query skills and docs MCP, scaffolds a project, starts a local instance, seeds some example data, and writes a `HELIX_CHEF_PROMPT.md`. It detects supported agents in this order: Claude Code → OpenAI Codex → OpenCode → Cursor Agent. When one is available, it can hand off and build a working app — frontend and all — from a one-line description of what you want.
 
 ```bash
 helix chef
@@ -80,12 +88,19 @@ If you'd rather wire things up yourself:
 
 Queries are authored with the Rust, TypeScript, Go, or Python DSL and sent straight to a running instance through `POST /v2/query` — no build or deploy step. The SDKs produce the same JSON AST. The examples below talk to a local instance on `http://localhost:6969` (the default `helix start dev` port). See the [Querying Guide](https://docs.helix-db.com/database/querying-guide/overview) for the full builder catalog and query wire format.
 
+| SDK | Package | Current release | Setup guide |
+|-----|---------|-----------------|-------------|
+| Rust | [`helix-db`](https://crates.io/crates/helix-db) | `3.0.0` | [Rust setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/rust-project-setup) |
+| TypeScript | [`@helix-db/helix-db`](https://www.npmjs.com/package/@helix-db/helix-db) | `3.0.4` | [TypeScript setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/typescript-project-setup) |
+| Python | [`helix-db`](https://pypi.org/project/helix-db/) | `0.3.4` | [Python setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/python-project-setup) |
+| Go | [`github.com/helixdb/helix-db/sdks/go`](https://pkg.go.dev/github.com/helixdb/helix-db/sdks/go) | `v0.1.3` | [Go setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/go-project-setup) |
+
 ### Rust
 
 Install the crate (published as `helix-db`, imported as `helix_db`):
 
 ```bash
-cargo init && cargo add helix-db tokio sonic-rs
+cargo init && cargo add helix-db@3.0.0 tokio sonic-rs
 ```
 
 Define queries as `#[query]` functions, then run them directly through the client:
@@ -144,7 +159,7 @@ async fn main() {
 Install the package (Node.js 20+):
 
 ```bash
-npm init -y && npm install @helix-db/helix-db
+npm init -y && npm install @helix-db/helix-db@3.0.4
 ```
 
 Define your queries as functions, then `POST` them to the running instance:
@@ -197,10 +212,10 @@ console.log("user:", user);
 
 ### Python
 
-Install the package from this repository:
+Install the published PyPI package:
 
 ```bash
-pip install -e sdks/python
+python -m pip install helix-db==0.3.4
 ```
 
 Build requests with snake_case builders, then send them with the client:
@@ -240,6 +255,54 @@ user = client.query(
 )
 print("user:", user)
 ```
+
+### Go
+
+Install the released Go module:
+
+```bash
+go mod init example.com/my-helix-app
+go get github.com/helixdb/helix-db/sdks/go@v0.1.3
+```
+
+Build a request with ordinary Go functions, then execute it with the client:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    helix "github.com/helixdb/helix-db/sdks/go"
+)
+
+func getUsers() helix.Request {
+    return helix.ReadQuery("get_users").
+        VarAs("users", helix.G().NWithLabel("User").ValueMap("$id", "name")).
+        Returning("users")
+}
+
+func main() {
+    client, err := helix.NewClient("http://localhost:6969")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    var response map[string]any
+    if err := client.Exec(context.Background(), getUsers(), &response); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(response)
+}
+```
+
+## Version names
+
+- **HelixDB v3** is the current product and SDK generation.
+- **Helix CLI 3.x** is the independently released command-line client. Check its exact version with `helix --version`.
+- **`POST /v2/query`** is the current HTTP wire endpoint. Its `v2` path does not mean HelixDB v2 or CLI v2.
 
 ## HelixDB Cloud
 

@@ -1,6 +1,6 @@
 ---
 title: "Getting started with HelixDB CLI"
-description: "Install the Helix CLI v3, bootstrap a first app, run a local instance, and send your first dynamic query"
+description: "Install the Helix CLI 3.x release, bootstrap a first app, run a local instance, and send your first dynamic query"
 icon: "rocket"
 pageType: "Tutorial"
 ---
@@ -26,7 +26,7 @@ If you are starting a new project inside a coding-agent environment, use `helix 
 helix chef
 ```
 
-`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches your coding agent (Claude Code, Codex, or OpenCode) to generate the app from your build intent.
+`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches the first supported agent it finds: Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 
 <Note>
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
@@ -39,8 +39,16 @@ For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by
 <Steps>
 
 <Step title="Install the Helix CLI">
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
 If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
@@ -97,6 +105,12 @@ helix stop dev
 </Step>
 
 </Steps>
+
+## Version names
+
+- **HelixDB v3** is the current product and SDK generation.
+- **Helix CLI 3.x** is the independently released command-line client. Run `helix --version` for the exact installed release.
+- **`POST /v2/query`** is the current HTTP wire endpoint. The endpoint version is independent of the product and CLI versions.
 
 Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
 

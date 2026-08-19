@@ -8,18 +8,18 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 Go SDK builds the shared operation-tree AST and executes it through
-a typed client.
+The released Go SDK builds the shared operation-tree AST and executes it through a
+typed client. The current module release is `v0.1.3`.
 
 <Note>
-The v3 SDK packages have not been published yet. The Go SDK keeps the module path
-`github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3` suffix.
+The module path is `github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3`
+suffix because the module itself has not reached major version 2.
 </Note>
 
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go
+go get github.com/helixdb/helix-db/sdks/go@v0.1.3
 ```
 
 ```go
@@ -68,7 +68,7 @@ options. The client does not retry conflicts automatically.
 
 ## Embedded runtime
 
-Install the SDK with `go get github.com/helixdb/helix-db/sdks/go`. See
+Install the SDK with `go get github.com/helixdb/helix-db/sdks/go@v0.1.3`. See
 [Embedded database](/database/helix-db/start-here/local-development/embedded-database)
 for storage, cache, and handle configuration.
 

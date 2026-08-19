@@ -35,7 +35,7 @@ The first interactive run signs you in to Helix Cloud through a GitHub device-co
 1. Installs the Helix skills (`npx skills add HelixDB/skills`) and docs MCP.
 2. Initializes a local project (`helix init local`) with a `dev` instance on port `6969`, then starts it in-memory.
 3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default) and, for the default build, starter query files under `examples/` — then seeds the data.
-4. Detects an installed coding agent (Claude Code → Codex → OpenCode), asks for a permission mode, and launches it against the build prompt.
+4. Detects an installed coding agent (Claude Code → OpenAI Codex → OpenCode → Cursor Agent), asks for a permission mode, and launches it against the build prompt.
 5. Opens the generated app at `http://localhost:3000` once the agent's frontend is running.
 
 <Note>

@@ -119,7 +119,7 @@ helix query dev --ts-file queries/count_users.ts
 How it works:
 
 - The expression must evaluate to a `readBatch()` or `writeBatch()` builder. `g`, `readBatch`, `writeBatch`, `defineParams`, and `param` are auto-imported and already in scope — you write only the expression, no imports.
-- The CLI evaluates it locally with Node using the forthcoming v3 `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
+- The CLI evaluates it locally with Node using the published `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
 - `request_type` is inferred automatically from whether you used `readBatch()` or `writeBatch()`.
 
 Requirements:

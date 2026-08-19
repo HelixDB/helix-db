@@ -99,35 +99,68 @@ Page type: Tutorial
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
 You will start a local HelixDB server, create two `User` nodes connected by a
-`FOLLOWS` edge, and read them back with one of the forthcoming v3 SDKs.
+`FOLLOWS` edge, and read them back with one of the released HelixDB v3 SDKs.
 
 ## Prerequisites
 
 - Docker or Podman
-- Rust, Node.js 20+, Go, Python 3.11+, or the `helix` CLI for raw JSON
+- Rust, Node.js 20+, Go 1.22+, Python 3.10+, or the `helix` CLI for raw JSON
 
   <Step title="Install the CLI">
+
+macOS and Linux:
 
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
 ```
 
-  </Step>
-  <Step title="Setup a local project">
+Windows PowerShell:
 
-```bash
-helix init local # --lang {rs,ts,go,py}
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-This creates the project structure, example query files, and installs dependencies.
+  </Step>
+  <Step title="Set up a local project">
 
-  you can choose a language to use with the `--lang` flag. The default is TypeScript.
+```bash
+mkdir helix-quickstart
+cd helix-quickstart
+helix init local
+```
+
+This creates `helix.toml`, local workspace state, and a runnable JSON request under
+`examples/`. SDK projects are ordinary language projects, so initialize the one you
+want to use next.
+
+  </Step>
+  <Step title="Install one SDK">
+
+```bash Rust
+cargo init
+cargo add helix-db@3.0.0 tokio serde_json
+```
+
+```bash TypeScript
+npm init -y
+npm install @helix-db/helix-db@3.0.4
+npm install --save-dev tsx
+```
+
+```bash Go
+go mod init example.com/helix-quickstart
+go get github.com/helixdb/helix-db/sdks/go@v0.1.3
+```
+
+```bash Python
+python -m pip install helix-db==0.3.4
+```
 
   </Step>
   <Step title="Start the local database">
 
 ```bash
-helix start local
+helix start dev
 ```
 
 This starts the local database at `http://localhost:6969/`.
@@ -135,8 +168,9 @@ This starts the local database at `http://localhost:6969/`.
   </Step>
   <Step title="Create and query the graph">
 
-In the generated after running `helix init local`, you will find a file called `queries.rs` (the file suffix will be different depending on the language you chose).
-For the language you chose, paste the following code into the file:
+Save the matching example as `src/main.rs`, `queries.ts`, `queries.go`, or
+`queries.py`. The JSON form can be saved as `examples/write-users.json` and run
+with `helix query dev --file examples/write-users.json`.
 
 ```rust Rust [expandable]
 use helix_db::dsl::prelude::*;
@@ -365,11 +399,11 @@ print(result)
 
 {/* sdk-commands: no JSON representation */}
 ```bash Rust
-cargo run --bin queries
+cargo run
 ```
 
 ```bash TypeScript
-npm run queries
+npx tsx queries.ts
 ```
 
 ```bash Go
@@ -379,8 +413,6 @@ go run queries.go
 ```bash Python
 python queries.py
 ```
-
-  you need to run this in the directory created by `helix init local`.
 
 Each SDK decodes the same JSON response. Your terminal's object formatting differs by
 language, but the response body is:
@@ -392,16 +424,6 @@ language, but the response body is:
   "friends": [{ "$id": 1, "name": "Bob" }]
 }
 ```
-
-  </Step>
-
-  <Step title="Open the dashboard">
-
-```bash
-helix dashboard
-```
-
-This opens the dashboard at `http://localhost:3000/`. You can explore the graph and query it with the UI.
 
   </Step>
 
@@ -420,7 +442,7 @@ apart operation by operation and explains the request and response JSON.
 ## Clean up
 
 ```bash
-helix stop local
+helix stop dev
 ```
 
 ## Next steps
@@ -511,9 +533,21 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 
 ## Start with the CLI
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+Then, in your shell:
+
+```bash
 mkdir my-helix-app
 cd my-helix-app
 helix init local --name dev # add --disk to make persistence the project default
@@ -896,13 +930,18 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 `helix-db` crate provides the query DSL, request types, async
+The published `helix-db` 3.0.0 crate provides the query DSL, request types, async
 HTTP client, native graph helpers, and a feature-gated embedded client.
 
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is published as `helix-db` and imported as `helix_db`.
 
 ## Install
+
+```bash
+cargo add helix-db@3.0.0
+```
+
+Or add the dependency directly:
 
 ```toml Cargo.toml
 [dependencies]
@@ -993,16 +1032,15 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 TypeScript SDK targets Node.js 20 or newer and emits the same
-operation-tree AST as the v3 Rust, Go, and Python SDKs.
+The published `@helix-db/helix-db` 3.0.4 package targets Node.js 20 or newer and
+emits the same operation-tree AST as the Rust, Go, and Python SDKs.
 
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is ESM and requires Node.js 20 or newer.
 
 ## Install
 
 ```bash
-npm install @helix-db/helix-db
+npm install @helix-db/helix-db@3.0.4
 ```
 
 The package is ESM. Set `"type": "module"` or compile to ESM.
@@ -1088,16 +1126,16 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 Go SDK builds the shared operation-tree AST and executes it through
-a typed client.
+The released Go SDK builds the shared operation-tree AST and executes it through a
+typed client. The current module release is `v0.1.3`.
 
-The v3 SDK packages have not been published yet. The Go SDK keeps the module path
-`github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3` suffix.
+The module path is `github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3`
+suffix because the module itself has not reached major version 2.
 
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go
+go get github.com/helixdb/helix-db/sdks/go@v0.1.3
 ```
 
 ```go
@@ -1146,7 +1184,7 @@ options. The client does not retry conflicts automatically.
 
 ## Embedded runtime
 
-Install the SDK with `go get github.com/helixdb/helix-db/sdks/go`. See
+Install the SDK with `go get github.com/helixdb/helix-db/sdks/go@v0.1.3`. See
 [Embedded database](/database/helix-db/start-here/local-development/embedded-database)
 for storage, cache, and handle configuration.
 
@@ -1172,9 +1210,9 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The Python SDK is packaged as `helix-db` and imported as `helixdb`. Its builder
-methods use `snake_case` and produce the same operation-tree AST as the other v3
-SDKs.
+The Python SDK is published on PyPI as `helix-db` 0.3.4 and imported as `helixdb`.
+Its builder methods use `snake_case` and produce the same operation-tree AST as
+the other HelixDB v3 SDKs.
 
 `helix-db` includes the synchronous and asynchronous server clients. Install
 `helix-db-embedded` as well only when the application runs HelixDB in process.
@@ -1182,7 +1220,7 @@ SDKs.
 ## Install
 
 ```bash
-python -m pip install helix-db
+python -m pip install helix-db==0.3.4
 ```
 
 ## Define a query
@@ -5527,7 +5565,7 @@ If you are starting a new project inside a coding-agent environment, use `helix 
 helix chef
 ```
 
-`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches your coding agent (Claude Code, Codex, or OpenCode) to generate the app from your build intent.
+`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches the first supported agent it finds: Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
 
@@ -5535,8 +5573,16 @@ For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by
 
 ## Local quickstart
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
 If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
@@ -5580,6 +5626,12 @@ helix stop dev
 ```
 
 `helix stop` is idempotent — it reports cleanly if the instance was not running.
+
+## Version names
+
+- **HelixDB v3** is the current product and SDK generation.
+- **Helix CLI 3.x** is the independently released command-line client. Run `helix --version` for the exact installed release.
+- **`POST /v2/query`** is the current HTTP wire endpoint. The endpoint version is independent of the product and CLI versions.
 
 Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
 
@@ -5664,7 +5716,9 @@ Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.4` container a
 ## Prerequisites
 
 - **Docker** or **Podman** on `PATH`.
-- The Helix CLI: `curl -sSL "https://install.helix-db.com" | bash`.
+- The Helix CLI:
+  - macOS and Linux: `curl -sSL "https://install.helix-db.com" | bash`.
+  - Windows PowerShell: `irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex`.
 
 ## Initial setup
 
@@ -6050,25 +6104,34 @@ Page type: Troubleshooting
 
 <div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
 
-This guide helps you resolve common issues with the Helix CLI v3.
+This guide helps you resolve common issues with the Helix CLI 3.x release line.
 
 ## Installation issues
 
 ### `command not found: helix`
 
-The CLI installs to `~/.helix/bin/helix`. If your shell can't find it after running the installer:
+On macOS and Linux, the CLI installs to `~/.local/bin/helix`. If your shell can't
+find it after running the installer:
 
 ```bash
 # Bash
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # Zsh
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Verify the binary exists with `ls -la ~/.helix/bin/helix`.
+Verify the binary exists with `ls -la ~/.local/bin/helix`.
+
+On Windows, the PowerShell installer writes
+`%LOCALAPPDATA%\Helix\bin\helix.exe` and adds that directory to your user `PATH`.
+Restart PowerShell after the first install, then verify it with:
+
+```powershell
+& "$env:LOCALAPPDATA\Helix\bin\helix.exe" --version
+```
 
 ### Updating the CLI
 
@@ -6090,7 +6153,7 @@ export HELIX_NO_UPDATE_CHECK=1   # also accepts HELIX_DISABLE_UPDATE_CHECK
 
 ### `helix compile` / `helix check`
 
-These commands do **not** exist in Helix CLI v3. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
+These commands do **not** exist in the Helix CLI 3.x release line. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
 
 ```bash
 helix query dev --file examples/request.json
@@ -6315,7 +6378,7 @@ Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-This page lists every command in Helix CLI v3. Click any command for full flag and example details.
+This page lists every command in the Helix CLI 3.x release line. Click any command for full flag and example details.
 
 ## Global Options
 
@@ -6515,7 +6578,7 @@ The first interactive run signs you in to Helix Cloud through a GitHub device-co
 1. Installs the Helix skills (`npx skills add HelixDB/skills`) and docs MCP.
 2. Initializes a local project (`helix init local`) with a `dev` instance on port `6969`, then starts it in-memory.
 3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default) and, for the default build, starter query files under `examples/` — then seeds the data.
-4. Detects an installed coding agent (Claude Code → Codex → OpenCode), asks for a permission mode, and launches it against the build prompt.
+4. Detects an installed coding agent (Claude Code → OpenAI Codex → OpenCode → Cursor Agent), asks for a permission mode, and launches it against the build prompt.
 5. Opens the generated app at `http://localhost:3000` once the agent's frontend is running.
 
 `helix chef` does **not** start a local dashboard — port `3000` is reserved for the Next.js app the agent builds.
@@ -7244,7 +7307,7 @@ helix query dev --ts-file queries/count_users.ts
 How it works:
 
 - The expression must evaluate to a `readBatch()` or `writeBatch()` builder. `g`, `readBatch`, `writeBatch`, `defineParams`, and `param` are auto-imported and already in scope — you write only the expression, no imports.
-- The CLI evaluates it locally with Node using the forthcoming v3 `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
+- The CLI evaluates it locally with Node using the published `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
 - `request_type` is inferred automatically from whether you used `readBatch()` or `writeBatch()`.
 
 Requirements:

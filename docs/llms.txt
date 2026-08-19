@@ -4,8 +4,18 @@
 
 Quickstart (local instance requires Docker or Podman):
 
+macOS and Linux:
 ```bash
 curl -sSL "https://install.helix-db.com" | bash   # install the helix CLI
+```
+
+Windows PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+Then:
+```bash
 helix init local                                  # scaffold helix.toml + examples/
 helix start dev                                   # start a local instance
 helix query dev -e 'writeBatch().varAs("alice", g().addN("User", { username: "alice" })).returning(["alice"])'
@@ -61,14 +71,14 @@ Full walkthrough: https://docs.helix-db.com/cli/getting-started
 - [Troubleshoot HelixDB](https://docs.helix-db.com/database/helix-cloud/operate/troubleshooting): Diagnose query, index, vector, embedded, and local runtime failures — Page type: Troubleshooting
 
 ## Using the helix CLI
-- [Getting started with HelixDB CLI](https://docs.helix-db.com/cli/getting-started): Install the Helix CLI v3, bootstrap a first app, run a local instance, and send your first dynamic query — Page type: Tutorial
+- [Getting started with HelixDB CLI](https://docs.helix-db.com/cli/getting-started): Install the Helix CLI 3.x release, bootstrap a first app, run a local instance, and send your first dynamic query — Page type: Tutorial
 - [Local Development](https://docs.helix-db.com/cli/workflows/local): Run a local instance and iterate on dynamic JSON queries — Page type: Guide
 - [Helix Cloud](https://docs.helix-db.com/cli/workflows/helix_cloud): Authenticate, link a project, and query a Helix Cloud cluster from the CLI — Page type: Guide
 - [Configuration Guide](https://docs.helix-db.com/cli/configuration): Reference for helix.toml, ~/.helix/config, and credentials — Page type: Reference
-- [Troubleshooting](https://docs.helix-db.com/cli/troubleshooting): Solutions to common issues and error messages in Helix CLI v3 — Page type: Troubleshooting
+- [Troubleshooting](https://docs.helix-db.com/cli/troubleshooting): Solutions to common issues and error messages in the Helix CLI 3.x release line — Page type: Troubleshooting
 
 ## CLI Command Reference
-- [CLI Command Reference](https://docs.helix-db.com/cli/command-reference): Complete reference for all Helix CLI v3 commands and options — Page type: Reference
+- [CLI Command Reference](https://docs.helix-db.com/cli/command-reference): Complete reference for all Helix CLI 3.x commands and options — Page type: Reference
 - [helix add](https://docs.helix-db.com/cli/command-reference/add) — Page type: Reference
 - [helix auth](https://docs.helix-db.com/cli/command-reference/auth) — Page type: Reference
 - [helix chef](https://docs.helix-db.com/cli/command-reference/chef) — Page type: Reference

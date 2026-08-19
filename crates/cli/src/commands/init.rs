@@ -287,8 +287,16 @@ instance. `helix query -e` evaluates a TypeScript DSL expression and needs Node 
 
 ## If `helix` is not installed
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
 ## If the container runtime is unavailable
@@ -376,6 +384,7 @@ mod tests {
         assert!(content.contains("helix start qa"));
         assert!(content.contains("helix query qa --file examples/request.json"));
         assert!(content.contains("install.helix-db.com"));
+        assert!(content.contains("crates/cli/install.ps1"));
         assert!(content.contains("container_runtime = \"podman\""));
         assert!(content.contains("llms.txt"));
     }

@@ -1,0 +1,75 @@
+name: Onboarding docs
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/onboarding-docs.yml"
+      - ".github/workflows/cli.yml"
+      - "README.md"
+      - "crates/cli/CLAUDE.md"
+      - "crates/cli/install.ps1"
+      - "crates/cli/tests/install.ps1"
+      - "crates/cli/src/commands/init.rs"
+      - "crates/cli/src/commands/chef.rs"
+      - "docs/**"
+      - "sdks/go/go.mod"
+      - "sdks/python/pyproject.toml"
+      - "sdks/rust/Cargo.toml"
+      - "sdks/typescript/package.json"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/onboarding-docs.yml"
+      - ".github/workflows/cli.yml"
+      - "README.md"
+      - "crates/cli/CLAUDE.md"
+      - "crates/cli/install.ps1"
+      - "crates/cli/tests/install.ps1"
+      - "crates/cli/src/commands/init.rs"
+      - "crates/cli/src/commands/chef.rs"
+      - "docs/**"
+      - "sdks/go/go.mod"
+      - "sdks/python/pyproject.toml"
+      - "sdks/rust/Cargo.toml"
+      - "sdks/typescript/package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: onboarding-docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs-contracts:
+    name: Links and install commands
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Validate documentation contracts
+        run: node docs/scripts/check-docs.mjs
+      - name: Validate generated documentation indexes
+        run: |
+          node docs/scripts/generate-llms.mjs --check
+          node docs/scripts/generate-llms-full.mjs --check
+
+  powershell-installer:
+    name: Windows installer (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install a fixture release asset
+        shell: cmd
+        env:
+          POWERSHELL_COMMAND: ${{ matrix.shell }}
+        run: "%POWERSHELL_COMMAND% -NoLogo -NoProfile -File crates\\cli\\tests\\install.ps1"

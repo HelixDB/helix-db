@@ -21,9 +21,21 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 
 ## Start with the CLI
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+Then, in your shell:
+
+```bash
 mkdir my-helix-app
 cd my-helix-app
 helix init local --name dev # add --disk to make persistence the project default

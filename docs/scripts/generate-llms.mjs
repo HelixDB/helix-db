@@ -19,8 +19,18 @@ const SUMMARY =
 const QUICKSTART = [
   'Quickstart (local instance requires Docker or Podman):',
   '',
+  'macOS and Linux:',
   '```bash',
   'curl -sSL "https://install.helix-db.com" | bash   # install the helix CLI',
+  '```',
+  '',
+  'Windows PowerShell:',
+  '```powershell',
+  'irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex',
+  '```',
+  '',
+  'Then:',
+  '```bash',
   'helix init local                                  # scaffold helix.toml + examples/',
   'helix start dev                                   # start a local instance',
   'helix query dev -e \'writeBatch().varAs("alice", g().addN("User", { username: "alice" })).returning(["alice"])\'',
@@ -158,7 +168,9 @@ if (missingSlugs.length > 0) {
 if (args.includes('--check')) {
   const existing = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : '';
   if (existing !== output) {
-    console.error('\nllms.txt is out of date. Run `npm run generate-llms` to regenerate.');
+    console.error(
+      '\nllms.txt is out of date. Run `npm run generate-llms` to regenerate.',
+    );
     process.exit(1);
   }
   console.log('llms.txt is up to date.');
@@ -166,7 +178,9 @@ if (args.includes('--check')) {
   fs.writeFileSync(OUT, output);
   console.log(
     `Wrote ${path.relative(REPO_ROOT, OUT)} — ${output.length} chars, ${sectionCount} sections${
-      missingSlugs.length > 0 ? `, ${missingSlugs.length} missing slugs (see above)` : ''
-    }`
+      missingSlugs.length > 0
+        ? `, ${missingSlugs.length} missing slugs (see above)`
+        : ''
+    }`,
   );
 }

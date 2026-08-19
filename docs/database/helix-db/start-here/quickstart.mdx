@@ -9,38 +9,73 @@ pageType: "Tutorial"
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
 You will start a local HelixDB server, create two `User` nodes connected by a
-`FOLLOWS` edge, and read them back with one of the forthcoming v3 SDKs.
+`FOLLOWS` edge, and read them back with one of the released HelixDB v3 SDKs.
 
 ## Prerequisites
 
 - Docker or Podman
-- Rust, Node.js 20+, Go, Python 3.11+, or the `helix` CLI for raw JSON
+- Rust, Node.js 20+, Go 1.22+, Python 3.10+, or the `helix` CLI for raw JSON
 
 <Steps>
   <Step title="Install the CLI">
+
+macOS and Linux:
 
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
 ```
 
-  </Step>
-  <Step title="Setup a local project">
+Windows PowerShell:
 
-```bash
-helix init local # --lang {rs,ts,go,py}
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-This creates the project structure, example query files, and installs dependencies.
+  </Step>
+  <Step title="Set up a local project">
 
-<Note>
-  you can choose a language to use with the `--lang` flag. The default is TypeScript.
-</Note>
+```bash
+mkdir helix-quickstart
+cd helix-quickstart
+helix init local
+```
+
+This creates `helix.toml`, local workspace state, and a runnable JSON request under
+`examples/`. SDK projects are ordinary language projects, so initialize the one you
+want to use next.
+
+  </Step>
+  <Step title="Install one SDK">
+
+{/* package-install: no JSON representation */}
+<CodeGroup>
+```bash Rust
+cargo init
+cargo add helix-db@3.0.0 tokio serde_json
+```
+
+```bash TypeScript
+npm init -y
+npm install @helix-db/helix-db@3.0.4
+npm install --save-dev tsx
+```
+
+```bash Go
+go mod init example.com/helix-quickstart
+go get github.com/helixdb/helix-db/sdks/go@v0.1.3
+```
+
+```bash Python
+python -m pip install helix-db==0.3.4
+```
+</CodeGroup>
+
 
   </Step>
   <Step title="Start the local database">
 
 ```bash
-helix start local
+helix start dev
 ```
 
 This starts the local database at `http://localhost:6969/`.
@@ -48,8 +83,9 @@ This starts the local database at `http://localhost:6969/`.
   </Step>
   <Step title="Create and query the graph">
 
-In the generated after running `helix init local`, you will find a file called `queries.rs` (the file suffix will be different depending on the language you chose).
-For the language you chose, paste the following code into the file:
+Save the matching example as `src/main.rs`, `queries.ts`, `queries.go`, or
+`queries.py`. The JSON form can be saved as `examples/write-users.json` and run
+with `helix query dev --file examples/write-users.json`.
 
 <CodeGroup>
 
@@ -287,11 +323,11 @@ print(result)
 {/* sdk-commands: no JSON representation */}
 <CodeGroup>
 ```bash Rust
-cargo run --bin queries
+cargo run
 ```
 
 ```bash TypeScript
-npm run queries
+npx tsx queries.ts
 ```
 
 ```bash Go
@@ -302,9 +338,6 @@ go run queries.go
 python queries.py
 ```
 </CodeGroup>
-<Note>
-  you need to run this in the directory created by `helix init local`.
-</Note>
 
 Each SDK decodes the same JSON response. Your terminal's object formatting differs by
 language, but the response body is:
@@ -316,16 +349,6 @@ language, but the response body is:
   "friends": [{ "$id": 1, "name": "Bob" }]
 }
 ```
-
-  </Step>
-
-  <Step title="Open the dashboard">
-
-```bash
-helix dashboard
-```
-
-This opens the dashboard at `http://localhost:3000/`. You can explore the graph and query it with the UI.
 
   </Step>
 
@@ -346,7 +369,7 @@ apart operation by operation and explains the request and response JSON.
 ## Clean up
 
 ```bash
-helix stop local
+helix stop dev
 ```
 
 ## Next steps
