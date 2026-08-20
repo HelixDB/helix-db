@@ -138,13 +138,24 @@ fn native_access_stream_validates_stream_bounds() {
 }
 
 #[test]
-fn native_access_stream_filter_propagates_each_validation_stage() {
+fn native_access_stream_filter_validates_predicates_and_defers_missing_bindings() {
     let ctx = crate::context::PlannerContext::default();
-    for predicate in [
-        Predicate::eq("", 1),
-        Predicate::eq_param("status", "missing"),
-        Predicate::eq("$label", ""),
-    ] {
+    for predicate in [Predicate::eq("", 1), Predicate::eq("$label", "")] {
         assert!(nodes().filter(&ctx, &predicate).is_err());
     }
+
+    let predicate = Predicate::and(vec![
+        Predicate::eq_param("status", "missing_status"),
+        Predicate::is_in_param("group", "missing_groups"),
+    ]);
+    let filtered = nodes()
+        .filter(&ctx, &predicate)
+        .unwrap()
+        .into_logical_expr()
+        .unwrap();
+    assert!(matches!(
+        filtered,
+        logical::LogicalExpr::AccessFilter(filter)
+            if filter.predicate() == &ir::PredicatePlan::new(predicate).unwrap()
+    ));
 }

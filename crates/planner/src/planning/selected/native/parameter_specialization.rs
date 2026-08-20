@@ -161,7 +161,7 @@ fn planning_parameter(
     if let Some(value) = ctx.params.query_values.get(&name) {
         return Ok(PlanningParameter::Literal(PropertyValue::from(value)));
     }
-    Err(error::PlannerError::MissingPlanningEqualityParameter { param: name })
+    Ok(PlanningParameter::Runtime(name))
 }
 
 #[cfg(test)]
@@ -237,15 +237,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_empty_parameter_names_are_rejected() {
-        assert!(matches!(
-            predicate(
-                &context::PlannerContext::default(),
-                &Predicate::eq_param("status", "missing")
-            ),
-            Err(error::PlannerError::MissingPlanningEqualityParameter { param })
-                if param.as_ref() == "missing"
-        ));
+    fn missing_parameters_remain_runtime_bound_and_empty_names_are_rejected() {
+        let original = Predicate::and(vec![
+            Predicate::eq_param("status", "missing_status"),
+            Predicate::is_in_param("group", "missing_groups"),
+        ]);
+
+        assert_eq!(
+            predicate(&context::PlannerContext::default(), &original).unwrap(),
+            original
+        );
         assert!(matches!(
             predicate(
                 &context::PlannerContext::default(),

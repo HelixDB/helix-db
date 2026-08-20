@@ -1,6 +1,6 @@
 use super::*;
 use crate::{catalog, error, ir, logical};
-use helix_ast::expr::{Expr, StreamBound};
+use helix_ast::expr::{Expr, Predicate, StreamBound};
 use helix_ast::traversal::{AstNode, Order};
 use helix_ast::value::{PropertyInput, PropertyValue};
 
@@ -196,7 +196,7 @@ fn pipeline_op_contract_rejects_non_pipeline_roots_and_invalid_payloads() {
 }
 
 #[test]
-fn filter_wrappers_propagate_each_validation_and_binding_failure() {
+fn filter_wrappers_validate_payloads_and_defer_missing_bindings() {
     let ctx = crate::context::PlannerContext::default();
     let cases = [
         AstNode::Has {
@@ -217,15 +217,27 @@ fn filter_wrappers_propagate_each_validation_and_binding_failure() {
             input: input(),
             property: String::new(),
         },
-        AstNode::Where {
-            input: input(),
-            predicate: helix_ast::expr::Predicate::eq_param("status", "missing"),
-        },
     ];
 
     for root in cases {
         assert!(filter::pipeline_op_from_ast(&ctx, &root).is_err());
     }
+
+    let predicate = Predicate::and(vec![
+        Predicate::eq_param("status", "missing_status"),
+        Predicate::is_in_param("group", "missing_groups"),
+    ]);
+    let root = AstNode::Where {
+        input: input(),
+        predicate: predicate.clone(),
+    };
+    let parsed = pipeline_op(&root);
+    assert!(matches!(
+        parsed.into_parts().1,
+        logical::StreamPipelineOp::Filter {
+            predicate: predicate_plan
+        } if predicate_plan == ir::PredicatePlan::new(predicate).unwrap()
+    ));
 }
 
 #[test]
