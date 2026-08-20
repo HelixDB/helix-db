@@ -173,11 +173,11 @@ async fn predicates_cover_alias_comparisons_membership_arrays_and_errors() {
             ])),
         },
         Predicate::IsIn {
-            value: Expr::val(PropertyValue::F64Array(vec![1.5, 2.5])),
+            value: Expr::val(2.5),
             values: Expr::val(PropertyValue::F64Array(vec![1.5, 2.5])),
         },
         Predicate::IsIn {
-            value: Expr::val(PropertyValue::F32Array(vec![1.25, 2.25])),
+            value: Expr::val(PropertyValue::F32(2.25)),
             values: Expr::val(PropertyValue::F32Array(vec![1.25, 2.25])),
         },
     ];
