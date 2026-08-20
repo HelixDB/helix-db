@@ -80,6 +80,9 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyKey,
         values: &[DbPropertyValue],
     ) -> Result<roaring::RoaringTreemap> {
+        if values.is_empty() {
+            return Ok(roaring::RoaringTreemap::new());
+        }
         let identity = secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,

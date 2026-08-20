@@ -52,29 +52,44 @@ impl<'db> ExecutionContext<'db> {
         plan: &ir::RuntimeEqualitySet,
     ) -> Result<RuntimeEqualityDomain> {
         let original = self.param_value(plan.param())?;
-        let values = runtime_members(original.clone());
-        let mut unique = Vec::new();
-        for value in values {
-            if !value.eq_value(&value) {
-                continue;
+        let max_values = plan.max_values();
+        let indexed = match &original {
+            PropertyValue::I64Array(values) => {
+                bounded_index_members(values.iter().copied().map(PropertyValue::I64), max_values)
             }
-            if matches!(
-                value,
-                PropertyValue::Null | PropertyValue::Array(_) | PropertyValue::Object(_)
-            ) {
-                return Ok(RuntimeEqualityDomain::Authoritative(original));
+            PropertyValue::F64Array(values) => {
+                bounded_index_members(values.iter().copied().map(PropertyValue::F64), max_values)
             }
-            if !unique
-                .iter()
-                .any(|existing: &PropertyValue| existing.eq_value(&value))
-            {
-                unique.push(value);
+            PropertyValue::F32Array(values) => bounded_index_members(
+                values
+                    .iter()
+                    .copied()
+                    .map(|value| PropertyValue::F32(f64::from(value))),
+                max_values,
+            ),
+            PropertyValue::StringArray(values) => bounded_index_members(
+                values.iter().cloned().map(PropertyValue::String),
+                max_values,
+            ),
+            PropertyValue::Array(values) => {
+                bounded_index_members(values.iter().cloned(), max_values)
             }
-        }
-        if unique.len() > plan.max_values().get() {
-            return Ok(RuntimeEqualityDomain::Authoritative(original));
-        }
-        Ok(RuntimeEqualityDomain::Indexed(unique))
+            value @ (PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::I64(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::F64(_)
+            | PropertyValue::F32(_)
+            | PropertyValue::String(_)
+            | PropertyValue::Bytes(_)
+            | PropertyValue::Object(_)) => {
+                bounded_index_members(core::iter::once(value.clone()), max_values)
+            }
+        };
+        Ok(match indexed {
+            Some(values) => RuntimeEqualityDomain::Indexed(values),
+            None => RuntimeEqualityDomain::Authoritative(original),
+        })
     }
 
     async fn scoped_membership_matches(
@@ -100,26 +115,83 @@ impl<'db> ExecutionContext<'db> {
     }
 }
 
-fn runtime_members(value: PropertyValue) -> Vec<PropertyValue> {
-    match value {
-        PropertyValue::I64Array(values) => values.into_iter().map(PropertyValue::I64).collect(),
-        PropertyValue::F64Array(values) => values.into_iter().map(PropertyValue::F64).collect(),
-        PropertyValue::F32Array(values) => values
-            .into_iter()
-            .map(|value| PropertyValue::F32(f64::from(value)))
-            .collect(),
-        PropertyValue::StringArray(values) => {
-            values.into_iter().map(PropertyValue::String).collect()
-        }
-        PropertyValue::Array(values) => values,
-        value @ (PropertyValue::Null
-        | PropertyValue::Bool(_)
-        | PropertyValue::I64(_)
-        | PropertyValue::DateTime(_)
-        | PropertyValue::F64(_)
-        | PropertyValue::F32(_)
-        | PropertyValue::String(_)
-        | PropertyValue::Bytes(_)
-        | PropertyValue::Object(_)) => vec![value],
+/// Collect a query-equality domain with memory bounded by `max_values`.
+///
+/// `None` means authoritative evaluation is required, either because a member
+/// has no exact secondary-index representation or because the finite domain
+/// exceeds the planner-selected bound.
+fn bounded_index_members(
+    values: impl IntoIterator<Item = PropertyValue>,
+    max_values: std::num::NonZeroUsize,
+) -> Option<Vec<PropertyValue>> {
+    values
+        .into_iter()
+        .try_fold(Vec::with_capacity(max_values.get()), |mut unique, value| {
+            if !value.eq_value(&value) {
+                return Some(unique);
+            }
+            if matches!(
+                value,
+                PropertyValue::Null | PropertyValue::Array(_) | PropertyValue::Object(_)
+            ) {
+                return None;
+            }
+            if unique
+                .iter()
+                .any(|existing: &PropertyValue| existing.eq_value(&value))
+            {
+                return Some(unique);
+            }
+            if unique.len() == max_values.get() {
+                return None;
+            }
+            unique.push(value);
+            Some(unique)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_members_deduplicate_by_query_equality_and_skip_non_reflexive_values() {
+        let values = [
+            PropertyValue::I64(1),
+            PropertyValue::F64(1.0),
+            PropertyValue::F64(f64::NAN),
+            PropertyValue::F32(2.0),
+        ];
+
+        assert_eq!(
+            bounded_index_members(values, std::num::NonZeroUsize::new(2).unwrap()),
+            Some(vec![PropertyValue::I64(1), PropertyValue::F32(2.0)])
+        );
+    }
+
+    #[test]
+    fn bounded_members_require_authoritative_evaluation_for_unsafe_or_large_domains() {
+        let limit = std::num::NonZeroUsize::new(2).unwrap();
+        assert_eq!(bounded_index_members(Vec::new(), limit), Some(Vec::new()));
+        assert_eq!(
+            bounded_index_members(
+                [
+                    PropertyValue::I64(1),
+                    PropertyValue::I64(2),
+                    PropertyValue::I64(3),
+                ],
+                limit,
+            ),
+            None
+        );
+        assert_eq!(bounded_index_members([PropertyValue::Null], limit), None);
+        assert_eq!(
+            bounded_index_members([PropertyValue::Array(Vec::new())], limit),
+            None
+        );
+        assert_eq!(
+            bounded_index_members([PropertyValue::Object(Default::default())], limit),
+            None
+        );
     }
 }

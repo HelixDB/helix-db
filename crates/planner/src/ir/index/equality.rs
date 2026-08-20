@@ -183,6 +183,18 @@ impl IndexValue {
 /// Genuinely late-bound, bounded equality-domain parameter.
 ///
 /// The positive limit makes an unbounded runtime index union unrepresentable.
+///
+/// ```
+/// use helix_planner::ir::{NonEmptyString, RuntimeEqualitySet};
+/// use std::num::NonZeroUsize;
+///
+/// let values = RuntimeEqualitySet::new(
+///     NonEmptyString::new("orbit_ids").unwrap(),
+///     NonZeroUsize::new(64).unwrap(),
+/// );
+/// assert_eq!(values.param().as_ref(), "orbit_ids");
+/// assert_eq!(values.max_values().get(), 64);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeEqualitySet {
     param: NonEmptyString,

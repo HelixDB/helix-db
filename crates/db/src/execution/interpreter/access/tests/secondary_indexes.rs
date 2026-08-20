@@ -1009,6 +1009,21 @@ async fn dynamic_membership_batches_safe_values_and_falls_back_authoritatively()
         run_node_access_with_params(
             &db,
             plan.clone(),
+            context::ParamBindings::default()
+                .with_value(param.clone(), PropertyValue::StringArray(Vec::new())),
+        )
+        .await,
+        ExecutionValue::Scalars(Vec::new())
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.multi_get_calls, 0);
+    assert_eq!(metrics.scans, 0);
+
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan.clone(),
             context::ParamBindings::default().with_value(
                 param.clone(),
                 PropertyValue::StringArray(vec![
