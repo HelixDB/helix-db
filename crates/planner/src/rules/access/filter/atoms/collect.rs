@@ -1,21 +1,26 @@
 //! Predicate-to-index-atom collection.
 
 use super::property::{access_index_property, AccessIndexProperty};
-use super::types::{AccessFilterIndexAtom, AccessFilterIndexAtoms, AccessFilterIndexPlanRejection};
+use super::types::{
+    AccessEqualityDomain, AccessFilterIndexAtom, AccessFilterIndexAtoms,
+    AccessFilterIndexPlanRejection,
+};
 use crate::{analysis, ir};
 
 pub(super) fn access_filter_index_atoms(
     predicate: &helix_ast::expr::Predicate,
     label: &ir::NonEmptyString,
+    planner_limits: &crate::context::PlannerLimits,
 ) -> Result<AccessFilterIndexAtoms, AccessFilterIndexPlanRejection> {
     let mut atoms = Vec::new();
-    collect_access_filter_index_atoms(predicate, label, &mut atoms)?;
+    collect_access_filter_index_atoms(predicate, label, planner_limits, &mut atoms)?;
     AccessFilterIndexAtoms::new(atoms).map_err(|_| AccessFilterIndexPlanRejection::EmptyIndexAtoms)
 }
 
 fn collect_access_filter_index_atoms(
     predicate: &helix_ast::expr::Predicate,
     label: &ir::NonEmptyString,
+    planner_limits: &crate::context::PlannerLimits,
     atoms: &mut Vec<AccessFilterIndexAtom>,
 ) -> Result<(), AccessFilterIndexPlanRejection> {
     if super::super::labels::label_equality_matches(predicate, label) {
@@ -25,11 +30,13 @@ fn collect_access_filter_index_atoms(
         return Err(AccessFilterIndexPlanRejection::LabelScopeMismatch);
     }
     match predicate {
-        helix_ast::expr::Predicate::And { predicates } => predicates
-            .iter()
-            .try_for_each(|predicate| collect_access_filter_index_atoms(predicate, label, atoms)),
+        helix_ast::expr::Predicate::And { predicates } => {
+            predicates.iter().try_for_each(|predicate| {
+                collect_access_filter_index_atoms(predicate, label, planner_limits, atoms)
+            })
+        }
         predicate => {
-            let atom = access_filter_index_atom(predicate)?;
+            let atom = access_filter_index_atom(predicate, planner_limits)?;
             atoms.push(atom);
             Ok(())
         }
@@ -38,13 +45,41 @@ fn collect_access_filter_index_atoms(
 
 fn access_filter_index_atom(
     predicate: &helix_ast::expr::Predicate,
+    planner_limits: &crate::context::PlannerLimits,
 ) -> Result<AccessFilterIndexAtom, AccessFilterIndexPlanRejection> {
-    if let Ok(analysis::EqualityIndexAtom::Atom { property, value }) =
+    if let Ok(analysis::EqualityIndexAtom::Atom { property, domain }) =
         analysis::equality_atom(predicate)
     {
+        let domain = match domain {
+            analysis::EqualityIndexDomain::Empty => {
+                return Err(AccessFilterIndexPlanRejection::EmptyIndexAtoms);
+            }
+            analysis::EqualityIndexDomain::One(value) => AccessEqualityDomain::One(value),
+            analysis::EqualityIndexDomain::Many(values) => {
+                let Some(max_branches) = super::limits::max_index_union_branches(planner_limits)
+                else {
+                    return Err(AccessFilterIndexPlanRejection::BranchLimitDisabled);
+                };
+                if values.len() > max_branches {
+                    return Err(AccessFilterIndexPlanRejection::BranchLimitExceeded);
+                }
+                AccessEqualityDomain::Many(values)
+            }
+            analysis::EqualityIndexDomain::RuntimeSet(param) => {
+                let Some(max_branches) = super::limits::max_index_union_branches(planner_limits)
+                else {
+                    return Err(AccessFilterIndexPlanRejection::BranchLimitDisabled);
+                };
+                AccessEqualityDomain::Runtime(ir::RuntimeEqualitySet::new(
+                    param,
+                    std::num::NonZeroUsize::new(max_branches)
+                        .expect("enabled index-union limit is positive"),
+                ))
+            }
+        };
         return match access_index_property(property) {
             AccessIndexProperty::Indexable(property) => {
-                Ok(AccessFilterIndexAtom::Equality { property, value })
+                Ok(AccessFilterIndexAtom::Equality { property, domain })
             }
             AccessIndexProperty::NotIndexable(_) => {
                 Err(AccessFilterIndexPlanRejection::PropertyNotIndexable)
@@ -80,7 +115,12 @@ mod tests {
             helix_ast::expr::Predicate::gte("age", 21),
         ]);
 
-        let atoms = access_filter_index_atoms(&predicate, &user_label()).unwrap();
+        let atoms = access_filter_index_atoms(
+            &predicate,
+            &user_label(),
+            &crate::context::PlannerLimits::default(),
+        )
+        .unwrap();
 
         assert!(matches!(
             atoms.as_ref(),
@@ -95,19 +135,31 @@ mod tests {
             helix_ast::expr::Predicate::gte("age", 21),
         ]);
         assert_eq!(
-            access_filter_index_atoms(&conflicting_label, &user_label()),
+            access_filter_index_atoms(
+                &conflicting_label,
+                &user_label(),
+                &crate::context::PlannerLimits::default(),
+            ),
             Err(AccessFilterIndexPlanRejection::LabelScopeMismatch)
         );
 
         let dotted_property = helix_ast::expr::Predicate::eq("profile.age", 21);
         assert_eq!(
-            access_filter_index_atoms(&dotted_property, &user_label()),
+            access_filter_index_atoms(
+                &dotted_property,
+                &user_label(),
+                &crate::context::PlannerLimits::default(),
+            ),
             Err(AccessFilterIndexPlanRejection::PropertyNotIndexable)
         );
 
         let not_candidate = helix_ast::expr::Predicate::contains("bio", "rust");
         assert_eq!(
-            access_filter_index_atoms(&not_candidate, &user_label()),
+            access_filter_index_atoms(
+                &not_candidate,
+                &user_label(),
+                &crate::context::PlannerLimits::default(),
+            ),
             Err(AccessFilterIndexPlanRejection::NotIndexCandidate)
         );
     }

@@ -2,7 +2,9 @@ use helix_ast::expr::{CompareOp, Expr, Predicate};
 use helix_ast::value::PropertyValue;
 
 use super::support::constant;
-use crate::analysis::{equality_atom, range_atom, EqualityIndexAtom, RangeIndexAtom};
+use crate::analysis::{
+    equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
+};
 use crate::error::PlannerError;
 use crate::ir::{IndexValue, SecondaryIndexLiteral};
 
@@ -18,9 +20,9 @@ fn equality_atoms_accept_reversed_literal_property_order() {
         equality_atom(&predicate).unwrap(),
         EqualityIndexAtom::Atom {
             property: "username".to_string(),
-            value: IndexValue::Literal(
+            domain: EqualityIndexDomain::One(IndexValue::Literal(
                 SecondaryIndexLiteral::new(PropertyValue::from("alice")).unwrap()
-            ),
+            )),
         }
     );
 }

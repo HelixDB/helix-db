@@ -82,6 +82,16 @@ enum CountCursorLeaf<'a> {
         key: &'a helix_planner::catalog::ScopedPropertyKey,
         param: &'a ir::NonEmptyString,
     },
+    NodeDynamicMembership {
+        index: &'a helix_planner::catalog::NodeEqualityIndexMeta,
+        key: &'a helix_planner::catalog::ScopedPropertyKey,
+        values: &'a ir::RuntimeEqualitySet,
+    },
+    EdgeDynamicMembership {
+        index: &'a helix_planner::catalog::EdgeEqualityIndexMeta,
+        key: &'a helix_planner::catalog::ScopedPropertyKey,
+        values: &'a ir::RuntimeEqualitySet,
+    },
 }
 
 enum CountCursorStructural<'a> {
@@ -173,6 +183,8 @@ fn count_plan_window(plan: &exec::ExecCountPlan) -> Option<&exec::ExecCountWindo
         exec::ExecCountPlan::EdgeTextSearch(plan) => Some(&plan.window),
         exec::ExecCountPlan::NodeDynamicEquality(plan) => Some(&plan.window),
         exec::ExecCountPlan::EdgeDynamicEquality(plan) => Some(&plan.window),
+        exec::ExecCountPlan::NodeDynamicMembership(plan) => Some(&plan.window),
+        exec::ExecCountPlan::EdgeDynamicMembership(plan) => Some(&plan.window),
         exec::ExecCountPlan::Stream(plan) => Some(&plan.window),
     }
 }
@@ -412,6 +424,30 @@ impl<'db> ExecutionContext<'db> {
                     core::slice::from_ref(&value),
                 );
                 let ids = read.await?;
+                window.apply(ids.len() as usize)
+            }
+            exec::ExecCountPlan::NodeDynamicMembership(plan) => {
+                validate_node_equality_index(&plan.index.index_id, &plan.key)?;
+                let window = evaluated_window.expect("dynamic counts carry a window");
+                let ids = self
+                    .dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        &plan.key,
+                        &plan.values,
+                    )
+                    .await?;
+                window.apply(ids.len() as usize)
+            }
+            exec::ExecCountPlan::EdgeDynamicMembership(plan) => {
+                validate_edge_equality_index(&plan.index.index_id, &plan.key)?;
+                let window = evaluated_window.expect("dynamic counts carry a window");
+                let ids = self
+                    .dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        &plan.key,
+                        &plan.values,
+                    )
+                    .await?;
                 window.apply(ids.len() as usize)
             }
             exec::ExecCountPlan::Stream(plan) => {
@@ -1048,6 +1084,26 @@ impl<'db> ExecutionContext<'db> {
                     .await?
                     .len() as usize
                 }
+                exec::ExecCountCursorPlan::NodeDynamicMembership { index, key, values } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    self.dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        values,
+                    )
+                    .await?
+                    .len() as usize
+                }
+                exec::ExecCountCursorPlan::EdgeDynamicMembership { index, key, values } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    self.dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        values,
+                    )
+                    .await?
+                    .len() as usize
+                }
                 exec::ExecCountCursorPlan::Filter { input, predicate } => {
                     let rows = self.count_cursor(input, dependency).await?;
                     let mut accepted = 0usize;
@@ -1224,6 +1280,16 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecCountCursorPlan::EdgeDynamicEquality { index, key, param } => self
                 .count_cursor_leaf(
                     CountCursorLeaf::EdgeDynamicEquality { index, key, param },
+                    dependency,
+                ),
+            exec::ExecCountCursorPlan::NodeDynamicMembership { index, key, values } => self
+                .count_cursor_leaf(
+                    CountCursorLeaf::NodeDynamicMembership { index, key, values },
+                    dependency,
+                ),
+            exec::ExecCountCursorPlan::EdgeDynamicMembership { index, key, values } => self
+                .count_cursor_leaf(
+                    CountCursorLeaf::EdgeDynamicMembership { index, key, values },
                     dependency,
                 ),
             exec::ExecCountCursorPlan::Union { driver, rest } => self
@@ -1525,6 +1591,34 @@ impl<'db> ExecutionContext<'db> {
                         core::slice::from_ref(&value),
                     );
                     let ids = read.await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
+                        .collect())
+                }
+                CountCursorLeaf::NodeDynamicMembership { index, key, values } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    let ids = self
+                        .dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            values,
+                        )
+                        .await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                        .collect())
+                }
+                CountCursorLeaf::EdgeDynamicMembership { index, key, values } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    let ids = self
+                        .dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Edge,
+                            key,
+                            values,
+                        )
+                        .await?;
                     Ok(ids
                         .into_iter()
                         .map(|id| ExecutionRow::current(ElementRef::Edge(id)))

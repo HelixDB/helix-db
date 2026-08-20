@@ -120,6 +120,16 @@ impl<'db> ExecutionContext<'db> {
                 let ids = limited_index_ids(read.await?, limit);
                 return self.verified_node_rows(ids);
             }
+            exec::ExecNodeAccessPlan::DynamicMembership { index, key, values } => {
+                super::super::count::validate_node_equality_index(&index.index_id, key)?;
+                let read = self.dynamic_membership_ids(
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    key,
+                    values,
+                );
+                let ids = limited_index_ids(read.await?, limit);
+                return self.verified_node_rows(ids);
+            }
             exec::ExecNodeAccessPlan::RangeIndex { key, range, .. } => {
                 let ids = self.node_range_index_ids(key, range, limit).await?;
                 return self.verified_node_rows(ids);
@@ -224,6 +234,16 @@ impl<'db> ExecutionContext<'db> {
                     crate::index_lifecycle::IndexElementKind::Edge,
                     key,
                     core::slice::from_ref(&value),
+                );
+                let ids = limited_index_ids(read.await?, limit);
+                return self.verified_edge_rows(ids);
+            }
+            exec::ExecEdgeAccessPlan::DynamicMembership { index, key, values } => {
+                super::super::count::validate_edge_equality_index(&index.index_id, key)?;
+                let read = self.dynamic_membership_ids(
+                    crate::index_lifecycle::IndexElementKind::Edge,
+                    key,
+                    values,
                 );
                 let ids = limited_index_ids(read.await?, limit);
                 return self.verified_edge_rows(ids);

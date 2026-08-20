@@ -100,6 +100,7 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
             exec::ExecNodeAccessPlan::Bitmap { .. }
             | exec::ExecNodeAccessPlan::Unique { .. }
             | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
             | exec::ExecNodeAccessPlan::RangeIndex { .. }
             | exec::ExecNodeAccessPlan::SecondarySet { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Secondary)
@@ -124,6 +125,7 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
         exec::ExecAccessPlan::Edge(plan) => match plan {
             exec::ExecEdgeAccessPlan::Bitmap { .. }
             | exec::ExecEdgeAccessPlan::DynamicEquality { .. }
+            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
             | exec::ExecEdgeAccessPlan::RangeIndex { .. }
             | exec::ExecEdgeAccessPlan::SecondarySet { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Secondary)

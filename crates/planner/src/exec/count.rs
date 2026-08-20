@@ -749,6 +749,32 @@ pub struct ExecEdgeDynamicEqualityCountPlan {
     pub window: ExecCountWindowPlan,
 }
 
+/// Bounded runtime equality-domain count for a node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecNodeDynamicMembershipCountPlan {
+    /// Catalog index metadata, including node uniqueness.
+    pub index: catalog::NodeEqualityIndexMeta,
+    /// Indexed property.
+    pub key: catalog::ScopedPropertyKey,
+    /// Runtime equality domain and index-union bound.
+    pub values: ir::RuntimeEqualitySet,
+    /// Normalized count window.
+    pub window: ExecCountWindowPlan,
+}
+
+/// Bounded runtime equality-domain count for an edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecEdgeDynamicMembershipCountPlan {
+    /// Catalog index metadata.
+    pub index: catalog::EdgeEqualityIndexMeta,
+    /// Indexed property.
+    pub key: catalog::ScopedPropertyKey,
+    /// Runtime equality domain and index-union bound.
+    pub values: ir::RuntimeEqualitySet,
+    /// Normalized count window.
+    pub window: ExecCountWindowPlan,
+}
+
 /// Explicit row-distinct algorithm used by a count cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -865,6 +891,24 @@ pub enum ExecCountCursorPlan {
         key: catalog::ScopedPropertyKey,
         /// Genuinely late-bound parameter.
         param: ir::NonEmptyString,
+    },
+    /// Bounded node runtime membership lookup.
+    NodeDynamicMembership {
+        /// Catalog index metadata.
+        index: catalog::NodeEqualityIndexMeta,
+        /// Indexed property.
+        key: catalog::ScopedPropertyKey,
+        /// Runtime equality domain and index-union bound.
+        values: ir::RuntimeEqualitySet,
+    },
+    /// Bounded edge runtime membership lookup.
+    EdgeDynamicMembership {
+        /// Catalog index metadata.
+        index: catalog::EdgeEqualityIndexMeta,
+        /// Indexed property.
+        key: catalog::ScopedPropertyKey,
+        /// Runtime equality domain and index-union bound.
+        values: ir::RuntimeEqualitySet,
     },
     /// Materialized row union in encoded child order.
     Union {
@@ -1032,6 +1076,10 @@ pub enum ExecCountPlan {
     NodeDynamicEquality(ExecNodeDynamicEqualityCountPlan),
     /// Explicit edge runtime equality dispatch exception.
     EdgeDynamicEquality(ExecEdgeDynamicEqualityCountPlan),
+    /// Bounded node runtime membership dispatch.
+    NodeDynamicMembership(ExecNodeDynamicMembershipCountPlan),
+    /// Bounded edge runtime membership dispatch.
+    EdgeDynamicMembership(ExecEdgeDynamicMembershipCountPlan),
     /// Recursive exact cursor fallback for identity-sensitive pipelines and sets.
     Stream(ExecCountStreamPlan),
     /// Count rows emitted by a preserved effect barrier.
@@ -1116,7 +1164,9 @@ impl ExecCountPlan {
             | Self::NodeTextSearch(_)
             | Self::EdgeTextSearch(_)
             | Self::NodeDynamicEquality(_)
-            | Self::EdgeDynamicEquality(_) => Ok(ExecCountDependency::Direct),
+            | Self::EdgeDynamicEquality(_)
+            | Self::NodeDynamicMembership(_)
+            | Self::EdgeDynamicMembership(_) => Ok(ExecCountDependency::Direct),
         }
     }
 }
@@ -1155,6 +1205,8 @@ fn validate_count_plan(plan: &ExecCountPlan) -> Result<(), ExecCountValidationEr
         ExecCountPlan::EdgeTextSearch(plan) => validate_window(&plan.window),
         ExecCountPlan::NodeDynamicEquality(plan) => validate_window(&plan.window),
         ExecCountPlan::EdgeDynamicEquality(plan) => validate_window(&plan.window),
+        ExecCountPlan::NodeDynamicMembership(plan) => validate_window(&plan.window),
+        ExecCountPlan::EdgeDynamicMembership(plan) => validate_window(&plan.window),
         ExecCountPlan::Stream(plan) => {
             validate_cursor(&plan.cursor)?;
             validate_window(&plan.window)
@@ -1209,7 +1261,9 @@ fn validate_cursor(cursor: &ExecCountCursorPlan) -> Result<(), ExecCountValidati
         | ExecCountCursorPlan::NodeTextSearch { .. }
         | ExecCountCursorPlan::EdgeTextSearch { .. }
         | ExecCountCursorPlan::NodeDynamicEquality { .. }
-        | ExecCountCursorPlan::EdgeDynamicEquality { .. } => Ok(()),
+        | ExecCountCursorPlan::EdgeDynamicEquality { .. }
+        | ExecCountCursorPlan::NodeDynamicMembership { .. }
+        | ExecCountCursorPlan::EdgeDynamicMembership { .. } => Ok(()),
     }
 }
 
@@ -1269,7 +1323,9 @@ fn cursor_row_input_count(cursor: &ExecCountCursorPlan) -> Result<usize, ExecCou
         | ExecCountCursorPlan::NodeTextSearch { .. }
         | ExecCountCursorPlan::EdgeTextSearch { .. }
         | ExecCountCursorPlan::NodeDynamicEquality { .. }
-        | ExecCountCursorPlan::EdgeDynamicEquality { .. } => 0,
+        | ExecCountCursorPlan::EdgeDynamicEquality { .. }
+        | ExecCountCursorPlan::NodeDynamicMembership { .. }
+        | ExecCountCursorPlan::EdgeDynamicMembership { .. } => 0,
     };
     Ok(count)
 }

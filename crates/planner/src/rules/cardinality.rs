@@ -592,6 +592,7 @@ enum EqualityValue {
     AuthoritativeNull,
     NonReflexive,
     Dynamic(ir::NonEmptyString),
+    DynamicSet(ir::RuntimeEqualitySet),
 }
 
 fn classify_equality(
@@ -603,6 +604,9 @@ fn classify_equality(
         .expect("cardinality helpers are only called by the cardinality rule");
     let literal = match value {
         ir::IndexValue::Literal(literal) => literal.clone(),
+        ir::IndexValue::ParamSet(values) => {
+            return Ok(EqualityValue::DynamicSet(values.clone()));
+        }
         // A foreach frame expands object fields into the parameter namespace.
         // The AST exposes the container name but cannot enumerate every field
         // that an iteration may shadow, so any active runtime parameter scope
@@ -704,6 +708,14 @@ fn node_equality_count(
                 window,
             })
         }
+        EqualityValue::DynamicSet(values) => {
+            exec::ExecCountPlan::NodeDynamicMembership(exec::ExecNodeDynamicMembershipCountPlan {
+                index: index.clone(),
+                key: key.clone(),
+                values,
+                window,
+            })
+        }
     })
 }
 
@@ -739,6 +751,14 @@ fn edge_equality_count(
                 index: index.clone(),
                 key: key.clone(),
                 param,
+                window,
+            })
+        }
+        EqualityValue::DynamicSet(values) => {
+            exec::ExecCountPlan::EdgeDynamicMembership(exec::ExecEdgeDynamicMembershipCountPlan {
+                index: index.clone(),
+                key: key.clone(),
+                values,
                 window,
             })
         }
@@ -907,6 +927,20 @@ fn count_plan_cursor(
                 param: plan.param,
             })
         }
+        exec::ExecCountPlan::NodeDynamicMembership(plan) => {
+            Ok(exec::ExecCountCursorPlan::NodeDynamicMembership {
+                index: plan.index,
+                key: plan.key,
+                values: plan.values,
+            })
+        }
+        exec::ExecCountPlan::EdgeDynamicMembership(plan) => {
+            Ok(exec::ExecCountCursorPlan::EdgeDynamicMembership {
+                index: plan.index,
+                key: plan.key,
+                values: plan.values,
+            })
+        }
         exec::ExecCountPlan::Stream(plan) => Ok(plan.cursor),
         exec::ExecCountPlan::InputRows { .. } => Ok(exec::ExecCountCursorPlan::InputRows),
         exec::ExecCountPlan::InputScalars { .. } => {
@@ -996,7 +1030,8 @@ fn node_bitmap_expr(
                 }),
                 EqualityValue::AuthoritativeNull
                 | EqualityValue::NonReflexive
-                | EqualityValue::Dynamic(_) => None,
+                | EqualityValue::Dynamic(_)
+                | EqualityValue::DynamicSet(_) => None,
             })
         }
         ir::NodeAccessPlan::Union(children) => node_bitmap_set(children, true, rule),
@@ -1029,7 +1064,8 @@ fn edge_bitmap_expr(
                 }),
                 EqualityValue::AuthoritativeNull
                 | EqualityValue::NonReflexive
-                | EqualityValue::Dynamic(_) => None,
+                | EqualityValue::Dynamic(_)
+                | EqualityValue::DynamicSet(_) => None,
             })
         }
         ir::EdgeAccessPlan::Union(children) => edge_bitmap_set(children, true, rule),
@@ -1371,7 +1407,9 @@ fn count_cost(
             storage.range_scan(storage.default_unknown_scan_rows)
         }
         exec::ExecCountPlan::NodeDynamicEquality(_)
-        | exec::ExecCountPlan::EdgeDynamicEquality(_) => storage
+        | exec::ExecCountPlan::EdgeDynamicEquality(_)
+        | exec::ExecCountPlan::NodeDynamicMembership(_)
+        | exec::ExecCountPlan::EdgeDynamicMembership(_) => storage
             .bitmap_equality_lookup(storage.default_equality_index_rows)
             .serial(storage.null_equality_scan(storage.default_unknown_scan_rows)),
         exec::ExecCountPlan::Stream(plan) => cursor_cost(&plan.cursor, stats, storage),
@@ -1721,7 +1759,9 @@ fn cursor_cost(
             storage.range_scan(storage.default_unknown_scan_rows)
         }
         exec::ExecCountCursorPlan::NodeDynamicEquality { .. }
-        | exec::ExecCountCursorPlan::EdgeDynamicEquality { .. } => storage
+        | exec::ExecCountCursorPlan::EdgeDynamicEquality { .. }
+        | exec::ExecCountCursorPlan::NodeDynamicMembership { .. }
+        | exec::ExecCountCursorPlan::EdgeDynamicMembership { .. } => storage
             .bitmap_equality_lookup(storage.default_equality_index_rows)
             .serial(storage.null_equality_scan(storage.default_unknown_scan_rows)),
         exec::ExecCountCursorPlan::Union { driver, rest }

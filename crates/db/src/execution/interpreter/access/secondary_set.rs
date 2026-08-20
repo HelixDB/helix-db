@@ -108,6 +108,16 @@ impl<'db> ExecutionContext<'db> {
                     .await
                     .map(SecondaryIds::Unordered)
                 }
+                exec::ExecNodeSecondarySetPlan::DynamicMembership { index, key, values } => {
+                    super::super::count::validate_node_equality_index(&index.index_id, key)?;
+                    self.dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        values,
+                    )
+                    .await
+                    .map(SecondaryIds::Unordered)
+                }
                 exec::ExecNodeSecondarySetPlan::Range(range) => self
                     .node_range_index_ids(&range.key, &range.range, range_limit)
                     .await
@@ -192,6 +202,16 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         core::slice::from_ref(&value),
+                    )
+                    .await
+                    .map(SecondaryIds::Unordered)
+                }
+                exec::ExecEdgeSecondarySetPlan::DynamicMembership { index, key, values } => {
+                    super::super::count::validate_edge_equality_index(&index.index_id, key)?;
+                    self.dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        values,
                     )
                     .await
                     .map(SecondaryIds::Unordered)

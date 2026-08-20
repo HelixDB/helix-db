@@ -292,6 +292,84 @@ fn cascades_foreach_body_preserves_selected_index_runs_and_body_conditions() {
 }
 
 #[test]
+fn foreach_membership_uses_a_bounded_runtime_equality_domain() {
+    let indexes = builtin_label_indexes()
+        .with_node_eq(ScopedPropertyKey::try_new("Audit", "event_id").unwrap())
+        .with_edge_eq(ScopedPropertyKey::try_new("MENTIONS", "event_id").unwrap());
+    let body = write_batch()
+        .var_as(
+            "nodes",
+            g().n_with_label_where("Audit", Predicate::is_in_param("event_id", "event_ids")),
+        )
+        .var_as(
+            "edges",
+            g().e_with_label_where("MENTIONS", Predicate::is_in_param("event_id", "event_ids")),
+        );
+    let batch = write_batch().for_each_param("events", body);
+
+    let plan = crate::planning::plan_write_batch(&batch, &ctx(indexes)).unwrap();
+    let ExecOp::ForEach { body, .. } = &plan.steps()[0].op else {
+        panic!("expected foreach entry: {:?}", plan.steps());
+    };
+
+    assert!(matches!(
+        &body.steps()[0].op,
+        ExecOp::Access { plan }
+            if matches!(
+                plan.as_ref(),
+                ExecAccessPlan::Node(ExecNodeAccessPlan::DynamicMembership { key, values, .. })
+                    if key.label == "Audit"
+                        && key.property == "event_id"
+                        && values.param().as_ref() == "event_ids"
+                        && values.max_values().get() == 64
+            )
+    ));
+    assert!(matches!(
+        &body.steps()[1].op,
+        ExecOp::Access { plan }
+            if matches!(
+                plan.as_ref(),
+                ExecAccessPlan::Edge(crate::exec::ExecEdgeAccessPlan::DynamicMembership {
+                    key,
+                    values,
+                    ..
+                }) if key.label == "MENTIONS"
+                    && key.property == "event_id"
+                    && values.param().as_ref() == "event_ids"
+                    && values.max_values().get() == 64
+            )
+    ));
+}
+
+#[test]
+fn foreach_membership_count_preserves_runtime_domain_dispatch() {
+    let indexes = builtin_label_indexes()
+        .with_node_eq(ScopedPropertyKey::try_new("Audit", "event_id").unwrap());
+    let body = write_batch().var_as(
+        "matching",
+        g().n_with_label_where("Audit", Predicate::is_in_param("event_id", "event_ids"))
+            .count(),
+    );
+    let batch = write_batch().for_each_param("events", body);
+
+    let plan = crate::planning::plan_write_batch(&batch, &ctx(indexes)).unwrap();
+    let ExecOp::ForEach { body, .. } = &plan.steps()[0].op else {
+        panic!("expected foreach entry: {:?}", plan.steps());
+    };
+
+    assert!(matches!(
+        &body.steps()[0].op,
+        ExecOp::Count { plan }
+            if matches!(
+                plan.as_ref(),
+                crate::exec::ExecCountPlan::NodeDynamicMembership(dynamic)
+                    if dynamic.key.property == "event_id"
+                        && dynamic.values.param().as_ref() == "event_ids"
+            )
+    ));
+}
+
+#[test]
 fn foreach_count_keeps_object_field_equality_explicitly_dynamic() {
     let indexes = builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Audit", "event_id").unwrap());

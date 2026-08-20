@@ -966,6 +966,107 @@ async fn dynamic_equality_is_the_only_runtime_classifier_for_null_nan_and_indexe
 }
 
 #[tokio::test]
+async fn dynamic_membership_batches_safe_values_and_falls_back_authoritatively() {
+    let db = test_support::open_db("access-dynamic-membership").await;
+    let active = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("status", PropertyValue::from("active"))],
+    )
+    .await;
+    let paused = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("status", PropertyValue::from("paused"))],
+    )
+    .await;
+    let explicit_null =
+        test_support::add_node_with_properties(&db, "User", vec![("status", PropertyValue::Null)])
+            .await;
+    let missing = test_support::add_node_with_properties(&db, "User", Vec::new()).await;
+    let _wrong_label = test_support::add_node_with_properties(
+        &db,
+        "Account",
+        vec![("status", PropertyValue::Null)],
+    )
+    .await;
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        61,
+        &[("active", active), ("paused", paused)],
+    )
+    .await;
+    let param = test_support::name("late_statuses");
+    let plan = exec::ExecNodeAccessPlan::DynamicMembership {
+        index: catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status")),
+        key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+        values: ir::RuntimeEqualitySet::new(param.clone(), std::num::NonZeroUsize::new(2).unwrap()),
+    };
+
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan.clone(),
+            context::ParamBindings::default().with_value(
+                param.clone(),
+                PropertyValue::StringArray(vec![
+                    "active".to_owned(),
+                    "paused".to_owned(),
+                    "active".to_owned(),
+                ]),
+            ),
+        )
+        .await,
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::NodeId(active),
+            ExecutionScalar::NodeId(paused),
+        ])
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.multi_get_calls, 1);
+    assert_eq!(metrics.scans, 0);
+
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan.clone(),
+            context::ParamBindings::default().with_value(
+                param.clone(),
+                PropertyValue::Array(vec![PropertyValue::from("active"), PropertyValue::Null]),
+            ),
+        )
+        .await,
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::NodeId(active),
+            ExecutionScalar::NodeId(explicit_null),
+            ExecutionScalar::NodeId(missing),
+        ])
+    );
+
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan,
+            context::ParamBindings::default().with_value(
+                param,
+                PropertyValue::StringArray(vec![
+                    "active".to_owned(),
+                    "paused".to_owned(),
+                    "absent".to_owned(),
+                ]),
+            ),
+        )
+        .await,
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::NodeId(active),
+            ExecutionScalar::NodeId(paused),
+        ])
+    );
+}
+
+#[tokio::test]
 async fn unordered_edge_secondary_sets_remain_edge_scoped() {
     let db = test_support::open_db("access-unordered-edge-secondary-set").await;
     let from = test_support::add_user(&db, "from").await;

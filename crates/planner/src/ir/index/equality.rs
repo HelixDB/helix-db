@@ -1,6 +1,7 @@
 use helix_ast::value::PropertyValue;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::num::NonZeroUsize;
 
 use crate::ir::NonEmptyString;
 
@@ -157,6 +158,8 @@ pub enum IndexValue {
     Literal(SecondaryIndexLiteral),
     /// Runtime parameter value.
     Param(NonEmptyString),
+    /// Runtime parameter interpreted as a bounded equality domain.
+    ParamSet(RuntimeEqualitySet),
 }
 
 impl IndexValue {
@@ -172,7 +175,33 @@ impl IndexValue {
                     EqualityIndexValueSemantics::NonReflexive
                 }
             },
-            Self::Param(_) => EqualityIndexValueSemantics::RuntimeDependent,
+            Self::Param(_) | Self::ParamSet(_) => EqualityIndexValueSemantics::RuntimeDependent,
         }
+    }
+}
+
+/// Genuinely late-bound, bounded equality-domain parameter.
+///
+/// The positive limit makes an unbounded runtime index union unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeEqualitySet {
+    param: NonEmptyString,
+    max_values: NonZeroUsize,
+}
+
+impl RuntimeEqualitySet {
+    /// Build a bounded runtime equality domain.
+    pub const fn new(param: NonEmptyString, max_values: NonZeroUsize) -> Self {
+        Self { param, max_values }
+    }
+
+    /// Runtime parameter name.
+    pub const fn param(&self) -> &NonEmptyString {
+        &self.param
+    }
+
+    /// Maximum distinct equality values eligible for the index path.
+    pub const fn max_values(&self) -> NonZeroUsize {
+        self.max_values
     }
 }

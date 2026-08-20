@@ -2,6 +2,7 @@ mod dispatch;
 mod expand;
 mod indexes;
 mod kv;
+mod membership;
 mod params;
 mod range;
 mod restricted_text;

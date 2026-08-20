@@ -10,7 +10,7 @@ mod search;
 
 pub use equality::{
     EqualityIndexValueSemantics, IndexValue, LiteralEqualityIndexValueSemantics,
-    SecondaryIndexLiteral, SecondaryIndexLiteralError,
+    RuntimeEqualitySet, SecondaryIndexLiteral, SecondaryIndexLiteralError,
 };
 pub use range::{
     BoundInclusivity, IndexBetweenRange, IndexBound, IndexRange, RangeIndexF32, RangeIndexF64,

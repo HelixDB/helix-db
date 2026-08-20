@@ -121,7 +121,9 @@ fn family(plan: &exec::ExecCountPlan) -> PhysicalCardinality {
             PhysicalCardinality::TextSearch
         }
         exec::ExecCountPlan::NodeDynamicEquality(_)
-        | exec::ExecCountPlan::EdgeDynamicEquality(_) => PhysicalCardinality::DynamicEquality,
+        | exec::ExecCountPlan::EdgeDynamicEquality(_)
+        | exec::ExecCountPlan::NodeDynamicMembership(_)
+        | exec::ExecCountPlan::EdgeDynamicMembership(_) => PhysicalCardinality::DynamicEquality,
         exec::ExecCountPlan::Stream(plan) => cursor_family(&plan.cursor),
         exec::ExecCountPlan::InputRows { .. } => PhysicalCardinality::InputRows,
         exec::ExecCountPlan::InputScalars { .. } => PhysicalCardinality::InputScalars,
@@ -175,7 +177,9 @@ fn cursor_family(cursor: &exec::ExecCountCursorPlan) -> PhysicalCardinality {
         exec::ExecCountCursorPlan::NodeTextSearch { .. }
         | exec::ExecCountCursorPlan::EdgeTextSearch { .. } => PhysicalCardinality::TextSearch,
         exec::ExecCountCursorPlan::NodeDynamicEquality { .. }
-        | exec::ExecCountCursorPlan::EdgeDynamicEquality { .. } => {
+        | exec::ExecCountCursorPlan::EdgeDynamicEquality { .. }
+        | exec::ExecCountCursorPlan::NodeDynamicMembership { .. }
+        | exec::ExecCountCursorPlan::EdgeDynamicMembership { .. } => {
             PhysicalCardinality::DynamicEquality
         }
         exec::ExecCountCursorPlan::Union { .. } => PhysicalCardinality::SetUnion,

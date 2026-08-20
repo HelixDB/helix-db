@@ -31,6 +31,9 @@ pub(crate) fn node_secondary_set(
                 exec::ExecNodeEqualityAccessPlan::DynamicEquality { index, key, param } => {
                     Some(exec::ExecNodeSecondarySetPlan::DynamicEquality { index, key, param })
                 }
+                exec::ExecNodeEqualityAccessPlan::DynamicMembership { index, key, values } => {
+                    Some(exec::ExecNodeSecondarySetPlan::DynamicMembership { index, key, values })
+                }
             }
         }
         ir::NodeAccessPlan::RangeIndex { index, key, range } => Some(
@@ -83,6 +86,9 @@ pub(crate) fn edge_secondary_set(
                 }
                 exec::ExecEdgeEqualityAccessPlan::DynamicEquality { index, key, param } => {
                     Some(exec::ExecEdgeSecondarySetPlan::DynamicEquality { index, key, param })
+                }
+                exec::ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values } => {
+                    Some(exec::ExecEdgeSecondarySetPlan::DynamicMembership { index, key, values })
                 }
             }
         }

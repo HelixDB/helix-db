@@ -106,6 +106,26 @@ async fn predicates_cover_comparisons_strings_nulls_membership_and_short_circuit
         .unwrap());
 }
 
+#[test]
+fn membership_semantics_cover_every_typed_array_and_scalar_rhs() {
+    assert!(property_value_is_in(
+        &DbPropertyValue::F64(2.0),
+        &DbPropertyValue::F64Array(vec![1.0, 2.0]),
+    ));
+    assert!(property_value_is_in(
+        &DbPropertyValue::F32(2.0),
+        &DbPropertyValue::F32Array(vec![1.0, 2.0]),
+    ));
+    assert!(property_value_is_in(
+        &DbPropertyValue::String("active".to_owned()),
+        &DbPropertyValue::String("active".to_owned()),
+    ));
+    assert!(!property_value_is_in(
+        &DbPropertyValue::F64(f64::NAN),
+        &DbPropertyValue::F64Array(vec![f64::NAN]),
+    ));
+}
+
 #[tokio::test]
 async fn predicates_cover_alias_comparisons_membership_arrays_and_errors() {
     let db = test_support::open_db("stream-eval-predicate-edges").await;
