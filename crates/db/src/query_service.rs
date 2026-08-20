@@ -1839,38 +1839,47 @@ mod tests {
         );
 
         let response = service
-            .execute_query(QueryRequest::read(
-                read_batch()
-                    .var_as("present_object", g().n(NodeRef::id(0)))
-                    .var_as("present_list", g().n_with_label("User"))
-                    .var_as("missing_object", g().n(NodeRef::id(999)))
-                    .var_as("missing_list", g().n_with_label("Missing"))
-                    .var_as("bounded_object", g().n_with_label("Missing").limit(1usize))
-                    .var_as("empty_fold", g().n(NodeRef::id(999)).fold())
-                    .var_as("seed", g().n_with_label("Missing"))
-                    .var_as_if(
-                        "skipped_object",
-                        BatchCondition::PrevNotEmpty,
-                        g().n(NodeRef::id(0)),
-                    )
-                    .var_as("count", g().n_with_label("Missing").count())
-                    .returning([
-                        "present_object",
-                        "missing_object",
-                        "missing_list",
-                        "bounded_object",
-                        "empty_fold",
-                        "skipped_object",
-                        "count",
-                        "present_list",
-                    ]),
-            ))
+            .execute_query(
+                QueryRequest::read(
+                    read_batch()
+                        .var_as("present_object", g().n(NodeRef::id(0)))
+                        .var_as("present_list", g().n_with_label("User"))
+                        .var_as("missing_object", g().n(NodeRef::id(999)))
+                        .var_as("missing_list", g().n_with_label("Missing"))
+                        .var_as(
+                            "empty_membership",
+                            g().n_with_label("User")
+                                .where_(Predicate::is_in_param("orbit_id", "orbit_ids")),
+                        )
+                        .var_as("bounded_object", g().n_with_label("Missing").limit(1usize))
+                        .var_as("empty_fold", g().n(NodeRef::id(999)).fold())
+                        .var_as("seed", g().n_with_label("Missing"))
+                        .var_as_if(
+                            "skipped_object",
+                            BatchCondition::PrevNotEmpty,
+                            g().n(NodeRef::id(0)),
+                        )
+                        .var_as("count", g().n_with_label("Missing").count())
+                        .returning([
+                            "present_object",
+                            "missing_object",
+                            "missing_list",
+                            "empty_membership",
+                            "bounded_object",
+                            "empty_fold",
+                            "skipped_object",
+                            "count",
+                            "present_list",
+                        ]),
+                )
+                .with_parameter_value("orbit_ids", QueryValue::Array(Vec::new())),
+            )
             .await
             .expect("shape read should execute");
 
         assert_eq!(
             response.to_json_bytes().unwrap(),
-            br#"{"bounded_object":null,"count":0,"empty_fold":[],"missing_list":[],"missing_object":null,"present_list":[{"$id":0}],"present_object":[{"$id":0}],"skipped_object":null}"#
+            br#"{"bounded_object":null,"count":0,"empty_fold":[],"empty_membership":[],"missing_list":[],"missing_object":null,"present_list":[{"$id":0}],"present_object":[{"$id":0}],"skipped_object":null}"#
         );
 
         let mutation = service

@@ -75,6 +75,7 @@ impl ExecutableDagBuilder<'_> {
             id,
             dependencies: draft.dependencies,
             output: draft.output,
+            semantic_return_shape: None,
             condition: draft.condition,
             op: draft.op,
             schedule: draft.schedule,
@@ -82,6 +83,24 @@ impl ExecutableDagBuilder<'_> {
             cost: draft.cost,
         });
         Ok(id)
+    }
+
+    pub(in crate::exec) fn capture_bound_return_shape(
+        &mut self,
+        root: ExecStepId,
+        shape: ReturnShape,
+    ) {
+        let step = self
+            .steps
+            .last_mut()
+            .expect("a root allocated by this builder remains present");
+        assert_eq!(
+            step.id, root,
+            "selected root lowering must allocate its root step last"
+        );
+        if matches!(step.output, ir::BatchOutputPlan::Bind(_)) {
+            step.semantic_return_shape = Some(shape);
+        }
     }
 
     pub(in crate::exec) fn push_native_merge(

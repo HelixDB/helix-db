@@ -32,7 +32,8 @@ pub(crate) use crate::error::{
 pub(crate) use crate::exec::{
     ElementKeyspace, ExecAccessPlan, ExecBranchPlan, ExecCondition, ExecCountPlan,
     ExecEdgeAccessPlan, ExecMergeMode, ExecMutationPlan, ExecNodeAccessPlan, ExecOp,
-    ExecRuntimeInputPlan, ExecVariableOp, ExecutablePlan, KvReadPlan,
+    ExecRuntimeInputPlan, ExecVariableOp, ExecutablePlan, ExecutableReturns, KvReadPlan,
+    ReturnShape,
 };
 pub(crate) use crate::ir::{
     AggregatePlan, AtLeast, BatchConditionPlan, BatchOutputPlan, BatchVariableConditionPlan,

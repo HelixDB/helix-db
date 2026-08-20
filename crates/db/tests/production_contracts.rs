@@ -253,6 +253,7 @@ async fn public_shared_runtime_keeps_search_families_available() {
                 id: root_id,
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(access),
@@ -1401,6 +1402,7 @@ async fn public_query_boundary_covers_branch_partition_edges() {
         id: step_id(id),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -1877,6 +1879,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: edge_access,
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Edge(
@@ -1891,6 +1894,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: fold,
                 dependencies: vec![edge_access],
                 output: ir::BatchOutputPlan::Bind(folded_edges.clone()),
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Reserved {
                     op: ir::ReservedOp::Fold,
@@ -1903,6 +1907,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: folded_access,
                 dependencies: vec![fold],
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Edge(
@@ -1919,6 +1924,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: exec::ExecStepId::new(4).expect("step ID is positive"),
                 dependencies: vec![folded_access],
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Project {
                     projection: ir::ProjectionPlan::Id,
@@ -2373,6 +2379,7 @@ async fn public_query_boundary_covers_active_range_index_access_and_mutation() {
         id: step_id(id),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -4959,6 +4966,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             id: receipt_id,
             dependencies: Vec::new(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: exec::ExecOp::IndexDdl {
                 plan: ir::IndexDdlPlan::Create {
@@ -4980,6 +4988,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 id: empty_id,
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty)),
@@ -4997,6 +5006,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             id: root_id,
             dependencies,
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: consumer,
             schedule: exec::ExecSchedule::Pipeline,
@@ -5152,6 +5162,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                     id: access_id,
                     dependencies: Vec::new(),
                     output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
                     condition: exec::ExecCondition::Always,
                     op: exec::ExecOp::Access {
                         plan: Box::new(access),
@@ -5164,6 +5175,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                     id: project_id,
                     dependencies: vec![access_id],
                     output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
                     condition: exec::ExecCondition::Always,
                     op: exec::ExecOp::Project {
                         projection: ir::ProjectionPlan::Id,
@@ -6538,6 +6550,7 @@ async fn public_reader_executes_parallel_stage_with_stable_output_order() {
         id: first_id,
         dependencies: Vec::new(),
         output: ir::BatchOutputPlan::Bind(seen.clone()),
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op: exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty)),
@@ -6550,6 +6563,7 @@ async fn public_reader_executes_parallel_stage_with_stable_output_order() {
         id: second_id,
         dependencies: Vec::new(),
         output: ir::BatchOutputPlan::Bind(seen.clone()),
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op: exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
@@ -6564,6 +6578,7 @@ async fn public_reader_executes_parallel_stage_with_stable_output_order() {
         id: root_id,
         dependencies: vec![first_id, second_id],
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op: exec::ExecOp::Variable {
             op: exec::ExecVariableOp::SourceInject {
@@ -6734,6 +6749,7 @@ async fn public_executable_plan_boundary_covers_typed_kv_read_modes() {
                     id: root_id,
                     dependencies: Vec::new(),
                     output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
                     condition: exec::ExecCondition::Always,
                     op: exec::ExecOp::KvRead(read),
                     schedule: exec::ExecSchedule::Pipeline,
@@ -6837,6 +6853,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
                         .into_iter()
                         .collect(),
                     output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
                     condition: exec::ExecCondition::Always,
                     op,
                     schedule,
@@ -7166,6 +7183,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 id: exec::ExecStepId::new(index + 1).expect("access step ID is positive"),
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
@@ -7183,6 +7201,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 .map(|id| exec::ExecStepId::new(id).expect("dependency ID is positive"))
                 .collect(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: exec::ExecOp::Merge { mode },
             schedule: exec::ExecSchedule::Pipeline,
@@ -7261,6 +7280,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 id: exec::ExecStepId::new(index + 1).expect("dependency step ID is positive"),
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op,
                 schedule,
@@ -7274,6 +7294,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 .map(|id| exec::ExecStepId::new(id).expect("dependency ID is positive"))
                 .collect(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: exec::ExecOp::Noop,
             schedule: exec::ExecSchedule::Pipeline,

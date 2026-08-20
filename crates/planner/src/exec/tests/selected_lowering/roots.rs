@@ -307,6 +307,7 @@ fn selected_root_pipeline_lowers_variable_source_stream_to_native_dag() {
                     ops,
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("selected")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),

@@ -148,6 +148,52 @@ fn membership_parameter_cardinality_matches_literal_normalization() {
 }
 
 #[test]
+fn optimizer_proven_empty_membership_preserves_collection_return_shape() {
+    let indexes = builtin_label_indexes()
+        .with_node_eq(ScopedPropertyKey::try_new("Person", "$label").unwrap())
+        .with_node_eq(ScopedPropertyKey::try_new("Person", "orbit_id").unwrap());
+    let mut planner_ctx = ctx(indexes);
+    planner_ctx.params = ParamBindings::default().with_query_value(
+        NonEmptyString::new("orbit_ids").unwrap(),
+        QueryValue::Array(Vec::new()),
+    );
+
+    let plan = executable_traversal(
+        g().n_with_label("Person")
+            .where_(Predicate::is_in_param("orbit_id", "orbit_ids")),
+        planner_ctx,
+    );
+
+    assert!(matches!(
+        unwrapped_first_exec_access(&plan),
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Empty)
+    ));
+    assert_eq!(
+        plan.steps().last().unwrap().delivered.cardinality.upper(),
+        Some(0)
+    );
+    assert_eq!(
+        plan.steps().last().unwrap().semantic_return_shape,
+        Some(ReturnShape::List)
+    );
+    let ExecutableReturns::Variables(returns) = plan.executable_returns() else {
+        panic!("named result should resolve an executable return");
+    };
+    assert_eq!(returns.as_ref()[0].shape(), ReturnShape::List);
+
+    let serialized = serde_json::to_vec(&plan).unwrap();
+    let restored: ExecutablePlan = serde_json::from_slice(&serialized).unwrap();
+    assert_eq!(
+        restored.steps().last().unwrap().semantic_return_shape,
+        Some(ReturnShape::List)
+    );
+    let ExecutableReturns::Variables(returns) = restored.executable_returns() else {
+        panic!("deserialized named result should resolve an executable return");
+    };
+    assert_eq!(returns.as_ref()[0].shape(), ReturnShape::List);
+}
+
+#[test]
 fn ordinary_request_range_parameters_enable_literal_constraint_reduction() {
     let indexes = builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Person", "$label").unwrap())

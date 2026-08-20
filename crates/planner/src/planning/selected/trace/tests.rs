@@ -75,6 +75,7 @@ fn initial_run() -> exec::SelectedInitialExecutableBatchEntry {
     exec::SelectedInitialExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: alternative_root(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }
@@ -83,6 +84,7 @@ fn followup_run() -> exec::SelectedFollowupExecutableBatchEntry {
     exec::SelectedFollowupExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: alternative_root(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }
@@ -91,6 +93,7 @@ fn optimizer_initial_run() -> exec::SelectedInitialExecutableBatchEntry {
     exec::SelectedInitialExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: optimizer_alternative_root(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }
@@ -99,6 +102,7 @@ fn optimizer_initial_run_with_children() -> exec::SelectedInitialExecutableBatch
     exec::SelectedInitialExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: optimizer_root_with_children(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }
@@ -132,6 +136,7 @@ fn optimizer_mutation_input_run() -> exec::SelectedInitialExecutableBatchEntry {
     exec::SelectedInitialExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: optimizer_mutation_with_input(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }
@@ -165,6 +170,7 @@ fn optimizer_branch_run() -> exec::SelectedInitialExecutableBatchEntry {
     exec::SelectedInitialExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: optimizer_branch_with_children(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }
@@ -203,6 +209,7 @@ fn optimizer_repeat_run() -> exec::SelectedInitialExecutableBatchEntry {
     exec::SelectedInitialExecutableBatchEntry::Run(Box::new(exec::SelectedExecutableRunEntry {
         root: optimizer_repeat_with_children(),
         output: ir::BatchOutputPlan::Discard,
+        return_shape: exec::ReturnShape::List,
         condition: ir::RunConditionPlan::Always,
     }))
 }

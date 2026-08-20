@@ -23,6 +23,7 @@ use super::ExecStepId;
 ///         id: exec::ExecStepId::new(id).unwrap(),
 ///         dependencies,
 ///         output: ir::BatchOutputPlan::Discard,
+///         semantic_return_shape: None,
 ///         condition: exec::ExecCondition::Always,
 ///         op: exec::ExecOp::Noop,
 ///         schedule: exec::ExecSchedule::Pipeline,

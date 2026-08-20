@@ -150,12 +150,14 @@ fn selected_executable_batch_lowers_followup_conditions_inside_one_dag() {
             first: SelectedInitialExecutableBatchEntry::Run(Box::new(SelectedExecutableRunEntry {
                 root: SelectedExecutableRunRoot::alternative(source.clone(), alternative.clone()),
                 output: ir::BatchOutputPlan::Bind(name("seed")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             })),
             rest: ir::AtLeast::<_, 1>::from_one(SelectedFollowupExecutableBatchEntry::Run(
                 Box::new(SelectedExecutableRunEntry {
                     root: SelectedExecutableRunRoot::alternative(source, alternative),
                     output: ir::BatchOutputPlan::Bind(name("users")),
+                    return_shape: ReturnShape::List,
                     condition: ir::RunConditionPlan::If(ir::BatchConditionPlan::PrevNotEmpty),
                 }),
             )),
@@ -194,6 +196,7 @@ fn selected_executable_batch_lowers_foreach_body_as_selected_subplan() {
         SelectedInitialExecutableBatchEntry::Run(Box::new(SelectedExecutableRunEntry {
             root: SelectedExecutableRunRoot::alternative(source.clone(), alternative.clone()),
             output: ir::BatchOutputPlan::Discard,
+            return_shape: ReturnShape::List,
             condition: ir::RunConditionPlan::Always,
         })),
     );
@@ -207,6 +210,7 @@ fn selected_executable_batch_lowers_foreach_body_as_selected_subplan() {
             first: SelectedInitialExecutableBatchEntry::Run(Box::new(SelectedExecutableRunEntry {
                 root: SelectedExecutableRunRoot::alternative(source, alternative),
                 output: ir::BatchOutputPlan::Bind(name("seed")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             })),
             rest: ir::AtLeast::<_, 1>::from_one(SelectedFollowupExecutableBatchEntry::ForEach(
@@ -241,6 +245,7 @@ fn selected_foreach_batch_exposes_validated_parts() {
         Box::new(SelectedExecutableRunEntry {
             root: SelectedExecutableRunRoot::alternative(source, alternative),
             output: ir::BatchOutputPlan::Discard,
+            return_shape: ReturnShape::List,
             condition: ir::RunConditionPlan::Always,
         }),
     ));
@@ -277,6 +282,7 @@ fn selected_executable_batch_lowers_mutation_input_as_selected_run_root() {
                     },
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("updated")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),
@@ -319,6 +325,7 @@ fn selected_executable_batch_lowers_control_payloads_as_selected_subplans() {
                         SelectedBranchPlan::Optional(Box::new(selected_kv_node_scan_root())),
                     ))),
                     output: ir::BatchOutputPlan::Bind(name("branched")),
+                    return_shape: ReturnShape::List,
                     condition: ir::RunConditionPlan::Always,
                 })),
             ),
@@ -364,6 +371,7 @@ fn selected_executable_batch_lowers_control_payloads_as_selected_subplans() {
                         },
                     ))),
                     output: ir::BatchOutputPlan::Bind(name("repeated")),
+                    return_shape: ReturnShape::List,
                     condition: ir::RunConditionPlan::Always,
                 })),
             ),
