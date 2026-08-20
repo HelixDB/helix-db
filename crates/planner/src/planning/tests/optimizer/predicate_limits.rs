@@ -124,6 +124,131 @@ fn cascades_index_union_branch_limit_disabled_keeps_residual_filter() {
     assert_no_exec_window(&plan);
 }
 
+#[test]
+fn finite_label_membership_uses_bounded_label_scan_unions() {
+    let labels = PropertyValue::StringArray(vec!["User".to_owned(), "Account".to_owned()]);
+    let node = executable_traversal(
+        g().n_where(Predicate::is_in("$label", labels.clone())),
+        label_union_ctx(2),
+    );
+    let edge = executable_traversal(
+        g().e_where(Predicate::is_in("$label", labels)),
+        label_union_ctx(2),
+    );
+
+    for (plan, node) in [(&node, true), (&edge, false)] {
+        let labels = plan
+            .steps()
+            .iter()
+            .filter_map(|step| match (&step.op, node) {
+                (ExecOp::Access { plan }, true) => match plan.as_ref() {
+                    ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { label }) => {
+                        Some(label.as_ref())
+                    }
+                    _ => None,
+                },
+                (ExecOp::Access { plan }, false) => match plan.as_ref() {
+                    ExecAccessPlan::Edge(ExecEdgeAccessPlan::LabelScan { label }) => {
+                        Some(label.as_ref())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["User", "Account"], "plan: {:?}", plan.steps());
+        assert_eq!(
+            plan.steps()
+                .iter()
+                .filter(|step| matches!(
+                    step.op,
+                    ExecOp::Merge {
+                        mode: ExecMergeMode::Union
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_no_exec_op_family(plan, ExecOpFamily::Filter);
+    }
+}
+
+#[test]
+fn label_membership_keeps_residuals_and_respects_the_union_limit() {
+    let label_membership = Predicate::is_in(
+        "$label",
+        PropertyValue::StringArray(vec!["User".to_owned(), "Account".to_owned()]),
+    );
+    let residual = Predicate::contains("bio", "rust");
+    let indexed = executable_traversal(
+        g().n_where(Predicate::and(vec![
+            label_membership.clone(),
+            residual.clone(),
+        ])),
+        label_union_ctx(2),
+    );
+    assert_eq!(
+        indexed
+            .steps()
+            .iter()
+            .filter(|step| matches!(
+                step.op,
+                ExecOp::Merge {
+                    mode: ExecMergeMode::Union
+                }
+            ))
+            .count(),
+        1,
+        "plan: {:?}",
+        indexed.steps()
+    );
+    assert!(matches!(
+        first_exec_op(&indexed, |op| matches!(op, ExecOp::Filter { .. })),
+        ExecOp::Filter { predicate } if predicate == &PredicatePlan::new(residual).unwrap()
+    ));
+
+    let over_limit =
+        executable_traversal(g().n_where(label_membership.clone()), label_union_ctx(1));
+    assert!(matches!(
+        first_kv_read(&over_limit),
+        KvReadPlan::RangeScan {
+            keyspace: ElementKeyspace::NodeProperty,
+            ..
+        }
+    ));
+    assert!(matches!(
+        first_exec_op(&over_limit, |op| matches!(op, ExecOp::Filter { .. })),
+        ExecOp::Filter { predicate } if predicate == &PredicatePlan::new(label_membership).unwrap()
+    ));
+}
+
+#[test]
+fn impossible_label_domains_eliminate_residual_work() {
+    let residual = Predicate::contains("bio", "rust");
+    let cases = [
+        g().n_with_label("User").where_(Predicate::and(vec![
+            Predicate::is_in(
+                "$label",
+                PropertyValue::StringArray(vec!["Account".to_owned()]),
+            ),
+            residual.clone(),
+        ])),
+        g().n_where(Predicate::and(vec![
+            Predicate::is_in("$label", PropertyValue::StringArray(Vec::new())),
+            residual,
+        ])),
+    ];
+
+    for traversal in cases {
+        let plan = executable_traversal(traversal, label_union_ctx(2));
+        assert!(matches!(
+            unwrapped_first_exec_access(&plan),
+            ExecAccessPlan::Node(ExecNodeAccessPlan::Empty)
+        ));
+        assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+    }
+}
+
 fn disjunction_indexes() -> IndexCatalogSnapshot {
     IndexCatalogSnapshot::default()
         .with_node_eq(ScopedPropertyKey::try_new("User", "username").unwrap())
@@ -137,6 +262,19 @@ fn branch_limited_ctx(indexes: IndexCatalogSnapshot, limit: usize) -> PlannerCon
             max_index_union_branches: IndexUnionBranchLimit::limited(limit).unwrap(),
         },
         ..PlannerContext::default()
+    }
+}
+
+fn label_union_ctx(limit: usize) -> PlannerContext {
+    let user = NonEmptyString::new("User").unwrap();
+    let account = NonEmptyString::new("Account").unwrap();
+    PlannerContext {
+        stats: context::StatsSnapshot::default()
+            .with_node_label_cardinality(user.clone(), 1)
+            .with_node_label_cardinality(account.clone(), 1)
+            .with_edge_label_cardinality(user, 1)
+            .with_edge_label_cardinality(account, 1),
+        ..branch_limited_ctx(IndexCatalogSnapshot::default(), limit)
     }
 }
 

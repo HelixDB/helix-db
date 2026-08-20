@@ -5,6 +5,7 @@
 
 mod contracts;
 mod edge;
+mod label_domain;
 mod node;
 mod shared;
 
@@ -12,6 +13,8 @@ use self::contracts::{AccessFilterIndexApplication, PartialIndexFilterApplicatio
 use super::atoms::{access_filter_index_plan, AccessFilterIndexPlanMatch};
 use super::AccessFilterRewrite;
 use crate::{analysis, catalog, context, ir, logical};
+
+pub(in crate::rules) use label_domain::has_candidate as label_domain_has_candidate;
 
 pub(in crate::rules) fn index_access_filter(
     filter: &logical::AccessFilter,
@@ -45,6 +48,7 @@ pub(in crate::rules) fn index_access_filter(
             |source| logical::AccessPath::Edge(logical::EdgeAccessPath::new(source)),
         ),
     })
+    .or_else(|| label_domain::rewrite(filter.access(), &predicate, planner_limits))
 }
 
 fn index_application_rewrite<T>(

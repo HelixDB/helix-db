@@ -56,6 +56,51 @@ fn ordinary_request_membership_parameters_match_literal_index_access() {
 }
 
 #[test]
+fn ordinary_request_label_membership_matches_literal_label_union() {
+    let user = NonEmptyString::new("User").unwrap();
+    let account = NonEmptyString::new("Account").unwrap();
+    let stats = StatsSnapshot::default()
+        .with_node_label_cardinality(user, 1)
+        .with_node_label_cardinality(account, 1);
+    let mut parameterized_ctx = PlannerContext {
+        stats: stats.clone(),
+        ..PlannerContext::default()
+    };
+    parameterized_ctx.params = ParamBindings::default().with_query_value(
+        NonEmptyString::new("labels").unwrap(),
+        QueryValue::Array(vec![
+            QueryValue::String("User".to_owned()),
+            QueryValue::String("Account".to_owned()),
+        ]),
+    );
+
+    let parameterized = executable_traversal(
+        g().n_where(Predicate::is_in_param("$label", "labels")),
+        parameterized_ctx,
+    );
+    let literal = executable_traversal(
+        g().n_where(Predicate::is_in(
+            "$label",
+            PropertyValue::StringArray(vec!["User".to_owned(), "Account".to_owned()]),
+        )),
+        PlannerContext {
+            stats,
+            ..PlannerContext::default()
+        },
+    );
+
+    assert_eq!(parameterized.steps(), literal.steps());
+    assert_eq!(
+        access_steps_matching(&parameterized, |access| matches!(
+            access,
+            ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
+        )),
+        2
+    );
+    assert_no_exec_op_family(&parameterized, ExecOpFamily::Filter);
+}
+
+#[test]
 fn membership_parameter_cardinality_matches_literal_normalization() {
     let indexes = builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Person", "$label").unwrap())
