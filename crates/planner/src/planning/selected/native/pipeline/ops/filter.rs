@@ -4,7 +4,7 @@ use helix_ast::expr::Predicate;
 use helix_ast::traversal::AstNode;
 
 use super::contract::{NativePipelineOp, NativePipelineOpMatch};
-use crate::planning::selected::native::equality_bindings;
+use crate::planning::selected::native::parameter_specialization;
 use crate::{analysis, context, error, ir, logical};
 
 pub(super) fn pipeline_op_from_ast<'a>(
@@ -51,9 +51,9 @@ fn filter_op(
     predicate: &Predicate,
 ) -> Result<logical::StreamPipelineOp, error::PlannerError> {
     let _ = ir::PredicatePlan::new(predicate.clone())?;
-    let predicate = equality_bindings::predicate(ctx, predicate)?;
+    let predicate = parameter_specialization::predicate(ctx, predicate)?;
     let predicate_plan = ir::PredicatePlan::new(predicate.clone())
-        .expect("specializing a validated equality preserves predicate validity");
+        .expect("specializing validated parameters preserves predicate validity");
     let _ = analysis::prune_statically_impossible_branches(&predicate)?;
     Ok(logical::StreamPipelineOp::Filter {
         predicate: predicate_plan,

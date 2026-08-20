@@ -3,7 +3,7 @@
 use helix_ast::expr::{Predicate, StreamBound};
 
 use super::NativeAccessStream;
-use crate::planning::selected::native::equality_bindings;
+use crate::planning::selected::native::parameter_specialization;
 use crate::{analysis, context, error, ir, logical};
 
 impl NativeAccessStream {
@@ -14,9 +14,9 @@ impl NativeAccessStream {
         predicate: &Predicate,
     ) -> Result<Self, error::PlannerError> {
         let _ = ir::PredicatePlan::new(predicate.clone())?;
-        let predicate = equality_bindings::predicate(ctx, predicate)?;
+        let predicate = parameter_specialization::predicate(ctx, predicate)?;
         let predicate_plan = ir::PredicatePlan::new(predicate.clone())
-            .expect("specializing a validated equality preserves predicate validity");
+            .expect("specializing validated parameters preserves predicate validity");
         let _ = analysis::prune_statically_impossible_branches(&predicate)?;
         Ok(self.filter_plan(predicate_plan))
     }

@@ -1,7 +1,7 @@
 //! Validated native source stream construction.
 
 use super::super::ast::NativeSourceAst;
-use crate::planning::selected::native::{access, equality_bindings, stream};
+use crate::planning::selected::native::{access, parameter_specialization, stream};
 use crate::{analysis, context, error, ir, planning};
 
 enum SourcePredicatePlan {
@@ -20,7 +20,7 @@ impl SourcePredicatePlan {
         predicate: &helix_ast::expr::Predicate,
     ) -> Result<Self, error::PlannerError> {
         let _ = ir::PredicatePlan::new(predicate.clone())?;
-        let predicate = equality_bindings::predicate(ctx, predicate)?;
+        let predicate = parameter_specialization::predicate(ctx, predicate)?;
         Ok(
             match analysis::prune_statically_impossible_branches(&predicate)? {
                 analysis::PrunedPredicate::Impossible => Self::Empty,
