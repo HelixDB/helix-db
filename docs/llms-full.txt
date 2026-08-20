@@ -1091,14 +1091,14 @@ Page type: Guide
 The Go SDK builds the shared operation-tree AST and executes requests through a
 typed HTTP client.
 
-Version `v0.3.0` ships the server query builder and HTTP client. It does not
+Version `v0.3.1` ships the server query builder and HTTP client. It does not
 distribute the native bindings required by embedded execution or native graph
 algorithms.
 
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go@v0.3.0
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -1147,7 +1147,7 @@ options. The client does not retry conflicts automatically.
 
 ## Release scope
 
-Use `v0.3.0` with a local or remote Helix server through `/v2/query`. Embedded
+Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Embedded
 constructors and `Client.Graph` return native-binding-unavailable errors in a
 standard module installation.
 
@@ -1330,7 +1330,7 @@ Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-- **[Go SDK v0.3.0](/database/helix-db/start-here/sdk-setup/go-project-setup)** — operation-tree query construction, typed parameters, `/v2/query` execution, index lifecycle requests, and traversal-scoped vector and BM25 search. Embedded execution and native graph bindings are not distributed in this release.
+- **[Go SDK v0.3.1](/database/helix-db/start-here/sdk-setup/go-project-setup)** — operation-tree query construction, typed parameters, `/v2/query` execution, index lifecycle requests, and traversal-scoped vector and BM25 search. Upgrade from v0.3.0: this patch keeps unreleased embedded adapters out of public module discovery. Embedded execution and native graph bindings are not distributed in this release.
 - **[Python async client](/database/helix-db/start-here/sdk-setup/python-project-setup#async-execution)** — `helix-db` 0.3.3 adds reusable HTTPX connection pooling, concurrent requests, cancellation-safe response cleanup, and asynchronous embedded writer and reader clients.
 
 - **Open-source database** — the engine moved out of `helix-hyperscale` into the public, modular `helix-db` workspace.

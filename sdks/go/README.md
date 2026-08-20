@@ -1,12 +1,12 @@
 # HelixDB Go SDK
 
-Go SDK for building and executing HelixDB server queries. Version `v0.3.0`
+Go SDK for building and executing HelixDB server queries. Version `v0.3.1`
 ships the operation-tree query builder and HTTP client.
 
 ## Install
 
 ```sh
-go get github.com/helixdb/helix-db/sdks/go@v0.3.0
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -257,7 +257,7 @@ func ExecWithConflictRetry(ctx context.Context, client *helix.Client, build func
 
 ## Release scope
 
-Version `v0.3.0` does not distribute the generated native bindings required by
+Version `v0.3.1` does not distribute the generated native bindings required by
 the embedded database or native graph algorithms. A standard module install
 returns `ErrNativeBindingsUnavailable` from embedded constructors and
 `ErrNativeGraphUnavailable` from `Client.Graph`. Do not enable the

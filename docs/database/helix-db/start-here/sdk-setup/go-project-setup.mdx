@@ -12,7 +12,7 @@ The Go SDK builds the shared operation-tree AST and executes requests through a
 typed HTTP client.
 
 <Note>
-Version `v0.3.0` ships the server query builder and HTTP client. It does not
+Version `v0.3.1` ships the server query builder and HTTP client. It does not
 distribute the native bindings required by embedded execution or native graph
 algorithms.
 </Note>
@@ -20,7 +20,7 @@ algorithms.
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go@v0.3.0
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -69,7 +69,7 @@ options. The client does not retry conflicts automatically.
 
 ## Release scope
 
-Use `v0.3.0` with a local or remote Helix server through `/v2/query`. Embedded
+Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Embedded
 constructors and `Client.Graph` return native-binding-unavailable errors in a
 standard module installation.
 
