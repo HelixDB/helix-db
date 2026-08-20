@@ -6,6 +6,7 @@ use super::super::{ElementRef, ExecutionContext, ExecutionRow};
 use crate::encoding::property::property_value::PropertyValue;
 use crate::error::Result;
 
+#[derive(Debug, PartialEq)]
 enum RuntimeEqualityDomain {
     Indexed(Vec<PropertyValue>),
     Authoritative(PropertyValue),
@@ -51,45 +52,10 @@ impl<'db> ExecutionContext<'db> {
         &self,
         plan: &ir::RuntimeEqualitySet,
     ) -> Result<RuntimeEqualityDomain> {
-        let original = self.param_value(plan.param())?;
-        let max_values = plan.max_values();
-        let indexed = match &original {
-            PropertyValue::I64Array(values) => {
-                bounded_index_members(values.iter().copied().map(PropertyValue::I64), max_values)
-            }
-            PropertyValue::F64Array(values) => {
-                bounded_index_members(values.iter().copied().map(PropertyValue::F64), max_values)
-            }
-            PropertyValue::F32Array(values) => bounded_index_members(
-                values
-                    .iter()
-                    .copied()
-                    .map(|value| PropertyValue::F32(f64::from(value))),
-                max_values,
-            ),
-            PropertyValue::StringArray(values) => bounded_index_members(
-                values.iter().cloned().map(PropertyValue::String),
-                max_values,
-            ),
-            PropertyValue::Array(values) => {
-                bounded_index_members(values.iter().cloned(), max_values)
-            }
-            value @ (PropertyValue::Null
-            | PropertyValue::Bool(_)
-            | PropertyValue::I64(_)
-            | PropertyValue::DateTime(_)
-            | PropertyValue::F64(_)
-            | PropertyValue::F32(_)
-            | PropertyValue::String(_)
-            | PropertyValue::Bytes(_)
-            | PropertyValue::Object(_)) => {
-                bounded_index_members(core::iter::once(value.clone()), max_values)
-            }
-        };
-        Ok(match indexed {
-            Some(values) => RuntimeEqualityDomain::Indexed(values),
-            None => RuntimeEqualityDomain::Authoritative(original),
-        })
+        Ok(runtime_equality_domain_from_value(
+            self.param_value(plan.param())?,
+            plan.max_values(),
+        ))
     }
 
     async fn scoped_membership_matches(
@@ -112,6 +78,47 @@ impl<'db> ExecutionContext<'db> {
             .find(|property| property.name == key.property.as_ref())
             .map_or(&PropertyValue::Null, |property| &property.value);
         Ok(super::super::stream::property_value_is_in(value, values))
+    }
+}
+
+fn runtime_equality_domain_from_value(
+    original: PropertyValue,
+    max_values: std::num::NonZeroUsize,
+) -> RuntimeEqualityDomain {
+    let indexed = match &original {
+        PropertyValue::I64Array(values) => {
+            bounded_index_members(values.iter().copied().map(PropertyValue::I64), max_values)
+        }
+        PropertyValue::F64Array(values) => {
+            bounded_index_members(values.iter().copied().map(PropertyValue::F64), max_values)
+        }
+        PropertyValue::F32Array(values) => bounded_index_members(
+            values
+                .iter()
+                .copied()
+                .map(|value| PropertyValue::F32(f64::from(value))),
+            max_values,
+        ),
+        PropertyValue::StringArray(values) => bounded_index_members(
+            values.iter().cloned().map(PropertyValue::String),
+            max_values,
+        ),
+        PropertyValue::Array(values) => bounded_index_members(values.iter().cloned(), max_values),
+        value @ (PropertyValue::Null
+        | PropertyValue::Bool(_)
+        | PropertyValue::I64(_)
+        | PropertyValue::DateTime(_)
+        | PropertyValue::F64(_)
+        | PropertyValue::F32(_)
+        | PropertyValue::String(_)
+        | PropertyValue::Bytes(_)
+        | PropertyValue::Object(_)) => {
+            bounded_index_members(core::iter::once(value.clone()), max_values)
+        }
+    };
+    match indexed {
+        Some(values) => RuntimeEqualityDomain::Indexed(values),
+        None => RuntimeEqualityDomain::Authoritative(original),
     }
 }
 
@@ -153,6 +160,68 @@ fn bounded_index_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_domains_normalize_every_array_representation_and_scalar_family() {
+        let limit = std::num::NonZeroUsize::new(4).unwrap();
+        let indexed = [
+            (
+                PropertyValue::I64Array(vec![1, 2]),
+                vec![PropertyValue::I64(1), PropertyValue::I64(2)],
+            ),
+            (
+                PropertyValue::F64Array(vec![1.5, 2.5]),
+                vec![PropertyValue::F64(1.5), PropertyValue::F64(2.5)],
+            ),
+            (
+                PropertyValue::F32Array(vec![1.25, 2.25]),
+                vec![PropertyValue::F32(1.25), PropertyValue::F32(2.25)],
+            ),
+            (
+                PropertyValue::StringArray(vec!["a".to_owned(), "b".to_owned()]),
+                vec![
+                    PropertyValue::String("a".to_owned()),
+                    PropertyValue::String("b".to_owned()),
+                ],
+            ),
+            (
+                PropertyValue::Array(vec![PropertyValue::Bool(true), PropertyValue::I64(1)]),
+                vec![PropertyValue::Bool(true), PropertyValue::I64(1)],
+            ),
+        ];
+        for (input, expected) in indexed {
+            assert_eq!(
+                runtime_equality_domain_from_value(input, limit),
+                RuntimeEqualityDomain::Indexed(expected)
+            );
+        }
+
+        for input in [
+            PropertyValue::Bool(true),
+            PropertyValue::I64(1),
+            PropertyValue::DateTime(1),
+            PropertyValue::F64(1.5),
+            PropertyValue::F32(1.25),
+            PropertyValue::String("value".to_owned()),
+            PropertyValue::Bytes(vec![1, 2]),
+        ] {
+            assert_eq!(
+                runtime_equality_domain_from_value(input.clone(), limit),
+                RuntimeEqualityDomain::Indexed(vec![input])
+            );
+        }
+
+        for input in [
+            PropertyValue::Null,
+            PropertyValue::Object(Default::default()),
+            PropertyValue::Array(vec![PropertyValue::Null]),
+        ] {
+            assert_eq!(
+                runtime_equality_domain_from_value(input.clone(), limit),
+                RuntimeEqualityDomain::Authoritative(input)
+            );
+        }
+    }
 
     #[test]
     fn bounded_members_deduplicate_by_query_equality_and_skip_non_reflexive_values() {
