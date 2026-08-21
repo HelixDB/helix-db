@@ -5,7 +5,7 @@ import { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Client, QueryRequest, HelixError, SourcePredicate, g, readBatch } from "../src/index.js";
+import { Client, QueryRequest, HelixError, SourcePredicate, g, readBatch, writeBatch } from "../src/index.js";
 
 interface CapturedRequest {
   method: string;
@@ -17,6 +17,7 @@ interface CapturedRequest {
 interface CaptureServer {
   base: string;
   captured: Promise<CapturedRequest>;
+  requestCount: () => number;
   close: () => Promise<void>;
 }
 
@@ -27,7 +28,9 @@ interface CaptureServer {
  */
 function spawnCaptureServer(response: { status?: number; body?: string } = {}): Promise<CaptureServer> {
   return new Promise((resolveServer) => {
+    let requestCount = 0;
     const server: Server = createServer((req, res) => {
+      requestCount += 1;
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
       req.on("end", () => {
@@ -52,6 +55,7 @@ function spawnCaptureServer(response: { status?: number; body?: string } = {}): 
       resolveServer({
         base: `http://127.0.0.1:${port}`,
         captured,
+        requestCount: () => requestCount,
         close: () => new Promise<void>((resolve) => server.close(() => resolve())),
       });
     });
@@ -63,6 +67,14 @@ function sampleRequest(): QueryRequest {
     readBatch()
       .varAs("user", g().nWhere(SourcePredicate.eq("username", "alice")))
       .returning(["user"]),
+  );
+}
+
+function sampleWriteRequest(): QueryRequest {
+  return QueryRequest.write(
+    writeBatch()
+      .varAs("created", g().addN("User", { name: "Ada" }))
+      .returning(["created"]),
   );
 }
 
@@ -238,6 +250,33 @@ assert.throws(
   assert.equal(error.details, "write conflict");
   assert.equal(error.isConflict(), true);
   assert.equal(error.isRateLimited(), false);
+  assert.equal(error.retryable, undefined);
+  assert.equal(error.isRetryable(), false);
+}
+
+{
+  const body = '{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}';
+  const server = await spawnCaptureServer({ status: 503, body });
+  const client = new Client(server.base);
+  await assert.rejects(
+    client.query(sampleWriteRequest()).send(),
+    (error: unknown) =>
+      error instanceof HelixError && error.code === "WRITE_OUTCOME_UNKNOWN" && error.retryable === false && !error.isRetryable(),
+  );
+  await server.captured;
+  assert.equal(server.requestCount(), 1);
+  await server.close();
+}
+
+for (const [retryable, expected] of [
+  [true, true],
+  [false, false],
+  ["true", false],
+  [undefined, false],
+] as const) {
+  const body = JSON.stringify({ error: "classified", ...(retryable === undefined ? {} : { retryable }) });
+  const error = await remoteError(503, body);
+  assert.equal(error.isRetryable(), expected);
 }
 
 for (const status of [400, 401, 403, 409, 429, 503]) {

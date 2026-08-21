@@ -33,6 +33,7 @@ type HelixError struct {
 	Code       QueryErrorCode
 	Details    string
 	StatusCode int
+	Retryable  *bool
 	Err        error
 }
 
@@ -51,6 +52,11 @@ func (e *HelixError) Unwrap() error { return e.Err }
 func IsConflict(err error) bool {
 	var helixErr *HelixError
 	return errors.Is(err, ErrConflict) || errors.As(err, &helixErr) && helixErr.Kind == ErrorRemote && helixErr.StatusCode == http.StatusConflict
+}
+
+func IsRetryable(err error) bool {
+	var helixErr *HelixError
+	return errors.As(err, &helixErr) && helixErr.Kind == ErrorRemote && helixErr.Retryable != nil && *helixErr.Retryable
 }
 
 type Client struct {
@@ -338,9 +344,10 @@ func (c *Client) Close() error {
 
 func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError {
 	var envelope struct {
-		Error string  `json:"error"`
-		Msg   *string `json:"msg"`
-		Code  *string `json:"code"`
+		Error     string  `json:"error"`
+		Msg       *string `json:"msg"`
+		Code      *string `json:"code"`
+		Retryable *bool   `json:"retryable"`
 	}
 	if json.Unmarshal(body, &envelope) == nil && envelope.Error != "" {
 		if envelope.Msg != nil {
@@ -349,6 +356,7 @@ func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError
 				Code:       QueryErrorCode(envelope.Error),
 				Details:    *envelope.Msg,
 				StatusCode: statusCode,
+				Retryable:  envelope.Retryable,
 			}
 		}
 		code := QueryErrorCode("")
@@ -360,6 +368,7 @@ func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError
 			Code:       code,
 			Details:    envelope.Error,
 			StatusCode: statusCode,
+			Retryable:  envelope.Retryable,
 		}
 	}
 	details := string(body)

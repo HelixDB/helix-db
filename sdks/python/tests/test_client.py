@@ -24,6 +24,7 @@ from helixdb import (
     read_batch,
     write_batch,
 )
+from helixdb._client_common import remote_error
 
 
 def public_api_members(type_: type) -> set[str]:
@@ -277,6 +278,49 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.details, "conflict")
         self.assertIsNone(ctx.exception.code)
+        self.assertIsNone(ctx.exception.retryable)
+        self.assertFalse(ctx.exception.is_retryable())
+
+    def test_unknown_write_outcome_is_terminal_and_sent_once(self) -> None:
+        request = QueryRequest.write(
+            write_batch()
+            .var_as("created", g().add_n("User", {"name": "Ada"}))
+            .returning(["created"])
+        )
+        calls = 0
+
+        def fake_urlopen(req):
+            nonlocal calls
+            calls += 1
+            raise HTTPError(
+                req.full_url,
+                503,
+                "Service Unavailable",
+                hdrs={},
+                fp=BytesIO(
+                    b'{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}'
+                ),
+            )
+
+        with patch("helixdb.client.urlopen", fake_urlopen):
+            with self.assertRaises(HelixError) as ctx:
+                Client("http://127.0.0.1:6969").query(request)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(ctx.exception.code, "WRITE_OUTCOME_UNKNOWN")
+        self.assertIs(ctx.exception.retryable, False)
+        self.assertFalse(ctx.exception.is_retryable())
+
+    def test_retryability_requires_explicit_boolean_true(self) -> None:
+        cases = [
+            (b'{"error":"busy","retryable":true}', True),
+            (b'{"error":"unknown","retryable":false}', False),
+            (b'{"error":"malformed","retryable":"true"}', False),
+            (b'{"error":"missing"}', False),
+        ]
+        for body, expected in cases:
+            with self.subTest(body=body):
+                self.assertIs(remote_error(body, "fallback").is_retryable(), expected)
 
     def test_remote_error_parses_new_legacy_future_missing_and_malformed_bodies(self) -> None:
         request = QueryRequest.read(read_batch())
