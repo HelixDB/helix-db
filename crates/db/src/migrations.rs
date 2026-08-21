@@ -4888,7 +4888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reader_requires_tenant_migration_without_mutating_bootstrap_metadata() {
+    async fn reader_tolerates_tenant_migration_without_mutating_bootstrap_metadata() {
         let root = tempfile::tempdir().expect("temporary object-store root");
         let database = "reader-requires-migration";
         let object_store = Arc::new(
@@ -4917,15 +4917,10 @@ mod tests {
             database: database.to_string(),
         };
 
-        let Err(error) = HelixDB::open_reader(source.clone()).await else {
-            panic!("pre-migration reader requires blocking writer startup");
-        };
-        assert!(matches!(
-            error,
-            HelixDbError::WriterMigrationRequired {
-                requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
-            }
-        ));
+        let reader = HelixDB::open_reader(source.clone())
+            .await
+            .expect("compatible pre-migration reader opens");
+        reader.close().await.expect("pre-migration reader closes");
 
         let object_store = Arc::new(
             slatedb::object_store::local::LocalFileSystem::new_with_prefix(root.path())
@@ -4958,15 +4953,10 @@ mod tests {
             .expect("writer bootstrap tuple commits");
         raw.flush().await.expect("bootstrap tuple flushes");
         raw.close().await.expect("raw tuple-only db closes");
-        let Err(error) = HelixDB::open_reader(source.clone()).await else {
-            panic!("tuple-only bootstrap must not make a reader ready");
-        };
-        assert!(matches!(
-            error,
-            HelixDbError::WriterMigrationRequired {
-                requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
-            }
-        ));
+        let reader = HelixDB::open_reader(source.clone())
+            .await
+            .expect("compatible tuple-only reader opens before writer migration");
+        reader.close().await.expect("tuple-only reader closes");
 
         let writer = HelixDB::open_with_config(source.clone(), migration_test_config())
             .await
