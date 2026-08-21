@@ -121,6 +121,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::IndexCatalogCorruption(_)
             | HelixDbError::LegacyZeroNormCosineVector { .. }
             | HelixDbError::QueryDeadlineExceeded
+            | HelixDbError::WriteAbortedByDrain
             | HelixDbError::InvariantViolation(_) => Self::Internal {
                 error: error_code,
                 msg,

@@ -38,7 +38,7 @@ impl<'db> ExecutionContext<'db> {
         op: &exec::ExecOp,
         input: ExecutionValue,
     ) -> Result<ExecutionValue> {
-        let execution_control = self.execution_control;
+        let execution_control = self.execution_control.clone();
         let value = match op {
             exec::ExecOp::Access { plan } => execution_control.run(self.execute_access(plan)).await,
             exec::ExecOp::Count { plan } => {
@@ -96,6 +96,7 @@ impl<'db> ExecutionContext<'db> {
                 let resume_request_scope = self.has_request_write_scope();
                 self.check_execution_deadline()?;
                 self.commit_request_write_scope().await?;
+                self.execution_control.claim_write_commit()?;
                 let result = self.execute_index_ddl(input, plan).await;
                 if resume_request_scope && result.is_ok() {
                     self.enable_request_write_scope().await?;

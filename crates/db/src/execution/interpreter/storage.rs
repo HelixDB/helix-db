@@ -102,13 +102,23 @@ impl<'db> ExecutionContext<'db> {
         let (start, end) = keys::Key::data_range(self.tenant_scope, start, end);
         if let Some(active) = self.active_write_tx() {
             let mut iter = active.txn.scan(start..end).await?;
-            return collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control)
-                .await;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             let mut iter = view.scan(start..end).await?;
-            return collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control)
-                .await;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await;
         }
         #[cfg(test)]
         {
@@ -116,7 +126,13 @@ impl<'db> ExecutionContext<'db> {
                 HelixStorage::Reader(reader) => reader.scan(start..end).await?,
                 HelixStorage::Writer(writer) => writer.scan(start..end).await?,
             };
-            collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control).await
+            collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await
         }
         #[cfg(not(test))]
         {
@@ -142,13 +158,23 @@ impl<'db> ExecutionContext<'db> {
         let prefix = keys::Key::data_prefix(self.tenant_scope, prefix);
         if let Some(active) = self.active_write_tx() {
             let mut iter = active.txn.scan_prefix(prefix, ..).await?;
-            return collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control)
-                .await;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             let mut iter = view.scan_prefix(prefix, ..).await?;
-            return collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control)
-                .await;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await;
         }
         #[cfg(test)]
         {
@@ -156,7 +182,13 @@ impl<'db> ExecutionContext<'db> {
                 HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
                 HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
             };
-            collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control).await
+            collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await
         }
         #[cfg(not(test))]
         {

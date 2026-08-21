@@ -826,6 +826,8 @@ impl HelixDB {
     /// The open fails before the writer WAL fence is published when an equal
     /// or newer epoch is already durable. Callers must persist the epoch before
     /// invoking this method and must never reuse it for another open attempt.
+    /// Advancing beyond `u64::MAX` is unsupported; authority must fail closed
+    /// instead of wrapping or reusing an epoch.
     pub async fn open_managed_writer_with_config(
         source: HelixDbSource,
         config: DbConfig,

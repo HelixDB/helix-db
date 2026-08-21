@@ -181,6 +181,10 @@ pub enum HelixDbError {
     #[error("Query execution deadline exceeded")]
     QueryDeadlineExceeded,
 
+    /// A bounded writer drain claimed the request before durable commit began.
+    #[error("Write was aborted before commit by writer drain")]
+    WriteAbortedByDrain,
+
     /// Invalid node ID
     #[error("Invalid node ID: {0}")]
     InvalidNodeId(u64),
@@ -490,6 +494,7 @@ impl HelixDbError {
             Self::TransactionConflict(_) => error_code::QueryErrorCode::TransactionConflict,
             Self::RequestReadViewChanged => error_code::QueryErrorCode::RequestReadViewChanged,
             Self::QueryDeadlineExceeded => error_code::QueryErrorCode::QueryDeadlineExceeded,
+            Self::WriteAbortedByDrain => error_code::QueryErrorCode::WriteAbortedByDrain,
             Self::InvalidNodeId(_) => error_code::QueryErrorCode::InvalidNodeId,
             Self::NodeNotFound(_) => error_code::QueryErrorCode::NodeNotFound,
             Self::EdgeNotFound { .. } => error_code::QueryErrorCode::EdgeNotFound,

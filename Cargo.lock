@@ -1536,9 +1536,9 @@ dependencies = [
 
 [[package]]
 name = "fail-parallel"
-version = "0.6.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c29b33a0187823f1fa88b36980227dc96c7504ede2288e7d2a77d9d6d88b260c"
+checksum = "c6f4a147ba57fcd64323c54c8f69fd4e045456a99574163010ccf5eea3168aaa"
 dependencies = [
  "log",
  "once_cell",
@@ -4796,8 +4796,8 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.15.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
+version = "0.14.1"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=64b929b1847d7eb9557681240144381f8da0f9a7#64b929b1847d7eb9557681240144381f8da0f9a7"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -4841,8 +4841,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.15.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
+version = "0.14.1"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=64b929b1847d7eb9557681240144381f8da0f9a7#64b929b1847d7eb9557681240144381f8da0f9a7"
 dependencies = [
  "chrono",
  "log",
@@ -4856,8 +4856,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.15.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
+version = "0.14.1"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=64b929b1847d7eb9557681240144381f8da0f9a7#64b929b1847d7eb9557681240144381f8da0f9a7"
 dependencies = [
  "async-trait",
  "bytes",
