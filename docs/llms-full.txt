@@ -5625,7 +5625,7 @@ helix add cloud --name production --cluster-id <cluster-id>
 
 ```bash
 helix sync production
-export HELIX_API_KEY="..."   # or whatever query_auth_env resolves to
+export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
 helix query production --file examples/request.json
 ```
 
@@ -5885,11 +5885,11 @@ The CLI handles authentication, workspace/project/cluster selection, metadata sy
 
   <Step title="Send dynamic queries">
     ```bash
-    export HELIX_API_KEY="..."   # value for the configured query_auth_env
+    export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
     helix query production --file examples/request.json
     ```
 
-    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`).
+    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`). `query_auth_scheme = "bearer"` adds the `Bearer` prefix; `"raw"` sends the environment value unchanged.
   </Step>
 
   <Step title="Pull historical logs">
@@ -5911,6 +5911,7 @@ Each `[enterprise.<instance>]` block stores the auth contract used by `helix que
 |-------|---------|---------|
 | `query_auth_header` | `Authorization` | HTTP header name set on every query request. |
 | `query_auth_env` | `HELIX_API_KEY` | Environment variable the CLI reads to populate the header value. |
+| `query_auth_scheme` | inferred | `bearer` for `Authorization`; `raw` for other headers. |
 
 Override the variable name per-instance by setting `query_auth_env` under `[enterprise.<instance>]` and exporting whatever name you choose.
 
@@ -6006,6 +6007,7 @@ One block per Helix Cloud instance. Most fields here are populated automatically
 | `gateway_url` | URL | No (required at query time) | — | Runtime gateway base URL. Populated by `helix sync` when available. |
 | `query_auth_header` | String | No | `Authorization` | HTTP header name used for query auth. |
 | `query_auth_env` | String | No | `HELIX_API_KEY` | Environment variable read by [`helix query`](/cli/command-reference/query) for the auth header value. |
+| `query_auth_scheme` | `bearer` or `raw` | No | Inferred from the header | `bearer` adds the `Bearer` prefix; `raw` sends the environment value unchanged. Missing values infer `bearer` for `Authorization` and `raw` for other headers. |
 | `availability_mode` | String | No | — | Cluster availability mode, returned by `helix sync`. |
 | `gateway_node_type` | String | No | — | Gateway node type, returned by `helix sync`. |
 | `db_node_type` | String | No | — | DB node type, returned by `helix sync`. |
@@ -6042,7 +6044,7 @@ Remove with `helix auth logout`. Never commit this file.
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Per-cluster Helix Cloud API key sent in the configured auth header. The variable name is configurable per-instance via `query_auth_env`. |
+| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Raw per-cluster Helix Cloud API key. With `query_auth_scheme = "bearer"`, the CLI adds the `Bearer` prefix. The variable name is configurable per-instance via `query_auth_env`. |
 
 ## Troubleshooting
 
@@ -6251,6 +6253,10 @@ The auth env var named by `query_auth_env` is unset.
 ```bash
 export HELIX_API_KEY="..."
 ```
+
+Set the raw key only. With the default `Authorization` header, an omitted
+`query_auth_scheme` infers `bearer` and adds the `Bearer` prefix. Headers such
+as `x-api-key` infer `raw`.
 
 ### `--warm is only valid for read requests`
 
@@ -6485,7 +6491,7 @@ helix auth <SUBCOMMAND>
 |----------|-------------|
 | `CLUSTER` | Cluster ID to rotate. Find one with [`helix cluster list`](/cli/command-reference/cluster). |
 
-`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster — update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) before running [`helix query`](/cli/command-reference/query) again.
+`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster. Update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) with the raw key before running [`helix query`](/cli/command-reference/query) again. Bearer mode adds the prefix automatically.
 
 ## Examples
 
@@ -7288,7 +7294,7 @@ If Node is missing, the CLI tells you to install Node 20+ or fall back to `--jso
 For a Helix Cloud instance, `helix query` reads `[enterprise.<instance>]` in `helix.toml` and:
 
 - Posts to `<gateway_url>/v2/query`.
-- Sends an auth header named by `query_auth_header` (default `Authorization`) with the value read from the environment variable `query_auth_env` (default `HELIX_API_KEY`). The value is read from your shell environment or from a `.env` file in the project root (whichever is set), so you can keep the key out of your shell history.
+- Sends an auth header named by `query_auth_header` (default `Authorization`) using `query_auth_scheme` (`bearer` or `raw`). Bearer mode adds `Bearer` to the raw key read from `query_auth_env` (default `HELIX_API_KEY`); raw mode sends the value unchanged. The value is read from your shell environment or from a `.env` file in the project root.
 
 If `gateway_url` is missing, the CLI returns:
 
@@ -7330,7 +7336,8 @@ helix query dev --json '{"request_type":"read","query_name":"ad_hoc_read","query
 # Build the request from a TypeScript DSL expression instead of JSON
 helix query dev -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
-# Target a Helix Cloud instance (requires HELIX_API_KEY in env and gateway_url in helix.toml)
+# Target Helix Cloud. Export the raw key; bearer mode adds the prefix.
+export HELIX_API_KEY="..."
 helix query production --file examples/request.json
 ```
 
@@ -7618,6 +7625,7 @@ For each matched Helix Cloud instance, `helix sync` overwrites these fields in `
 - `gateway_url`
 - `query_auth_header` (defaults to `Authorization`)
 - `query_auth_env` (defaults to `HELIX_API_KEY`)
+- `query_auth_scheme` (`bearer` or `raw`, inferred from the header when omitted)
 - `availability_mode`
 - `gateway_node_type`
 - `db_node_type`

@@ -74,11 +74,11 @@ The CLI handles authentication, workspace/project/cluster selection, metadata sy
 
   <Step title="Send dynamic queries">
     ```bash
-    export HELIX_API_KEY="..."   # value for the configured query_auth_env
+    export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
     helix query production --file examples/request.json
     ```
 
-    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`).
+    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`). `query_auth_scheme = "bearer"` adds the `Bearer` prefix; `"raw"` sends the environment value unchanged.
   </Step>
 
   <Step title="Pull historical logs">
@@ -101,6 +101,7 @@ Each `[enterprise.<instance>]` block stores the auth contract used by `helix que
 |-------|---------|---------|
 | `query_auth_header` | `Authorization` | HTTP header name set on every query request. |
 | `query_auth_env` | `HELIX_API_KEY` | Environment variable the CLI reads to populate the header value. |
+| `query_auth_scheme` | inferred | `bearer` for `Authorization`; `raw` for other headers. |
 
 Override the variable name per-instance by setting `query_auth_env` under `[enterprise.<instance>]` and exporting whatever name you choose.
 

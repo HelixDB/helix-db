@@ -83,6 +83,7 @@ One block per Helix Cloud instance. Most fields here are populated automatically
 | `gateway_url` | URL | No (required at query time) | — | Runtime gateway base URL. Populated by `helix sync` when available. |
 | `query_auth_header` | String | No | `Authorization` | HTTP header name used for query auth. |
 | `query_auth_env` | String | No | `HELIX_API_KEY` | Environment variable read by [`helix query`](/cli/command-reference/query) for the auth header value. |
+| `query_auth_scheme` | `bearer` or `raw` | No | Inferred from the header | `bearer` adds the `Bearer` prefix; `raw` sends the environment value unchanged. Missing values infer `bearer` for `Authorization` and `raw` for other headers. |
 | `availability_mode` | String | No | — | Cluster availability mode, returned by `helix sync`. |
 | `gateway_node_type` | String | No | — | Gateway node type, returned by `helix sync`. |
 | `db_node_type` | String | No | — | DB node type, returned by `helix sync`. |
@@ -119,7 +120,7 @@ Remove with `helix auth logout`. Never commit this file.
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Per-cluster Helix Cloud API key sent in the configured auth header. The variable name is configurable per-instance via `query_auth_env`. |
+| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Raw per-cluster Helix Cloud API key. With `query_auth_scheme = "bearer"`, the CLI adds the `Bearer` prefix. The variable name is configurable per-instance via `query_auth_env`. |
 
 ## Troubleshooting
 

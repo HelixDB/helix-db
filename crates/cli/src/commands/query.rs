@@ -51,11 +51,26 @@ pub async fn run(
                 .into()
             })?;
             let header_name = HeaderName::from_bytes(config.query_auth_header.as_bytes())?;
+            let auth_value = config
+                .resolved_query_auth_scheme()
+                .format_header_value(&auth_value)
+                .ok_or_else(|| -> Report {
+                    CliError::new(format!(
+                        "environment variable {} must contain a valid, non-empty Enterprise query auth value",
+                        config.query_auth_env
+                    ))
+                    .into()
+                })?;
+            let header_value = HeaderValue::from_str(&auth_value).map_err(|_| -> Report {
+                CliError::new(format!(
+                    "environment variable {} contains a value that cannot be used for Enterprise query auth",
+                    config.query_auth_env
+                ))
+                .into()
+            })?;
             let endpoint = format!("{}/v2/query", gateway_url.trim_end_matches('/'));
             (
-                client
-                    .post(&endpoint)
-                    .header(header_name, HeaderValue::from_str(&auth_value)?),
+                client.post(&endpoint).header(header_name, header_value),
                 endpoint,
                 false,
             )

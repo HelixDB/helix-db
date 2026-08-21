@@ -1,6 +1,6 @@
 use crate::config::{
-    EnterpriseInstanceConfig, HelixConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
-    DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
+    EnterpriseInstanceConfig, HelixConfig, LocalInstanceConfig, LocalStorageMode, QueryAuthScheme,
+    S3StorageConfig, DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
 };
 use crate::output::Operation;
 use crate::prompts;
@@ -104,6 +104,7 @@ pub async fn run(
                     gateway_url: target.gateway_url,
                     query_auth_header: DEFAULT_QUERY_AUTH_HEADER.to_string(),
                     query_auth_env: DEFAULT_QUERY_AUTH_ENV.to_string(),
+                    query_auth_scheme: Some(QueryAuthScheme::Bearer),
                     availability_mode: None,
                     gateway_node_type: None,
                     db_node_type: None,

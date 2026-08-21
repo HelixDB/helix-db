@@ -197,6 +197,10 @@ The auth env var named by `query_auth_env` is unset.
 export HELIX_API_KEY="..."
 ```
 
+Set the raw key only. With the default `Authorization` header, an omitted
+`query_auth_scheme` infers `bearer` and adds the `Bearer` prefix. Headers such
+as `x-api-key` infer `raw`.
+
 ### `--warm is only valid for read requests`
 
 `helix query --warm` is rejected for write requests before any backend executes.

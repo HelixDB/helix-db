@@ -325,6 +325,124 @@ async fn query_command_sends_body_headers_and_surfaces_http_errors() {
     assert!(error.contains("invalid traversal"));
 }
 
+fn write_enterprise_query_project(
+    project: &std::path::Path,
+    gateway_url: &str,
+    auth_header: &str,
+    auth_scheme: Option<&str>,
+) {
+    let auth_scheme = auth_scheme.map_or_else(String::new, |scheme| {
+        format!("query_auth_scheme = \"{scheme}\"\n")
+    });
+    fs::create_dir_all(project).unwrap();
+    fs::write(
+        project.join("helix.toml"),
+        format!(
+            r#"[project]
+name = "query-auth-project"
+
+[enterprise.production]
+cluster_id = "cluster-1"
+gateway_url = "{gateway_url}"
+query_auth_header = "{auth_header}"
+query_auth_env = "HELIX_API_KEY"
+{auth_scheme}
+"#
+        ),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enterprise_query_auth_formats_bearer_and_raw_headers_without_leaking_secrets() {
+    let server = MockServer::start().await;
+    let fixture = CliFixture::new();
+    let project = fixture.root().join("enterprise-query-auth-project");
+    let request = serde_json::json!({
+        "request_type": "read",
+        "query": {"queries": [], "returns": []},
+        "parameters": {}
+    });
+
+    write_enterprise_query_project(&project, &server.uri(), "Authorization", Some("bearer"));
+    Mock::given(method("POST"))
+        .and(path("/v2/query"))
+        .and(header("authorization", "Bearer cluster-key"))
+        .and(body_json(&request))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["query", "production", "--json"])
+        .arg(request.to_string())
+        .env("HELIX_API_KEY", "cluster-key")
+        .assert()
+        .success();
+
+    server.reset().await;
+    write_enterprise_query_project(&project, &server.uri(), "x-api-key", None);
+    Mock::given(method("POST"))
+        .and(path("/v2/query"))
+        .and(header("x-api-key", "cluster-key"))
+        .and(body_json(&request))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["query", "production", "--json"])
+        .arg(request.to_string())
+        .env("HELIX_API_KEY", "cluster-key")
+        .assert()
+        .success();
+
+    let missing = stderr(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["query", "production", "--json"])
+            .arg(request.to_string())
+            .env_remove("HELIX_API_KEY")
+            .assert()
+            .failure(),
+    );
+    assert!(missing.contains("HELIX_API_KEY"));
+
+    server.reset().await;
+    write_enterprise_query_project(&project, &server.uri(), "Authorization", Some("bearer"));
+    let secret = "Bearer\r\nsecret-value";
+    let invalid_value = stderr(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["query", "production", "--json"])
+            .arg(request.to_string())
+            .env("HELIX_API_KEY", secret)
+            .assert()
+            .failure(),
+    );
+    assert!(!invalid_value.contains("secret-value"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    write_enterprise_query_project(&project, &server.uri(), "Authorization", Some("token"));
+    let invalid_config = stderr(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["query", "production", "--json"])
+            .arg(request.to_string())
+            .env("HELIX_API_KEY", "cluster-key")
+            .assert()
+            .failure(),
+    );
+    assert!(invalid_config.contains("token"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_command_preserves_the_shared_transport_corpus() {
     let server = MockServer::start().await;
