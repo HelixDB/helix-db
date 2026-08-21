@@ -16,8 +16,8 @@ futures = "0.3"
 baseline-helix-dsl = { package = "helix-db", version = "=2.0.5" }
 helix = { path = "../../../helix-hyperscale-migration-parity-source/enterprise/helix" }
 hyperscale-slatedb = { package = "slatedb", path = "../../../helix-hyperscale-migration-parity-source/enterprise/slatedb/slatedb" }
-target-slatedb = { package = "slatedb", git = "https://github.com/HelixDB/slatedb.git", rev = "30d9f28cfeb93cf95652aac2b7724811c5c49630" }
-target-slatedb-common = { package = "slatedb-common", git = "https://github.com/HelixDB/slatedb.git", rev = "30d9f28cfeb93cf95652aac2b7724811c5c49630" }
+target-slatedb = { package = "slatedb", git = "https://github.com/HelixDB/slatedb.git", rev = "c64286ec8e5aaa724f12a8c54b58fe73efcff534" }
+target-slatedb-common = { package = "slatedb-common", git = "https://github.com/HelixDB/slatedb.git", rev = "c64286ec8e5aaa724f12a8c54b58fe73efcff534" }
 object_store = { version = "0.12", features = ["aws"] }
 object_store_014 = { package = "object_store", version = "0.14", features = ["aws"] }
 roaring = { version = "0.11", features = ["serde"] }
