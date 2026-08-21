@@ -298,7 +298,8 @@ class ClientTests(unittest.TestCase):
                 "Service Unavailable",
                 hdrs={},
                 fp=BytesIO(
-                    b'{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}'
+                    b'{"code":"WRITE_OUTCOME_UNKNOWN",'
+                    b'"error":"write outcome is unknown","retryable":false}'
                 ),
             )
 
