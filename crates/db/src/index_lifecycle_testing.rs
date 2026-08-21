@@ -1544,6 +1544,7 @@ impl HelixDB {
             path,
             object_store,
             config,
+            None,
             scheduling.internal(),
         )
         .await
@@ -1564,6 +1565,7 @@ impl HelixDB {
             database.into(),
             object_store,
             config,
+            None,
             scheduling.internal(),
         )
         .await

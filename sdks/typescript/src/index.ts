@@ -30,6 +30,7 @@ export class HelixError extends Error {
   readonly statusCode?: number;
   readonly code?: string;
   readonly serverMessage?: string;
+  readonly retryable?: boolean;
   readonly serverDetails?: unknown;
   readonly rawBody?: string;
 
@@ -41,6 +42,7 @@ export class HelixError extends Error {
     remote?: {
       statusCode: number;
       serverMessage: string;
+      retryable?: boolean;
       serverDetails?: unknown;
       rawBody: string;
     },
@@ -52,6 +54,7 @@ export class HelixError extends Error {
     this.statusCode = remote?.statusCode;
     this.code = code;
     this.serverMessage = remote?.serverMessage;
+    this.retryable = remote?.retryable;
     this.serverDetails = remote?.serverDetails;
     this.rawBody = remote?.rawBody;
   }
@@ -74,6 +77,7 @@ export class HelixError extends Error {
     const rawBody = rawBodyOrCode;
     let code: string | undefined;
     let serverMessage: string | undefined;
+    let retryable: boolean | undefined;
     let serverDetails: unknown;
     try {
       const parsed: unknown = JSON.parse(rawBody);
@@ -94,6 +98,7 @@ export class HelixError extends Error {
           serverMessage = messageField ?? errorField;
         }
         if (Object.prototype.hasOwnProperty.call(body, "details")) serverDetails = body.details;
+        if (typeof body.retryable === "boolean") retryable = body.retryable;
       }
     } catch {}
 
@@ -102,6 +107,7 @@ export class HelixError extends Error {
     return new HelixError("Remote", `got error from server: ${serverMessage}`, details, code, {
       statusCode,
       serverMessage,
+      retryable,
       serverDetails,
       rawBody,
     });
@@ -133,6 +139,10 @@ export class HelixError extends Error {
 
   isRateLimited(): boolean {
     return this.kind === "Remote" && this.statusCode === 429;
+  }
+
+  isRetryable(): boolean {
+    return this.kind === "Remote" && this.retryable === true;
   }
 }
 

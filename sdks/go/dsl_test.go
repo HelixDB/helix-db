@@ -707,6 +707,58 @@ func TestClientExecConflictError(t *testing.T) {
 	}
 }
 
+func TestClientUnknownWriteOutcomeIsTerminalAndSentOnce(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := WriteQuery("create_user").
+		VarAs("created", G().AddN("User", Props{Prop("name", "Ada")})).
+		Returning("created")
+	err = client.Exec(context.Background(), request, nil)
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) {
+		t.Fatalf("expected HelixError, got %T", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("write executed %d times, want exactly once", requestCount)
+	}
+	if helixErr.Code != QueryErrorCode("WRITE_OUTCOME_UNKNOWN") {
+		t.Fatalf("unexpected error code %q", helixErr.Code)
+	}
+	if helixErr.Retryable == nil || *helixErr.Retryable {
+		t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
+	}
+	if IsRetryable(err) {
+		t.Fatal("unknown write outcome must not be retryable")
+	}
+}
+
+func TestRemoteRetryabilityRequiresExplicitBooleanTrue(t *testing.T) {
+	for _, testCase := range []struct {
+		body     string
+		expected bool
+	}{
+		{`{"error":"busy","retryable":true}`, true},
+		{`{"error":"unknown","retryable":false}`, false},
+		{`{"error":"malformed","retryable":"true"}`, false},
+		{`{"error":"missing"}`, false},
+	} {
+		err := decodeRemoteError([]byte(testCase.body), "fallback", http.StatusServiceUnavailable)
+		if IsRetryable(err) != testCase.expected {
+			t.Fatalf("body %s retryable = %t, want %t", testCase.body, IsRetryable(err), testCase.expected)
+		}
+	}
+}
+
 func TestClientExecParsesNewLegacyFutureMissingAndMalformedErrors(t *testing.T) {
 	cases := []struct {
 		body    string

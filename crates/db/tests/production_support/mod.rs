@@ -79,11 +79,13 @@ pub async fn writer_migration_requirement_contracts() {
 }
 
 /// Runs the exhaustive exact cardinality interpreter contract matrix.
+#[cfg(not(test))]
 pub async fn interpreter_cardinality_program_contracts() {
     crate::execution::interpreter::run_cardinality_production_contracts().await;
 }
 
 /// Exercises literal secondary reads and verified ranges through exact storage primitives.
+#[cfg(not(test))]
 pub async fn secondary_exact_storage_contracts() {
     crate::index_lifecycle::secondary::run_exact_production_contracts().await;
 }

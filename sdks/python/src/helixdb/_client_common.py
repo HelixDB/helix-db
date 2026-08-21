@@ -24,6 +24,7 @@ class HelixError(Exception):
         details: str | None = None,
         code: str | None = None,
         status_code: int | None = None,
+        retryable: bool | None = None,
         cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
@@ -31,6 +32,7 @@ class HelixError(Exception):
         self.details = details
         self.code = code
         self.status_code = status_code
+        self.retryable = retryable
         self.__cause__ = cause
 
     @classmethod
@@ -49,6 +51,7 @@ class HelixError(Exception):
         *,
         code: str | None = None,
         status_code: int | None = None,
+        retryable: bool | None = None,
     ) -> "HelixError":
         return cls(
             "Remote",
@@ -56,7 +59,13 @@ class HelixError(Exception):
             details=details,
             code=code,
             status_code=status_code,
+            retryable=retryable,
         )
+
+    def is_retryable(self) -> bool:
+        """Return true only for an explicit server retry classification."""
+
+        return self.kind == "Remote" and self.retryable is True
 
     @classmethod
     def serialization(cls, message: str, *, cause: BaseException | None = None) -> "HelixError":
@@ -231,13 +240,21 @@ def remote_error(
         error = payload.get("error")
         msg = payload.get("msg")
         legacy_code = payload.get("code")
+        retryable = payload.get("retryable")
+        explicit_retryable = retryable if isinstance(retryable, bool) else None
         if isinstance(error, str) and isinstance(msg, str):
-            return HelixError.remote(msg, code=error, status_code=status_code)
+            return HelixError.remote(
+                msg,
+                code=error,
+                status_code=status_code,
+                retryable=explicit_retryable,
+            )
         if isinstance(error, str):
             return HelixError.remote(
                 error,
                 code=legacy_code if isinstance(legacy_code, str) else None,
                 status_code=status_code,
+                retryable=explicit_retryable,
             )
     return HelixError.remote(text or fallback, status_code=status_code)
 

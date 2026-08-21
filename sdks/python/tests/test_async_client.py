@@ -20,6 +20,7 @@ from helixdb import (
     QueryRequest,
     g,
     read_batch,
+    write_batch,
 )
 
 
@@ -224,6 +225,35 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 await client.query(read_request())
         self.assertEqual(network.exception.kind, "Network")
         self.assertIsInstance(network.exception.__cause__, httpx.ConnectError)
+
+    async def test_unknown_write_outcome_is_terminal_and_sent_once(self) -> None:
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                503,
+                json={
+                    "code": "WRITE_OUTCOME_UNKNOWN",
+                    "error": "write outcome is unknown",
+                    "retryable": False,
+                },
+            )
+
+        request = QueryRequest.write(
+            write_batch()
+            .var_as("created", g().add_n("User", {"name": "Ada"}))
+            .returning(["created"])
+        )
+        async with AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with self.assertRaises(HelixError) as ctx:
+                await client.query(request)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(ctx.exception.code, "WRITE_OUTCOME_UNKNOWN")
+        self.assertIs(ctx.exception.retryable, False)
+        self.assertFalse(ctx.exception.is_retryable())
 
     async def test_timeout_closes_response_and_client_is_reusable(self) -> None:
         stream = ControlledStream(b"", fail=True)

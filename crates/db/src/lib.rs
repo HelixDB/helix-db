@@ -821,6 +821,29 @@ impl HelixDB {
         Ok(db.with_embedded_query_metrics().await)
     }
 
+    /// Opens a managed writer using one exact monotonic SlateDB fencing epoch.
+    ///
+    /// The open fails before the writer WAL fence is published when an equal
+    /// or newer epoch is already durable. Callers must persist the epoch before
+    /// invoking this method and must never reuse it for another open attempt.
+    /// Advancing beyond `u64::MAX` is unsupported; authority must fail closed
+    /// instead of wrapping or reusing an epoch.
+    pub async fn open_managed_writer_with_config(
+        source: HelixDbSource,
+        config: DbConfig,
+        writer_epoch: NonZeroU64,
+    ) -> Result<Self> {
+        let (path, object_store) = source.into_parts()?;
+        Self::open_writer_inner_with_index_scheduling(
+            path,
+            object_store,
+            config,
+            Some(writer_epoch),
+            IndexLifecycleScheduling::Configured,
+        )
+        .await
+    }
+
     /// Opens a database for a transport server that owns its metrics recorder.
     #[doc(hidden)]
     pub async fn open_for_server(source: HelixDbSource) -> Result<Self> {
@@ -903,6 +926,7 @@ impl HelixDB {
             path,
             object_store,
             config,
+            None,
             IndexLifecycleScheduling::Configured,
         )
         .await
@@ -913,6 +937,7 @@ impl HelixDB {
         path: String,
         object_store: Arc<dyn ObjectStore>,
         config: DbConfig,
+        writer_epoch: Option<NonZeroU64>,
         index_scheduling: IndexLifecycleScheduling,
     ) -> Result<Self> {
         let vector_memory_settings = *config.cache().vector_memory();
@@ -924,6 +949,9 @@ impl HelixDB {
                     .slate()
                     .to_writer_settings(config.cache().object_store_cache()),
             );
+        if let Some(writer_epoch) = writer_epoch {
+            builder = builder.with_writer_epoch(writer_epoch);
+        }
 
         match config.cache().mode() {
             CacheMode::VectorMemoryOnly => builder = builder.with_db_cache_disabled(),
@@ -1032,7 +1060,10 @@ impl HelixDB {
             )
             .build()
             .await?;
-        index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        match index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await {
+            Ok(()) | Err(HelixDbError::WriterMigrationRequired { .. }) => {}
+            Err(error) => return Err(error),
+        }
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1073,7 +1104,10 @@ impl HelixDB {
             }
         }
         let reader = builder.build().await?;
-        index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        match index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await {
+            Ok(()) | Err(HelixDbError::WriterMigrationRequired { .. }) => {}
+            Err(error) => return Err(error),
+        }
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1272,6 +1306,17 @@ impl HelixDB {
             HelixStorage::Writer(writer) => writer.db().snapshot().await?.seq(),
         };
         Ok(DatabaseSequence(sequence))
+    }
+
+    /// Returns the latest SlateDB writer fencing epoch visible to this handle.
+    ///
+    /// Fresh storage has no writer epoch until its first writer open.
+    pub fn storage_writer_epoch(&self) -> Option<NonZeroU64> {
+        let epoch = match self.storage() {
+            HelixStorage::Reader(reader) => reader.manifest().writer_epoch(),
+            HelixStorage::Writer(writer) => writer.db().manifest().writer_epoch(),
+        };
+        NonZeroU64::new(epoch)
     }
 
     /// Flushes an acknowledged writer state for reader-replica publication.
@@ -3023,6 +3068,221 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(reader.object_store(), &expected_store,));
         reader.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_writer_epoch_rejects_equal_and_lower_claims() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-writer-stale-claims").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(11).unwrap(),
+        )
+        .await
+        .expect("epoch 11 writer opens");
+        assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(11));
+
+        for stale_epoch in [10, 11] {
+            let Err(error) = HelixDB::open_managed_writer_with_config(
+                source(),
+                DbConfig::new(),
+                NonZeroU64::new(stale_epoch).unwrap(),
+            )
+            .await
+            else {
+                panic!("equal and lower epochs must be rejected")
+            };
+            let HelixDbError::Storage(error) = error else {
+                panic!("stale epoch must fail at the SlateDB fence boundary")
+            };
+            assert_eq!(
+                error.kind(),
+                slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+            );
+            assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(11));
+        }
+
+        let transaction = writer
+            .inner_db()
+            .begin(slatedb::IsolationLevel::Snapshot)
+            .await
+            .expect("current writer remains open after rejected claims");
+        transaction
+            .put(b"current-writer", b"still-authoritative")
+            .expect("current writer stages after rejected claims");
+        transaction
+            .commit()
+            .await
+            .expect("rejected stale claims do not fence the current writer");
+        writer.close().await.expect("epoch 11 writer closes");
+    }
+
+    #[tokio::test]
+    async fn managed_writer_epoch_fences_an_inflight_old_transaction() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-writer-inflight-fence").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+
+        let old_writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(20).unwrap(),
+        )
+        .await
+        .expect("epoch 20 writer opens");
+        let old_transaction = old_writer
+            .inner_db()
+            .begin(slatedb::IsolationLevel::Snapshot)
+            .await
+            .expect("old transaction begins before fencing");
+        old_transaction
+            .put(b"old-writer", b"must-not-commit")
+            .expect("old transaction stages before fencing");
+
+        let new_writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(21).unwrap(),
+        )
+        .await
+        .expect("epoch 21 writer fences epoch 20");
+        let new_transaction = new_writer
+            .inner_db()
+            .begin(slatedb::IsolationLevel::Snapshot)
+            .await
+            .expect("new writer transaction begins");
+        new_transaction
+            .put(b"new-writer", b"committed")
+            .expect("new writer stages a write");
+        new_transaction
+            .commit()
+            .await
+            .expect("new writer commits after its fence");
+
+        let old_error = old_transaction
+            .commit()
+            .await
+            .expect_err("old transaction must not commit after epoch 21 opens");
+        assert_eq!(
+            old_error.kind(),
+            slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+        );
+
+        let Err(delayed) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(20).unwrap(),
+        )
+        .await
+        else {
+            panic!("delayed epoch 20 open cannot fence epoch 21")
+        };
+        let HelixDbError::Storage(delayed) = delayed else {
+            panic!("delayed stale open must fail at the SlateDB fence boundary")
+        };
+        assert_eq!(
+            delayed.kind(),
+            slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+        );
+
+        new_writer
+            .flush_writer()
+            .await
+            .expect("new writer publishes committed data");
+        new_writer.close().await.expect("epoch 21 writer closes");
+        old_writer
+            .close()
+            .await
+            .expect("fenced old writer closes idempotently");
+
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("reader observes latest epoch");
+        assert_eq!(reader.storage_writer_epoch().map(NonZeroU64::get), Some(21));
+        let HelixStorage::Reader(raw_reader) = reader.storage() else {
+            panic!("reader open returns reader storage")
+        };
+        assert_eq!(
+            raw_reader.get(b"new-writer").await.unwrap().as_deref(),
+            Some(b"committed".as_slice())
+        );
+        assert_eq!(raw_reader.get(b"old-writer").await.unwrap(), None);
+        reader.close().await.expect("reader closes");
+    }
+
+    #[tokio::test]
+    async fn concurrent_managed_writer_epoch_claim_has_one_winner() {
+        let token =
+            ProcessLocalDatabaseToken::new("facade-managed-writer-concurrent-claim").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let epoch = NonZeroU64::new(30).unwrap();
+
+        let (left, right) = tokio::join!(
+            HelixDB::open_managed_writer_with_config(source(), DbConfig::new(), epoch),
+            HelixDB::open_managed_writer_with_config(source(), DbConfig::new(), epoch),
+        );
+        let (writer, error) = match (left, right) {
+            (Ok(writer), Err(error)) | (Err(error), Ok(writer)) => (writer, error),
+            (Ok(_), Ok(_)) => panic!("equal concurrent epochs cannot both open"),
+            (Err(_), Err(_)) => panic!("one exact epoch claimant must win"),
+        };
+        let HelixDbError::Storage(error) = error else {
+            panic!("losing equal claim must fail at the SlateDB fence boundary")
+        };
+        assert_eq!(
+            error.kind(),
+            slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+        );
+        assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(30));
+        writer.close().await.expect("winning writer closes");
+    }
+
+    #[cfg(feature = "migration-parity")]
+    #[tokio::test]
+    async fn old_storage_reader_stays_available_until_managed_writer_migrates() {
+        let token =
+            ProcessLocalDatabaseToken::new("facade-reader-before-writer-migration").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let fixture = HelixDB::open(source()).await.expect("fixture writer opens");
+        fixture
+            .migration_parity_make_storage_v2_fixture()
+            .await
+            .expect("fixture becomes exact storage version two");
+        fixture
+            .migration_parity_inner_db()
+            .unwrap()
+            .delete(b"\xFFkv_migration_ready:index_storage_v4_cleanup")
+            .await
+            .expect("version four cleanup marker is removed");
+        fixture.close().await.expect("fixture writer closes");
+
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("compatible old storage remains readable");
+        assert_eq!(reader.mode(), HelixDbMode::ReadOnly);
+        reader.close().await.expect("old-storage reader closes");
+
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(2).unwrap(),
+        )
+        .await
+        .expect("managed writer owns and completes migration");
+        writer.close().await.expect("migrated writer closes");
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("reader reopens after migration");
+        reader.close().await.expect("migrated reader closes");
     }
 
     #[tokio::test]
