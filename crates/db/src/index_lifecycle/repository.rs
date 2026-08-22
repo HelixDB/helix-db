@@ -183,14 +183,42 @@ async fn initialize_writer_bootstrap(db: &Db) -> Result<()> {
     Ok(())
 }
 
-/// Accepts either a current, complete bootstrap tuple or a pristine legacy store.
+/// Reader-visible storage formats with explicit physical-read compatibility.
+///
+/// Adding a storage migration does not make it reader-compatible. A future
+/// migration must add a new variant and exhaustively define its read behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReaderStorageCompatibility {
+    /// All physical reads use the current storage format.
+    Current,
+    /// V2/V3 non-unique equality entries are unioned with V4 equality bitmaps.
+    LegacyEqualityUnion,
+}
+
+impl ReaderStorageCompatibility {
+    /// Accepts the only monotonic compatibility transition for an open reader.
+    pub(crate) fn advance(self, observed: Self) -> Result<Self> {
+        match (self, observed) {
+            (Self::Current, Self::Current) | (Self::LegacyEqualityUnion, Self::Current) => {
+                Ok(Self::Current)
+            }
+            (Self::LegacyEqualityUnion, Self::LegacyEqualityUnion) => Ok(Self::LegacyEqualityUnion),
+            (Self::Current, Self::LegacyEqualityUnion) => Err(HelixDbError::MigrationRequired {
+                reason: "reader storage compatibility moved backwards from current to legacy"
+                    .to_string(),
+            }),
+        }
+    }
+}
+
+/// Accepts a reader-compatible complete bootstrap tuple or a pristine legacy store.
 ///
 /// This is intentionally validation-only. Valid writer-resumable storage is
 /// reported through [`HelixDbError::WriterMigrationRequired`], while partial or
 /// malformed metadata remains a fatal migration error.
 pub(crate) async fn require_reader_bootstrap_or_legacy(
     reader: &(impl DbReadOps + Send + Sync),
-) -> Result<()> {
+) -> Result<ReaderStorageCompatibility> {
     let tenant_envelope_ready = crate::migrations::tenant_key_envelope_ready(reader).await?;
     let marker_key = global_key(GlobalKey::StorageVersion);
     let logical_key = global_key(GlobalKey::LogicalIndexIdWatermark);
@@ -202,29 +230,33 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
         let bootstrap = validate_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
         let progress =
             crate::migrations::storage_schema_progress(reader, DataScope::LegacyUnscoped).await?;
+        let cleanup_ready = crate::migrations::index_storage_v4_cleanup_ready(reader).await?;
+        if bootstrap == ValidatedReaderBootstrap::LegacyEqualityUnion && cleanup_ready {
+            return Err(HelixDbError::MigrationRequired {
+                reason: "index storage V4 cleanup is marked complete beside legacy storage"
+                    .to_string(),
+            });
+        }
         return match (bootstrap, progress, tenant_envelope_ready) {
             (
-                ValidatedReaderBootstrap::WriterMigration(requirement),
-                crate::migrations::StorageSchemaProgress::NotStarted
-                | crate::migrations::StorageSchemaProgress::GraphReady
-                | crate::migrations::StorageSchemaProgress::IndexReady
-                | crate::migrations::StorageSchemaProgress::Complete,
-                _,
-            ) => Err(HelixDbError::WriterMigrationRequired { requirement }),
+                ValidatedReaderBootstrap::LegacyEqualityUnion,
+                crate::migrations::StorageSchemaProgress::Complete,
+                true,
+            ) => Ok(ReaderStorageCompatibility::LegacyEqualityUnion),
             (
                 ValidatedReaderBootstrap::Current,
                 crate::migrations::StorageSchemaProgress::Complete,
                 true,
-            ) => Ok(()),
+            ) => Ok(ReaderStorageCompatibility::Current),
             (
-                ValidatedReaderBootstrap::Current,
+                ValidatedReaderBootstrap::Current | ValidatedReaderBootstrap::LegacyEqualityUnion,
                 crate::migrations::StorageSchemaProgress::NotStarted
                 | crate::migrations::StorageSchemaProgress::GraphReady
                 | crate::migrations::StorageSchemaProgress::IndexReady,
                 _,
             )
             | (
-                ValidatedReaderBootstrap::Current,
+                ValidatedReaderBootstrap::Current | ValidatedReaderBootstrap::LegacyEqualityUnion,
                 crate::migrations::StorageSchemaProgress::Complete,
                 false,
             ) => Err(HelixDbError::WriterMigrationRequired {
@@ -270,14 +302,14 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
             requirement: WriterMigrationRequirement::IncompleteStorageSchema,
         })
     } else {
-        Ok(())
+        Ok(ReaderStorageCompatibility::Current)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidatedReaderBootstrap {
     Current,
-    WriterMigration(WriterMigrationRequirement),
+    LegacyEqualityUnion,
 }
 
 fn validate_bootstrap_values(
@@ -330,15 +362,11 @@ fn validate_bootstrap_values(
             reason: "V2 allocator record contains the wrong value kind".to_string(),
         });
     }
-    if version < IndexStorageVersion::CURRENT {
-        return Ok(ValidatedReaderBootstrap::WriterMigration(
-            WriterMigrationRequirement::StorageVersion {
-                found: version.get(),
-                target: IndexStorageVersion::CURRENT.get(),
-            },
-        ));
+    match version.get() {
+        0x0002 | 0x0003 => Ok(ValidatedReaderBootstrap::LegacyEqualityUnion),
+        0x0004 => Ok(ValidatedReaderBootstrap::Current),
+        _ => unreachable!("unsupported storage versions returned before compatibility dispatch"),
     }
-    Ok(ValidatedReaderBootstrap::Current)
 }
 
 fn validate_writer_bootstrap_values(
@@ -1321,6 +1349,43 @@ mod tests {
                 .expect("storage version 4 is accepted"),
             ValidatedReaderBootstrap::Current
         );
+        for legacy in [0x0002, 0x0003] {
+            let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                IndexStorageVersion::new(legacy).unwrap(),
+            ));
+            assert_eq!(
+                validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
+                    .expect("only versions two and three have explicit reader compatibility"),
+                ValidatedReaderBootstrap::LegacyEqualityUnion
+            );
+        }
+    }
+
+    #[test]
+    fn reader_storage_compatibility_only_advances_monotonically() {
+        assert_eq!(
+            ReaderStorageCompatibility::LegacyEqualityUnion
+                .advance(ReaderStorageCompatibility::LegacyEqualityUnion)
+                .unwrap(),
+            ReaderStorageCompatibility::LegacyEqualityUnion
+        );
+        assert_eq!(
+            ReaderStorageCompatibility::LegacyEqualityUnion
+                .advance(ReaderStorageCompatibility::Current)
+                .unwrap(),
+            ReaderStorageCompatibility::Current
+        );
+        assert_eq!(
+            ReaderStorageCompatibility::Current
+                .advance(ReaderStorageCompatibility::Current)
+                .unwrap(),
+            ReaderStorageCompatibility::Current
+        );
+        assert!(matches!(
+            ReaderStorageCompatibility::Current
+                .advance(ReaderStorageCompatibility::LegacyEqualityUnion),
+            Err(HelixDbError::MigrationRequired { .. })
+        ));
     }
 
     #[test]
@@ -1849,6 +1914,11 @@ mod tests {
                 if reason
                     == "index storage V4 cleanup is marked complete beside storage version 3"
         ));
+        assert!(matches!(
+            require_reader_bootstrap_or_legacy(&premature).await,
+            Err(HelixDbError::MigrationRequired { reason })
+                if reason == "index storage V4 cleanup is marked complete beside legacy storage"
+        ));
         premature.close().await.unwrap();
     }
 
@@ -1885,7 +1955,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_readers_require_writer_migration_without_writing() {
+    async fn incomplete_older_readers_require_writer_migration_without_writing() {
         for version_number in [0x0002, 0x0003] {
             let db = Db::builder(
                 format!("index-lifecycle-reader-migration-{version_number}"),
@@ -1899,20 +1969,19 @@ mod tests {
             let marker_key = global_key(GlobalKey::StorageVersion);
             let marker_before = db.get(&marker_key).await.unwrap().unwrap();
 
+            let before = all_rows(&db).await;
             let error = require_reader_bootstrap_or_legacy(&db)
                 .await
-                .expect_err("an older store requires writer-owned migration");
+                .expect_err("an incomplete older store requires writer-owned migration");
 
             assert!(matches!(
                 error,
                 HelixDbError::WriterMigrationRequired {
-                    requirement: WriterMigrationRequirement::StorageVersion {
-                        found,
-                        target: 0x0004,
-                    },
-                } if found == version_number
+                    requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+                }
             ));
             assert_eq!(db.get(marker_key).await.unwrap().unwrap(), marker_before);
+            assert_eq!(all_rows(&db).await, before);
             db.close().await.unwrap();
         }
     }

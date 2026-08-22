@@ -1284,6 +1284,23 @@ pub(crate) fn stage_tenant_key_envelope_ready(transaction: &DbTransaction) -> Re
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn stage_reader_compatible_storage_schema_for_tests(
+    transaction: &DbTransaction,
+) -> Result<()> {
+    for marker in [
+        GRAPH_FORMAT_V1_READY,
+        INDEX_V2_MIGRATION_READY,
+        STORAGE_SCHEMA_COMPLETE,
+    ] {
+        transaction.put(
+            scoped_metadata_key(DataScope::LegacyUnscoped, marker),
+            Bytes::from_static(b"1"),
+        )?;
+    }
+    stage_tenant_key_envelope_ready(transaction)
+}
+
 /// Stages V4 cleanup completion in the caller's existing transaction.
 pub(crate) fn stage_index_storage_v4_cleanup_ready(transaction: &DbTransaction) -> Result<()> {
     transaction.put(
@@ -5283,32 +5300,32 @@ pub(crate) mod production_contracts {
             .expect("complete current schema is reader-ready");
 
         fixture
-            .put(
-                global(GlobalKey::StorageVersion),
-                encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-                    IndexStorageVersion::new(0x0002).expect("version two is nonzero"),
-                )),
-            )
+            .delete(scoped_metadata_key(
+                DataScope::LegacyUnscoped,
+                INDEX_STORAGE_V4_CLEANUP_READY,
+            ))
             .await
-            .expect("version-two marker writes");
-        let error =
-            crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(&fixture)
+            .expect("legacy fixture clears the V4 cleanup marker");
+        for legacy_version in [2, 3] {
+            fixture
+                .put(
+                    global(GlobalKey::StorageVersion),
+                    encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                        IndexStorageVersion::new(legacy_version)
+                            .expect("legacy reader version is nonzero"),
+                    )),
+                )
                 .await
-                .expect_err("complete version-two storage requires a writer");
-        let HelixDbError::WriterMigrationRequired { requirement } = error else {
-            panic!("complete version-two storage must remain typed: {error}")
-        };
-        assert_eq!(
-            requirement,
-            crate::error::WriterMigrationRequirement::StorageVersion {
-                found: 2,
-                target: 4,
-            }
-        );
-        assert_eq!(
-            requirement.to_string(),
-            "storage version 2 must be upgraded to 4"
-        );
+                .expect("legacy storage marker writes");
+            let before = all_rows(&fixture).await;
+            assert_eq!(
+                crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(&fixture)
+                    .await
+                    .expect("complete versions two and three are explicitly reader-compatible"),
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::LegacyEqualityUnion
+            );
+            assert_eq!(all_rows(&fixture).await, before);
+        }
         fixture.close().await.expect("fixture closes");
     }
 
@@ -5322,6 +5339,15 @@ pub(crate) mod production_contracts {
             .build()
             .await
             .expect("migration contract raw database opens")
+    }
+
+    async fn all_rows(read: &(impl DbReadOps + Send + Sync)) -> Vec<(Bytes, Bytes)> {
+        let mut rows = read.scan(..).await.expect("migration contract scans");
+        let mut collected = Vec::new();
+        while let Some(row) = rows.next().await.expect("migration contract row reads") {
+            collected.push((row.key, row.value));
+        }
+        collected
     }
 
     fn global(key: GlobalKey) -> Bytes {

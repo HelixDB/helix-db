@@ -683,6 +683,7 @@ pub struct HelixDB {
 /// a detached in-memory view.
 struct HelixDBInner {
     storage: HelixStorageParts,
+    reader_storage_compatibility: RwLock<index_lifecycle::repository::ReaderStorageCompatibility>,
     caches: HelixCaches,
     index_scope_gates: Arc<index_lifecycle::IndexScopeGates>,
     config: HelixConfig,
@@ -910,6 +911,7 @@ impl HelixDB {
             loaded_catalog,
             None,
             fts_cache,
+            index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
         migrations::migrate_legacy_definitions(&db).await?;
         Box::pin(migrations::migrate_active_vector_simhash_directories(&db)).await?;
@@ -987,6 +989,7 @@ impl HelixDB {
             slate_db_cache,
             fts_cache,
             index_scheduling,
+            index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
         if let Err(error) = migrations::migrate_legacy_definitions(&db).await {
             let _ = db.close().await;
@@ -1051,19 +1054,17 @@ impl HelixDB {
     ) -> Result<Self> {
         let path = database.into();
         let config = DbConfig::new();
+        let mut reader_options = config
+            .slate()
+            .to_reader_options(config.cache().object_store_cache());
+        reader_options.manifest_poll_interval = Duration::from_millis(10);
         let reader = DbReader::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-            .with_options(
-                config
-                    .slate()
-                    .to_reader_options(config.cache().object_store_cache()),
-            )
+            .with_options(reader_options)
             .build()
             .await?;
-        match index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await {
-            Ok(()) | Err(HelixDbError::WriterMigrationRequired { .. }) => {}
-            Err(error) => return Err(error),
-        }
+        let compatibility =
+            index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1075,6 +1076,7 @@ impl HelixDB {
             loaded_catalog,
             None,
             fts_cache,
+            compatibility,
         ))
     }
 
@@ -1104,10 +1106,8 @@ impl HelixDB {
             }
         }
         let reader = builder.build().await?;
-        match index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await {
-            Ok(()) | Err(HelixDbError::WriterMigrationRequired { .. }) => {}
-            Err(error) => return Err(error),
-        }
+        let compatibility =
+            index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1119,6 +1119,7 @@ impl HelixDB {
             loaded_catalog,
             slate_db_cache,
             fts_cache,
+            compatibility,
         );
         db.run_configured_startup_cache_warm().await?;
         db.run_configured_vector_memory_warm(vector_memory_settings)
@@ -1132,6 +1133,7 @@ impl HelixDB {
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
         slate_db_cache: Option<Arc<dyn DbCache>>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
+        reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
         Self::from_storage_with_index_scheduling(
             storage,
@@ -1140,6 +1142,7 @@ impl HelixDB {
             slate_db_cache,
             fts_cache,
             IndexLifecycleScheduling::Configured,
+            reader_storage_compatibility,
         )
     }
 
@@ -1150,6 +1153,7 @@ impl HelixDB {
         slate_db_cache: Option<Arc<dyn DbCache>>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         index_scheduling: IndexLifecycleScheduling,
+        reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
         let vector_memory = VectorMemoryCache::new(*config.db().cache().vector_memory());
         let index_scope_gates = Arc::new(index_lifecycle::IndexScopeGates::default());
@@ -1247,6 +1251,7 @@ impl HelixDB {
         Self {
             inner: Arc::new(HelixDBInner {
                 storage,
+                reader_storage_compatibility: RwLock::new(reader_storage_compatibility),
                 caches: HelixCaches {
                     slate_db: slate_db_cache,
                     fts: fts_cache,
@@ -2355,6 +2360,30 @@ impl HelixDB {
         self.inner.storage.handle()
     }
 
+    pub(crate) fn observe_reader_storage_compatibility(
+        &self,
+        observed: index_lifecycle::repository::ReaderStorageCompatibility,
+    ) -> Result<()> {
+        let mut compatibility = self
+            .inner
+            .reader_storage_compatibility
+            .write()
+            .expect("reader storage compatibility lock is not poisoned");
+        *compatibility = compatibility.advance(observed)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reader_storage_compatibility_for_tests(
+        &self,
+    ) -> index_lifecycle::repository::ReaderStorageCompatibility {
+        *self
+            .inner
+            .reader_storage_compatibility
+            .read()
+            .expect("reader storage compatibility lock is not poisoned")
+    }
+
     /// Returns why one family cannot cross the public lifecycle boundary.
     pub(crate) fn index_lifecycle_unavailable_reason(
         &self,
@@ -2582,11 +2611,19 @@ impl HelixDB {
         let loaded = match self.storage() {
             HelixStorage::Reader(reader) => {
                 let observed = reader.status();
+                let snapshot = reader.snapshot().await?;
+                let compatibility =
+                    index_lifecycle::repository::require_reader_bootstrap_or_legacy(
+                        snapshot.as_ref(),
+                    )
+                    .await?;
                 let loaded =
-                    index_lifecycle::repository::load_scope_catalog(reader.as_ref(), scope).await?;
+                    index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope)
+                        .await?;
                 if reader.status() != observed {
                     return Err(HelixDbError::RequestReadViewChanged);
                 }
+                self.observe_reader_storage_compatibility(compatibility)?;
                 loaded
             }
             HelixStorage::Writer(writer) => {
@@ -3283,6 +3320,42 @@ mod tests {
             .await
             .expect("reader reopens after migration");
         reader.close().await.expect("migrated reader closes");
+    }
+
+    #[tokio::test]
+    async fn incomplete_tenant_envelope_rejects_production_and_test_reader_opens() {
+        let token = ProcessLocalDatabaseToken::new("facade-incomplete-tenant-reader").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let writer = HelixDB::open(source()).await.expect("fixture writer opens");
+        writer
+            .inner_db()
+            .delete(b"\xFFkv_migration_ready:tenant_key_envelope_v1")
+            .await
+            .expect("tenant readiness marker is removed");
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("incomplete migration state becomes reader-visible");
+        writer.close().await.expect("fixture writer closes");
+
+        for result in [
+            HelixDB::open_reader(source()).await,
+            HelixDB::open_reader_with_object_store_for_tests(
+                token.database().to_string(),
+                token.object_store(),
+            )
+            .await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(HelixDbError::WriterMigrationRequired {
+                    requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+                })
+            ));
+        }
     }
 
     #[tokio::test]

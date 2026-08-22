@@ -27,10 +27,26 @@ pub(crate) fn record_equality_graph_read() {
 
 /// Executes one planner-selected indexed equality point read without choosing
 /// or performing authoritative verification.
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_point_literal(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     value: &PropertyValue,
+) -> Result<roaring::RoaringTreemap> {
+    lookup_active_equality_point_literal_with_compatibility(
+        reader,
+        handle,
+        value,
+        ReaderStorageCompatibility::Current,
+    )
+    .await
+}
+
+pub(crate) async fn lookup_active_equality_point_literal_with_compatibility(
+    reader: &(impl DbReadOps + Sync),
+    handle: &ActiveIndexHandle,
+    value: &PropertyValue,
+    compatibility: ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
     let Some(definition) = handle.secondary_definition() else {
         return Err(corruption(
@@ -67,6 +83,7 @@ pub(crate) async fn lookup_active_equality_point_literal(
         }
     };
     let lane = definition_lane(definition);
+    let legacy_value = value.clone();
     let key = secondary_entry_key(
         handle.scope(),
         handle.index_id(),
@@ -77,27 +94,54 @@ pub(crate) async fn lookup_active_equality_point_literal(
     )
     .expect("validated indexed equality values always fit their physical key");
     record_equality_point_read();
-    let Some(bytes) = reader.get(key).await? else {
-        return Ok(roaring::RoaringTreemap::new());
-    };
     if lane.is_unique() {
+        let Some(bytes) = reader.get(key).await? else {
+            return Ok(roaring::RoaringTreemap::new());
+        };
         let owner =
             decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &bytes)?;
         return Ok(roaring::RoaringTreemap::from_iter([owner.get()]));
     }
-    SecondaryEqualityBitmapValue::decode(&bytes)
-        .map(SecondaryEqualityBitmapValue::into_ids)
-        .map_err(HelixDbError::from)
+    let mut owners = reader
+        .get(key)
+        .await?
+        .map(|bytes| {
+            SecondaryEqualityBitmapValue::decode(&bytes)
+                .map(SecondaryEqualityBitmapValue::into_ids)
+                .map_err(HelixDbError::from)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if compatibility == ReaderStorageCompatibility::LegacyEqualityUnion {
+        owners |= lookup_legacy_equality_entries(reader, handle, lane, &legacy_value).await?;
+    }
+    Ok(owners)
 }
 
 /// Executes one planner-selected literal bitmap multi-get.
 ///
 /// Duplicate physical keys are preserved and the primitive always issues one
 /// `multi_get`; executable validation owns the at-least-two invariant.
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_literal_batch(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     values: &[PropertyValue],
+) -> Result<roaring::RoaringTreemap> {
+    lookup_active_equality_literal_batch_with_compatibility(
+        reader,
+        handle,
+        values,
+        ReaderStorageCompatibility::Current,
+    )
+    .await
+}
+
+pub(crate) async fn lookup_active_equality_literal_batch_with_compatibility(
+    reader: &(impl DbReadOps + Sync),
+    handle: &ActiveIndexHandle,
+    values: &[PropertyValue],
+    compatibility: ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
     if values.len() < 2 {
         return Err(corruption(
@@ -113,6 +157,19 @@ pub(crate) async fn lookup_active_equality_literal_batch(
         return Err(corruption(
             "literal equality bitmap batch received a non-bitmap definition",
         ));
+    }
+    if compatibility == ReaderStorageCompatibility::LegacyEqualityUnion {
+        let mut owners = roaring::RoaringTreemap::new();
+        for value in values {
+            owners |= lookup_active_equality_point_literal_with_compatibility(
+                reader,
+                handle,
+                value,
+                compatibility,
+            )
+            .await?;
+        }
+        return Ok(owners);
     }
     let keys = values
         .iter()
@@ -153,6 +210,48 @@ pub(crate) async fn lookup_active_equality_literal_batch(
     let mut owners = roaring::RoaringTreemap::new();
     for bytes in reader.multi_get(&keys).await?.into_iter().flatten() {
         owners |= SecondaryEqualityBitmapValue::decode(&bytes)?.into_ids();
+    }
+    Ok(owners)
+}
+
+async fn lookup_legacy_equality_entries(
+    reader: &(impl DbReadOps + Sync),
+    handle: &ActiveIndexHandle,
+    lane: SecondaryEntryLane,
+    value: &crate::encoding::v1::property::equality_value::CanonicalEqualityValue,
+) -> Result<roaring::RoaringTreemap> {
+    let logical_prefix = ScopedKey::secondary_equality_entry_value_prefix(
+        handle.index_id(),
+        handle.generation(),
+        lane,
+        value,
+    )?;
+    let prefix = IndexKey::data_prefix(handle.scope(), logical_prefix);
+    let mut rows = reader.scan_prefix(prefix, ..).await?;
+    let mut owners = roaring::RoaringTreemap::new();
+    while let Some(row) = rows.next().await? {
+        let IndexKey::Data {
+            kind: ScopedKey::SecondaryEntry(entry),
+            ..
+        } = IndexKey::parse_from_slice(handle.scope(), &row.key)?
+        else {
+            return Err(corruption(
+                "V3 equality value prefix resolved a different record kind",
+            ));
+        };
+        let Some(key_owner) = entry.entity_id() else {
+            return Err(corruption(
+                "V3 non-unique equality entry omitted its entity ID",
+            ));
+        };
+        let value_owner =
+            decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &row.value)?;
+        if key_owner != value_owner {
+            return Err(corruption(
+                "V3 non-unique equality key and value owners disagree",
+            ));
+        }
+        owners.insert(key_owner.get());
     }
     Ok(owners)
 }
@@ -692,7 +791,128 @@ pub(crate) async fn run_production_contracts() {
 mod tests {
     use super::*;
 
+    async fn put_v3_equality_entry(
+        db: &slatedb::Db,
+        handle: &ActiveIndexHandle,
+        value: &str,
+        entity_id: u64,
+    ) {
+        let definition = handle.secondary_definition().unwrap();
+        let lane = definition_lane(definition);
+        let entity_id = IndexEntityId::new(entity_id);
+        let EqualityValueProjection::Indexed(value) =
+            project_equality_value(&PropertyValue::String(value.to_string()))
+        else {
+            unreachable!("string fixture is indexable")
+        };
+        let key = IndexKey::Data {
+            scope: handle.scope(),
+            kind: ScopedKey::SecondaryEntry(
+                SecondaryEntryKey::try_new(
+                    handle.index_id(),
+                    handle.generation(),
+                    lane,
+                    CanonicalSecondaryValue::equality(value),
+                    Some(entity_id),
+                )
+                .unwrap(),
+            ),
+        }
+        .to_bytes();
+        db.put(
+            key,
+            encode_secondary_entry(&SecondaryEntryValue {
+                index_id: handle.index_id(),
+                generation: handle.generation(),
+                lane,
+                entity_id,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn put_v4_equality_bitmap(
+        db: &slatedb::Db,
+        handle: &ActiveIndexHandle,
+        value: &str,
+        entity_ids: impl IntoIterator<Item = u64>,
+    ) {
+        let definition = handle.secondary_definition().unwrap();
+        let EqualityValueProjection::Indexed(value) =
+            project_equality_value(&PropertyValue::String(value.to_string()))
+        else {
+            unreachable!("string fixture is indexable")
+        };
+        let key = secondary_entry_key(
+            handle.scope(),
+            handle.index_id(),
+            handle.generation(),
+            definition,
+            CanonicalSecondaryValue::equality(value),
+            IndexEntityId::initial(),
+        )
+        .unwrap();
+        db.put(
+            key,
+            SecondaryEqualityBitmapValue::new(roaring::RoaringTreemap::from_iter(entity_ids))
+                .encode(),
+        )
+        .await
+        .unwrap();
+    }
+
     struct FailingRows;
+
+    #[tokio::test]
+    async fn legacy_equality_reads_union_v3_entries_and_v4_bitmaps_without_duplicates() {
+        let db = super::super::tests::test_db("secondary-exact-legacy-equality-union").await;
+        let handle = super::super::tests::active_read_handle(
+            &db,
+            crate::config::SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
+        )
+        .await;
+        put_v3_equality_entry(&db, &handle, "shared", 1).await;
+        put_v3_equality_entry(&db, &handle, "shared", 2).await;
+        put_v3_equality_entry(&db, &handle, "other", 4).await;
+        put_v4_equality_bitmap(&db, &handle, "shared", [2, 3]).await;
+
+        let shared = PropertyValue::String("shared".to_string());
+        assert_eq!(
+            lookup_active_equality_point_literal_with_compatibility(
+                &db,
+                &handle,
+                &shared,
+                ReaderStorageCompatibility::LegacyEqualityUnion,
+            )
+            .await
+            .unwrap(),
+            roaring::RoaringTreemap::from_iter([1, 2, 3])
+        );
+        assert_eq!(
+            lookup_active_equality_point_literal_with_compatibility(
+                &db,
+                &handle,
+                &shared,
+                ReaderStorageCompatibility::Current,
+            )
+            .await
+            .unwrap(),
+            roaring::RoaringTreemap::from_iter([2, 3])
+        );
+        assert_eq!(
+            lookup_active_equality_literal_batch_with_compatibility(
+                &db,
+                &handle,
+                &[shared, PropertyValue::String("other".to_string())],
+                ReaderStorageCompatibility::LegacyEqualityUnion,
+            )
+            .await
+            .unwrap(),
+            roaring::RoaringTreemap::from_iter([1, 2, 3, 4])
+        );
+        db.close().await.unwrap();
+    }
 
     #[async_trait]
     impl ExactRangeRows for FailingRows {

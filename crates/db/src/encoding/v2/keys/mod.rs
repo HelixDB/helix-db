@@ -254,6 +254,43 @@ impl ScopedKey {
         Bytes::from(bytes)
     }
 
+    /// Returns the exact deployed V3 non-unique equality value prefix.
+    pub(crate) fn secondary_equality_entry_value_prefix(
+        index_id: IndexId,
+        generation: IndexGenerationId,
+        lane: SecondaryEntryLane,
+        value: &CanonicalEqualityValue,
+    ) -> Result<Bytes, EncodingError> {
+        if !lane.is_equality() || lane.is_unique() {
+            return Err(EncodingError::InvalidKey(
+                "V3 equality value prefix requires a non-unique equality lane".to_string(),
+            ));
+        }
+        let encoded_len = PREFIX_LEN
+            + KIND_LEN
+            + U64_LEN
+            + U64_LEN
+            + KIND_LEN
+            + EQUALITY_DIGEST_LEN
+            + U32_LEN
+            + value.canonical().len();
+        if encoded_len + U64_LEN > KEY_MAX_LEN {
+            return Err(EncodingError::InvalidKey(
+                "V3 equality value prefix exceeds the complete 1 MiB key limit".to_string(),
+            ));
+        }
+        let mut bytes =
+            Self::generation_prefix(RecordKind::SecondaryEntry, index_id, generation).to_vec();
+        bytes.put_u8(lane.as_u8());
+        bytes.put_slice(value.digest());
+        bytes.put_u32(
+            u32::try_from(value.canonical().len())
+                .expect("canonical equality values are bounded below u32"),
+        );
+        bytes.put_slice(value.canonical());
+        Ok(Bytes::from(bytes))
+    }
+
     /// Returns the exact V4 bitmap-generation prefix for one element kind.
     pub(crate) fn secondary_equality_bitmap_prefix(
         index_id: IndexId,

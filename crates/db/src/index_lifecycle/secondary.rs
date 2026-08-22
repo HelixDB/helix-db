@@ -60,6 +60,7 @@ use crate::index_lifecycle::outbox::{
     IndexOperationDriver, IndexOperationStepExecution, IndexOperationStepPermit,
     IndexOperationStepResult, PreparedIndexOperationStep,
 };
+use crate::index_lifecycle::repository::ReaderStorageCompatibility;
 use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, SecondaryEntryValue,
 };
@@ -86,8 +87,13 @@ pub(crate) use exact::run_production_contracts as run_exact_production_contracts
 #[cfg(test)]
 pub(crate) use exact::scan_active_range_generation_with_membership;
 pub(crate) use exact::{
-    count_active_range_generation_with_membership, lookup_active_equality_literal_batch,
-    lookup_active_equality_point_literal, record_equality_graph_read,
+    count_active_range_generation_with_membership,
+    lookup_active_equality_literal_batch_with_compatibility,
+    lookup_active_equality_point_literal_with_compatibility, record_equality_graph_read,
+};
+#[cfg(test)]
+pub(crate) use exact::{
+    lookup_active_equality_literal_batch, lookup_active_equality_point_literal,
 };
 
 #[cfg(any(test, feature = "production-coverage"))]
@@ -2820,10 +2826,26 @@ fn property_value_type_name(value: &PropertyValue) -> &'static str {
 /// with `handle`. Unique entries and V4 non-unique bitmaps each use one point
 /// read. Authoritative-null lookup remains a graph scan because nulls are not
 /// physically indexed.
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     value: &PropertyValue,
+) -> Result<roaring::RoaringTreemap> {
+    lookup_active_equality_generation_with_compatibility(
+        reader,
+        handle,
+        value,
+        ReaderStorageCompatibility::Current,
+    )
+    .await
+}
+
+async fn lookup_active_equality_generation_with_compatibility(
+    reader: &(impl DbReadOps + Sync),
+    handle: &ActiveIndexHandle,
+    value: &PropertyValue,
+    compatibility: ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
     let Some(definition) = handle.secondary_definition() else {
         return Err(corruption(
@@ -2887,25 +2909,8 @@ pub(crate) async fn lookup_active_equality_generation(
         return Ok(roaring::RoaringTreemap::from_iter([owner.get()]));
     }
 
-    let key = secondary_entry_key(
-        handle.scope(),
-        handle.index_id(),
-        handle.generation(),
-        definition,
-        canonical,
-        IndexEntityId::initial(),
-    )?;
-    record_equality_point_read();
-    reader
-        .get(key)
-        .await?
-        .map(|bytes| {
-            SecondaryEqualityBitmapValue::decode(&bytes)
-                .map(SecondaryEqualityBitmapValue::into_ids)
-                .map_err(HelixDbError::from)
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+    lookup_active_equality_point_literal_with_compatibility(reader, handle, value, compatibility)
+        .await
 }
 
 /// Reads and unions equality values from one exact Active generation.
@@ -2913,10 +2918,11 @@ pub(crate) async fn lookup_active_equality_generation(
 /// Non-unique indexed values use one `multi_get` over their V4 bitmap rows.
 /// Unique, null, non-reflexive, and error projections retain the authoritative
 /// single-value path so their verification contracts remain unchanged.
-pub(crate) async fn lookup_active_equality_generations(
+pub(crate) async fn lookup_active_equality_generations_with_compatibility(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     values: &[PropertyValue],
+    compatibility: ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
     if values.is_empty() {
         return Ok(roaring::RoaringTreemap::new());
@@ -2929,7 +2935,26 @@ pub(crate) async fn lookup_active_equality_generations(
     if !definition_uses_equality_bitmap(definition) {
         let mut owners = roaring::RoaringTreemap::new();
         for value in values {
-            owners |= lookup_active_equality_generation(reader, handle, value).await?;
+            owners |= lookup_active_equality_generation_with_compatibility(
+                reader,
+                handle,
+                value,
+                compatibility,
+            )
+            .await?;
+        }
+        return Ok(owners);
+    }
+    if compatibility == ReaderStorageCompatibility::LegacyEqualityUnion {
+        let mut owners = roaring::RoaringTreemap::new();
+        for value in values {
+            owners |= lookup_active_equality_generation_with_compatibility(
+                reader,
+                handle,
+                value,
+                compatibility,
+            )
+            .await?;
         }
         return Ok(owners);
     }
@@ -2939,7 +2964,13 @@ pub(crate) async fn lookup_active_equality_generations(
         let EqualityValueProjection::Indexed(value) = project_equality_value(value) else {
             let mut owners = roaring::RoaringTreemap::new();
             for value in values {
-                owners |= lookup_active_equality_generation(reader, handle, value).await?;
+                owners |= lookup_active_equality_generation_with_compatibility(
+                    reader,
+                    handle,
+                    value,
+                    compatibility,
+                )
+                .await?;
             }
             return Ok(owners);
         };

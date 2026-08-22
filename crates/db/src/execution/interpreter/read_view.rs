@@ -108,7 +108,10 @@ impl RequestReadScopeState {
 /// One read-only request view whose storage source cannot change between steps.
 pub(crate) enum StableRequestReadView {
     /// A reader-node view pinned to one checkpoint generation and sequence.
-    ReaderSnapshot(Arc<DbSnapshot>),
+    ReaderSnapshot {
+        snapshot: Arc<DbSnapshot>,
+        compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+    },
     /// A writer-node read transaction pinned at snapshot isolation.
     WriterTransaction(DbTransaction),
 }
@@ -117,7 +120,19 @@ impl StableRequestReadView {
     /// Opens the storage view that planning and execution must share.
     pub(crate) async fn open(db: &HelixDB) -> Result<Self> {
         Ok(match db.storage() {
-            HelixStorage::Reader(reader) => Self::ReaderSnapshot(reader.snapshot().await?),
+            HelixStorage::Reader(reader) => {
+                let snapshot = reader.snapshot().await?;
+                let compatibility =
+                    crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(
+                        snapshot.as_ref(),
+                    )
+                    .await?;
+                db.observe_reader_storage_compatibility(compatibility)?;
+                Self::ReaderSnapshot {
+                    snapshot,
+                    compatibility,
+                }
+            }
             HelixStorage::Writer(writer) => {
                 Self::WriterTransaction(writer.db().begin(IsolationLevel::Snapshot).await?)
             }
@@ -127,7 +142,7 @@ impl StableRequestReadView {
     /// Returns the sequence visible to this request-scoped storage view.
     pub(in crate::execution::interpreter) fn comparable_sequence(&self) -> Option<u64> {
         Some(match self {
-            Self::ReaderSnapshot(snapshot) => snapshot.seq(),
+            Self::ReaderSnapshot { snapshot, .. } => snapshot.seq(),
             Self::WriterTransaction(transaction) => transaction.seqnum(),
         })
     }
@@ -141,18 +156,36 @@ impl StableRequestReadView {
         matches!(self, Self::WriterTransaction(_))
     }
 
+    pub(in crate::execution::interpreter) const fn storage_compatibility(
+        &self,
+    ) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
+        match self {
+            Self::ReaderSnapshot { compatibility, .. } => *compatibility,
+            Self::WriterTransaction(_) => {
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current
+            }
+        }
+    }
+
     /// Clones the immutable reader view into an isolated parallel context.
     fn clone_reader_snapshot(&self) -> Self {
-        let Self::ReaderSnapshot(snapshot) = self else {
+        let Self::ReaderSnapshot {
+            snapshot,
+            compatibility,
+        } = self
+        else {
             unreachable!("writer transactions are scheduled serially")
         };
-        Self::ReaderSnapshot(Arc::clone(snapshot))
+        Self::ReaderSnapshot {
+            snapshot: Arc::clone(snapshot),
+            compatibility: *compatibility,
+        }
     }
 
     /// Ends the request view and explicitly unregisters writer read transactions.
     pub(crate) fn close(self) {
         match self {
-            Self::ReaderSnapshot(snapshot) => drop(snapshot),
+            Self::ReaderSnapshot { snapshot, .. } => drop(snapshot),
             Self::WriterTransaction(transaction) => transaction.rollback(),
         }
     }
@@ -166,7 +199,7 @@ impl DbReadOps for StableRequestReadView {
         options: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<bytes::Bytes>, slatedb::Error> {
         match self {
-            Self::ReaderSnapshot(snapshot) => snapshot.get_with_options(key, options).await,
+            Self::ReaderSnapshot { snapshot, .. } => snapshot.get_with_options(key, options).await,
             Self::WriterTransaction(transaction) => {
                 transaction.get_with_options(key, options).await
             }
@@ -179,7 +212,7 @@ impl DbReadOps for StableRequestReadView {
         options: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<slatedb::KeyValue>, slatedb::Error> {
         match self {
-            Self::ReaderSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } => {
                 snapshot.get_key_value_with_options(key, options).await
             }
             Self::WriterTransaction(transaction) => {
@@ -197,7 +230,9 @@ impl DbReadOps for StableRequestReadView {
         K: AsRef<[u8]> + Send + Sync,
     {
         match self {
-            Self::ReaderSnapshot(snapshot) => snapshot.multi_get_with_options(keys, options).await,
+            Self::ReaderSnapshot { snapshot, .. } => {
+                snapshot.multi_get_with_options(keys, options).await
+            }
             Self::WriterTransaction(transaction) => {
                 transaction.multi_get_with_options(keys, options).await
             }
@@ -213,7 +248,9 @@ impl DbReadOps for StableRequestReadView {
         T: slatedb::ByteRangeBounds + Send,
     {
         match self {
-            Self::ReaderSnapshot(snapshot) => snapshot.scan_with_options(range, options).await,
+            Self::ReaderSnapshot { snapshot, .. } => {
+                snapshot.scan_with_options(range, options).await
+            }
             Self::WriterTransaction(transaction) => {
                 transaction.scan_with_options(range, options).await
             }
@@ -231,7 +268,7 @@ impl DbReadOps for StableRequestReadView {
         T: slatedb::ByteRangeBounds + Send,
     {
         match self {
-            Self::ReaderSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } => {
                 snapshot
                     .scan_prefix_with_options(prefix, subrange, options)
                     .await
@@ -428,9 +465,10 @@ mod tests {
         )
         .await
         .expect("reader opens");
-        let view = StableRequestReadView::ReaderSnapshot(
-            reader.snapshot().await.expect("reader snapshot opens"),
-        );
+        let view = StableRequestReadView::ReaderSnapshot {
+            snapshot: reader.snapshot().await.expect("reader snapshot opens"),
+            compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+        };
 
         db.put(b"second", b"updated")
             .await

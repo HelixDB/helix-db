@@ -135,14 +135,26 @@ impl<'db> ExecutionContext<'db> {
             let Some(handle) = active.index_context.active_handle(&identity) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_literal_batch(&active.txn, handle, values).await;
+            return lookup_managed_active_literal_batch(
+                &active.txn,
+                handle,
+                values,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             if let Some(catalog) = self.request_read_index_catalog() {
                 let Some(handle) = catalog.handle(&identity) else {
                     return Err(secondary_catalog_unavailable());
                 };
-                return lookup_managed_active_literal_batch(view, handle, values).await;
+                return lookup_managed_active_literal_batch(
+                    view,
+                    handle,
+                    values,
+                    view.storage_compatibility(),
+                )
+                .await;
             }
             crate::index_lifecycle::secondary::record_equality_point_read();
             let Some(record) = crate::index_lifecycle::repository::load_index_record(
@@ -160,7 +172,13 @@ impl<'db> ExecutionContext<'db> {
             ) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_literal_batch(view, &handle, values).await;
+            return lookup_managed_active_literal_batch(
+                view,
+                &handle,
+                values,
+                view.storage_compatibility(),
+            )
+            .await;
         }
         Err(HelixDbError::InvariantViolation(
             "literal secondary equality batch escaped its request read view".to_string(),
@@ -188,14 +206,28 @@ impl<'db> ExecutionContext<'db> {
             let Some(handle) = active.index_context.active_handle(&identity) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_point_exact(&active.txn, handle, value, unique).await;
+            return lookup_managed_active_point_exact(
+                &active.txn,
+                handle,
+                value,
+                unique,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             if let Some(catalog) = self.request_read_index_catalog() {
                 let Some(handle) = catalog.handle(&identity) else {
                     return Err(secondary_catalog_unavailable());
                 };
-                return lookup_managed_active_point_exact(view, handle, value, unique).await;
+                return lookup_managed_active_point_exact(
+                    view,
+                    handle,
+                    value,
+                    unique,
+                    view.storage_compatibility(),
+                )
+                .await;
             }
             crate::index_lifecycle::secondary::record_equality_point_read();
             let Some(record) = crate::index_lifecycle::repository::load_index_record(
@@ -213,7 +245,14 @@ impl<'db> ExecutionContext<'db> {
             ) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_point_exact(view, &handle, value, unique).await;
+            return lookup_managed_active_point_exact(
+                view,
+                &handle,
+                value,
+                unique,
+                view.storage_compatibility(),
+            )
+            .await;
         }
         Err(HelixDbError::InvariantViolation(
             "exact secondary equality point read escaped its request read view".to_string(),
@@ -576,7 +615,13 @@ async fn lookup_managed_equalities_in_view(
                 reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
             });
         };
-        return lookup_managed_active_equalities_in_view(reader, active, values).await;
+        return lookup_managed_active_equalities_in_view(
+            reader,
+            active,
+            values,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+        )
+        .await;
     }
 
     if let Some(catalog) = context.request_read_index_catalog() {
@@ -586,7 +631,16 @@ async fn lookup_managed_equalities_in_view(
                 reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
             });
         };
-        return lookup_managed_active_equalities_in_view(reader, active, values).await;
+        return lookup_managed_active_equalities_in_view(
+            reader,
+            active,
+            values,
+            context
+                .request_read_view()
+                .expect("prepared catalog requires its exact request read view")
+                .storage_compatibility(),
+        )
+        .await;
     }
 
     crate::index_lifecycle::secondary::record_equality_point_read();
@@ -610,13 +664,23 @@ async fn lookup_managed_equalities_in_view(
             reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
         });
     };
-    lookup_managed_active_equalities_in_view(reader, &active, values).await
+    lookup_managed_active_equalities_in_view(
+        reader,
+        &active,
+        values,
+        context.request_read_view().map_or(
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+            super::super::read_view::StableRequestReadView::storage_compatibility,
+        ),
+    )
+    .await
 }
 
 async fn lookup_managed_active_equalities_in_view(
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
     if !matches!(
         active,
@@ -626,17 +690,28 @@ async fn lookup_managed_active_equalities_in_view(
             "secondary equality identity resolved another Active family".to_string(),
         ));
     }
-    crate::index_lifecycle::secondary::lookup_active_equality_generations(reader, active, values)
-        .await
+    crate::index_lifecycle::secondary::lookup_active_equality_generations_with_compatibility(
+        reader,
+        active,
+        values,
+        compatibility,
+    )
+    .await
 }
 
 async fn lookup_managed_active_literal_batch(
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
-    crate::index_lifecycle::secondary::lookup_active_equality_literal_batch(reader, active, values)
-        .await
+    crate::index_lifecycle::secondary::lookup_active_equality_literal_batch_with_compatibility(
+        reader,
+        active,
+        values,
+        compatibility,
+    )
+    .await
 }
 
 async fn lookup_managed_active_point_exact(
@@ -644,6 +719,7 @@ async fn lookup_managed_active_point_exact(
     active: &crate::index_lifecycle::ActiveIndexHandle,
     value: &DbPropertyValue,
     unique: bool,
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
     let Some(definition) = active.secondary_definition() else {
         return Err(HelixDbError::IndexCatalogCorruption(
@@ -665,8 +741,13 @@ async fn lookup_managed_active_point_exact(
                 .to_string(),
         ));
     }
-    crate::index_lifecycle::secondary::lookup_active_equality_point_literal(reader, active, value)
-        .await
+    crate::index_lifecycle::secondary::lookup_active_equality_point_literal_with_compatibility(
+        reader,
+        active,
+        value,
+        compatibility,
+    )
+    .await
 }
 
 fn secondary_catalog_unavailable() -> HelixDbError {
@@ -958,6 +1039,7 @@ pub(super) mod tests {
             &node_unique,
             &value,
             true,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .expect("matching unique lane reads literally")
@@ -967,6 +1049,7 @@ pub(super) mod tests {
             &node_unique,
             &value,
             false,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -980,6 +1063,7 @@ pub(super) mod tests {
             &edge_equality,
             &value,
             false,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .expect("edge equality uses its non-unique lane")
@@ -989,6 +1073,7 @@ pub(super) mod tests {
             &edge_equality,
             &value,
             true,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -1004,6 +1089,7 @@ pub(super) mod tests {
                 &secondary_handle(range),
                 &value,
                 false,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await
             .is_err());
@@ -1037,6 +1123,7 @@ pub(super) mod tests {
             &vector_handle,
             &value,
             false,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());

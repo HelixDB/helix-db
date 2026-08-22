@@ -326,7 +326,10 @@ async fn run_stable_vector_read_contracts() {
     exercise_stable_restricted_metric::<Manhattan>(&db, "stable-vector-manhattan").await;
 
     let snapshot = db.snapshot().await.unwrap();
-    let view = read_view::StableRequestReadView::ReaderSnapshot(snapshot);
+    let view = read_view::StableRequestReadView::ReaderSnapshot {
+        snapshot,
+        compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+    };
     let mut rows = view.scan_prefix(Bytes::new(), ..).await.unwrap();
     assert!(rows.next().await.unwrap().is_some());
     drop(rows);

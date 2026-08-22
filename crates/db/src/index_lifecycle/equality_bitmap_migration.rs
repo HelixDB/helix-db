@@ -658,12 +658,20 @@ fn corruption(message: &str) -> HelixDbError {
 mod tests {
     use std::sync::Arc;
 
+    use helix_ast::batch::read_batch;
+    use helix_ast::expr::Predicate;
+    use helix_ast::query::QueryRequest;
+    use helix_ast::traversal::g;
+    use helix_ast::value::PropertyValue as AstPropertyValue;
     use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::ObjectStore;
 
     use super::*;
     use crate::config::SecondaryIndexDefinition;
     use crate::encoding::property::{encode_properties, Property};
-    use crate::encoding::v1::keys::{DataKeyKind, Key as GraphKey, NodePropertyKey};
+    use crate::encoding::v1::keys::{
+        DataKeyKind, EdgePropertyByIdKey, Key as GraphKey, NodePropertyKey,
+    };
     use crate::encoding::v2::keys::{
         CanonicalSecondaryValue, SecondaryEntryKey, SecondaryEntryLane,
     };
@@ -680,7 +688,15 @@ mod tests {
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn v3_db(name: &str) -> Db {
-        let db = Db::builder(name, Arc::new(InMemory::new()))
+        legacy_db_with_store(name, Arc::new(InMemory::new()), 3).await
+    }
+
+    async fn v3_db_with_store(name: &str, store: Arc<dyn ObjectStore>) -> Db {
+        legacy_db_with_store(name, store, 3).await
+    }
+
+    async fn legacy_db_with_store(name: &str, store: Arc<dyn ObjectStore>, version: u16) -> Db {
+        let db = Db::builder(name, store)
             .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
             .build()
             .await
@@ -691,7 +707,7 @@ mod tests {
             }
             .to_bytes(),
             encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-                IndexStorageVersion::new(0x0003).unwrap(),
+                IndexStorageVersion::new(version).unwrap(),
             )),
         )
         .await
@@ -725,6 +741,90 @@ mod tests {
         db
     }
 
+    async fn assert_reader_queries(reader: &crate::HelixDB) {
+        let response = reader
+            .query(QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "point",
+                        g().n_with_label_where("User", Predicate::eq("email", "shared"))
+                            .count(),
+                    )
+                    .var_as(
+                        "membership",
+                        g().n_with_label_where(
+                            "User",
+                            Predicate::is_in(
+                                "email",
+                                AstPropertyValue::StringArray(vec![
+                                    "shared".to_string(),
+                                    "missing".to_string(),
+                                ]),
+                            ),
+                        )
+                        .count(),
+                    )
+                    .var_as("ordinary", g().n_with_label("User").count())
+                    .returning(["point", "membership", "ordinary"]),
+            ))
+            .await
+            .expect("reader queries remain executable through V3-to-V4 migration");
+        assert_eq!(response["point"], serde_json::Value::from(2));
+        assert_eq!(response["membership"], serde_json::Value::from(2));
+        assert_eq!(response["ordinary"], serde_json::Value::from(2));
+    }
+
+    async fn assert_node_and_edge_reader_queries(reader: &crate::HelixDB) {
+        let values =
+            AstPropertyValue::StringArray(vec!["shared".to_string(), "missing".to_string()]);
+        let response = reader
+            .query(QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "node_point",
+                        g().n_with_label_where("User", Predicate::eq("email", "shared"))
+                            .count(),
+                    )
+                    .var_as(
+                        "node_membership",
+                        g().n_with_label_where("User", Predicate::is_in("email", values.clone()))
+                            .count(),
+                    )
+                    .var_as(
+                        "edge_point",
+                        g().e_with_label_where("KNOWS", Predicate::eq("kind", "shared"))
+                            .count(),
+                    )
+                    .var_as(
+                        "edge_membership",
+                        g().e_with_label_where("KNOWS", Predicate::is_in("kind", values))
+                            .count(),
+                    )
+                    .var_as("nodes", g().n_with_label("User").count())
+                    .var_as("edges", g().e_with_label("KNOWS").count())
+                    .returning([
+                        "node_point",
+                        "node_membership",
+                        "edge_point",
+                        "edge_membership",
+                        "nodes",
+                        "edges",
+                    ]),
+            ))
+            .await
+            .expect("complete legacy reader executes indexed and ordinary reads");
+        for name in [
+            "node_point",
+            "node_membership",
+            "edge_point",
+            "edge_membership",
+            "nodes",
+            "edges",
+        ] {
+            assert_eq!(response[name], serde_json::Value::from(2), "{name}");
+        }
+    }
+
     fn equality_definition() -> ValidatedDynamicIndexDefinition {
         SecondaryIndexDefinition::node_equality("User", "email")
             .unwrap()
@@ -733,19 +833,65 @@ mod tests {
     }
 
     async fn put_graph_entity(db: &Db, scope: DataScope, entity_id: u64, email: &str) {
-        db.put(
-            GraphKey::Data {
-                scope,
-                kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
-            }
-            .to_bytes(),
-            encode_properties(&[
-                Property::string("$label", "User"),
-                Property::string("email", email),
-            ]),
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(
+                GraphKey::Data {
+                    scope,
+                    kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
+                }
+                .to_bytes(),
+                encode_properties(&[
+                    Property::string("$label", "User"),
+                    Property::string("email", email),
+                ]),
+            )
+            .unwrap();
+        crate::search::add_to_equality_index_scoped(
+            &transaction,
+            "$label",
+            "User",
+            entity_id,
+            scope,
         )
         .await
         .unwrap();
+        transaction.commit().await.unwrap();
+    }
+
+    async fn put_edge_graph_entity(db: &Db, scope: DataScope, entity_id: u64, kind: &str) {
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(
+                GraphKey::Data {
+                    scope,
+                    kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(entity_id)),
+                }
+                .to_bytes(),
+                encode_properties(&[
+                    Property::string("$label", "KNOWS"),
+                    Property::string("kind", kind),
+                ]),
+            )
+            .unwrap();
+        crate::search::store_edge_endpoints_scoped(
+            &transaction,
+            entity_id,
+            entity_id + 100,
+            entity_id + 200,
+            scope,
+        )
+        .await
+        .unwrap();
+        crate::search::add_to_global_edge_label_index_scoped(
+            &transaction,
+            "KNOWS",
+            entity_id,
+            scope,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
     }
 
     async fn put_v3_entry(
@@ -783,9 +929,50 @@ mod tests {
         .unwrap();
     }
 
+    async fn put_v3_edge_entry(
+        db: &Db,
+        generation: &EqualityGeneration,
+        entity_id: u64,
+        kind: &str,
+    ) {
+        let entity_id = super::super::IndexEntityId::new(entity_id);
+        let lane = SecondaryEntryLane::EdgeEquality;
+        let key = tenant_envelope_migration::legacy_data_key(
+            generation.scope,
+            ScopedKey::SecondaryEntry(
+                SecondaryEntryKey::try_new(
+                    generation.index_id,
+                    generation.generation,
+                    lane,
+                    CanonicalSecondaryValue::equality_string(kind),
+                    Some(entity_id),
+                )
+                .unwrap(),
+            ),
+        );
+        db.put(
+            key,
+            encode_secondary_entry(&SecondaryEntryValue {
+                index_id: generation.index_id,
+                generation: generation.generation,
+                lane,
+                entity_id,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
     async fn put_active_index(db: &Db, scope: DataScope) -> EqualityGeneration {
-        let definition = equality_definition();
-        let index_id = IndexId::initial();
+        put_active_definition(db, scope, equality_definition(), IndexId::initial()).await
+    }
+
+    async fn put_active_definition(
+        db: &Db,
+        scope: DataScope,
+        definition: ValidatedDynamicIndexDefinition,
+        index_id: IndexId,
+    ) -> EqualityGeneration {
         let generation = IndexGenerationId::initial();
         let building = IndexRecordV2::building(
             index_id,
@@ -834,6 +1021,130 @@ mod tests {
             .await;
         }
         (db, generation)
+    }
+
+    #[tokio::test]
+    async fn complete_v2_and_v3_readers_query_legacy_node_and_edge_equality() {
+        for version in [2, 3] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let database = format!("reader-compatible-storage-v{version}");
+            let db = legacy_db_with_store(&database, Arc::clone(&store), version).await;
+            let node = put_active_index(&db, DataScope::LegacyUnscoped).await;
+            let edge = put_active_definition(
+                &db,
+                DataScope::LegacyUnscoped,
+                SecondaryIndexDefinition::edge_equality("KNOWS", "kind")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                IndexId::new(2).unwrap(),
+            )
+            .await;
+            for entity_id in 1..=2 {
+                put_graph_entity(&db, node.scope, entity_id, "shared").await;
+                put_v3_entry(
+                    &db,
+                    node.scope,
+                    node.index_id,
+                    node.generation,
+                    entity_id,
+                    "shared",
+                )
+                .await;
+                let edge_id = entity_id + 10;
+                put_edge_graph_entity(&db, edge.scope, edge_id, "shared").await;
+                put_v3_edge_entry(&db, &edge, edge_id, "shared").await;
+            }
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            crate::migrations::stage_reader_compatible_storage_schema_for_tests(&transaction)
+                .unwrap();
+            transaction.commit().await.unwrap();
+            db.flush().await.unwrap();
+
+            let reader = crate::HelixDB::open_reader_with_object_store_for_tests(
+                database,
+                Arc::clone(&store),
+            )
+            .await
+            .expect("complete V2/V3 storage opens in explicit union mode");
+            assert_eq!(
+                reader.reader_storage_compatibility_for_tests(),
+                super::super::repository::ReaderStorageCompatibility::LegacyEqualityUnion
+            );
+            assert_node_and_edge_reader_queries(&reader).await;
+            reader.close().await.unwrap();
+            db.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn one_open_reader_remains_correct_across_every_v3_to_v4_boundary() {
+        let _guard = TEST_LOCK.lock().await;
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let database = "v4-open-reader-boundaries";
+        let db = v3_db_with_store(database, Arc::clone(&store)).await;
+        let generation = put_active_index(&db, DataScope::LegacyUnscoped).await;
+        for entity_id in 1..=2 {
+            put_graph_entity(&db, generation.scope, entity_id, "shared").await;
+            put_v3_entry(
+                &db,
+                generation.scope,
+                generation.index_id,
+                generation.generation,
+                entity_id,
+                "shared",
+            )
+            .await;
+        }
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        crate::migrations::stage_reader_compatible_storage_schema_for_tests(&transaction).unwrap();
+        transaction.commit().await.unwrap();
+        db.flush().await.unwrap();
+
+        let reader =
+            crate::HelixDB::open_reader_with_object_store_for_tests(database, Arc::clone(&store))
+                .await
+                .expect("complete V3 storage opens in union mode");
+        assert_eq!(
+            reader.reader_storage_compatibility_for_tests(),
+            super::super::repository::ReaderStorageCompatibility::LegacyEqualityUnion
+        );
+        assert_reader_queries(&reader).await;
+
+        inject_once(EqualityBitmapMigrationFailpoint::BatchAfter).unwrap();
+        assert!(migrate_v3_to_v4(&db).await.is_err());
+        db.flush().await.unwrap();
+        assert_reader_queries(&reader).await;
+
+        inject_once(EqualityBitmapMigrationFailpoint::PublicationAfter).unwrap();
+        assert!(migrate_v3_to_v4(&db).await.is_err());
+        db.flush().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert_reader_queries(&reader).await;
+                if reader.reader_storage_compatibility_for_tests()
+                    == super::super::repository::ReaderStorageCompatibility::Current
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the open reader switches monotonically to current storage");
+
+        cleanup_v3_nonunique_equality_rows(&db).await.unwrap();
+        db.flush().await.unwrap();
+        assert_reader_queries(&reader).await;
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
     }
 
     async fn assert_active_migrated(db: &Db, generation: &EqualityGeneration) {
