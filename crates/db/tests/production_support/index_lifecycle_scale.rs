@@ -123,7 +123,11 @@ fn drop_plan(spec: ir::IndexDdlDropSpec) -> exec::ExecutablePlan {
 }
 
 /// Builds one node equality lookup followed by an ID projection.
-fn equality_search_plan(property: &str, value: PlannerPropertyValue) -> exec::ExecutablePlan {
+fn equality_search_plan(
+    property: &str,
+    value: PlannerPropertyValue,
+    uniqueness: catalog::IndexUniqueness,
+) -> exec::ExecutablePlan {
     let access_id = exec::ExecStepId::new(1).expect("scale access id is positive");
     executable(
         ir::PlanKind::Read,
@@ -136,7 +140,8 @@ fn equality_search_plan(property: &str, value: PlannerPropertyValue) -> exec::Ex
                         exec::ExecNodeAccessPlan::exact_equality(
                             catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{property}"
-                            ))),
+                            )))
+                            .with_uniqueness(uniqueness),
                             catalog::ScopedPropertyKey::try_new(LABEL, property)
                                 .expect("scale equality key is valid"),
                             ir::IndexValue::Literal(
@@ -1066,6 +1071,7 @@ pub(super) async fn run_secondary_text_tenant() {
             &equality_search_plan(
                 NON_UNIQUE_PROPERTY,
                 PlannerPropertyValue::String("shared-target".to_string()),
+                catalog::IndexUniqueness::NonUnique,
             ),
             context::ParamBindings::default(),
         )
@@ -1091,6 +1097,7 @@ pub(super) async fn run_secondary_text_tenant() {
                 &equality_search_plan(
                     UNIQUE_PROPERTY,
                     PlannerPropertyValue::String("external-99999".to_string()),
+                    catalog::IndexUniqueness::Unique,
                 ),
                 context::ParamBindings::default(),
             )
@@ -1161,6 +1168,7 @@ pub(super) async fn run_secondary_text_tenant() {
                 &equality_search_plan(
                     NON_UNIQUE_PROPERTY,
                     PlannerPropertyValue::String("tenant-group-0".to_string()),
+                    catalog::IndexUniqueness::NonUnique,
                 ),
                 context::ParamBindings::default(),
                 scope,
