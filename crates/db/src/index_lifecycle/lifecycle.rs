@@ -345,7 +345,10 @@ async fn create_index_operation_in_transaction_with_physical(
     outbox::stage_operation(&transaction, scope, expected, &next_index, &operation).await?;
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
     execution_control.claim_write_commit()?;
-    transaction.commit().await?;
+    transaction
+        .commit()
+        .await
+        .map_err(HelixDbError::from_storage_commit)?;
     Ok(IndexDdlReceipt::Accepted {
         operation_id,
         index_id,
@@ -459,7 +462,10 @@ pub(crate) async fn drop_index_operation_with_control(
             )?;
             failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
             execution_control.claim_write_commit()?;
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)?;
             Ok(IndexDdlReceipt::ExistingOperation {
                 operation_id: *build_operation_id,
             })
@@ -498,7 +504,10 @@ pub(crate) async fn drop_index_operation_with_control(
             .await?;
             failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
             execution_control.claim_write_commit()?;
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)?;
             Ok(IndexDdlReceipt::Accepted {
                 operation_id,
                 index_id: index.index_id(),

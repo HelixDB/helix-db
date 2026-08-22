@@ -1502,20 +1502,31 @@ mod client_tests {
     }
 
     #[tokio::test]
-    async fn unknown_write_outcome_is_explicitly_terminal_and_sent_once() {
-        let body = r#"{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}"#;
-        let (base, handle) = spawn_capture_server(503, body).await;
-        let client = Client::new(Some(&base)).unwrap();
-        let error = client
-            .query::<serde_json::Value>(write_request())
-            .send()
-            .await
-            .expect_err("unknown write outcome must be terminal");
+    async fn direct_and_hosted_unknown_write_outcomes_are_terminal_and_sent_once() {
+        for (body, expected_code) in [
+            (
+                r#"{"error":"writer_fenced_commit_outcome_unknown","msg":"write outcome is unknown","retryable":false}"#,
+                "writer_fenced_commit_outcome_unknown",
+            ),
+            (
+                r#"{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}"#,
+                "WRITE_OUTCOME_UNKNOWN",
+            ),
+        ] {
+            let (base, handle) = spawn_capture_server(503, body).await;
+            let client = Client::new(Some(&base)).unwrap();
+            let error = client
+                .query::<serde_json::Value>(write_request())
+                .send()
+                .await
+                .expect_err("unknown write outcome must be terminal");
 
-        assert_eq!(handle.await.unwrap(), "/v2/query");
-        assert_eq!(error.remote_code(), Some("WRITE_OUTCOME_UNKNOWN"));
-        assert_eq!(error.retryable(), Some(false));
-        assert!(!error.is_retryable());
+            assert_eq!(handle.await.unwrap(), "/v2/query");
+            assert_eq!(error.remote_code(), Some(expected_code));
+            assert_eq!(error.retryable(), Some(false));
+            assert!(!error.is_conflict());
+            assert!(!error.is_retryable());
+        }
     }
 
     #[tokio::test]

@@ -1157,8 +1157,7 @@ export type IndexErrorCode =
   | "index_generation_exhausted"
   | "index_revision_exhausted"
   | "index_operation_revision_exhausted"
-  | "stale_index_generation"
-  | "writer_fenced_commit_outcome_unknown";
+  | "stale_index_generation";
 
 /** Decimal-string bounded-work counters. */
 export interface IndexOperationProgress {

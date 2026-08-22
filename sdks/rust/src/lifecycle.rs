@@ -185,8 +185,6 @@ pub enum IndexErrorCode {
     IndexOperationRevisionExhausted,
     /// A retained active handle no longer names the canonical generation.
     StaleIndexGeneration,
-    /// Writer fencing prevented the runtime from proving commit outcome.
-    WriterFencedCommitOutcomeUnknown,
 }
 
 /// Monotonic public progress counters.

@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request as HttpRequest, StatusCode};
+use axum::routing::post;
 use db::encoding::keys::tenant::{DataScope, TenantId};
 use db::encoding::property::Property as DbProperty;
 use db::execution::interpreter::{
@@ -386,6 +388,54 @@ fn vector_input_errors_are_client_failures_but_physical_errors_are_internal() {
             tonic::Code::Internal
         );
     }
+}
+
+#[tokio::test]
+async fn fenced_commit_outcome_crosses_http_once_and_is_terminal_to_the_rust_sdk() {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let handler_count = Arc::clone(&request_count);
+    let router = axum::Router::new().route(
+        "/v2/query",
+        post(move || {
+            let handler_count = Arc::clone(&handler_count);
+            async move {
+                handler_count.fetch_add(1, Ordering::SeqCst);
+                http::service_error_response(QueryServiceError::Db(
+                    db::error::HelixDbError::WriterFencedCommitOutcomeUnknown,
+                ))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let client = helix_db::Client::new(Some(&format!("http://{address}"))).unwrap();
+    let error = client
+        .query::<serde_json::Value>(QueryRequest::write(batch::write_batch()))
+        .send()
+        .await
+        .expect_err("fenced commit outcome must be terminal");
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(error.status_code(), Some(503));
+    assert_eq!(
+        error.remote_code(),
+        Some("writer_fenced_commit_outcome_unknown")
+    );
+    assert_eq!(error.retryable(), Some(false));
+    assert!(!error.is_conflict());
+    assert!(!error.is_retryable());
+
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1002,20 +1002,19 @@ func (IndexDdlAlreadyActive) indexDdlReceipt() {}
 type IndexErrorCode string
 
 const (
-	IndexLifecycleUnavailable        IndexErrorCode = "index_lifecycle_unavailable"
-	IndexAlreadyExists               IndexErrorCode = "index_already_exists"
-	IndexDefinitionConflict          IndexErrorCode = "index_definition_conflict"
-	IndexBusy                        IndexErrorCode = "index_busy"
-	IndexNotFound                    IndexErrorCode = "index_not_found"
-	IndexOperationNotFound           IndexErrorCode = "index_operation_not_found"
-	IndexOperationNotAbortable       IndexErrorCode = "index_operation_not_abortable"
-	IndexIDExhausted                 IndexErrorCode = "index_id_exhausted"
-	VectorPhysicalIDExhausted        IndexErrorCode = "vector_physical_id_exhausted"
-	IndexGenerationExhausted         IndexErrorCode = "index_generation_exhausted"
-	IndexRevisionExhausted           IndexErrorCode = "index_revision_exhausted"
-	IndexOperationRevisionExhausted  IndexErrorCode = "index_operation_revision_exhausted"
-	StaleIndexGeneration             IndexErrorCode = "stale_index_generation"
-	WriterFencedCommitOutcomeUnknown IndexErrorCode = "writer_fenced_commit_outcome_unknown"
+	IndexLifecycleUnavailable       IndexErrorCode = "index_lifecycle_unavailable"
+	IndexAlreadyExists              IndexErrorCode = "index_already_exists"
+	IndexDefinitionConflict         IndexErrorCode = "index_definition_conflict"
+	IndexBusy                       IndexErrorCode = "index_busy"
+	IndexNotFound                   IndexErrorCode = "index_not_found"
+	IndexOperationNotFound          IndexErrorCode = "index_operation_not_found"
+	IndexOperationNotAbortable      IndexErrorCode = "index_operation_not_abortable"
+	IndexIDExhausted                IndexErrorCode = "index_id_exhausted"
+	VectorPhysicalIDExhausted       IndexErrorCode = "vector_physical_id_exhausted"
+	IndexGenerationExhausted        IndexErrorCode = "index_generation_exhausted"
+	IndexRevisionExhausted          IndexErrorCode = "index_revision_exhausted"
+	IndexOperationRevisionExhausted IndexErrorCode = "index_operation_revision_exhausted"
+	StaleIndexGeneration            IndexErrorCode = "stale_index_generation"
 )
 
 // IndexOperationBlockerCode is a stable reason explicit control is required.

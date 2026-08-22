@@ -254,14 +254,23 @@ assert.throws(
   assert.equal(error.isRetryable(), false);
 }
 
-{
-  const body = '{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}';
+for (const [body, expectedCode] of [
+  [
+    '{"error":"writer_fenced_commit_outcome_unknown","msg":"write outcome is unknown","retryable":false}',
+    "writer_fenced_commit_outcome_unknown",
+  ],
+  ['{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}', "WRITE_OUTCOME_UNKNOWN"],
+] as const) {
   const server = await spawnCaptureServer({ status: 503, body });
   const client = new Client(server.base);
   await assert.rejects(
     client.query(sampleWriteRequest()).send(),
     (error: unknown) =>
-      error instanceof HelixError && error.code === "WRITE_OUTCOME_UNKNOWN" && error.retryable === false && !error.isRetryable(),
+      error instanceof HelixError &&
+      error.code === expectedCode &&
+      error.retryable === false &&
+      !error.isConflict() &&
+      !error.isRetryable(),
   );
   await server.captured;
   assert.equal(server.requestCount(), 1);

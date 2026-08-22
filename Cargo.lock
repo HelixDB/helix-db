@@ -4676,6 +4676,7 @@ dependencies = [
  "axum",
  "db",
  "helix-ast",
+ "helix-db",
  "helix-db-testkit",
  "helix-metrics",
  "helix-planner",

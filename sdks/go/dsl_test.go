@@ -708,37 +708,56 @@ func TestClientExecConflictError(t *testing.T) {
 }
 
 func TestClientUnknownWriteOutcomeIsTerminalAndSentOnce(t *testing.T) {
-	requestCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}`))
-	}))
-	defer server.Close()
-	client, err := NewClient(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, testCase := range []struct {
+		name string
+		body string
+		code QueryErrorCode
+	}{
+		{
+			name: "direct server",
+			body: `{"error":"writer_fenced_commit_outcome_unknown","msg":"write outcome is unknown","retryable":false}`,
+			code: QueryErrorCode("writer_fenced_commit_outcome_unknown"),
+		},
+		{
+			name: "hosted gateway",
+			body: `{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}`,
+			code: QueryErrorCode("WRITE_OUTCOME_UNKNOWN"),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(testCase.body))
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	request := WriteQuery("create_user").
-		VarAs("created", G().AddN("User", Props{Prop("name", "Ada")})).
-		Returning("created")
-	err = client.Exec(context.Background(), request, nil)
-	var helixErr *HelixError
-	if !errors.As(err, &helixErr) {
-		t.Fatalf("expected HelixError, got %T", err)
-	}
-	if requestCount != 1 {
-		t.Fatalf("write executed %d times, want exactly once", requestCount)
-	}
-	if helixErr.Code != QueryErrorCode("WRITE_OUTCOME_UNKNOWN") {
-		t.Fatalf("unexpected error code %q", helixErr.Code)
-	}
-	if helixErr.Retryable == nil || *helixErr.Retryable {
-		t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
-	}
-	if IsRetryable(err) {
-		t.Fatal("unknown write outcome must not be retryable")
+			request := WriteQuery("create_user").
+				VarAs("created", G().AddN("User", Props{Prop("name", "Ada")})).
+				Returning("created")
+			err = client.Exec(context.Background(), request, nil)
+			var helixErr *HelixError
+			if !errors.As(err, &helixErr) {
+				t.Fatalf("expected HelixError, got %T", err)
+			}
+			if requestCount != 1 {
+				t.Fatalf("write executed %d times, want exactly once", requestCount)
+			}
+			if helixErr.Code != testCase.code {
+				t.Fatalf("unexpected error code %q", helixErr.Code)
+			}
+			if helixErr.Retryable == nil || *helixErr.Retryable {
+				t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
+			}
+			if IsRetryable(err) {
+				t.Fatal("unknown write outcome must not be retryable")
+			}
+		})
 	}
 }
 

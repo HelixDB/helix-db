@@ -1472,7 +1472,6 @@ class IndexErrorCode(str, Enum):
     INDEX_REVISION_EXHAUSTED = "index_revision_exhausted"
     INDEX_OPERATION_REVISION_EXHAUSTED = "index_operation_revision_exhausted"
     STALE_INDEX_GENERATION = "stale_index_generation"
-    WRITER_FENCED_COMMIT_OUTCOME_UNKNOWN = "writer_fenced_commit_outcome_unknown"
 
 
 class IndexOperationBlockerCode(str, Enum):

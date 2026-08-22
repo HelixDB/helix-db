@@ -140,7 +140,11 @@ fn query_response(response: QueryResponse) -> Response {
 }
 
 pub(super) fn service_error_response(error: QueryServiceError) -> Response {
-    let status = if error.is_transaction_conflict() {
+    let terminal_write_outcome =
+        error.is_commit_outcome_unknown() || error.is_write_aborted_by_drain();
+    let status = if terminal_write_outcome {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if error.is_transaction_conflict() {
         StatusCode::CONFLICT
     } else {
         match &error {
@@ -160,13 +164,20 @@ pub(super) fn service_error_response(error: QueryServiceError) -> Response {
     };
     let code = error.error_code();
     let message = error.to_string();
-    error_response(status, code, message)
+    error_response_with_retryable(
+        status,
+        code,
+        message,
+        terminal_write_outcome.then_some(false),
+    )
 }
 
 #[derive(Serialize)]
 struct QueryErrorEnvelope<'a> {
     error: error_code::QueryErrorCode,
     msg: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retryable: Option<bool>,
 }
 
 fn error_response(
@@ -174,12 +185,22 @@ fn error_response(
     code: error_code::QueryErrorCode,
     message: impl Into<String>,
 ) -> Response {
+    error_response_with_retryable(status, code, message, None)
+}
+
+fn error_response_with_retryable(
+    status: StatusCode,
+    code: error_code::QueryErrorCode,
+    message: impl Into<String>,
+    retryable: Option<bool>,
+) -> Response {
     let message = message.into();
     json_response(
         status,
         &QueryErrorEnvelope {
             error: code,
             msg: &message,
+            retryable,
         },
     )
 }
@@ -371,5 +392,31 @@ mod tests {
             .expect("error message is a string")
             .contains("Index operation not found"));
         assert_eq!(json.get("code"), None);
+        assert_eq!(json.get("retryable"), None);
+    }
+
+    #[tokio::test]
+    async fn terminal_write_outcomes_are_503_and_explicitly_not_retryable() {
+        for (error, expected_code) in [
+            (
+                db::error::HelixDbError::WriterFencedCommitOutcomeUnknown,
+                "writer_fenced_commit_outcome_unknown",
+            ),
+            (
+                db::error::HelixDbError::WriteAbortedByDrain,
+                "write_aborted_by_drain",
+            ),
+        ] {
+            let response = service_error_response(QueryServiceError::Db(error));
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = to_bytes(response.into_body(), 4_096)
+                .await
+                .expect("terminal write error body is bounded");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("terminal write error body is JSON");
+            assert_eq!(json["error"], expected_code);
+            assert_eq!(json["retryable"], false);
+            assert!(json["msg"].is_string());
+        }
     }
 }

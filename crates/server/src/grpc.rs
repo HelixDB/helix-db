@@ -168,7 +168,9 @@ fn validate_options_for_request_type(
 pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
     let error_code = error.error_code();
     let message = error.to_string();
-    let code = if error.is_transaction_conflict() {
+    let code = if error.is_commit_outcome_unknown() || error.is_write_aborted_by_drain() {
+        tonic::Code::Unavailable
+    } else if error.is_transaction_conflict() {
         tonic::Code::Aborted
     } else {
         match error {
@@ -227,6 +229,16 @@ mod tests {
                 }),
                 tonic::Code::FailedPrecondition,
                 "writer_mode_required",
+            ),
+            (
+                QueryServiceError::Db(db::error::HelixDbError::WriterFencedCommitOutcomeUnknown),
+                tonic::Code::Unavailable,
+                "writer_fenced_commit_outcome_unknown",
+            ),
+            (
+                QueryServiceError::Db(db::error::HelixDbError::WriteAbortedByDrain),
+                tonic::Code::Unavailable,
+                "write_aborted_by_drain",
             ),
             (
                 QueryServiceError::Db(db::error::HelixDbError::IndexNotFound(

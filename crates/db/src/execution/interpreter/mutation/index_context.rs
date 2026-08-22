@@ -360,6 +360,9 @@ async fn classify_commit_error(
     reader: &(impl slatedb::DbReadOps + Sync),
     error: slatedb::Error,
 ) -> crate::HelixDbError {
+    if error.kind() == slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced) {
+        return crate::HelixDbError::from_storage_commit(error);
+    }
     if error.kind() != slatedb::ErrorKind::Transaction {
         return error.into();
     }

@@ -27,6 +27,7 @@ tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
 async-trait = "0.1"
+helix-db = { path = "../../sdks/rust" }
 helix-db-testkit = { path = "../db-testkit" }
 helix-planner = { path = "../planner" }
 tokio-test = "0.4"

@@ -87,8 +87,7 @@ impl From<HelixDbError> for HelixError {
             }
             HelixDbError::TransactionConflict(_)
             | HelixDbError::RequestReadViewChanged
-            | HelixDbError::StaleIndexGeneration { .. }
-            | HelixDbError::WriterFencedCommitOutcomeUnknown => Self::Transaction {
+            | HelixDbError::StaleIndexGeneration { .. } => Self::Transaction {
                 error: error_code,
                 msg,
             },
@@ -113,6 +112,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::InvalidVectorItem(_)
             | HelixDbError::IndexLifecycleUnavailable { .. }
             | HelixDbError::InvalidIndexV2Model(_)
+            | HelixDbError::WriterFencedCommitOutcomeUnknown
             | HelixDbError::MigrationRequired { .. }
             | HelixDbError::WriterMigrationRequired { .. }
             | HelixDbError::UnsupportedIndexStorageVersion { .. }
@@ -242,10 +242,10 @@ mod tests {
     }
 
     #[test]
-    fn fenced_commit_outcomes_are_retryable_transaction_failures() {
+    fn fenced_commit_outcomes_are_terminal_internal_failures() {
         assert!(matches!(
             HelixError::from(HelixDbError::WriterFencedCommitOutcomeUnknown),
-            HelixError::Transaction { .. }
+            HelixError::Internal { .. }
         ));
     }
 

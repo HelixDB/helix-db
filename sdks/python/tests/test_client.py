@@ -287,30 +287,41 @@ class ClientTests(unittest.TestCase):
             .var_as("created", g().add_n("User", {"name": "Ada"}))
             .returning(["created"])
         )
-        calls = 0
+        cases = [
+            (
+                b'{"error":"writer_fenced_commit_outcome_unknown",'
+                b'"msg":"write outcome is unknown","retryable":false}',
+                "writer_fenced_commit_outcome_unknown",
+            ),
+            (
+                b'{"code":"WRITE_OUTCOME_UNKNOWN",'
+                b'"error":"write outcome is unknown","retryable":false}',
+                "WRITE_OUTCOME_UNKNOWN",
+            ),
+        ]
+        for body, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                calls = 0
 
-        def fake_urlopen(req):
-            nonlocal calls
-            calls += 1
-            raise HTTPError(
-                req.full_url,
-                503,
-                "Service Unavailable",
-                hdrs={},
-                fp=BytesIO(
-                    b'{"code":"WRITE_OUTCOME_UNKNOWN",'
-                    b'"error":"write outcome is unknown","retryable":false}'
-                ),
-            )
+                def fake_urlopen(req):
+                    nonlocal calls
+                    calls += 1
+                    raise HTTPError(
+                        req.full_url,
+                        503,
+                        "Service Unavailable",
+                        hdrs={},
+                        fp=BytesIO(body),
+                    )
 
-        with patch("helixdb.client.urlopen", fake_urlopen):
-            with self.assertRaises(HelixError) as ctx:
-                Client("http://127.0.0.1:6969").query(request)
+                with patch("helixdb.client.urlopen", fake_urlopen):
+                    with self.assertRaises(HelixError) as ctx:
+                        Client("http://127.0.0.1:6969").query(request)
 
-        self.assertEqual(calls, 1)
-        self.assertEqual(ctx.exception.code, "WRITE_OUTCOME_UNKNOWN")
-        self.assertIs(ctx.exception.retryable, False)
-        self.assertFalse(ctx.exception.is_retryable())
+                self.assertEqual(calls, 1)
+                self.assertEqual(ctx.exception.code, expected_code)
+                self.assertIs(ctx.exception.retryable, False)
+                self.assertFalse(ctx.exception.is_retryable())
 
     def test_retryability_requires_explicit_boolean_true(self) -> None:
         cases = [

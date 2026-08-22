@@ -5751,9 +5751,34 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
             .find_map(|step| match &step.op {
                 exec::ExecOp::Access { plan } => Some(match plan.as_ref() {
                     exec::ExecAccessPlan::Limited(limited) => limited.source(),
-                    access => access,
+                    access @ (exec::ExecAccessPlan::Node(_) | exec::ExecAccessPlan::Edge(_)) => {
+                        access
+                    }
                 }),
-                _ => None,
+                exec::ExecOp::Count { .. }
+                | exec::ExecOp::KvRead(_)
+                | exec::ExecOp::Expand { .. }
+                | exec::ExecOp::VectorSearch { .. }
+                | exec::ExecOp::TextSearch { .. }
+                | exec::ExecOp::Filter { .. }
+                | exec::ExecOp::Limit { .. }
+                | exec::ExecOp::Skip { .. }
+                | exec::ExecOp::Range { .. }
+                | exec::ExecOp::Distinct
+                | exec::ExecOp::Order { .. }
+                | exec::ExecOp::Project { .. }
+                | exec::ExecOp::Aggregate { .. }
+                | exec::ExecOp::Variable { .. }
+                | exec::ExecOp::Branch { .. }
+                | exec::ExecOp::Repeat { .. }
+                | exec::ExecOp::ShortestPath { .. }
+                | exec::ExecOp::Mutation { .. }
+                | exec::ExecOp::IndexDdl { .. }
+                | exec::ExecOp::Merge { .. }
+                | exec::ExecOp::Reserved { .. }
+                | exec::ExecOp::ForEach { .. }
+                | exec::ExecOp::Barrier { .. }
+                | exec::ExecOp::Noop => None,
             })
             .expect("indexed plan has an access step");
         match (expected_driver, indexed_access) {
