@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -392,17 +393,56 @@ fn vector_input_errors_are_client_failures_but_physical_errors_are_internal() {
 
 #[tokio::test]
 async fn fenced_commit_outcome_crosses_http_once_and_is_terminal_to_the_rust_sdk() {
+    let object_store = Arc::new(slatedb::object_store::memory::InMemory::new());
+    let old_writer = slatedb::Db::builder("server-real-fenced-write-outcome", object_store.clone())
+        .with_writer_epoch(NonZeroU64::new(20).unwrap())
+        .build()
+        .await
+        .expect("epoch 20 writer opens");
+    let old_transaction = old_writer
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("old transaction begins before fencing");
+    old_transaction
+        .put(b"business-id", b"exactly-once")
+        .expect("old transaction stages a write");
+    let new_writer = slatedb::Db::builder("server-real-fenced-write-outcome", object_store)
+        .with_writer_epoch(NonZeroU64::new(21).unwrap())
+        .build()
+        .await
+        .expect("epoch 21 writer fences epoch 20");
+    let storage_error = old_transaction
+        .commit()
+        .await
+        .expect_err("the old transaction cannot commit after fencing");
+    assert_eq!(
+        storage_error.kind(),
+        slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+    );
+    let terminal_error = db::error::HelixDbError::from_storage_commit(storage_error);
+    assert!(matches!(
+        terminal_error,
+        db::error::HelixDbError::WriterFencedCommitOutcomeUnknown
+    ));
+    new_writer.close().await.expect("new writer closes cleanly");
+
     let request_count = Arc::new(AtomicUsize::new(0));
     let handler_count = Arc::clone(&request_count);
+    let terminal_error = Arc::new(std::sync::Mutex::new(Some(terminal_error)));
+    let handler_error = Arc::clone(&terminal_error);
     let router = axum::Router::new().route(
         "/v2/query",
         post(move || {
             let handler_count = Arc::clone(&handler_count);
+            let handler_error = Arc::clone(&handler_error);
             async move {
                 handler_count.fetch_add(1, Ordering::SeqCst);
-                http::service_error_response(QueryServiceError::Db(
-                    db::error::HelixDbError::WriterFencedCommitOutcomeUnknown,
-                ))
+                let error = handler_error
+                    .lock()
+                    .expect("terminal error lock is not poisoned")
+                    .take()
+                    .expect("the Rust SDK sends exactly one request");
+                http::service_error_response(QueryServiceError::Db(error))
             }
         }),
     );

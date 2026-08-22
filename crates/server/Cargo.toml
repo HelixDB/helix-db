@@ -30,6 +30,7 @@ async-trait = "0.1"
 helix-db = { path = "../../sdks/rust" }
 helix-db-testkit = { path = "../db-testkit" }
 helix-planner = { path = "../planner" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "c64286ec8e5aaa724f12a8c54b58fe73efcff534" }
 tokio-test = "0.4"
 tokio-stream = { version = "0.1", features = ["net"] }
 tower = { version = "0.5", features = ["util"] }

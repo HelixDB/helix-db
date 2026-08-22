@@ -612,7 +612,7 @@ impl HelixDbError {
     /// Once SlateDB reports that the committing writer was fenced, neither a
     /// retryable conflict nor a definite abort can be proven. Callers must
     /// therefore preserve the request as a terminal unknown outcome.
-    pub(crate) fn from_storage_commit(error: slatedb::Error) -> Self {
+    pub fn from_storage_commit(error: slatedb::Error) -> Self {
         if error.kind() == ErrorKind::Closed(slatedb::CloseReason::Fenced) {
             Self::WriterFencedCommitOutcomeUnknown
         } else {
