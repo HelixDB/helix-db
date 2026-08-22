@@ -1413,11 +1413,25 @@ impl HelixDB {
     }
 
     /// Validates and atomically enqueues one public CREATE against the current source cut.
+    #[cfg(test)]
     pub(crate) async fn enqueue_index_create(
         &self,
         scope: DataScope,
         spec: &ir::IndexDdlCreateSpec,
         mode: ir::IndexCreateMode,
+    ) -> Result<index_lifecycle::IndexDdlReceipt> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.enqueue_index_create_with_control(scope, spec, mode, &execution_control)
+            .await
+    }
+
+    /// Enqueues one request-owned CREATE at its exact durable commit boundary.
+    pub(crate) async fn enqueue_index_create_with_control(
+        &self,
+        scope: DataScope,
+        spec: &ir::IndexDdlCreateSpec,
+        mode: ir::IndexCreateMode,
+        execution_control: &execution_control::ExecutionControl,
     ) -> Result<index_lifecycle::IndexDdlReceipt> {
         let definition = runtime_catalog::dynamic_index_definition_from_create_spec(spec)?;
         let family = match definition.family() {
@@ -1433,22 +1447,37 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        let receipt = index_lifecycle::lifecycle::create_index_operation_from_current_source(
-            writer.db(),
-            scope,
-            definition,
-            mode,
-        )
-        .await?;
+        let receipt =
+            index_lifecycle::lifecycle::create_index_operation_from_current_source_with_control(
+                writer.db(),
+                scope,
+                definition,
+                mode,
+                execution_control,
+            )
+            .await?;
         self.notify_index_worker();
         Ok(receipt)
     }
 
     /// Resolves canonical settings and atomically enqueues one public DROP or abort.
+    #[cfg(test)]
     pub(crate) async fn enqueue_index_drop(
         &self,
         scope: DataScope,
         spec: &ir::IndexDdlDropSpec,
+    ) -> Result<index_lifecycle::IndexDdlReceipt> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.enqueue_index_drop_with_control(scope, spec, &execution_control)
+            .await
+    }
+
+    /// Enqueues one request-owned DROP at its exact durable commit boundary.
+    pub(crate) async fn enqueue_index_drop_with_control(
+        &self,
+        scope: DataScope,
+        spec: &ir::IndexDdlDropSpec,
+        execution_control: &execution_control::ExecutionControl,
     ) -> Result<index_lifecycle::IndexDdlReceipt> {
         let identity = runtime_catalog::dynamic_index_identity_from_drop_spec(spec)?;
         let family = match identity.family() {
@@ -1479,9 +1508,13 @@ impl HelixDB {
             spec,
             record.definition(),
         )?;
-        let receipt =
-            index_lifecycle::lifecycle::drop_index_operation(writer.db(), scope, &definition)
-                .await?;
+        let receipt = index_lifecycle::lifecycle::drop_index_operation_with_control(
+            writer.db(),
+            scope,
+            &definition,
+            execution_control,
+        )
+        .await?;
         self.notify_index_worker();
         Ok(receipt)
     }
@@ -1492,13 +1525,30 @@ impl HelixDB {
         scope: DataScope,
         operation_id: index_lifecycle::IndexOperationId,
     ) -> Result<index_lifecycle::IndexOperationStatus> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.retry_index_operation_with_control(scope, operation_id, &execution_control)
+            .await
+    }
+
+    /// Retries one request-owned operation at its exact durable commit boundary.
+    pub(crate) async fn retry_index_operation_with_control(
+        &self,
+        scope: DataScope,
+        operation_id: index_lifecycle::IndexOperationId,
+        execution_control: &execution_control::ExecutionControl,
+    ) -> Result<index_lifecycle::IndexOperationStatus> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
                 actual: self.mode().as_str(),
             });
         };
-        let operation =
-            index_lifecycle::outbox::retry_operation(writer.db(), scope, operation_id).await?;
+        let operation = index_lifecycle::outbox::retry_operation_with_control(
+            writer.db(),
+            scope,
+            operation_id,
+            execution_control,
+        )
+        .await?;
         if matches!(
             operation.execution_state(),
             index_lifecycle::IndexOperationExecutionState::Queued { .. }
@@ -1517,13 +1567,30 @@ impl HelixDB {
         scope: DataScope,
         operation_id: index_lifecycle::IndexOperationId,
     ) -> Result<index_lifecycle::IndexOperationStatus> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.abort_index_operation_with_control(scope, operation_id, &execution_control)
+            .await
+    }
+
+    /// Aborts one request-owned operation at its exact durable commit boundary.
+    pub(crate) async fn abort_index_operation_with_control(
+        &self,
+        scope: DataScope,
+        operation_id: index_lifecycle::IndexOperationId,
+        execution_control: &execution_control::ExecutionControl,
+    ) -> Result<index_lifecycle::IndexOperationStatus> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
                 actual: self.mode().as_str(),
             });
         };
-        let operation =
-            index_lifecycle::outbox::abort_operation(writer.db(), scope, operation_id).await?;
+        let operation = index_lifecycle::outbox::abort_operation_with_control(
+            writer.db(),
+            scope,
+            operation_id,
+            execution_control,
+        )
+        .await?;
         if matches!(
             operation.execution_state(),
             index_lifecycle::IndexOperationExecutionState::Queued { .. }

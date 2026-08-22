@@ -33,26 +33,46 @@ impl<'db> ExecutionContext<'db> {
             ir::IndexDdlPlan::RetryOperation { operation_id: id } => {
                 let status = self
                     .db
-                    .retry_index_operation(self.tenant_scope, operation_id(id)?)
+                    .retry_index_operation_with_control(
+                        self.tenant_scope,
+                        operation_id(id)?,
+                        &self.execution_control,
+                    )
                     .await?;
                 Ok(ExecutionValue::IndexOperationStatus(status))
             }
             ir::IndexDdlPlan::AbortOperation { operation_id: id } => {
                 let status = self
                     .db
-                    .abort_index_operation(self.tenant_scope, operation_id(id)?)
+                    .abort_index_operation_with_control(
+                        self.tenant_scope,
+                        operation_id(id)?,
+                        &self.execution_control,
+                    )
                     .await?;
                 Ok(ExecutionValue::IndexOperationStatus(status))
             }
             ir::IndexDdlPlan::Create { spec, mode } => {
                 let receipt = self
                     .db
-                    .enqueue_index_create(self.tenant_scope, spec, *mode)
+                    .enqueue_index_create_with_control(
+                        self.tenant_scope,
+                        spec,
+                        *mode,
+                        &self.execution_control,
+                    )
                     .await?;
                 Ok(ExecutionValue::IndexDdlReceipt(receipt))
             }
             ir::IndexDdlPlan::Drop { spec } => {
-                let receipt = self.db.enqueue_index_drop(self.tenant_scope, spec).await?;
+                let receipt = self
+                    .db
+                    .enqueue_index_drop_with_control(
+                        self.tenant_scope,
+                        spec,
+                        &self.execution_control,
+                    )
+                    .await?;
                 Ok(ExecutionValue::IndexDdlReceipt(receipt))
             }
         }
