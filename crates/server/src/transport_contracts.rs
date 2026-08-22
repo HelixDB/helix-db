@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request as HttpRequest, StatusCode};
-use db::encoding::keys::tenant::{DataScope, TenantId};
+use db::encoding::keys::scope::{DataScope, TenantId};
 use db::encoding::property::Property as DbProperty;
 use db::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionValue, ReturnedValue, RowPath, RowSack,

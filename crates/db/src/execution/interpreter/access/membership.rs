@@ -3,7 +3,7 @@
 use helix_planner::{catalog, exec, ir};
 
 use super::super::{ElementRef, ExecutionContext, ExecutionRow};
-use crate::encoding::property::property_value::PropertyValue;
+use crate::encoding::v2::values::property::{equality_index_value, property_value::PropertyValue};
 use crate::error::Result;
 
 #[derive(Debug, PartialEq)]
@@ -134,14 +134,16 @@ fn bounded_index_members(
     values
         .into_iter()
         .try_fold(Vec::with_capacity(max_values.get()), |mut unique, value| {
-            if !value.eq_value(&value) {
-                return Some(unique);
-            }
-            if matches!(
-                value,
-                PropertyValue::Null | PropertyValue::Array(_) | PropertyValue::Object(_)
-            ) {
-                return None;
+            match equality_index_value::project_equality_value(&value) {
+                equality_index_value::EqualityValueProjection::Indexed(_) => {}
+                equality_index_value::EqualityValueProjection::NonReflexive => {
+                    return Some(unique);
+                }
+                equality_index_value::EqualityValueProjection::AuthoritativeNull
+                | equality_index_value::EqualityValueProjection::Unsupported(_)
+                | equality_index_value::EqualityValueProjection::Oversized { .. } => {
+                    return None;
+                }
             }
             if unique
                 .iter()
@@ -261,6 +263,21 @@ mod tests {
         assert_eq!(
             bounded_index_members([PropertyValue::Object(Default::default())], limit),
             None
+        );
+
+        let oversized_bytes =
+            PropertyValue::Bytes(vec![0; equality_index_value::MAX_EQUALITY_CANONICAL_LEN]);
+        assert_eq!(
+            runtime_equality_domain_from_value(oversized_bytes.clone(), limit),
+            RuntimeEqualityDomain::Authoritative(oversized_bytes)
+        );
+
+        let oversized_strings = PropertyValue::StringArray(vec![
+            "x".repeat(equality_index_value::MAX_EQUALITY_CANONICAL_LEN)
+        ]);
+        assert_eq!(
+            runtime_equality_domain_from_value(oversized_strings.clone(), limit),
+            RuntimeEqualityDomain::Authoritative(oversized_strings)
         );
     }
 }

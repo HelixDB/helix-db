@@ -7,7 +7,7 @@
 
 use std::any::TypeId;
 
-use crate::encoding::v1::values::vector_generation::{
+use crate::encoding::v2::values::indexes::vector::{
     ActiveMetricKind, ActiveScoreSemantic, ActiveVectorCodec, CosineNormPolicyId,
 };
 use crate::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
@@ -90,7 +90,7 @@ mod tests {
     use bytemuck::{Pod, Zeroable};
 
     use super::*;
-    use crate::encoding::v1::values::vector_generation::{
+    use crate::encoding::v2::values::indexes::vector::{
         ActiveScoreSemantic, MetricKind, VectorCodecKind,
     };
     use crate::search::vector::{item::Item, unaligned_vector::UnalignedVector};

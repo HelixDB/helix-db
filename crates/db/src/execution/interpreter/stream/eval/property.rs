@@ -131,7 +131,7 @@ impl<'db> ExecutionContext<'db> {
                 keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(*id))
             }
         };
-        let key = keys::Key::Data {
+        let key = keys::DataKey::Data {
             scope: self.tenant_scope,
             kind,
         }

@@ -31,25 +31,25 @@ use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDir
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{decode_properties, Property};
 #[cfg(test)]
-use crate::encoding::v1::keys::metadata::MetadataKey;
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::metadata::MetadataKey;
+use crate::encoding::v2::keys::scope::DataScope;
 #[cfg(test)]
-use crate::encoding::v1::keys::GlobalKeyKind;
-use crate::encoding::v1::keys::{
-    DataKeyKind, EdgePropertyByIdKey, Key, KeyPrefix, NodePropertyKey,
-};
-use crate::encoding::v1::property::equality_value::{
-    project_equality_value, EqualityValueProjection,
-};
-use crate::encoding::v1::property::range_value::{
-    project_range_value, CanonicalRangeValue, RangeValueProjection,
-};
-#[cfg(test)]
-use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::GlobalKeyKind;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, RecordKind, ScopedKey,
     SecondaryEntryKey, SecondaryEntryLane, SecondaryEqualityBitmapKey,
+};
+use crate::encoding::v2::keys::{
+    DataKey, DataKeyKind, EdgePropertyByIdKey, KeyPrefix, NodePropertyKey,
+};
+#[cfg(test)]
+use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
+use crate::encoding::v2::values::property::equality_index_value::{
+    project_equality_value, EqualityValueProjection,
+};
+use crate::encoding::v2::values::property::range_index_value::{
+    project_range_value, CanonicalRangeValue, RangeValueProjection,
 };
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_delta, decode_index_record, decode_secondary_entry,
@@ -3497,12 +3497,12 @@ async fn read_authoritative_properties(
 
 pub(super) fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
     match entity.kind {
-        IndexElementKind::Node => Key::Data {
+        IndexElementKind::Node => DataKey::Data {
             scope,
             kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity.id.get())),
         }
         .to_bytes(),
-        IndexElementKind::Edge => Key::Data {
+        IndexElementKind::Edge => DataKey::Data {
             scope,
             kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(entity.id.get())),
         }
@@ -3547,7 +3547,7 @@ pub(super) fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
         IndexElementKind::Node => KeyPrefix::NodeProperty,
         IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
     };
-    Key::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
+    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
 }
 
 pub(super) fn source_entity(
@@ -3555,24 +3555,24 @@ pub(super) fn source_entity(
     expected: IndexElementKind,
     key: &[u8],
 ) -> Result<Option<IndexEntityId>> {
-    let parsed = Key::parse_from_slice(scope, key)?;
+    let parsed = DataKey::parse_from_slice(scope, key)?;
     Ok(match (expected, parsed) {
         (
             IndexElementKind::Node,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::NodeProperty(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.node_id())),
         (
             IndexElementKind::Edge,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::EdgePropertyById(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, Key::Data { .. }) => None,
-        (IndexElementKind::Node, Key::Data { .. }) | (_, Key::Global { .. }) => {
+        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
+        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
             return Err(corruption(
                 "secondary source prefix yielded another key kind",
             ));
@@ -3639,8 +3639,8 @@ mod tests {
     use crate::config::{
         SearchIndexBackfillLimits, SecondaryIndexDefinition, VectorIndexDefinition,
     };
-    use crate::encoding::v1::property::encode_properties;
     use crate::encoding::v2::values::encode_index_record;
+    use crate::encoding::v2::values::property::encode_properties;
     use crate::index_lifecycle::lifecycle::{
         create_index_operation, drop_index_operation, InitialBuildProgress,
     };
@@ -5199,12 +5199,12 @@ mod tests {
 
     fn source_key(scope: DataScope, kind: IndexElementKind, entity_id: u64) -> Bytes {
         match kind {
-            IndexElementKind::Node => Key::Data {
+            IndexElementKind::Node => DataKey::Data {
                 scope,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
             }
             .to_bytes(),
-            IndexElementKind::Edge => Key::Data {
+            IndexElementKind::Edge => DataKey::Data {
                 scope,
                 kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(entity_id)),
             }
@@ -5639,7 +5639,7 @@ mod tests {
     #[tokio::test]
     async fn shared_edge_equality_builds_one_bitmap_and_serves_one_point_read() {
         let db = test_db("secondary-shared-edge-bitmap-read").await;
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
             0xFD00_0000_0000_0000_0000_0000_0000_0007,
         ));
         let definition = validated(
@@ -6453,7 +6453,7 @@ mod tests {
 
         let scopes = [
             DataScope::LegacyUnscoped,
-            DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+            DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
                 u128::from_be_bytes([0xFD; 16]),
             )),
         ];
@@ -6613,7 +6613,7 @@ mod tests {
     #[tokio::test]
     async fn source_upper_bound_uses_the_exclusive_allocator_watermark() {
         let db = test_db("secondary-source-upper-bound").await;
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(7));
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(7));
         let definition = validated(
             SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("node equality definition"),
@@ -6629,7 +6629,7 @@ mod tests {
             source_cursor(scope, IndexElementKind::Node, 0)
         );
         db.put(
-            Key::Global {
+            DataKey::Global {
                 kind: GlobalKeyKind::Metadata(MetadataKey::next_node_id_key()),
             }
             .to_bytes(),
@@ -6652,7 +6652,7 @@ mod tests {
             unreachable!("test definition is secondary");
         };
         db.put(
-            Key::Global {
+            DataKey::Global {
                 kind: GlobalKeyKind::Metadata(MetadataKey::next_edge_id_key()),
             }
             .to_bytes(),
@@ -7090,8 +7090,8 @@ mod tests {
     #[tokio::test]
     async fn tenant_move_keeps_generation_rows_in_their_exact_scopes() {
         let db = test_db("secondary-tenant-move").await;
-        let tenant_a = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(1));
-        let tenant_b = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(2));
+        let tenant_a = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(1));
+        let tenant_b = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(2));
         let definition = validated(
             SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("node equality definition"),
@@ -7194,7 +7194,7 @@ mod tests {
         bootstrap_writer(&db)
             .await
             .expect("reopen test database bootstraps");
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
             0xABCD,
         ));
         let definition = validated(

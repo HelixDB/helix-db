@@ -724,7 +724,7 @@ pub(super) mod tests {
             .transition(crate::index_lifecycle::IndexStateTransition::Activate)
             .expect("exact dispatch fixture activates");
         crate::index_lifecycle::ActiveIndexHandle::try_from_record(
-            crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             &active,
         )
         .expect("active fixture projects one authorized handle")
@@ -917,7 +917,7 @@ pub(super) mod tests {
 
     #[cfg_attr(test, tokio::test)]
     async fn exact_equality_dispatch_rejects_every_wrong_catalog_lane() {
-        use crate::encoding::v1::keys::tenant::DataScope;
+        use crate::encoding::v2::keys::scope::DataScope;
 
         let db = test_support::open_db("access-exact-equality-lanes").await;
         let value = DbPropertyValue::String("active".to_string());
@@ -1134,7 +1134,7 @@ pub(super) mod tests {
         )
         .unwrap();
         let index_key = |identity| {
-            crate::encoding::v2::keys::Key::Data {
+            crate::encoding::v2::keys::ManagedIndexKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: crate::encoding::v2::keys::ScopedKey::index_record(identity),
             }

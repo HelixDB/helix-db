@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use db::config::{DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, TextElementType};
-use db::encoding::v1::keys::tenant::DataScope;
+use db::encoding::v2::keys::scope::DataScope;
 use db::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue,
 };

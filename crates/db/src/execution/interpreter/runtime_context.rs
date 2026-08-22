@@ -269,7 +269,7 @@ impl RequestWriteScopeState {
 
 pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) db: &'db HelixDB,
-    pub(in crate::execution::interpreter) tenant_scope: crate::encoding::keys::tenant::DataScope,
+    pub(in crate::execution::interpreter) tenant_scope: crate::encoding::keys::scope::DataScope,
     pub(in crate::execution::interpreter) params: ParamBindingsOwnership,
     pub(in crate::execution::interpreter) variables: ExecutionValueStore<ir::NonEmptyString>,
     pub(in crate::execution::interpreter) variable_return_shapes:
@@ -298,7 +298,7 @@ impl<'db> ExecutionContext<'db> {
         Self::new_scoped(
             db,
             params,
-            crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+            crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         )
     }
 
@@ -306,7 +306,7 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn new_scoped(
         db: &'db HelixDB,
         params: context::ParamBindings,
-        tenant_scope: crate::encoding::keys::tenant::DataScope,
+        tenant_scope: crate::encoding::keys::scope::DataScope,
     ) -> Self {
         Self::new_scoped_controlled(
             db,
@@ -319,7 +319,7 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn new_scoped_controlled(
         db: &'db HelixDB,
         params: context::ParamBindings,
-        tenant_scope: crate::encoding::keys::tenant::DataScope,
+        tenant_scope: crate::encoding::keys::scope::DataScope,
         execution_control: crate::execution_control::ExecutionControl,
     ) -> Self {
         Self::new_scoped_controlled_with_catalog_freshness(
@@ -334,7 +334,7 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn new_scoped_controlled_with_catalog_freshness(
         db: &'db HelixDB,
         params: context::ParamBindings,
-        tenant_scope: crate::encoding::keys::tenant::DataScope,
+        tenant_scope: crate::encoding::keys::scope::DataScope,
         execution_control: crate::execution_control::ExecutionControl,
         catalog_freshness: PendingCatalogFreshness,
     ) -> Self {

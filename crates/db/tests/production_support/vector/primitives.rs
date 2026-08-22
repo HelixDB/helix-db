@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::num::NonZeroUsize;
 
 use super::*;
-use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
 
 /// Process-local invalid codec used only to exercise generic decoder defenses.
 ///
@@ -341,8 +341,8 @@ pub(crate) fn run() {
         .with_m(usize::MAX);
     assert_eq!(extreme_connections.m0, 0);
     assert!(extreme_connections.validate().is_err());
-    let metadata_key = crate::encoding::v1::keys::vectors::VectorKey::IndexMetadata(
-        crate::encoding::v1::keys::vectors::VectorIndexMetadataKey::new(7),
+    let metadata_key = crate::encoding::v2::keys::indexes::vector::VectorKey::IndexMetadata(
+        crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey::new(7),
     )
     .to_bytes();
     assert!(is_vector_index_metadata_key(&metadata_key));

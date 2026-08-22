@@ -30,18 +30,113 @@ MATRIX_TEST = re.compile(r"^\s+test:\s*(?P<test>[A-Za-z0-9_:.-]+)\s*$", re.MULTI
 FLAG_KIND = {"--test": "test", "--bench": "bench", "--bin": "bin"}
 TARGET_KIND_ORDER = ("lib", "test", "bench", "bin")
 CODEC_OWNERS = {
+    "legacy/tenant_envelope.rs": "struct LegacyTenantEnvelope",
+    "legacy/edge_property_pair.rs": "struct LegacyEdgePropertyPairKey",
+    "legacy/index_catalog.rs": "enum LegacyDynamicIndexCatalogEntry",
+    "legacy/text/storage_keys.rs": "enum LegacyTextMetadataElement",
+    "legacy/text/manifest.rs": "enum LegacyTextManifestError",
+    "legacy/text/live_state.rs": "struct LegacyTextLiveStateError",
+    "legacy/text/version_counter.rs": "enum LegacyTextVersionCounterError",
+    "legacy/vector/metadata.rs": "struct LegacyVectorIndexMetadata",
+    "legacy/vector/transaction_guard.rs": "struct LegacyVectorTxnGuardKey",
     "keys/global.rs": "enum GlobalKey",
     "keys/lifecycle.rs": "struct IndexRecordKey",
-    "keys/indexes/equality.rs": "struct SecondaryEquality",
-    "keys/indexes/range.rs": "struct SecondaryRange",
+    "keys/indexes/secondary.rs": "struct SecondaryEqualityEntryKey",
     "keys/indexes/text.rs": "struct TextManifestRootKey",
-    "keys/indexes/vector.rs": "struct VectorPartitionMappingKey",
+    "keys/indexes/vector/metadata.rs": "struct VectorPartitionMappingKey",
     "values/global.rs": "fn encode_metadata_value",
-    "values/lifecycle.rs": "fn encode_index_record",
+    "values/lifecycle/index_record.rs": "fn encode_index_record",
     "values/indexes/equality.rs": "struct SecondaryEqualityBitmapValue",
     "values/indexes/range.rs": "fn encode_entry",
     "values/indexes/text.rs": "fn encode_manifest_root",
-    "values/indexes/vector.rs": "fn encode_partition_mapping",
+    "values/indexes/vector/generation.rs": "fn encode_partition_mapping",
+}
+V2_SOURCE_FILES = {
+    "mod.rs",
+    "legacy/mod.rs",
+    "legacy/tenant_envelope.rs",
+    "legacy/edge_property_pair.rs",
+    "legacy/index_catalog.rs",
+    "legacy/text/mod.rs",
+    "legacy/text/storage_keys.rs",
+    "legacy/text/manifest.rs",
+    "legacy/text/live_state.rs",
+    "legacy/text/version_counter.rs",
+    "legacy/vector/mod.rs",
+    "legacy/vector/metadata.rs",
+    "legacy/vector/transaction_guard.rs",
+    "keys/mod.rs",
+    "keys/codec.rs",
+    "keys/scope.rs",
+    "keys/data.rs",
+    "keys/managed_index.rs",
+    "keys/global.rs",
+    "keys/lifecycle.rs",
+    "keys/graph.rs",
+    "keys/metadata.rs",
+    "keys/indexes/mod.rs",
+    "keys/indexes/secondary.rs",
+    "keys/indexes/direction.rs",
+    "keys/indexes/prefix.rs",
+    "keys/indexes/property.rs",
+    "keys/indexes/label.rs",
+    "keys/indexes/text.rs",
+    "keys/indexes/equality/mod.rs",
+    "keys/indexes/equality/node.rs",
+    "keys/indexes/equality/edge.rs",
+    "keys/indexes/equality/scans.rs",
+    "keys/indexes/range/mod.rs",
+    "keys/indexes/range/node.rs",
+    "keys/indexes/range/edge.rs",
+    "keys/indexes/range/scans.rs",
+    "keys/indexes/vector/mod.rs",
+    "keys/indexes/vector/metadata.rs",
+    "keys/indexes/vector/layer0.rs",
+    "keys/indexes/vector/items.rs",
+    "keys/indexes/vector/entry_candidates.rs",
+    "keys/indexes/vector/simhash.rs",
+    "keys/indexes/vector/upper_layers.rs",
+    "keys/indexes/vector/reverse_edges.rs",
+    "keys/indexes/vector/storage_prefixes.rs",
+    "values/mod.rs",
+    "values/codec.rs",
+    "values/global.rs",
+    "values/adjacency.rs",
+    "values/edge_endpoints.rs",
+    "values/id_allocation.rs",
+    "values/property/mod.rs",
+    "values/property/row.rs",
+    "values/property/property.rs",
+    "values/property/property_value.rs",
+    "values/property/canonical_number.rs",
+    "values/property/equality_index_value.rs",
+    "values/property/range_index_value.rs",
+    "values/lifecycle/mod.rs",
+    "values/lifecycle/common.rs",
+    "values/lifecycle/entity_state.rs",
+    "values/lifecycle/index_record.rs",
+    "values/lifecycle/operation_record.rs",
+    "values/indexes/mod.rs",
+    "values/indexes/secondary_entry.rs",
+    "values/indexes/equality.rs",
+    "values/indexes/range.rs",
+    "values/indexes/text.rs",
+    "values/indexes/vector/mod.rs",
+    "values/indexes/vector/generation.rs",
+    "values/indexes/vector/layer0.rs",
+    "values/indexes/vector/entry_candidate.rs",
+    "values/indexes/vector/item.rs",
+    "values/indexes/vector/markers.rs",
+    "values/indexes/vector/metadata.rs",
+    "values/indexes/vector/neighbors.rs",
+    "values/indexes/vector/simhash.rs",
+}
+V1_SOURCE_FILES = {
+    "mod.rs",
+    "keys/mod.rs",
+    "indexes/mod.rs",
+    "property/mod.rs",
+    "values/mod.rs",
 }
 RAW_RUNTIME_CODEC_EXEMPTIONS = {
     # Canonical hash preimages are model data, not stored database values.
@@ -380,7 +475,7 @@ def forbidden_codec_source(path: str, text: str) -> list[str]:
         )
     ):
         errors.append(f"{path}: raw managed-index serialization must use encoding::v2")
-    if path.endswith("encoding/v2/values/lifecycle.rs"):
+    if path.startswith("crates/db/src/encoding/v2/values/lifecycle/"):
         for dependency in (
             "decode_secondary_entry",
             "encode_secondary_entry",
@@ -401,6 +496,172 @@ def validate_codec_architecture(root: Path) -> list[str]:
             forbidden_codec_source(path.relative_to(root).as_posix(), path.read_text())
         )
     v2 = source_root / "encoding" / "v2"
+    actual_v2_files = {
+        path.relative_to(v2).as_posix() for path in v2.rglob("*.rs")
+    }
+    for relative_path in sorted(V2_SOURCE_FILES - actual_v2_files):
+        errors.append(f"crates/db/src/encoding/v2/{relative_path}: required V2 module is missing")
+    for relative_path in sorted(actual_v2_files - V2_SOURCE_FILES):
+        errors.append(f"crates/db/src/encoding/v2/{relative_path}: unexpected V2 module")
+    for path in v2.rglob("*.rs"):
+        text = path.read_text()
+        if "v1::" in text or "encoding/v1" in text:
+            errors.append(
+                f"{path.relative_to(root)}: V2 source must not depend on V1"
+            )
+        if path.name != "mod.rs" and (path.parent / path.stem).is_dir():
+            errors.append(
+                f"{path.relative_to(root)}: use {path.stem}/mod.rs for a module with children"
+            )
+
+    legacy = v2 / "legacy"
+    legacy_implementation = re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|struct|enum|trait|impl|const|static|type)\b",
+        re.MULTILINE,
+    )
+    for path in legacy.rglob("mod.rs"):
+        if legacy_implementation.search(path.read_text()):
+            errors.append(
+                f"{path.relative_to(root)}: legacy mod.rs must contain declarations and re-exports only"
+            )
+
+    legacy_codec_declaration = re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+"
+        r"(?:LegacyTenantEnvelope|LegacyEdgePropertyPairKey|LegacyDynamicIndexCatalogEntry|"
+        r"LegacyTextMetadataElement|LegacyTextManifestError|LegacyTextLiveStateError|"
+        r"LegacyTextVersionCounterError|LegacyVectorIndexMetadata|LegacyVectorTxnGuardKey)\b"
+        r"|^\s*const\s+(?:DYNAMIC_INDEX_PREFIX|TEXT_INDEX_MANIFEST_PREFIX|ACTIVE_TXN_GUARD)\b",
+        re.MULTILINE,
+    )
+    for path in source_root.rglob("*.rs"):
+        if path.is_relative_to(legacy):
+            continue
+        if legacy_codec_declaration.search(path.read_text()):
+            errors.append(
+                f"{path.relative_to(root)}: legacy codec implementation must live in encoding/v2/legacy"
+            )
+
+    fixture_encoders = {
+        "encode_for_contract",
+        "encode_row_for_contract",
+        "encode_legacy_metadata_for_contract",
+        "encode_active_txn_guard",
+    }
+    for path in legacy.rglob("*.rs"):
+        lines = path.read_text().splitlines()
+        for line_number, line in enumerate(lines):
+            if not any(re.search(rf"\bfn\s+{name}\b", line) for name in fixture_encoders):
+                continue
+            previous = line_number - 1
+            while previous >= 0 and not lines[previous].strip():
+                previous -= 1
+            gated = False
+            while previous >= 0 and lines[previous].strip().startswith("#["):
+                gated |= lines[previous].strip().startswith("#[cfg(")
+                previous -= 1
+            if not gated:
+                errors.append(
+                    f"{path.relative_to(root)}:{line_number + 1}: legacy fixture encoder is not compile-gated"
+                )
+
+    def legacy_dependency_allowed(relative_path: str) -> bool:
+        return (
+            relative_path.startswith("crates/db/src/encoding/v2/legacy/")
+            or relative_path.startswith("crates/db/src/encoding/v1/")
+            or relative_path in {
+                "crates/db/src/encoding/v2/keys/data.rs",
+                "crates/db/src/encoding/v2/keys/indexes/vector/mod.rs",
+                "crates/db/src/encoding/v2/keys/indexes/vector/storage_prefixes.rs",
+                "crates/db/src/fuzzing.rs",
+                "crates/db/src/index_lifecycle/cursor_contracts.rs",
+                "crates/db/src/index_lifecycle/tenant_envelope_migration.rs",
+                "crates/db/src/index_lifecycle/vector.rs",
+                "crates/db/src/index_lifecycle/vector/driver.rs",
+                "crates/db/src/index_lifecycle_testing.rs",
+                "crates/db/src/migration_parity.rs",
+                "crates/db/src/migrations.rs",
+                "crates/db/src/search/mod.rs",
+                "crates/db/src/search/text/mod.rs",
+                "crates/db/src/search/vector/index.rs",
+                "crates/db/src/search/vector/mod.rs",
+                "crates/db/src/search/vector/storage.rs",
+            }
+            or relative_path.startswith("crates/db/src/migrations/")
+            or relative_path.startswith("crates/db/tests/")
+        )
+
+    fixture_encoder_call = re.compile(
+        r"\b(?:encode_for_contract|encode_row_for_contract|"
+        r"encode_legacy_metadata_for_contract|encode_active_txn_guard)\s*\("
+    )
+    for path in source_root.rglob("*.rs"):
+        relative_path = path.relative_to(root).as_posix()
+        text = path.read_text()
+        if "encoding::v2::legacy" in text and not legacy_dependency_allowed(relative_path):
+            errors.append(f"{relative_path}: legacy dependency is outside the compatibility allowlist")
+        if path.is_relative_to(legacy) or relative_path.startswith("crates/db/src/migrations/"):
+            continue
+        production_text = text.split("#[cfg(test)]\nmod tests", 1)[0]
+        if fixture_encoder_call.search(production_text) and relative_path not in {
+            "crates/db/src/index_lifecycle_testing.rs",
+            "crates/db/src/index_lifecycle/tenant_envelope_migration.rs",
+            "crates/db/src/migration_parity.rs",
+            "crates/db/src/migrations.rs",
+            "crates/db/src/search/text/mod.rs",
+        }:
+            errors.append(f"{relative_path}: production source calls a legacy fixture encoder")
+
+    v1 = source_root / "encoding" / "v1"
+    actual_v1_files = {
+        path.relative_to(v1).as_posix() for path in v1.rglob("*.rs")
+    }
+    for relative_path in sorted(V1_SOURCE_FILES - actual_v1_files):
+        errors.append(f"crates/db/src/encoding/v1/{relative_path}: required V1 facade is missing")
+    for relative_path in sorted(actual_v1_files - V1_SOURCE_FILES):
+        errors.append(f"crates/db/src/encoding/v1/{relative_path}: V1 implementation logic remains")
+    implementation = re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|struct|enum|trait|impl|const|static|type)\b",
+        re.MULTILINE,
+    )
+    public_facade_item = re.compile(r"^\s*pub(?:\([^)]*\))?\s+(?:mod|use)\b")
+    for path in v1.rglob("*.rs"):
+        text = path.read_text()
+        if implementation.search(text):
+            errors.append(f"{path.relative_to(root)}: V1 facade contains implementation logic")
+        lines = text.splitlines()
+        for line_number, line in enumerate(lines):
+            if not public_facade_item.search(line):
+                continue
+            attributes = "\n".join(lines[max(0, line_number - 8) : line_number])
+            if re.search(r"#\[deprecated\([\s\S]*?\)\]\s*$", attributes) is None:
+                errors.append(
+                    f"{path.relative_to(root)}:{line_number + 1}: V1 facade item is not deprecated"
+                )
+
+    encoding_root = source_root / "encoding" / "mod.rs"
+    encoding_text = encoding_root.read_text()
+    if not re.search(
+        r'#\[deprecated\(note = "use encoding::v2"\)\]\s+pub mod v1;',
+        encoding_text,
+    ):
+        errors.append(f"{encoding_root.relative_to(root)}: root V1 module is not deprecated")
+
+    def v1_import_allowed(relative_path: str) -> bool:
+        return (
+            relative_path == "crates/db/src/migration_parity.rs"
+            or relative_path == "crates/db/src/migrations.rs"
+            or relative_path.startswith("crates/db/src/migrations/")
+            or relative_path == "crates/db/tests/production_support/v1_migration.rs"
+            or relative_path.startswith("crates/db/tests/production_support/v1_migration/")
+            or relative_path
+            == "crates/db/tests/production_support/migration_text_rebuild.rs"
+        )
+
+    for path in (root / "crates").rglob("*.rs"):
+        relative_path = path.relative_to(root).as_posix()
+        if "encoding::v1" in path.read_text() and not v1_import_allowed(relative_path):
+            errors.append(f"{relative_path}: V1 import is outside migration code")
+
     for relative_path, owner in CODEC_OWNERS.items():
         path = v2 / relative_path
         if not path.is_file():

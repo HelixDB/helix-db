@@ -17,8 +17,8 @@ use std::sync::Arc;
 use slatedb::DbReadOps;
 use slatedb::DbTransaction;
 
-use crate::encoding::v1::values::vectors::encode_layer0_neighbors;
-use crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors;
+use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
+use crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 use crate::search::vector::unaligned_vector::UnalignedVector;
@@ -3385,7 +3385,7 @@ mod tests {
     use super::*;
 
     fn session_identity(
-        scope: crate::encoding::v1::keys::tenant::DataScope,
+        scope: crate::encoding::v2::keys::scope::DataScope,
         physical_index_id: u64,
     ) -> VectorGenerationIdentity {
         VectorGenerationIdentity::try_new(
@@ -3655,7 +3655,7 @@ mod tests {
 
     #[test]
     fn build_session_namespaces_positive_and_negative_state_by_complete_identity() {
-        use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
+        use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 
         let first = session_identity(DataScope::Tenant(TenantId::from_u128(1)), 31);
         let second = session_identity(DataScope::Tenant(TenantId::from_u128(2)), 31);
@@ -3692,7 +3692,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_session_enforces_every_class_limit_and_payload_ceiling() {
-        use crate::encoding::v1::keys::tenant::DataScope;
+        use crate::encoding::v2::keys::scope::DataScope;
 
         let identity = session_identity(DataScope::LegacyUnscoped, 41);
         let mut session = VectorBuildSession::<super::super::distance::Cosine>::with_test_limits(
@@ -3732,7 +3732,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_session_neighbor_flush_preserves_dirty_state() {
-        use crate::encoding::v1::keys::tenant::DataScope;
+        use crate::encoding::v2::keys::scope::DataScope;
 
         let identity = session_identity(DataScope::LegacyUnscoped, 51);
         let row = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 1);
@@ -3773,7 +3773,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_session_reuses_upper_beam_neighbor_item_and_simhash_state() {
-        use crate::encoding::v1::keys::tenant::DataScope;
+        use crate::encoding::v2::keys::scope::DataScope;
 
         let identity = session_identity(DataScope::LegacyUnscoped, 61);
         let handle = super::super::ValidatedVectorGenerationHandle::create_current::<

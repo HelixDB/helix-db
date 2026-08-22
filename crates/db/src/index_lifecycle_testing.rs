@@ -23,10 +23,10 @@ use std::time::Instant;
 
 use slatedb::object_store::ObjectStoreExt;
 
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{encode_properties, Property};
-use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind, NodePropertyKey};
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::outbox::{self, ClaimPermission, OperationPointerObservation};
 use crate::index_lifecycle::work;
@@ -852,7 +852,7 @@ impl LifecycleTestController {
     /// Seeds authoritative node-property rows in bounded setup transactions.
     ///
     /// This test-only setup boundary reserves IDs through the production
-    /// allocator and serializes rows through the canonical typed V1 codecs. It
+    /// allocator and serializes rows through the canonical typed codecs. It
     /// deliberately does not maintain indexes, so callers must invoke it only
     /// before accepting the index build whose source snapshot they are testing.
     pub async fn seed_node_property_rows<F>(
@@ -881,7 +881,7 @@ impl LifecycleTestController {
             let transaction = writer.db().begin(slatedb::IsolationLevel::Snapshot).await?;
             for entity_id in batch_start..batch_end {
                 transaction.put(
-                    Key::Data {
+                    DataKey::Data {
                         scope,
                         kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
                     }
@@ -945,11 +945,11 @@ impl LifecycleTestController {
         )?;
         transaction.put(catalog_key, catalog_value)?;
         transaction.put(
-            Key::Data {
+            DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: DataKeyKind::Vector(
-                    crate::encoding::v1::keys::vectors::VectorKey::IndexMetadata(
-                        crate::encoding::v1::keys::vectors::VectorIndexMetadataKey::new(
+                    crate::encoding::v2::keys::indexes::vector::VectorKey::IndexMetadata(
+                        crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey::new(
                             physical_index_id.get(),
                         ),
                     ),
@@ -957,7 +957,7 @@ impl LifecycleTestController {
             }
             .to_bytes(),
             bytes::Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),
@@ -1027,7 +1027,7 @@ impl LifecycleTestController {
                 )
                 .await?;
                 transaction.put(
-                    Key::Data {
+                    DataKey::Data {
                         scope,
                         kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
                     }

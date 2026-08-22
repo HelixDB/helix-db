@@ -2,14 +2,6 @@
 
 use bytes::Bytes;
 
-use crate::encoding::error::EncodingError;
-use crate::index_lifecycle::work::{
-    TextBuildArtifactValue, TextCorpusStatisticsValue, TextEntityStateValue, TextManifestPageValue,
-    TextManifestRootValue, TextStatisticsContribution, TextStatisticsEntityValue,
-    TextTermStatisticsValue,
-};
-use crate::index_lifecycle::IndexEntityId;
-
 use super::super::{
     put_element_kind, put_generation, put_index_id, put_partition, put_split_ref,
     take_element_kind, take_generation, take_index_id, take_logical_version,
@@ -18,6 +10,13 @@ use super::super::{
     U32_LEN,
 };
 use super::super::{INDEX_V2_VALUE_VERSION, INDEX_V3_SPLIT_VALUE_VERSION};
+use crate::encoding::error::EncodingError;
+use crate::index_lifecycle::work::{
+    TextBuildArtifactValue, TextCorpusStatisticsValue, TextEntityStateValue, TextManifestPageValue,
+    TextManifestRootValue, TextStatisticsContribution, TextStatisticsEntityValue,
+    TextTermStatisticsValue,
+};
+use crate::index_lifecycle::IndexEntityId;
 
 const MANIFEST_ROOT_KIND: u8 = 0x06;
 const MANIFEST_PAGE_KIND: u8 = 0x07;

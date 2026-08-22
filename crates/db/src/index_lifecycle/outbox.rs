@@ -19,8 +19,8 @@ use bytes::Bytes;
 use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
 use crate::config::SearchIndexBatchLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::keys::{GlobalKey, GlobalKind, RecordKind, ScopedKey};
 use crate::encoding::v2::values::{
     decode_index_record, decode_metadata_value, decode_operation_record,
@@ -705,7 +705,8 @@ pub(crate) async fn reconcile_legacy_reader_coordination_operations(
     scope: DataScope,
 ) -> Result<u64> {
     const RECONCILIATION_PAGE_SIZE: usize = 64;
-    let prefix = Key::data_prefix(scope, ScopedKey::logical_prefix(RecordKind::Operation));
+    let prefix =
+        ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(RecordKind::Operation));
     let mut repaired = 0_u64;
     let mut resume_after = None;
     loop {
@@ -720,10 +721,10 @@ pub(crate) async fn reconcile_legacy_reader_coordination_operations(
             let Some(row) = rows.next().await? else {
                 break;
             };
-            let Key::Data {
+            let ManagedIndexKey::Data {
                 scope: row_scope,
                 kind: ScopedKey::Operation(operation_key),
-            } = Key::parse_from_slice(scope, &row.key)?
+            } = ManagedIndexKey::parse_from_slice(scope, &row.key)?
             else {
                 return Err(corruption(
                     "operation-prefix scan returned another typed key",
@@ -1714,7 +1715,7 @@ pub(super) fn scoped_index_key_for_identity(
     scope: DataScope,
     identity: &super::IndexIdentity,
 ) -> Bytes {
-    Key::Data {
+    ManagedIndexKey::Data {
         scope,
         kind: ScopedKey::index_record(identity.clone()),
     }
@@ -1722,7 +1723,7 @@ pub(super) fn scoped_index_key_for_identity(
 }
 
 pub(super) fn scoped_operation_key(scope: DataScope, operation_id: IndexOperationId) -> Bytes {
-    Key::Data {
+    ManagedIndexKey::Data {
         scope,
         kind: ScopedKey::operation(operation_id),
     }
@@ -1730,7 +1731,7 @@ pub(super) fn scoped_operation_key(scope: DataScope, operation_id: IndexOperatio
 }
 
 pub(super) fn global_operation_key(operation_id: IndexOperationId) -> Bytes {
-    Key::Global {
+    ManagedIndexKey::Global {
         kind: GlobalKey::OperationPointer(operation_id),
     }
     .to_bytes()

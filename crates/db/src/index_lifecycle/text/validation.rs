@@ -16,9 +16,9 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::config::SearchIndexBatchLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::outbox::IndexOperationStepResult;
@@ -181,12 +181,12 @@ async fn select_page(
         }));
     };
 
-    let page_key = match Key::parse_from_slice(scope, &row_key) {
-        Ok(Key::Data {
+    let page_key = match ManagedIndexKey::parse_from_slice(scope, &row_key) {
+        Ok(ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestPage(key),
             ..
         }) => key,
-        Ok(Key::Data { .. } | Key::Global { .. }) | Err(_) => {
+        Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
             return Ok(blocked_database(vec![range], Vec::new()));
         }
     };
@@ -346,12 +346,12 @@ async fn select_root(
             )),
         }));
     };
-    let root_key = match Key::parse_from_slice(scope, &row_key) {
-        Ok(Key::Data {
+    let root_key = match ManagedIndexKey::parse_from_slice(scope, &row_key) {
+        Ok(ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestRoot(key),
             ..
         }) => key,
-        Ok(Key::Data { .. } | Key::Global { .. }) | Err(_) => {
+        Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
             return Ok(blocked_database(vec![range], Vec::new()));
         }
     };
@@ -484,12 +484,12 @@ async fn select_entity_state(
         )
         .await;
     };
-    let state_key = match Key::parse_from_slice(scope, &row_key) {
-        Ok(Key::Data {
+    let state_key = match ManagedIndexKey::parse_from_slice(scope, &row_key) {
+        Ok(ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextEntityState(key),
             ..
         }) => key,
-        Ok(Key::Data { .. } | Key::Global { .. }) | Err(_) => {
+        Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
             return Ok(blocked_database(vec![range], Vec::new()));
         }
     };
@@ -725,13 +725,13 @@ fn blocked_database(
     })
 }
 
-/// Encodes a complete generation prefix through the canonical V1 key codec.
+/// Encodes a complete generation prefix through the canonical key codec.
 fn generation_prefix(
     scope: DataScope,
     kind: index_keys::RecordKind,
     operation: &IndexOperationRecord,
 ) -> Bytes {
-    Key::data_prefix(
+    ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::generation_prefix(
             kind,
@@ -741,9 +741,9 @@ fn generation_prefix(
     )
 }
 
-/// Encodes one scoped logical key through the canonical V1 key codec.
+/// Encodes one scoped logical key through the canonical key codec.
 fn scoped_key(scope: DataScope, key: index_keys::ScopedKey) -> Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 /// Measures one exact observed key/value row without allocation.

@@ -27,9 +27,9 @@ use crate::config::{
     IndexLifecycleScanTuning, SearchIndexBatchLimits, TextBackfillCompactionLimits,
 };
 use crate::encoding::property;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, Key, KeyPrefix};
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{
     IndexEntity, IndexEntityStateKey, PartitionFingerprint, RecordKind, ScopedKey,
     TextBuildArtifactKey, TextEntityStateKey, TextManifestRootKey,
@@ -2885,13 +2885,13 @@ fn text_document(
 fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
     let kind = match entity.kind {
         IndexElementKind::Node => DataKeyKind::NodeProperty(
-            crate::encoding::v1::keys::NodePropertyKey::new(entity.id.get()),
+            crate::encoding::v2::keys::NodePropertyKey::new(entity.id.get()),
         ),
         IndexElementKind::Edge => DataKeyKind::EdgePropertyById(
-            crate::encoding::v1::keys::EdgePropertyByIdKey::new(entity.id.get()),
+            crate::encoding::v2::keys::EdgePropertyByIdKey::new(entity.id.get()),
         ),
     };
-    Key::Data { scope, kind }.to_bytes()
+    DataKey::Data { scope, kind }.to_bytes()
 }
 
 /// Returns the typed blocker for one invalid authoritative graph row.
@@ -3319,7 +3319,7 @@ fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
         IndexElementKind::Node => KeyPrefix::NodeProperty,
         IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
     };
-    Key::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
+    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
 }
 
 /// Parses one source row and rejects a keyspace/entity-kind mismatch.
@@ -3328,24 +3328,24 @@ fn source_entity(
     expected: IndexElementKind,
     key: &[u8],
 ) -> Result<Option<IndexEntityId>> {
-    let parsed = Key::parse_from_slice(scope, key)?;
+    let parsed = DataKey::parse_from_slice(scope, key)?;
     Ok(match (expected, parsed) {
         (
             IndexElementKind::Node,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::NodeProperty(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.node_id())),
         (
             IndexElementKind::Edge,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::EdgePropertyById(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, Key::Data { .. }) => None,
-        (IndexElementKind::Node, Key::Data { .. }) | (_, Key::Global { .. }) => {
+        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
+        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
             return Err(corruption("text source prefix yielded another key kind"));
         }
     })
@@ -3362,7 +3362,7 @@ fn cursor_suffix(prefix: &Bytes, cursor: Option<&IndexCursor>) -> Result<Option<
     Ok(Some(Bytes::copy_from_slice(suffix)))
 }
 
-/// Encodes one scoped V2 key through the canonical `encoding/v1` boundary.
+/// Encodes one scoped V2 key through the canonical `encoding/v2` boundary.
 fn scoped_index_key(scope: DataScope, key: ScopedKey) -> Bytes {
     IndexKey::Data { scope, kind: key }.to_bytes()
 }

@@ -13,7 +13,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, IsolationLevel};
 
 use super::*;
-use crate::encoding::keys::tenant::{DataScope, TenantId};
+use crate::encoding::keys::scope::{DataScope, TenantId};
 use crate::search::vector::{SimHasherRegistryLimits, VectorDimension, VectorDistanceMetric};
 
 /// Verifies every fallible cache-construction and descriptor-identity boundary.

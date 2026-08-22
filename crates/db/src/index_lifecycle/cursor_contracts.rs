@@ -3,20 +3,21 @@
 use bytes::Bytes;
 
 use crate::encoding::indexes::range::RangeIndexDirection;
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashDirectoryKey,
     VectorUpperVectorKey,
 };
-use crate::encoding::v1::keys::{
-    DataKeyKind, EdgePropertyByIdKey, EdgePropertyPairKey, Key as GraphKey, NodePropertyKey,
-};
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 use crate::encoding::v2::keys::{
-    CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, Key, PartitionFingerprint,
-    ScopedKey, SecondaryEntryKey, SecondaryEntryLane, TextBuildArtifactKey,
+    CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, ManagedIndexKey,
+    PartitionFingerprint, ScopedKey, SecondaryEntryKey, SecondaryEntryLane, TextBuildArtifactKey,
     TextCorpusStatisticsKey, TextEntityStateKey, TextManifestPageKey, TextManifestRootKey,
     TextStatisticsEntityKey, TextTermFingerprint, TextTermStatisticsKey, VectorPartitionMappingKey,
 };
+use crate::encoding::v2::keys::{
+    DataKey as GraphKey, DataKeyKind, EdgePropertyByIdKey, NodePropertyKey,
+};
+use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey;
 
 use super::*;
 
@@ -78,7 +79,7 @@ fn cursor(bytes: Bytes) -> IndexCursor {
 }
 
 fn scoped_cursor(scope: DataScope, kind: ScopedKey) -> IndexCursor {
-    cursor(Key::Data { scope, kind }.to_bytes())
+    cursor(ManagedIndexKey::Data { scope, kind }.to_bytes())
 }
 
 fn graph_cursor(scope: DataScope, element_kind: IndexElementKind, id: u64) -> IndexCursor {
@@ -93,7 +94,7 @@ fn legacy_edge_pair_cursor(scope: DataScope, from: u64, to: u64) -> IndexCursor 
     cursor(
         GraphKey::Data {
             scope,
-            kind: DataKeyKind::EdgePropertyPair(EdgePropertyPairKey::new(from, to)),
+            kind: DataKeyKind::EdgePropertyPair(LegacyEdgePropertyPairKey::new(from, to)),
         }
         .to_bytes(),
     )
@@ -675,7 +676,9 @@ fn reframe_cursor(
     next_scope: DataScope,
     cursor: &IndexCursor,
 ) -> IndexCursor {
-    if let Ok(Key::Data { kind, .. }) = Key::parse_from_slice(original_scope, cursor.as_bytes()) {
+    if let Ok(ManagedIndexKey::Data { kind, .. }) =
+        ManagedIndexKey::parse_from_slice(original_scope, cursor.as_bytes())
+    {
         return scoped_cursor(next_scope, kind);
     }
     let GraphKey::Data { kind, .. } =

@@ -19,10 +19,10 @@ impl EdgeMutationTarget {
     }
 }
 
-pub(super) fn decode_stored_edges(value: Option<Bytes>) -> Result<values::edges::Edges> {
+pub(super) fn decode_stored_edges(value: Option<Bytes>) -> Result<values::adjacency::Edges> {
     match value {
-        Some(value) => Ok(values::edges::decode_edges(&value)?),
-        None => Ok(values::edges::Edges::new()),
+        Some(value) => Ok(values::adjacency::decode_edges(&value)?),
+        None => Ok(values::adjacency::Edges::new()),
     }
 }
 
@@ -62,10 +62,10 @@ mod tests {
     fn decode_stored_edges_handles_absent_encoded_and_invalid_payloads() {
         assert!(decode_stored_edges(None).unwrap().is_empty());
 
-        let mut edges = values::edges::Edges::new();
+        let mut edges = values::adjacency::Edges::new();
         edges.add_out(7);
         edges.add_in(9);
-        let encoded = values::edges::encode_edges(&edges);
+        let encoded = values::adjacency::encode_edges(&edges);
         let decoded = decode_stored_edges(Some(encoded)).unwrap();
         assert!(decoded.contains_out(7));
         assert!(decoded.contains_in(9));

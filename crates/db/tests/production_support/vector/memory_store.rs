@@ -16,11 +16,11 @@ use slatedb::{Db, DbReader, IsolationLevel};
 use tokio::sync::watch;
 
 use super::*;
-use crate::encoding::keys::tenant::TenantId;
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::keys::scope::TenantId;
+use crate::encoding::v2::keys::indexes::vector::{
     VectorMemoryPrefixKey, VectorSimHashKey, VectorUpperNeighborsKey, VectorUpperVectorKey,
 };
-use crate::encoding::v1::values::vectors::{
+use crate::encoding::v2::values::indexes::vector::{
     neighbors::encode_upper_neighbors, simhash::encode_simhash,
 };
 use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};

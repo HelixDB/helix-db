@@ -7,7 +7,7 @@
 //! insertion failure.
 
 use crate::config::{SecondaryIndexDefinition, TextIndexDefinition, VectorIndexDefinition};
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 use crate::error::{HelixDbError, IndexFamily};
 use crate::index_lifecycle::{
     ActiveIndexHandle, IndexGenerationId, IndexId, IndexOperationId, IndexRecordV2, IndexRevision,

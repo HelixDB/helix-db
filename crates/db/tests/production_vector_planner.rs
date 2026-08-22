@@ -11,7 +11,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use db::config::{DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, VectorElementType};
-use db::encoding::v1::keys::tenant::DataScope;
+use db::encoding::v2::keys::scope::DataScope;
 use db::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue,
 };
@@ -535,7 +535,7 @@ async fn execute_ddl_to_success(db: &HelixDB, plan: &exec::ExecutablePlan) {
         loop {
             match db
                 .get_index_operation(
-                    db::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                    db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     operation_id,
                 )
                 .await
@@ -555,7 +555,7 @@ async fn execute_ddl_to_success(db: &HelixDB, plan: &exec::ExecutablePlan) {
     .expect("fixture DDL worker should converge");
     db.planner_context_scoped(
         context::ParamBindings::default(),
-        db::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+        db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
     )
     .await
     .expect("terminal DDL is visible through a refreshed planner catalog");

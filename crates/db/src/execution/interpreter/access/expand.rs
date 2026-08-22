@@ -10,7 +10,7 @@ use helix_planner::ir;
 
 use super::super::*;
 use crate::encoding::keys;
-use crate::encoding::v1::values;
+use crate::encoding::v2::values;
 
 impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) async fn expand(
@@ -130,7 +130,7 @@ impl<'db> ExecutionContext<'db> {
         node_id: u64,
         direction: ir::ExpandDirection,
     ) -> Result<Vec<u64>> {
-        let key = keys::Key::Data {
+        let key = keys::DataKey::Data {
             scope: self.tenant_scope,
             kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(node_id)),
         }
@@ -138,7 +138,7 @@ impl<'db> ExecutionContext<'db> {
         let Some(value) = self.get_raw(&key).await? else {
             return Ok(Vec::new());
         };
-        let edges = values::edges::decode_edges(&value)?;
+        let edges = values::adjacency::decode_edges(&value)?;
         let mut out = BTreeSet::new();
         match direction {
             ir::ExpandDirection::Out | ir::ExpandDirection::Both => out.extend(edges.iter_out()),
@@ -156,7 +156,7 @@ impl<'db> ExecutionContext<'db> {
         node_id: u64,
         direction: ir::ExpandDirection,
     ) -> Result<BTreeSet<u64>> {
-        let key = keys::Key::Data {
+        let key = keys::DataKey::Data {
             scope: self.tenant_scope,
             kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(node_id)),
         }
@@ -164,7 +164,7 @@ impl<'db> ExecutionContext<'db> {
         let Some(value) = self.get_raw(&key).await? else {
             return Ok(BTreeSet::new());
         };
-        let edges = values::edges::decode_edges(&value)?;
+        let edges = values::adjacency::decode_edges(&value)?;
         let mut out = BTreeSet::new();
         if matches!(
             direction,

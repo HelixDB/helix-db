@@ -3,16 +3,16 @@
 #[cfg(any(test, feature = "production-coverage"))]
 use bytes::Bytes;
 
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::work;
 
 #[cfg(any(test, feature = "production-coverage"))]
 pub(super) fn scoped_key(scope: DataScope, logical_key: index_keys::ScopedKey) -> Bytes {
-    Key::Data {
+    ManagedIndexKey::Data {
         scope,
         kind: logical_key,
     }
@@ -29,10 +29,10 @@ pub(super) fn decode_build_artifact(
     index_keys::TextBuildArtifactKey,
     work::TextBuildArtifactValue,
 )> {
-    let Key::Data {
+    let ManagedIndexKey::Data {
         kind: index_keys::ScopedKey::TextBuildArtifact(key),
         ..
-    } = Key::parse_from_slice(scope, key)?
+    } = ManagedIndexKey::parse_from_slice(scope, key)?
     else {
         return Err(corruption(
             "text artifact prefix yielded another typed key kind",

@@ -19,8 +19,8 @@ use crate::config::{
 };
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{encode_properties, Property};
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
+use crate::encoding::v2::keys::{DataKey, DataKeyKind, NodePropertyKey};
 use crate::encoding::v2::keys::{RecordKind, ScopedKey};
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::failpoints::{self, IndexOutboxFailpoint};
@@ -137,7 +137,7 @@ impl FamilyCase {
 
     fn initial_build_progress(self) -> crate::index_lifecycle::lifecycle::InitialBuildProgress {
         let cursor = IndexCursor::try_new(
-            Key::Data {
+            DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(0)),
             }
@@ -636,7 +636,7 @@ fn secondary_driver() -> SecondaryIndexDriver {
 
 /// Builds one typed node-property key for the authoritative graph source.
 fn secondary_source_key(entity_id: u64) -> bytes::Bytes {
-    Key::Data {
+    DataKey::Data {
         scope: DataScope::LegacyUnscoped,
         kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
     }
@@ -919,7 +919,7 @@ async fn drive_one_secondary_step(
 
 /// Counts the exact scoped operation lane without assuming operation IDs.
 async fn operation_row_count(db: &Db) -> usize {
-    let prefix = Key::data_prefix(
+    let prefix = DataKey::data_prefix(
         DataScope::LegacyUnscoped,
         ScopedKey::logical_prefix(RecordKind::Operation),
     );
@@ -956,7 +956,7 @@ async fn assert_operation_queue_empty(db: &Db) {
 async fn assert_failed_create_is_absent(db: &Db, definition: &ValidatedDynamicIndexDefinition) {
     assert!(db
         .get(
-            crate::encoding::v2::keys::Key::Data {
+            crate::encoding::v2::keys::ManagedIndexKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: ScopedKey::index_record(definition.identity().clone()),
             }

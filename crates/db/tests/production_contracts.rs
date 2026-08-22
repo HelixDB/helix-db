@@ -8,7 +8,7 @@
 use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use db::config::{self, VectorIndexDefinition};
-use db::encoding::v1::values::vectors::{decode_layer0_neighbors, encode_layer0_neighbors};
+use db::encoding::v2::values::indexes::vector::{decode_layer0_neighbors, encode_layer0_neighbors};
 use db::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue,
 };
@@ -43,6 +43,19 @@ fn current_layer0_neighbor_bytes_are_stable_through_the_public_codec() {
         ]
     );
     assert_eq!(decode_layer0_neighbors(&encoded).unwrap(), vec![2, 9]);
+}
+
+#[test]
+#[allow(deprecated)]
+fn root_tenant_compatibility_path_reexports_v2_scope_types() {
+    use db::encoding::keys::tenant::{DataScope, TenantId};
+
+    let tenant = TenantId::from_ulid_str("00000000000000000000000001")
+        .expect("compatibility path decodes tenant IDs");
+    let compatibility_scope = DataScope::Tenant(tenant);
+    let canonical_scope: db::encoding::v2::keys::scope::DataScope = compatibility_scope;
+
+    assert_eq!(canonical_scope, DataScope::Tenant(tenant));
 }
 
 #[test]

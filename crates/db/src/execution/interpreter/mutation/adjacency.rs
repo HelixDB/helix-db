@@ -26,7 +26,7 @@ impl<'db> ExecutionContext<'db> {
                 edges.add_in(neighbor);
             }
         }
-        txn.put(&key, values::edges::encode_edges(&edges))?;
+        txn.put(&key, values::adjacency::encode_edges(&edges))?;
         Ok(())
     }
 
@@ -56,7 +56,7 @@ impl<'db> ExecutionContext<'db> {
         if edges.is_empty() {
             txn.delete(&key)?;
         } else {
-            txn.put(&key, values::edges::encode_edges(&edges))?;
+            txn.put(&key, values::adjacency::encode_edges(&edges))?;
         }
         Ok(())
     }

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Durable KV migration jobs.
 //!
 //! Migration progress is stored in the same scoped data-metadata namespace as
@@ -25,14 +27,21 @@ use serde::{Deserialize, Serialize};
 use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
 use crate::config;
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{decode_properties, Property};
 use crate::encoding::v1::keys::vectors::VectorKey;
 use crate::encoding::v1::keys::{
     AdjacencyKey, DataKeyKind, EdgeEndpointsKey, EdgePairIndexKey, EdgePropertyByIdKey, Key,
     KeyPrefix, MetadataKey,
 };
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::legacy::index_catalog::{
+    self as legacy_index_catalog, LegacyDefinitionRow, LegacyDynamicIndexCatalogEntry,
+    LegacyDynamicIndexDefinition, LegacyDynamicIndexKey, LegacyRangeDirection,
+    LegacySecondaryElementType, LegacySecondaryIndexDefinition, LegacySecondaryKind,
+    LegacyTextAnalyzer, LegacyTextElementType, LegacyTextIndexDefinition, LegacyVectorElementType,
+    LegacyVectorIndexDefinition, LegacyVectorMetric,
+};
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::{HelixDbError, Result};
 use crate::search;
@@ -51,6 +60,20 @@ const LEGACY_DYNAMIC_INDEX_CATALOG_METADATA: [&[u8]; 3] = [
     b"dynamic_index_manifest_ack_token",
 ];
 
+fn legacy_vector_metric_into_runtime(
+    metric: LegacyVectorMetric,
+) -> search::vector::VectorDistanceMetric {
+    match metric {
+        LegacyVectorMetric::Cosine => search::vector::VectorDistanceMetric::Cosine,
+        LegacyVectorMetric::Euclidean => search::vector::VectorDistanceMetric::Euclidean,
+        LegacyVectorMetric::Manhattan => search::vector::VectorDistanceMetric::Manhattan,
+    }
+}
+
+fn legacy_catalog_corruption(error: legacy_index_catalog::LegacyIndexCatalogError) -> HelixDbError {
+    HelixDbError::IndexCatalogCorruption(error.to_string())
+}
+
 /// Runs one fixed-size vector migration scale and resource-boundedness contract.
 ///
 /// The feature-gated production test entry points select the entity count. The
@@ -61,128 +84,63 @@ pub(crate) async fn run_vector_migration_scale_contract(entity_count: u64) {
     vector_scale::run(entity_count).await;
 }
 
-/// Exact pre-V2 secondary definition JSON shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LegacySecondaryIndexDefinition {
-    element_type: config::SecondaryIndexElementType,
-    kind: config::SecondaryIndexKind,
-    label: String,
-    property: String,
-    #[serde(default)]
-    unique: bool,
-    #[serde(default)]
-    direction: config::RangeIndexDirection,
-}
-
-/// Exact pre-V2 vector definition JSON shape.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct LegacyVectorIndexDefinition {
-    element_type: config::VectorElementType,
-    label: String,
-    property: String,
-    tenant_property: Option<String>,
-    dimension: usize,
-    metric: crate::search::vector::VectorDistanceMetric,
-    m: usize,
-    m0: usize,
-    ef_construction: usize,
-    ml: f32,
-    simhash_threshold: usize,
-    sampling_ratio: f32,
-    adaptive_enabled: bool,
-    adaptive_failure_prob: f32,
-}
-
-/// Exact pre-V2 text definition JSON shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LegacyTextIndexDefinition {
-    element_type: config::TextElementType,
-    label: String,
-    property: String,
-    tenant_property: Option<String>,
-    analyzer: config::TextAnalyzerKind,
-    positions_enabled: bool,
-}
-
-/// Exact externally tagged pre-V2 definition value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-enum LegacyDynamicIndexDefinition {
-    Secondary(LegacySecondaryIndexDefinition),
-    Vector(LegacyVectorIndexDefinition),
-    Text(LegacyTextIndexDefinition),
-}
-
-/// Exact untagged pre-V2 catalog row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-enum LegacyDynamicIndexCatalogEntry {
-    Definition(LegacyDynamicIndexDefinition),
-    Tombstone { tombstone: bool },
-}
-
-/// Exact externally tagged identity encoded as hex in a legacy metadata key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum LegacyDynamicIndexKey {
-    Secondary(LegacySecondaryIndexDefinition),
-    Vector {
-        element_type: config::VectorElementType,
-        label: String,
-        property: String,
-    },
-    Text {
-        element_type: config::TextElementType,
-        label: String,
-        property: String,
-    },
-}
-
 impl LegacySecondaryIndexDefinition {
     fn into_runtime(self) -> Result<config::SecondaryIndexDefinition> {
-        use config::{RangeIndexDirection, SecondaryIndexElementType, SecondaryIndexKind};
-
         Ok(
             match (self.element_type, self.kind, self.unique, self.direction) {
                 (
-                    SecondaryIndexElementType::Node,
-                    SecondaryIndexKind::Equality,
+                    LegacySecondaryElementType::Node,
+                    LegacySecondaryKind::Equality,
                     false,
-                    RangeIndexDirection::Asc,
+                    LegacyRangeDirection::Asc,
                 ) => config::SecondaryIndexDefinition::node_equality(self.label, self.property)?,
                 (
-                    SecondaryIndexElementType::Node,
-                    SecondaryIndexKind::Equality,
+                    LegacySecondaryElementType::Node,
+                    LegacySecondaryKind::Equality,
                     true,
-                    RangeIndexDirection::Asc,
+                    LegacyRangeDirection::Asc,
                 ) => config::SecondaryIndexDefinition::node_unique_equality(
                     self.label,
                     self.property,
                 )?,
-                (SecondaryIndexElementType::Node, SecondaryIndexKind::Range, false, direction) => {
-                    config::SecondaryIndexDefinition::node_range_with_direction(
-                        self.label,
-                        self.property,
-                        direction,
-                    )?
-                }
                 (
-                    SecondaryIndexElementType::Edge,
-                    SecondaryIndexKind::Equality,
+                    LegacySecondaryElementType::Node,
+                    LegacySecondaryKind::Range,
                     false,
-                    RangeIndexDirection::Asc,
+                    direction,
+                ) => config::SecondaryIndexDefinition::node_range_with_direction(
+                    self.label,
+                    self.property,
+                    match direction {
+                        LegacyRangeDirection::Asc => config::RangeIndexDirection::Asc,
+                        LegacyRangeDirection::Desc => config::RangeIndexDirection::Desc,
+                    },
+                )?,
+                (
+                    LegacySecondaryElementType::Edge,
+                    LegacySecondaryKind::Equality,
+                    false,
+                    LegacyRangeDirection::Asc,
                 ) => config::SecondaryIndexDefinition::edge_equality(self.label, self.property)?,
-                (SecondaryIndexElementType::Edge, SecondaryIndexKind::Range, false, direction) => {
-                    config::SecondaryIndexDefinition::edge_range_with_direction(
-                        self.label,
-                        self.property,
-                        direction,
-                    )?
-                }
+                (
+                    LegacySecondaryElementType::Edge,
+                    LegacySecondaryKind::Range,
+                    false,
+                    direction,
+                ) => config::SecondaryIndexDefinition::edge_range_with_direction(
+                    self.label,
+                    self.property,
+                    match direction {
+                        LegacyRangeDirection::Asc => config::RangeIndexDirection::Asc,
+                        LegacyRangeDirection::Desc => config::RangeIndexDirection::Desc,
+                    },
+                )?,
                 (element_type, kind, true, _) => {
                     return Err(HelixDbError::Config(format!(
                         "invalid legacy unique secondary definition: {element_type:?} {kind:?}"
                     )))
                 }
-                (_, SecondaryIndexKind::Equality, false, RangeIndexDirection::Desc) => {
+                (_, LegacySecondaryKind::Equality, false, LegacyRangeDirection::Desc) => {
                     return Err(HelixDbError::Config(
                         "legacy equality definition has descending direction".to_string(),
                     ))
@@ -195,17 +153,17 @@ impl LegacySecondaryIndexDefinition {
 impl LegacyVectorIndexDefinition {
     fn into_runtime(self) -> Result<config::VectorIndexDefinition> {
         let definition = match self.element_type {
-            config::VectorElementType::Node => config::VectorIndexDefinition::new_node(
+            LegacyVectorElementType::Node => config::VectorIndexDefinition::new_node(
                 self.label,
                 self.property,
                 self.dimension,
-                self.metric,
+                legacy_vector_metric_into_runtime(self.metric),
             )?,
-            config::VectorElementType::Edge => config::VectorIndexDefinition::new_edge(
+            LegacyVectorElementType::Edge => config::VectorIndexDefinition::new_edge(
                 self.label,
                 self.property,
                 self.dimension,
-                self.metric,
+                legacy_vector_metric_into_runtime(self.metric),
             )?,
         }
         .with_tenant_property_option(self.tenant_property)?
@@ -224,15 +182,21 @@ impl LegacyVectorIndexDefinition {
 impl LegacyTextIndexDefinition {
     fn into_runtime(self) -> Result<config::TextIndexDefinition> {
         let definition = match self.element_type {
-            config::TextElementType::Node => {
+            LegacyTextElementType::Node => {
                 config::TextIndexDefinition::new_node(self.label, self.property)?
             }
-            config::TextElementType::Edge => {
+            LegacyTextElementType::Edge => {
                 config::TextIndexDefinition::new_edge(self.label, self.property)?
             }
         }
         .with_tenant_property_option(self.tenant_property)?
-        .with_analyzer(self.analyzer)
+        .with_analyzer(match self.analyzer {
+            LegacyTextAnalyzer::Standard => config::TextAnalyzerKind::Standard,
+            LegacyTextAnalyzer::StandardStemEn => config::TextAnalyzerKind::StandardStemEn,
+            LegacyTextAnalyzer::WhitespaceLowercase => {
+                config::TextAnalyzerKind::WhitespaceLowercase
+            }
+        })
         .with_positions_enabled(self.positions_enabled);
         Ok(definition)
     }
@@ -282,12 +246,8 @@ impl LegacyDynamicIndexKey {
             } => (
                 crate::index_lifecycle::IndexIdentityFamily::Vector,
                 match element_type {
-                    config::VectorElementType::Node => {
-                        crate::index_lifecycle::IndexElementKind::Node
-                    }
-                    config::VectorElementType::Edge => {
-                        crate::index_lifecycle::IndexElementKind::Edge
-                    }
+                    LegacyVectorElementType::Node => crate::index_lifecycle::IndexElementKind::Node,
+                    LegacyVectorElementType::Edge => crate::index_lifecycle::IndexElementKind::Edge,
                 },
                 label,
                 property,
@@ -299,8 +259,8 @@ impl LegacyDynamicIndexKey {
             } => (
                 crate::index_lifecycle::IndexIdentityFamily::Text,
                 match element_type {
-                    config::TextElementType::Node => crate::index_lifecycle::IndexElementKind::Node,
-                    config::TextElementType::Edge => crate::index_lifecycle::IndexElementKind::Edge,
+                    LegacyTextElementType::Node => crate::index_lifecycle::IndexElementKind::Node,
+                    LegacyTextElementType::Edge => crate::index_lifecycle::IndexElementKind::Edge,
                 },
                 label,
                 property,
@@ -326,19 +286,28 @@ pub fn migration_parity_legacy_catalog_row(
         ValidatedDynamicIndexDefinition::Secondary(definition) => {
             let runtime = definition.to_runtime();
             LegacyDynamicIndexDefinition::Secondary(LegacySecondaryIndexDefinition {
-                element_type: runtime.element_type(),
-                kind: runtime.kind(),
+                element_type: match runtime.element_type() {
+                    config::SecondaryIndexElementType::Node => LegacySecondaryElementType::Node,
+                    config::SecondaryIndexElementType::Edge => LegacySecondaryElementType::Edge,
+                },
+                kind: match runtime.kind() {
+                    config::SecondaryIndexKind::Equality => LegacySecondaryKind::Equality,
+                    config::SecondaryIndexKind::Range => LegacySecondaryKind::Range,
+                },
                 label: runtime.label().to_string(),
                 property: runtime.property().to_string(),
                 unique: runtime.unique(),
-                direction: runtime.direction(),
+                direction: match runtime.direction() {
+                    config::RangeIndexDirection::Asc => LegacyRangeDirection::Asc,
+                    config::RangeIndexDirection::Desc => LegacyRangeDirection::Desc,
+                },
             })
         }
         ValidatedDynamicIndexDefinition::Vector(definition) => {
             LegacyDynamicIndexDefinition::Vector(LegacyVectorIndexDefinition {
                 element_type: match definition.element_kind() {
-                    IndexElementKind::Node => config::VectorElementType::Node,
-                    IndexElementKind::Edge => config::VectorElementType::Edge,
+                    IndexElementKind::Node => LegacyVectorElementType::Node,
+                    IndexElementKind::Edge => LegacyVectorElementType::Edge,
                 },
                 label: definition.label().as_str().to_string(),
                 property: definition.property().as_str().to_string(),
@@ -350,7 +319,15 @@ pub fn migration_parity_legacy_catalog_row(
                         "validated vector dimension does not fit usize".to_string(),
                     )
                 })?,
-                metric: definition.metric(),
+                metric: match definition.metric() {
+                    search::vector::VectorDistanceMetric::Cosine => LegacyVectorMetric::Cosine,
+                    search::vector::VectorDistanceMetric::Euclidean => {
+                        LegacyVectorMetric::Euclidean
+                    }
+                    search::vector::VectorDistanceMetric::Manhattan => {
+                        LegacyVectorMetric::Manhattan
+                    }
+                },
                 m: usize::try_from(definition.m()).map_err(|_| {
                     HelixDbError::InvariantViolation(
                         "validated vector m does not fit usize".to_string(),
@@ -382,39 +359,33 @@ pub fn migration_parity_legacy_catalog_row(
         ValidatedDynamicIndexDefinition::Text(definition) => {
             LegacyDynamicIndexDefinition::Text(LegacyTextIndexDefinition {
                 element_type: match definition.element_kind() {
-                    IndexElementKind::Node => config::TextElementType::Node,
-                    IndexElementKind::Edge => config::TextElementType::Edge,
+                    IndexElementKind::Node => LegacyTextElementType::Node,
+                    IndexElementKind::Edge => LegacyTextElementType::Edge,
                 },
                 label: definition.label().as_str().to_string(),
                 property: definition.property().as_str().to_string(),
                 tenant_property: definition
                     .tenant_property()
                     .map(|property| property.as_str().to_string()),
-                analyzer: definition.analyzer(),
+                analyzer: match definition.analyzer() {
+                    config::TextAnalyzerKind::Standard => LegacyTextAnalyzer::Standard,
+                    config::TextAnalyzerKind::StandardStemEn => LegacyTextAnalyzer::StandardStemEn,
+                    config::TextAnalyzerKind::WhitespaceLowercase => {
+                        LegacyTextAnalyzer::WhitespaceLowercase
+                    }
+                },
                 positions_enabled: definition.positions_enabled(),
             })
         }
     };
-    let identity = serde_json::to_vec(&legacy.key()).map_err(|error| {
-        HelixDbError::Config(format!(
-            "failed to encode legacy dynamic index identity: {error}"
-        ))
-    })?;
-    let key = crate::encoding::v1::keys::metadata::dynamic_index_storage_key_scoped(
-        DataScope::LegacyUnscoped,
-        &identity,
-    );
+    let identity = legacy.key();
     let entry = if tombstone {
         LegacyDynamicIndexCatalogEntry::Tombstone { tombstone: true }
     } else {
         LegacyDynamicIndexCatalogEntry::Definition(legacy)
     };
-    let value = Bytes::from(serde_json::to_vec(&entry).map_err(|error| {
-        HelixDbError::Config(format!(
-            "failed to encode legacy dynamic index catalog entry: {error}"
-        ))
-    })?);
-    Ok((key, value))
+    legacy_index_catalog::encode_row_for_contract(DataScope::LegacyUnscoped, &identity, &entry)
+        .map_err(|error| HelixDbError::Config(error.to_string()))
 }
 
 /// Stable crash-injection boundaries used by the release recovery harness.
@@ -896,11 +867,7 @@ impl MigrationStage {
                 );
             }
             Self::LegacyVectorDefinitions => {
-                return Key::Data {
-                    scope,
-                    kind: DataKeyKind::IndexMetadata(MetadataKey::dynamic_index_prefix()),
-                }
-                .to_bytes();
+                return legacy_index_catalog::catalog_scan_prefix(scope);
             }
         };
         Key::data_prefix(scope, Bytes::copy_from_slice(logical))
@@ -1727,49 +1694,6 @@ pub(crate) async fn migrate_active_vector_simhash_directories(db: &crate::HelixD
     .await
 }
 
-struct LegacyDefinitionRow {
-    storage_key: Bytes,
-    identity: LegacyDynamicIndexKey,
-    entry: LegacyDynamicIndexCatalogEntry,
-}
-
-impl LegacyDefinitionRow {
-    /// Decodes one row already proven to be inside the typed legacy catalog prefix.
-    fn decode(scope: DataScope, storage_key: Bytes, value: &[u8]) -> Result<Self> {
-        let Key::Data {
-            kind: DataKeyKind::IndexMetadata(metadata),
-            ..
-        } = Key::parse_from_slice(scope, &storage_key)?
-        else {
-            return Err(HelixDbError::IndexCatalogCorruption(
-                "legacy dynamic catalog prefix yielded another key kind".to_string(),
-            ));
-        };
-        let Some(encoded_identity) = metadata.dynamic_index_encoded_identity() else {
-            return Err(HelixDbError::IndexCatalogCorruption(
-                "legacy dynamic catalog row has no encoded identity".to_string(),
-            ));
-        };
-        let identity =
-            serde_json::from_slice::<LegacyDynamicIndexKey>(encoded_identity).map_err(|error| {
-                HelixDbError::IndexCatalogCorruption(format!(
-                    "failed to decode legacy dynamic catalog identity: {error}"
-                ))
-            })?;
-        let entry =
-            serde_json::from_slice::<LegacyDynamicIndexCatalogEntry>(value).map_err(|error| {
-                HelixDbError::IndexCatalogCorruption(format!(
-                    "failed to decode legacy dynamic catalog row: {error}"
-                ))
-            })?;
-        Ok(Self {
-            storage_key,
-            identity,
-            entry,
-        })
-    }
-}
-
 /// Exact persisted source row retained until one vector adoption activates.
 pub(crate) struct LegacyVectorAdoptionSource {
     storage_key: Bytes,
@@ -1790,15 +1714,14 @@ async fn load_legacy_definition_rows(
     read: &(impl DbReadOps + Send + Sync),
     scope: DataScope,
 ) -> Result<Vec<LegacyDefinitionRow>> {
-    let prefix = Key::Data {
-        scope,
-        kind: DataKeyKind::IndexMetadata(MetadataKey::dynamic_index_prefix()),
-    }
-    .to_bytes();
+    let prefix = legacy_index_catalog::catalog_scan_prefix(scope);
     let mut rows = read.scan_prefix(prefix, ..).await?;
     let mut definitions = Vec::new();
     while let Some(row) = rows.next().await? {
-        definitions.push(LegacyDefinitionRow::decode(scope, row.key, &row.value)?);
+        definitions.push(
+            LegacyDefinitionRow::decode(scope, row.key, &row.value)
+                .map_err(legacy_catalog_corruption)?,
+        );
     }
     Ok(definitions)
 }
@@ -2784,15 +2707,15 @@ async fn retire_legacy_text_rows(
     {
         transaction.delete(manifest_key)?;
         for prefix in [
-            crate::encoding::v1::keys::metadata::text_index_live_state_prefix_scoped(
+            crate::encoding::v2::legacy::text::storage_keys::live_state_prefix(
                 scope,
                 &manifest.physical_index_name,
             ),
-            crate::encoding::v1::keys::metadata::text_index_txn_guard_key_scoped(
+            crate::encoding::v2::legacy::text::storage_keys::transaction_guard_key(
                 scope,
                 &manifest.physical_index_name,
             ),
-            crate::encoding::v1::keys::metadata::text_index_version_counter_key_scoped(
+            crate::encoding::v2::legacy::text::storage_keys::version_counter_key(
                 scope,
                 &manifest.physical_index_name,
             ),
@@ -4224,12 +4147,13 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::*;
-    use crate::encoding::keys::tenant::TenantId;
+    use crate::encoding::keys::scope::TenantId;
     use crate::encoding::keys::{
-        AdjacencyKey, EdgeEndpointsKey, EdgePairIndexKey, EdgePropertyByIdKey, EdgePropertyPairKey,
+        AdjacencyKey, EdgeEndpointsKey, EdgePairIndexKey, EdgePropertyByIdKey,
     };
     use crate::encoding::property;
     use crate::encoding::v1::values;
+    use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey as EdgePropertyPairKey;
     use crate::{DbConfig, HelixDB};
 
     fn migration_test_config() -> DbConfig {
@@ -5226,7 +5150,6 @@ pub(crate) mod production_contracts {
     use crate::encoding::v1::keys::vectors::{
         VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey,
     };
-    use crate::encoding::v1::keys::Key;
     use crate::encoding::v2::keys::{GlobalKey, ScopedKey};
     use crate::encoding::v2::values::{
         decode_metadata_value, encode_index_record, encode_metadata_value,

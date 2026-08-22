@@ -139,8 +139,9 @@ UNCOVERED_NON_VECTOR_LINES="$(jq -r '
             and (
                 (
                     (.filename | contains("/crates/db/src/search/vector/"))
-                    or (.filename | contains("/crates/db/src/encoding/v1/keys/vectors.rs"))
-                    or (.filename | contains("/crates/db/src/encoding/v1/values/vectors/"))
+                    or (.filename | contains("/crates/db/src/encoding/v2/legacy/vector/"))
+                    or (.filename | contains("/crates/db/src/encoding/v2/keys/indexes/vector/"))
+                    or (.filename | contains("/crates/db/src/encoding/v2/values/indexes/vector/"))
                 )
                 | not
             )

@@ -1,5 +1,5 @@
 use super::*;
-use crate::encoding::v1::property::Property;
+use crate::encoding::v2::values::property::Property;
 use crate::index_lifecycle::graph_mutation::{
     CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit, PropertyEditOutcome,
 };

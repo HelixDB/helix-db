@@ -133,7 +133,7 @@ pub(crate) mod production_contracts {
     use std::panic::AssertUnwindSafe;
 
     use super::*;
-    use crate::encoding::keys::tenant::DataScope;
+    use crate::encoding::keys::scope::DataScope;
     use crate::search::vector::distance::Cosine;
     use crate::search::vector::{VectorDimension, VectorGenerationIdentity};
 
@@ -167,7 +167,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::*;
-    use crate::encoding::keys::tenant::DataScope;
+    use crate::encoding::keys::scope::DataScope;
     use crate::search::vector::distance::Cosine;
     use crate::search::vector::{VectorDimension, VectorGenerationIdentity};
 
