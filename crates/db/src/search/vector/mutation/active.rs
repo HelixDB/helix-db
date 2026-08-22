@@ -28,8 +28,9 @@ use super::super::{
 };
 use super::{
     CacheSequence, CachedNeighbor, MutationDegreeLimits, MutationOpCache, NeighborRowId,
-    NeighborRowValue, SessionCacheKind, VectorInsertContract, VECTOR_BUILD_ITEM_CACHE_LIMIT,
-    VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT, VECTOR_BUILD_SIMHASH_CACHE_LIMIT,
+    NeighborRowValue, SessionCacheKind, VectorGenerationAfterDeletion, VectorInsertContract,
+    VECTOR_BUILD_ITEM_CACHE_LIMIT, VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT,
+    VECTOR_BUILD_SIMHASH_CACHE_LIMIT,
 };
 
 /// Closed request-local lifecycle for Active vector mutation state.
@@ -301,6 +302,63 @@ impl ActiveVectorMutationRuntime {
         Ok(empty)
     }
 
+    /// Repairs and removes one sorted non-empty cohort in a single generation boundary.
+    pub(crate) async fn delete_batch(
+        &mut self,
+        transaction: &DbTransaction,
+        generation: &ValidatedVectorGenerationHandle,
+        cache_writes: &VectorCacheWriteSet,
+        node_ids: &[NodeId],
+    ) -> Result<VectorGenerationAfterDeletion, HelixDbError> {
+        if node_ids.is_empty() || node_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(HelixDbError::InvariantViolation(
+                "Active vector deletion cohort must be non-empty, sorted, and unique".to_string(),
+            ));
+        }
+        let open = self.open_mut()?;
+        let (outcome, changed) = match generation.metric() {
+            VectorDistanceMetric::Cosine => {
+                open.cosine
+                    .delete_batch(
+                        transaction,
+                        generation,
+                        cache_writes,
+                        node_ids,
+                        &mut open.next_touch,
+                        &mut open.benchmark_layers,
+                    )
+                    .await?
+            }
+            VectorDistanceMetric::Euclidean => {
+                open.euclidean
+                    .delete_batch(
+                        transaction,
+                        generation,
+                        cache_writes,
+                        node_ids,
+                        &mut open.next_touch,
+                        &mut open.benchmark_layers,
+                    )
+                    .await?
+            }
+            VectorDistanceMetric::Manhattan => {
+                open.manhattan
+                    .delete_batch(
+                        transaction,
+                        generation,
+                        cache_writes,
+                        node_ids,
+                        &mut open.next_touch,
+                        &mut open.benchmark_layers,
+                    )
+                    .await?
+            }
+        };
+        transaction.mark_read(changed)?;
+        open.enforce_limits(transaction).await?;
+        Ok(outcome)
+    }
+
     /// Flushes and removes one exact generation before physical-empty validation.
     pub(crate) async fn drain_generation(
         &mut self,
@@ -372,6 +430,7 @@ impl<D: Distance> Default for ActiveMetricSession<D> {
 }
 
 impl<D: Distance> ActiveMetricSession<D> {
+    /// Runs one upsert through the retained generation session entry.
     #[allow(
         clippy::too_many_arguments,
         reason = "the session binds exact generation, cache, entity, vector, and creation state"
@@ -477,6 +536,56 @@ impl<D: Distance> ActiveMetricSession<D> {
         result?;
         let changed = boundary.expect("successful Active vector deletion has a boundary result")?;
         Ok((empty, changed))
+    }
+
+    /// Runs one physical cohort through the retained generation session entry.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the cohort boundary binds generation, cache, IDs, and session clocks"
+    )]
+    async fn delete_batch(
+        &mut self,
+        transaction: &DbTransaction,
+        generation: &ValidatedVectorGenerationHandle,
+        cache_writes: &VectorCacheWriteSet,
+        node_ids: &[NodeId],
+        next_touch: &mut CacheSequence,
+        benchmark_layers: &mut Option<Vec<u16>>,
+    ) -> Result<(VectorGenerationAfterDeletion, Vec<Bytes>), HelixDbError> {
+        let identity = generation.identity().clone();
+        let mut entry = self
+            .take_or_load(
+                transaction,
+                generation,
+                cache_writes,
+                false,
+                benchmark_layers,
+            )
+            .await?;
+        entry.cache.next_touch = *next_touch;
+        entry.cache.begin_entity();
+        let measured = MeasuredVectorTransaction::new(transaction);
+        let result = entry
+            .index
+            .stage_delete_batch_with_metadata(
+                &measured,
+                node_ids,
+                &mut entry.metadata,
+                &mut entry.cache,
+            )
+            .await;
+        let changed = entry.cache.finish_entity_changes();
+        *next_touch = entry.cache.next_touch;
+        let boundary = result
+            .is_ok()
+            .then(|| entry.stage_boundary_reverse_updates(&measured, changed));
+        assert!(
+            self.entries.insert(identity, entry).is_none(),
+            "detached Active vector generation cannot be restored twice"
+        );
+        let outcome = result?;
+        let changed = boundary.expect("successful vector cohort has a boundary result")?;
+        Ok((outcome, changed))
     }
 
     async fn take_or_load(
@@ -1026,6 +1135,7 @@ fn evict_simhash<D: Distance>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use slatedb::object_store::memory::InMemory;
@@ -1036,7 +1146,7 @@ mod tests {
     use crate::encoding::v1::keys::vectors::VectorStorageLane;
     use crate::encoding::v1::keys::Key;
     use crate::index_lifecycle::IndexElementKind;
-    use crate::search::vector::{SimHasherRegistry, VectorDimension};
+    use crate::search::vector::{SimHasherRegistry, VectorDimension, VectorIndexState};
 
     #[derive(Clone)]
     enum Operation {
@@ -1170,6 +1280,226 @@ mod tests {
         new_db.close().await.unwrap();
     }
 
+    async fn run_deletion_cohort(
+        database: &str,
+        batched: bool,
+    ) -> (Vec<(Bytes, Bytes)>, Vec<NodeId>) {
+        let db = Arc::new(Db::open(database, Arc::new(InMemory::new())).await.unwrap());
+        let handle = generation::<Cosine>("active-deletion-cohort", 91);
+        let index = VectorIndex::<Cosine>::from_generation(&handle);
+        let seeded = VectorIndex::<Cosine>::from_generation(&handle)
+            .with_scripted_layers(vec![2, 1, 0, 1, 0, 2, 0, 1])
+            .unwrap();
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        seeded
+            .create(
+                &seed,
+                VectorIndexConfig::from_v2_definition(handle.definition(), handle.physical_name()),
+            )
+            .await
+            .unwrap();
+        for node_id in 1..=8 {
+            let value = node_id as f32;
+            seeded
+                .insert(&seed, node_id, &[value, value + 1.0, 9.0 - value, 0.5])
+                .await
+                .unwrap();
+        }
+        seed.commit().await.unwrap();
+
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let cache_writes = VectorCacheWriteSet::new(Arc::new(SimHasherRegistry::default()));
+        let mut runtime =
+            ActiveVectorMutationRuntime::new(NonZeroU64::new(8 * 1024 * 1024).unwrap());
+        if batched {
+            assert!(matches!(
+                runtime
+                    .delete_batch(&transaction, &handle, &cache_writes, &[])
+                    .await,
+                Err(HelixDbError::InvariantViolation(message))
+                    if message.contains("non-empty, sorted, and unique")
+            ));
+            assert!(matches!(
+                runtime
+                    .delete_batch(&transaction, &handle, &cache_writes, &[3, 2])
+                    .await,
+                Err(HelixDbError::InvariantViolation(message))
+                    if message.contains("non-empty, sorted, and unique")
+            ));
+            assert_eq!(
+                runtime
+                    .delete_batch(&transaction, &handle, &cache_writes, &[2, 3, 6])
+                    .await
+                    .unwrap(),
+                VectorGenerationAfterDeletion::Retained
+            );
+        } else {
+            for node_id in [2, 3, 6] {
+                assert!(!runtime
+                    .delete(&transaction, &handle, &cache_writes, node_id)
+                    .await
+                    .unwrap());
+            }
+        }
+        runtime.prepare(&transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+
+        let metadata = index.get_metadata(db.as_ref()).await.unwrap().unwrap();
+        assert_eq!(metadata.count, 5);
+        let VectorIndexState::Populated { entry_point, .. } = metadata.validated_state().unwrap()
+        else {
+            panic!("a partial cohort must retain populated metadata");
+        };
+        assert!(![2, 3, 6].contains(&entry_point));
+        let survivors = [1, 4, 5, 7, 8];
+        for node_id in 1..=8 {
+            assert_eq!(
+                index
+                    .get_item(db.as_ref(), node_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                ![2, 3, 6].contains(&node_id)
+            );
+        }
+        for layer in 0..=metadata.max_layer {
+            let mut adjacency = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+            for node_id in survivors {
+                let neighbors = if layer == 0 {
+                    index
+                        .load_neighbors_layer0(db.as_ref(), node_id)
+                        .await
+                        .unwrap()
+                } else {
+                    index
+                        .load_upper_neighbors(db.as_ref(), layer, node_id)
+                        .await
+                        .unwrap()
+                        .unwrap_or_default()
+                };
+                let degree_limit = if layer == 0 {
+                    metadata.config.m0
+                } else {
+                    metadata.config.m
+                };
+                assert!(neighbors.len() <= degree_limit);
+                assert!(neighbors.windows(2).all(|pair| pair[0] < pair[1]));
+                assert!(!neighbors.contains(&node_id));
+                assert!(neighbors
+                    .iter()
+                    .all(|neighbor| survivors.contains(neighbor)));
+                adjacency.insert(node_id, neighbors.into_iter().collect());
+            }
+            for (&source, targets) in &adjacency {
+                for target in targets {
+                    assert!(adjacency
+                        .get(target)
+                        .is_some_and(|neighbors| neighbors.contains(&source)));
+                }
+            }
+            for target in survivors {
+                let expected = adjacency
+                    .iter()
+                    .filter_map(|(&source, neighbors)| {
+                        neighbors.contains(&target).then_some(source)
+                    })
+                    .collect::<Vec<_>>();
+                let reverse = index
+                    .load_reverse_sources_for_target(db.as_ref(), target)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reverse
+                        .sources_by_layer()
+                        .get(&layer)
+                        .cloned()
+                        .unwrap_or_default(),
+                    expected
+                );
+            }
+        }
+        for target in [2, 3, 6] {
+            let reverse = index
+                .load_reverse_sources_for_target(db.as_ref(), target)
+                .await
+                .unwrap();
+            assert!(reverse.sources_by_layer().values().all(Vec::is_empty));
+        }
+        let results = index
+            .search(
+                db.as_ref(),
+                &[1.0, 2.0, 8.0, 0.5],
+                &crate::search::vector::SearchParams::new(5)
+                    .unwrap()
+                    .with_ef(16)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let result_ids = results
+            .into_iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>();
+        assert_eq!(result_ids.len(), 5);
+        assert!(result_ids
+            .iter()
+            .all(|node_id| ![2, 3, 6].contains(node_id)));
+        let rows = exact_namespace_rows(&db, handle.physical_index_id()).await;
+        db.close().await.unwrap();
+        (rows, result_ids)
+    }
+
+    async fn assert_complete_cohort_deletion<D: Distance>(database: &str, physical_id: u64) {
+        let db = Arc::new(Db::open(database, Arc::new(InMemory::new())).await.unwrap());
+        let handle = generation::<D>(database, physical_id);
+        let index = VectorIndex::<D>::from_generation(&handle);
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        index
+            .create(
+                &seed,
+                VectorIndexConfig::from_v2_definition(handle.definition(), handle.physical_name()),
+            )
+            .await
+            .unwrap();
+        index.insert(&seed, 1, &[1.0, 0.2, 0.3, 0.4]).await.unwrap();
+        seed.commit().await.unwrap();
+
+        let deletion = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let cache_writes = VectorCacheWriteSet::new(Arc::new(SimHasherRegistry::default()));
+        let mut runtime =
+            ActiveVectorMutationRuntime::new(NonZeroU64::new(8 * 1024 * 1024).unwrap());
+        assert_eq!(
+            runtime
+                .delete_batch(&deletion, &handle, &cache_writes, &[1])
+                .await
+                .unwrap(),
+            VectorGenerationAfterDeletion::Empty
+        );
+        runtime.prepare(&deletion).await.unwrap();
+        deletion.commit().await.unwrap();
+
+        let metadata = index.get_metadata(db.as_ref()).await.unwrap().unwrap();
+        assert_eq!(metadata.count, 0);
+        assert!(matches!(
+            metadata.validated_state().unwrap(),
+            VectorIndexState::Empty
+        ));
+        assert!(index.get_item(db.as_ref(), 1).await.unwrap().is_none());
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn session_is_byte_exact_for_every_metric_and_repeated_transition() {
         differential_session_matches_per_entity_flush::<Cosine>(
@@ -1196,6 +1526,120 @@ mod tests {
             true,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn cohort_deletion_is_deterministic_and_semantically_matches_sequential_deletion() {
+        let (first_rows, first_results) =
+            run_deletion_cohort("active-deletion-cohort-first", true).await;
+        let (second_rows, second_results) =
+            run_deletion_cohort("active-deletion-cohort-second", true).await;
+        let (_, sequential_results) =
+            run_deletion_cohort("active-deletion-cohort-sequential", false).await;
+
+        assert_eq!(first_rows, second_rows);
+        assert_eq!(first_results, second_results);
+        assert_eq!(
+            first_results.into_iter().collect::<BTreeSet<_>>(),
+            sequential_results.into_iter().collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_cohort_deletion_is_empty_for_every_metric() {
+        assert_complete_cohort_deletion::<Cosine>("active-delete-all-cosine", 93).await;
+        assert_complete_cohort_deletion::<Euclidean>("active-delete-all-euclidean", 94).await;
+        assert_complete_cohort_deletion::<Manhattan>("active-delete-all-manhattan", 95).await;
+    }
+
+    #[tokio::test]
+    async fn cohort_deletion_cleans_missing_rows_reverse_residue_and_stale_entry_metadata() {
+        let db = Arc::new(
+            Db::open("active-deletion-cohort-residue", Arc::new(InMemory::new()))
+                .await
+                .unwrap(),
+        );
+        let handle = generation::<Cosine>("active-deletion-cohort-residue", 92);
+        let index = VectorIndex::<Cosine>::from_generation(&handle)
+            .with_scripted_layers(vec![1, 0, 1])
+            .unwrap();
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        index
+            .create(
+                &seed,
+                VectorIndexConfig::from_v2_definition(handle.definition(), handle.physical_name()),
+            )
+            .await
+            .unwrap();
+        for (node_id, vector) in [
+            (1, [1.0, 0.1, 0.2, 0.3]),
+            (2, [0.2, 1.0, 0.3, 0.4]),
+            (3, [0.3, 0.4, 1.0, 0.5]),
+        ] {
+            index.insert(&seed, node_id, &vector).await.unwrap();
+        }
+        seed.commit().await.unwrap();
+
+        let corrupt = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let (canonical_key, _) = index
+            .resolve_required_canonical_vector_key_counted(
+                &corrupt,
+                2,
+                "seeding batched deletion residue",
+            )
+            .await
+            .unwrap();
+        let measured = MeasuredVectorTransaction::new(&corrupt);
+        let rows = super::super::VectorWriteRows::new(&measured, index.row_keyspace());
+        rows.delete_canonical_vector(&canonical_key).unwrap();
+        rows.delete_layer0_neighbors(2).unwrap();
+        rows.put_reverse_locator(2, 0, 99).unwrap();
+        let mut metadata = index.get_metadata(&measured).await.unwrap().unwrap();
+        metadata.entry_point = Some(9_999);
+        metadata.max_layer = metadata.max_layer.max(1);
+        index.update_metadata(&measured, &metadata).await.unwrap();
+        corrupt.commit().await.unwrap();
+
+        let deletion = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let cache_writes = VectorCacheWriteSet::new(Arc::new(SimHasherRegistry::default()));
+        let mut runtime =
+            ActiveVectorMutationRuntime::new(NonZeroU64::new(8 * 1024 * 1024).unwrap());
+        assert_eq!(
+            runtime
+                .delete_batch(&deletion, &handle, &cache_writes, &[2])
+                .await
+                .unwrap(),
+            VectorGenerationAfterDeletion::Retained
+        );
+        runtime.prepare(&deletion).await.unwrap();
+        deletion.commit().await.unwrap();
+
+        assert!(index.get_item(db.as_ref(), 2).await.unwrap().is_none());
+        let reverse = index
+            .load_reverse_sources_for_target(db.as_ref(), 2)
+            .await
+            .unwrap();
+        assert!(reverse.sources_by_layer().values().all(Vec::is_empty));
+        let metadata = index.get_metadata(db.as_ref()).await.unwrap().unwrap();
+        let entry_point = metadata
+            .entry_point
+            .expect("survivors retain an entry point");
+        assert_ne!(entry_point, 9_999);
+        assert!(index
+            .get_item(db.as_ref(), entry_point)
+            .await
+            .unwrap()
+            .is_some());
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

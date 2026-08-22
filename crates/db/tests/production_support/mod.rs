@@ -15,6 +15,11 @@ use std::sync::Once;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
+#[doc(hidden)]
+pub use crate::execution::interpreter::mutation::benchmark_telemetry::{
+    InstrumentedMutationOperations, MutationBenchmarkTelemetry, MutationPhaseTimings,
+};
+
 pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
@@ -23,6 +28,14 @@ pub use crate::search::vector::{
 /// Current managed-index storage version exposed to production fixtures.
 pub const CURRENT_INDEX_STORAGE_VERSION: u16 =
     crate::index_lifecycle::CURRENT_INDEX_STORAGE_VERSION;
+
+mod deletion_batch;
+pub use deletion_batch::{
+    DeletionBatchSize, DeletionBenchmarkApi, DeletionBenchmarkCachePolicy, DeletionBenchmarkCase,
+    DeletionBenchmarkEntityKind, DeletionBenchmarkFixture, DeletionBenchmarkIndexes,
+    DeletionBenchmarkLifecycle, DeletionBenchmarkSample, DeletionBenchmarkWorkload,
+    PhysicalObjectStoreOperations,
+};
 
 mod graph_mutation_representation;
 mod index_lifecycle;

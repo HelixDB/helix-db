@@ -13,9 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "production-coverage"))]
-use slatedb::DbReadOps;
-use slatedb::DbTransaction;
+use slatedb::{DbReadOps, DbTransaction};
 
 use crate::encoding::v1::values::vectors::encode_layer0_neighbors;
 use crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors;
@@ -31,7 +29,6 @@ use super::neighbor_set::{
     NeighborDegreeLimit, NeighborDegreeLimits, NeighborDifference, NeighborSet,
 };
 use super::result::VectorEntityId;
-#[cfg(any(test, feature = "production-coverage"))]
 use super::storage::ReverseSourcesForTarget;
 use super::storage::{EntryCandidateLayerRow, VectorRowKeyspace, VectorRows, VectorWriteRows};
 use super::{
@@ -42,6 +39,15 @@ use super::{
 
 mod active;
 pub(crate) use active::ActiveVectorMutationRuntime;
+
+/// Complete physical-generation state after one non-empty deletion cohort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorGenerationAfterDeletion {
+    /// At least one canonical layer-0 vector remains searchable.
+    Retained,
+    /// No canonical layer-0 vector remains in the generation.
+    Empty,
+}
 
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MIN_TARGETS: usize = 2;
@@ -1151,7 +1157,6 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Loads every reverse source grouped by layer for deletion repair.
-    #[cfg(any(test, feature = "production-coverage"))]
     pub(super) async fn load_reverse_sources_for_target(
         &self,
         read: &(impl DbReadOps + Send + Sync),
@@ -1769,6 +1774,312 @@ impl<D: Distance> VectorIndex<D> {
         }
 
         Ok(item_existed)
+    }
+
+    /// Removes one sorted cohort and repairs each affected HNSW component once.
+    ///
+    /// All target and survivor rows are observed before mutation. Each layer is
+    /// then repaired highest-first after cohort references have been removed,
+    /// and the operation cache emits only final canonical rows and their linear
+    /// reverse-locator differences. Canonical payload cleanup tolerates missing
+    /// target rows, while metadata count changes only for observed layer-0
+    /// items and the final entry point is selected exactly once.
+    pub(super) async fn stage_delete_batch_with_metadata(
+        &self,
+        txn: &MeasuredVectorTransaction<'_>,
+        node_ids: &[NodeId],
+        metadata: &mut VectorIndexMetadata,
+        mutation_cache: &mut MutationOpCache<D>,
+    ) -> Result<VectorGenerationAfterDeletion, HelixDbError> {
+        if node_ids.is_empty() || node_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(HelixDbError::InvariantViolation(
+                "vector deletion cohort must be non-empty, sorted, and unique".to_string(),
+            ));
+        }
+        metadata.validated_state()?;
+        let cohort = node_ids.iter().copied().collect::<BTreeSet<_>>();
+        let degree_limits = MutationDegreeLimits::try_from_metadata(metadata)?;
+        let rows = VectorWriteRows::new(txn, self.row_keyspace());
+        let mut existing_items = 0u64;
+        let mut target_layers = BTreeMap::<NodeId, BTreeSet<u16>>::new();
+        let mut outgoing = BTreeMap::<(u16, NodeId), Vec<NodeId>>::new();
+        let mut reverse_sources = BTreeMap::<NodeId, ReverseSourcesForTarget>::new();
+        let mut all_layers = BTreeSet::new();
+        #[cfg(feature = "production-coverage")]
+        let mut repair_sources = BTreeSet::new();
+
+        // Snapshot the complete cohort before any row is staged. This avoids
+        // order-sensitive repair when deleted nodes are adjacent to each other.
+        for &node_id in node_ids {
+            if self
+                .get_item_for_layer_cached(txn, 0, node_id, mutation_cache)
+                .await?
+                .is_some()
+            {
+                existing_items = existing_items.saturating_add(1);
+            }
+            let node_max_layer = self
+                .get_node_max_layer_cached(txn, node_id, metadata, mutation_cache)
+                .await?;
+            let reverse = self.load_reverse_sources_for_target(txn, node_id).await?;
+            let mut layers = (0..=node_max_layer).collect::<BTreeSet<_>>();
+            layers.extend(reverse.sources_by_layer().keys().copied());
+            for layer in layers.iter().copied() {
+                let neighbors = self
+                    .load_neighbors_for_mutation(txn, layer, node_id, mutation_cache)
+                    .await?;
+                outgoing.insert((layer, node_id), neighbors);
+                all_layers.insert(layer);
+            }
+            target_layers.insert(node_id, layers);
+            reverse_sources.insert(node_id, reverse);
+        }
+
+        for layer in all_layers.iter().rev().copied() {
+            let maximum_neighbors = if layer == 0 {
+                degree_limits.layer0.get()
+            } else {
+                degree_limits.upper.get()
+            };
+            let targets_on_layer = node_ids
+                .iter()
+                .copied()
+                .filter(|node_id| {
+                    target_layers
+                        .get(node_id)
+                        .is_some_and(|layers| layers.contains(&layer))
+                })
+                .collect::<BTreeSet<_>>();
+            let mut affected_survivors = BTreeSet::new();
+            for &target in &targets_on_layer {
+                affected_survivors.extend(
+                    outgoing
+                        .get(&(layer, target))
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|node_id| !cohort.contains(node_id)),
+                );
+                affected_survivors.extend(
+                    reverse_sources
+                        .get(&target)
+                        .expect("every cohort target retains its reverse snapshot")
+                        .sources_at(layer)
+                        .iter()
+                        .copied()
+                        .filter(|node_id| !cohort.contains(node_id)),
+                );
+            }
+
+            let mut retained_rows = BTreeMap::<NodeId, Vec<NodeId>>::new();
+            for &source in &affected_survivors {
+                #[cfg(feature = "production-coverage")]
+                repair_sources.insert((layer, source));
+                let observed = self
+                    .load_neighbors_for_mutation(txn, layer, source, mutation_cache)
+                    .await?;
+                let retained = observed
+                    .iter()
+                    .copied()
+                    .filter(|node_id| !cohort.contains(node_id))
+                    .collect::<Vec<_>>();
+                if retained != observed {
+                    self.stage_neighbors_vec_for_mutation(
+                        txn,
+                        layer,
+                        source,
+                        retained.clone(),
+                        mutation_cache,
+                    )
+                    .await?;
+                }
+                retained_rows.insert(source, retained);
+            }
+
+            let mut incidence = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+            for node_id in targets_on_layer
+                .iter()
+                .chain(affected_survivors.iter())
+                .copied()
+            {
+                incidence.entry(node_id).or_default();
+            }
+            for &target in &targets_on_layer {
+                let observed = outgoing
+                    .get(&(layer, target))
+                    .expect("snapshotted target layer retains its outgoing row");
+                for &neighbor in observed {
+                    if !incidence.contains_key(&neighbor) {
+                        continue;
+                    }
+                    incidence.entry(target).or_default().insert(neighbor);
+                    incidence.entry(neighbor).or_default().insert(target);
+                }
+                for &source in reverse_sources
+                    .get(&target)
+                    .expect("every cohort target retains its reverse snapshot")
+                    .sources_at(layer)
+                {
+                    if !incidence.contains_key(&source) {
+                        continue;
+                    }
+                    incidence.entry(target).or_default().insert(source);
+                    incidence.entry(source).or_default().insert(target);
+                }
+            }
+            for (&source, neighbors) in &retained_rows {
+                for &neighbor in neighbors {
+                    if !incidence.contains_key(&neighbor) {
+                        continue;
+                    }
+                    incidence.entry(source).or_default().insert(neighbor);
+                    incidence.entry(neighbor).or_default().insert(source);
+                }
+            }
+
+            let mut unvisited = incidence.keys().copied().collect::<BTreeSet<_>>();
+            while let Some(first) = unvisited.pop_first() {
+                let mut frontier = BTreeSet::from([first]);
+                let mut component = BTreeSet::new();
+                while let Some(current) = frontier.pop_first() {
+                    if !component.insert(current) {
+                        continue;
+                    }
+                    let neighbors = incidence
+                        .get(&current)
+                        .expect("component member retains an incidence row");
+                    for &neighbor in neighbors {
+                        if unvisited.remove(&neighbor) {
+                            frontier.insert(neighbor);
+                        }
+                    }
+                }
+                let survivors = component
+                    .iter()
+                    .copied()
+                    .filter(|node_id| !cohort.contains(node_id))
+                    .collect::<BTreeSet<_>>();
+                if survivors.is_empty() {
+                    continue;
+                }
+                let mut candidates = survivors.clone();
+                for survivor in &survivors {
+                    candidates.extend(
+                        retained_rows
+                            .get(survivor)
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .filter(|node_id| !cohort.contains(node_id)),
+                    );
+                }
+                let candidates = candidates.into_iter().collect::<HashSet<_>>();
+                for survivor in survivors {
+                    self.relink_neighbor(
+                        txn,
+                        layer,
+                        survivor,
+                        &candidates,
+                        maximum_neighbors,
+                        mutation_cache,
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        for &node_id in node_ids {
+            let layers = target_layers
+                .get(&node_id)
+                .expect("every cohort target retains its observed layers");
+            for &layer in layers {
+                for &target_node_id in outgoing
+                    .get(&(layer, node_id))
+                    .expect("every observed target layer retains its outgoing row")
+                {
+                    rows.delete_reverse_locator(target_node_id, layer, node_id)?;
+                }
+            }
+            rows.delete_reverse_sources(
+                reverse_sources
+                    .get(&node_id)
+                    .expect("every cohort target retains its reverse snapshot"),
+            )?;
+
+            let (canonical_key, _) = self
+                .resolve_canonical_vector_key_cached(
+                    txn,
+                    node_id,
+                    mutation_cache,
+                    "deleting batched canonical vector payload",
+                )
+                .await?;
+            if let Some(canonical_key) = canonical_key {
+                if self.simhash_directory_enabled() {
+                    rows.delete_simhash_directory_entry(&canonical_key)?;
+                }
+                rows.delete_canonical_vector(&canonical_key)?;
+            }
+            rows.delete_layer0_neighbors(node_id)?;
+            for layer in 1..=layers.iter().next_back().copied().unwrap_or(0) {
+                rows.delete_upper_neighbors(layer, node_id)?;
+                self.mark_memory_upper_neighbors_dirty(layer, node_id);
+            }
+            rows.delete_upper_vector(node_id)?;
+            self.mark_memory_node_dirty(node_id);
+            rows.delete_simhash(node_id)?;
+            self.mark_memory_node_dirty(node_id);
+            self.remove_entry_candidate(txn, node_id).await?;
+
+            let originals = layers
+                .iter()
+                .map(|&layer| {
+                    let row = MutationOpCache::<D>::node_row_id(layer, node_id);
+                    mutation_cache
+                        .neighbor(row)
+                        .map(|cached| (layer, row, cached.current().clone()))
+                        .ok_or_else(|| {
+                            HelixDbError::InvariantViolation(format!(
+                                "snapshotted vector deletion row vanished from the mutation cache: node={node_id}, layer={layer}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            mutation_cache.invalidate_items(node_id);
+            mutation_cache.invalidate_simhash(node_id);
+            mutation_cache.put_simhash(node_id, None);
+            mutation_cache.invalidate_neighbors(node_id);
+            for (layer, row, original) in originals {
+                mutation_cache.install_loaded_neighbor(row, NeighborRowValue::KnownAbsent);
+                mutation_cache.record_neighbor_change(row, original);
+                mutation_cache.put_item(layer, node_id, None, 0);
+            }
+        }
+
+        #[cfg(feature = "production-coverage")]
+        crate::execution::interpreter::mutation::benchmark_telemetry::record_vector_deletion(
+            node_ids.len(),
+            repair_sources.len(),
+        );
+        metadata.count = metadata.count.saturating_sub(existing_items);
+        let final_entry = self
+            .find_best_entry_candidate_cached(txn, mutation_cache)
+            .await?;
+        match final_entry {
+            Some((entry_point, max_layer)) => {
+                metadata.entry_point = Some(entry_point);
+                metadata.max_layer = max_layer;
+            }
+            None => {
+                metadata.entry_point = None;
+                metadata.max_layer = 0;
+            }
+        }
+        self.update_metadata(txn, metadata).await?;
+        Ok(match final_entry {
+            Some(_) => VectorGenerationAfterDeletion::Retained,
+            None => VectorGenerationAfterDeletion::Empty,
+        })
     }
 
     /// Finds the highest layer containing a node for production coverage contracts.

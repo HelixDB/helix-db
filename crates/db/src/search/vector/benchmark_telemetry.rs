@@ -53,7 +53,7 @@ static COUNTERS: Counters = Counters {
 };
 
 /// One complete benchmark observation for the typed vector mutation boundary.
-#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VectorMutationBenchmarkTelemetry {
     pub point_get_calls: u64,
     pub multi_get_calls: u64,

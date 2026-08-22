@@ -212,6 +212,41 @@ enum MissingAbsentMarkerPolicy {
 }
 
 impl PreparedTextStatisticsBatch {
+    /// Observes sorted unique rows once so later entity transitions compose in memory.
+    pub(crate) async fn observe_rows(
+        &mut self,
+        transaction: &DbTransaction,
+        keys: impl IntoIterator<Item = Bytes>,
+    ) -> Result<()> {
+        const ROWS_PER_CHUNK: usize = 512;
+
+        let mut keys = keys.into_iter().collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        for chunk in keys.chunks(ROWS_PER_CHUNK) {
+            let values = transaction.multi_get(chunk).await?;
+            for (key, observed) in chunk.iter().cloned().zip(values) {
+                match self.rows.entry(key.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(PreparedStatisticsRow {
+                            key,
+                            observed: observed.clone(),
+                            replacement: observed,
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        if entry.get().replacement != observed {
+                            return Err(corruption(
+                                "text statistics observation disagrees with composed state",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Adds one transition while preserving the first database observation and
     /// exposing the latest replacement to later transition preparation.
     pub(crate) fn push(&mut self, transition: PreparedTextStatisticsTransition) -> Result<()> {
@@ -849,14 +884,7 @@ async fn read_marker(
     generation: index_lifecycle::IndexGenerationId,
     entity: index_keys::IndexEntity,
 ) -> Result<Option<(Bytes, work::TextStatisticsEntityValue)>> {
-    let key = scoped_key(
-        scope,
-        index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
-            index_id,
-            generation,
-            entity,
-        }),
-    );
+    let key = entity_key(scope, index_id, generation, entity);
     let Some(value) = read_value(transaction, batch, &key).await? else {
         return Ok(None);
     };
@@ -871,6 +899,23 @@ async fn read_marker(
         ));
     }
     Ok(Some((value, marker)))
+}
+
+/// Builds the exact entity-accounting key shared by Active and Building epochs.
+pub(super) fn entity_key(
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    entity: index_keys::IndexEntity,
+) -> Bytes {
+    scoped_key(
+        scope,
+        index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
+            index_id,
+            generation,
+            entity,
+        }),
+    )
 }
 
 async fn read_value(

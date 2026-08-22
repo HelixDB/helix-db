@@ -10,7 +10,7 @@ mod count;
 mod ddl;
 mod dependencies;
 mod dispatch;
-mod mutation;
+pub(crate) mod mutation;
 pub(crate) mod read_view;
 mod reserved;
 mod row_mode;
