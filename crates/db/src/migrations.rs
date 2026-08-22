@@ -4247,6 +4247,7 @@ mod tests {
     };
     use crate::encoding::property;
     use crate::encoding::v1::values;
+    use crate::error::WriterMigrationRequirement;
     use crate::{DbConfig, HelixDB};
 
     fn migration_test_config() -> DbConfig {
@@ -4267,6 +4268,15 @@ mod tests {
                     )
                     .with_worker_mode(config::MigrationWorkerMode::Disabled),
             )
+    }
+
+    async fn all_test_rows(read: &(impl DbReadOps + Send + Sync)) -> Vec<(Bytes, Bytes)> {
+        let mut rows = read.scan(..).await.expect("migration test scans");
+        let mut collected = Vec::new();
+        while let Some(row) = rows.next().await.expect("migration test row reads") {
+            collected.push((row.key, row.value));
+        }
+        collected
     }
 
     fn edge_delta(op: u8, node_id: NodeId) -> Bytes {
@@ -4905,7 +4915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reader_tolerates_tenant_migration_without_mutating_bootstrap_metadata() {
+    async fn reader_rejects_incomplete_tenant_migration_without_mutating_storage() {
         let root = tempfile::tempdir().expect("temporary object-store root");
         let database = "reader-requires-migration";
         let object_store = Arc::new(
@@ -4928,16 +4938,22 @@ mod tests {
         )
         .await
         .expect("legacy tenant row writes");
+        let legacy_rows = all_test_rows(&raw).await;
         raw.close().await.expect("raw pre-migration db closes");
         let source = crate::HelixDbSource::Disk {
             root: root.path().to_path_buf(),
             database: database.to_string(),
         };
 
-        let reader = HelixDB::open_reader(source.clone())
-            .await
-            .expect("compatible pre-migration reader opens");
-        reader.close().await.expect("pre-migration reader closes");
+        let Err(error) = HelixDB::open_reader(source.clone()).await else {
+            panic!("incomplete tenant migration must not become query-routable")
+        };
+        assert!(matches!(
+            error,
+            HelixDbError::WriterMigrationRequired {
+                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+            }
+        ));
 
         let object_store = Arc::new(
             slatedb::object_store::local::LocalFileSystem::new_with_prefix(root.path())
@@ -4947,6 +4963,7 @@ mod tests {
             .build()
             .await
             .expect("raw pre-migration db reopens");
+        assert_eq!(all_test_rows(&raw).await, legacy_rows);
         assert!(
             !tenant_key_envelope_ready(&raw)
                 .await
@@ -4969,11 +4986,27 @@ mod tests {
             .await
             .expect("writer bootstrap tuple commits");
         raw.flush().await.expect("bootstrap tuple flushes");
+        let tuple_rows = all_test_rows(&raw).await;
         raw.close().await.expect("raw tuple-only db closes");
-        let reader = HelixDB::open_reader(source.clone())
+        let Err(error) = HelixDB::open_reader(source.clone()).await else {
+            panic!("tuple-only storage must not become query-routable")
+        };
+        assert!(matches!(
+            error,
+            HelixDbError::WriterMigrationRequired {
+                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+            }
+        ));
+        let object_store = Arc::new(
+            slatedb::object_store::local::LocalFileSystem::new_with_prefix(root.path())
+                .expect("local object store reopens after tuple rejection"),
+        );
+        let raw = Db::builder(database, object_store)
+            .build()
             .await
-            .expect("compatible tuple-only reader opens before writer migration");
-        reader.close().await.expect("tuple-only reader closes");
+            .expect("raw tuple-only db reopens");
+        assert_eq!(all_test_rows(&raw).await, tuple_rows);
+        raw.close().await.expect("raw tuple-only db closes again");
 
         let writer = HelixDB::open_with_config(source.clone(), migration_test_config())
             .await
