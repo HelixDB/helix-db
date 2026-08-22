@@ -617,6 +617,14 @@ impl QueryServiceError {
         matches!(self, Self::Db(HelixDbError::QueryDeadlineExceeded))
     }
 
+    /// Returns true when reader retirement cancelled an admitted read.
+    pub fn is_cancelled_by_reader_retirement(&self) -> bool {
+        matches!(
+            self,
+            Self::Db(HelixDbError::QueryCancelledByReaderRetirement)
+        )
+    }
+
     /// Returns true when fencing made a started commit's outcome unknowable.
     pub fn is_commit_outcome_unknown(&self) -> bool {
         matches!(

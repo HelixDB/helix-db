@@ -104,6 +104,8 @@ pub enum QueryErrorCode {
     RequestReadViewChanged,
     /// The query exceeded its execution deadline.
     QueryDeadlineExceeded,
+    /// Reader retirement cancelled an admitted read before completion.
+    QueryCancelledByReaderRetirement,
     /// A supplied node ID is invalid.
     InvalidNodeId,
     /// A requested node does not exist.
@@ -231,6 +233,7 @@ impl QueryErrorCode {
         Self::TransactionConflict,
         Self::RequestReadViewChanged,
         Self::QueryDeadlineExceeded,
+        Self::QueryCancelledByReaderRetirement,
         Self::InvalidNodeId,
         Self::NodeNotFound,
         Self::EdgeNotFound,
@@ -319,6 +322,7 @@ impl QueryErrorCode {
             Self::TransactionConflict => "transaction_conflict",
             Self::RequestReadViewChanged => "request_read_view_changed",
             Self::QueryDeadlineExceeded => "query_deadline_exceeded",
+            Self::QueryCancelledByReaderRetirement => "query_cancelled_by_reader_retirement",
             Self::InvalidNodeId => "invalid_node_id",
             Self::NodeNotFound => "node_not_found",
             Self::EdgeNotFound => "edge_not_found",

@@ -38,7 +38,7 @@ impl<'db> ExecutionContext<'db> {
         op: &exec::ExecOp,
         input: ExecutionValue,
     ) -> Result<ExecutionValue> {
-        let execution_control = self.execution_control;
+        let execution_control = self.execution_control.clone();
         let value = match op {
             exec::ExecOp::Access { plan } => execution_control.run(self.execute_access(plan)).await,
             exec::ExecOp::Count { plan } => {

@@ -181,6 +181,10 @@ pub enum HelixDbError {
     #[error("Query execution deadline exceeded")]
     QueryDeadlineExceeded,
 
+    /// Reader retirement cancelled an admitted read before completion.
+    #[error("Query was cancelled because its reader is retiring")]
+    QueryCancelledByReaderRetirement,
+
     /// Invalid node ID
     #[error("Invalid node ID: {0}")]
     InvalidNodeId(u64),
@@ -490,6 +494,9 @@ impl HelixDbError {
             Self::TransactionConflict(_) => error_code::QueryErrorCode::TransactionConflict,
             Self::RequestReadViewChanged => error_code::QueryErrorCode::RequestReadViewChanged,
             Self::QueryDeadlineExceeded => error_code::QueryErrorCode::QueryDeadlineExceeded,
+            Self::QueryCancelledByReaderRetirement => {
+                error_code::QueryErrorCode::QueryCancelledByReaderRetirement
+            }
             Self::InvalidNodeId(_) => error_code::QueryErrorCode::InvalidNodeId,
             Self::NodeNotFound(_) => error_code::QueryErrorCode::NodeNotFound,
             Self::EdgeNotFound { .. } => error_code::QueryErrorCode::EdgeNotFound,
@@ -771,6 +778,10 @@ mod tests {
             (
                 HelixDbError::QueryDeadlineExceeded,
                 Code::QueryDeadlineExceeded,
+            ),
+            (
+                HelixDbError::QueryCancelledByReaderRetirement,
+                Code::QueryCancelledByReaderRetirement,
             ),
             (HelixDbError::InvalidNodeId(0), Code::InvalidNodeId),
             (HelixDbError::NodeNotFound(1), Code::NodeNotFound),
