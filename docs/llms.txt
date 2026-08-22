@@ -12,11 +12,11 @@ helix query dev -e 'writeBatch().varAs("alice", g().addN("User", { username: "al
 helix query dev -e 'readBatch().varAs("users", g().nWithLabel("User")).returning(["users"])'
 ```
 
-Full walkthrough: https://docs.helix-db.com/cli/getting-started
+Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickstart
 
 ## HelixDB — Start Here
 - [Introduction](https://docs.helix-db.com/database/helix-db/start-here/introduction) — Page type: Concept
-- [Get Started](https://docs.helix-db.com/database/helix-db/start-here/quickstart): Start HelixDB locally, write data, and follow an edge in ten minutes — Page type: Tutorial
+- [Get Started](https://docs.helix-db.com/database/helix-db/start-here/quickstart): Initialize HelixDB, start a local instance, run the generated query, and stop it — Page type: Tutorial
 - [Deployment options](https://docs.helix-db.com/database/helix-db/start-here/run-modes): Compare Cloud, local server, and embedded execution — Page type: Concept
 - [Local server](https://docs.helix-db.com/database/helix-db/start-here/local-development/local-server): Start HelixDB locally with ephemeral memory or persistent object storage — Page type: Guide
 - [Embedded database](https://docs.helix-db.com/database/helix-db/start-here/local-development/embedded-database): Open HelixDB directly inside your process with explicit storage and cache settings — Page type: Guide

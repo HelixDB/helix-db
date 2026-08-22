@@ -31,74 +31,17 @@ helix chef
 <Note>
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
 
-For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by hand: `helix init local` → `helix start dev` → `helix query dev --file …` (see the Local quickstart below). This path never prompts and never logs in.
+For a fully scriptable setup with **no** Cloud auth, skip `chef` and follow the
+[canonical local quickstart](/database/helix-db/start-here/quickstart). This path
+never prompts and never logs in.
 </Note>
 
 ## Local quickstart
 
-<Steps>
-
-<Step title="Install the Helix CLI">
-```bash
-curl -sSL "https://install.helix-db.com" | bash
-```
-
-If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
-</Step>
-
-<Step title="Create a new project">
-```bash
-mkdir my-helix-app
-cd my-helix-app
-helix init
-```
-
-`helix init` scaffolds:
-
-- `helix.toml` with a single `[local.dev]` instance.
-- `.helix/` workspace state (added to `.gitignore`).
-- `examples/request.json` — a runnable read request you can send straight away.
-
-In a TTY, `helix init` prompts you to pick `local` or `enterprise`. Pass the subcommand directly to skip the prompt: `helix init local`.
-</Step>
-
-<Step title="Run the local dev runtime">
-```bash
-helix start dev
-```
-
-`helix start` pulls `ghcr.io/helixdb/helixdb:v0.0.4`, starts a background container named `helix-<project>-dev`, publishes port `6969`, and waits for `GET /healthz` to report ready before returning.
-
-To stream logs in the foreground instead, use `helix start dev --foreground` and stop the container with Ctrl-C.
-
-For persistent local data, use `helix start dev --disk`. Disk mode starts a CLI-managed MinIO sidecar and keeps data across `helix stop`.
-
-<Warning>
-The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
-</Warning>
-</Step>
-
-<Step title="Send a dynamic query">
-```bash
-helix query dev --file examples/request.json
-```
-
-The example request runs a read query that counts `User` nodes. Pass `--compact`
-to print on a single line, or `--warm` to populate caches. A standalone local
-warm read prints its normal response; Helix Cloud fanout returns no body.
-</Step>
-
-<Step title="Stop the instance when you are done">
-```bash
-helix stop dev
-```
-
-`helix stop` is idempotent — it reports cleanly if the instance was not running.
-</Step>
-
-</Steps>
-
-Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
+Use the [canonical local quickstart](/database/helix-db/start-here/quickstart)
+for the executable `helix init local` → `helix start dev` → `helix query dev`
+→ `helix stop dev` journey. It lists the exact generated files, instance name,
+and query file so this CLI guide does not maintain a second copy of the tutorial.
 
 ## Helix Cloud quickstart
 

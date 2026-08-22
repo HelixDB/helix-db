@@ -83,7 +83,7 @@ All this means is much lower costs for vastly more amounts of storage.
 ## Next steps
 
   <Card title="Get Started" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Start building">
-    Build and query a connected application with HelixDB.
+    Start a local instance and run the generated query.
   </Card>
   <Card title="Understand the data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model" cta="Explore the model">
     Learn how nodes, edges, properties, and indexes represent your data.
@@ -98,13 +98,14 @@ Page type: Tutorial
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-You will start a local HelixDB server, create two `User` nodes connected by a
-`FOLLOWS` edge, and read them back with one of the forthcoming v3 SDKs.
+This is the canonical local HelixDB quickstart. You will create a project, start
+the generated `dev` instance, run the generated JSON request, and stop the
+instance.
 
 ## Prerequisites
 
 - Docker or Podman
-- Rust, Node.js 20+, Go, Python 3.11+, or the `helix` CLI for raw JSON
+- A terminal on macOS or Linux
 
   <Step title="Install the CLI">
 
@@ -112,330 +113,98 @@ You will start a local HelixDB server, create two `User` nodes connected by a
 curl -sSL "https://install.helix-db.com" | bash
 ```
 
+If the CLI is already installed, run [`helix update`](/cli/command-reference/update).
+
   </Step>
-  <Step title="Setup a local project">
+  <Step title="Create a local project">
+
+Create and enter an empty directory, then initialize it:
 
 ```bash
-helix init local # --lang {rs,ts,go,py}
+mkdir my-helix-app
+cd my-helix-app
+helix init local
 ```
 
-This creates the project structure, example query files, and installs dependencies.
+`helix init local` creates:
 
-  you can choose a language to use with the `--lang` flag. The default is TypeScript.
+- `helix.toml` with one local instance named `dev` on port `6969`.
+- `.helix/` for CLI-managed instance state.
+- `.gitignore` entries for `.helix/`, `.env`, `target/`, and `*.log`.
+- `AGENTS.md` with the current CLI workflow for coding agents.
+- `examples/request.json` with a runnable read request.
+
+It does not create a Rust, TypeScript, Go, or Python project. Choose an SDK
+after this CLI journey.
 
   </Step>
-  <Step title="Start the local database">
+  <Step title="Start the generated instance">
 
 ```bash
-helix start local
+helix start dev
 ```
 
-This starts the local database at `http://localhost:6969/`.
+The CLI starts the local container, publishes it at `http://localhost:6969`,
+and waits for the database health check before it returns.
+
+The default storage mode is in-memory. Stopping the instance removes its data.
+Use `helix start dev --disk` when you need local persistence.
 
   </Step>
-  <Step title="Create and query the graph">
-
-In the generated after running `helix init local`, you will find a file called `queries.rs` (the file suffix will be different depending on the language you chose).
-For the language you chose, paste the following code into the file:
-
-```rust Rust [expandable]
-use helix_db::dsl::prelude::*;
-use helix_db::Client;
-
-#[query]
-fn write_users() -> WriteBatch {
-    write_batch()
-        .var_as("alice", g().add_n("User", vec![("name", "Alice")]))
-        .var_as("bob", g().add_n("User", vec![("name", "Bob")]))
-        .var_as(
-            "follow",
-            g()
-                .n(NodeRef::var("alice"))
-                .add_e(
-                    "FOLLOWS",
-                    NodeRef::var("bob"),
-                    vec![("since", "2026-07-24")],
-                ),
-        )
-        .var_as(
-            "friends",
-            g()
-                .n(NodeRef::var("alice"))
-                .out(Some("FOLLOWS"))
-                .value_map(Some(vec!["$id", "name"])),
-        )
-        .returning(["alice", "bob", "friends"])
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let result: serde_json::Value = Client::new(None)?
-        .query(write_users())
-        .send()
-        .await?;
-    println!("{result:?}");
-    Ok(())
-}
-```
-
-```ts TypeScript [expandable]
-import { Client, NodeRef, g, writeBatch } from "@helix-db/helix-db";
-
-const query = writeBatch()
-  .varAs("alice", g().addN("User", { name: "Alice" }))
-  .varAs("bob", g().addN("User", { name: "Bob" }))
-  .varAs(
-    "follow",
-    g()
-      .n(NodeRef.var("alice"))
-      .addE("FOLLOWS", NodeRef.var("bob"), { since: "2026-07-24" }),
-  )
-  .varAs(
-    "friends",
-    g().n(NodeRef.var("alice")).out("FOLLOWS").valueMap(["$id", "name"]),
-  )
-  .returning(["alice", "bob", "friends"]);
-
-const client = Client.server("http://localhost:6969");
-const result = await client
-  .query(query.toQueryRequest({ queryName: "write_users" }))
-  .send();
-console.log(result);
-```
-
-```go Go [expandable]
-package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-
-	helix "github.com/helixdb/helix-db/sdks/go"
-)
-
-func main() {
-	request := helix.WriteQuery("write_users").
-		VarAs("alice", helix.G().AddN(
-			"User",
-			helix.Props{helix.Prop("name", "Alice")},
-		)).
-		VarAs("bob", helix.G().AddN(
-			"User",
-			helix.Props{helix.Prop("name", "Bob")},
-		)).
-		VarAs(
-			"follow",
-			helix.G().
-				N(helix.NodeVar("alice")).
-				AddE(
-					"FOLLOWS",
-					helix.NodeVar("bob"),
-					helix.Props{helix.Prop("since", "2026-07-24")},
-				),
-		).
-		VarAs(
-			"friends",
-			helix.G().
-				N(helix.NodeVar("alice")).
-				Out("FOLLOWS").
-				ValueMap("$id", "name"),
-		).
-		Returning("alice", "bob", "friends")
-
-	client, err := helix.NewClient("http://localhost:6969")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var result map[string]any
-	if err := client.Exec(context.Background(), request, &result); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(result)
-}
-```
-
-```python Python [expandable]
-from helixdb import Client, NodeRef, g, write_batch
-
-request = (
-    write_batch()
-    .var_as("alice", g().add_n("User", {"name": "Alice"}))
-    .var_as("bob", g().add_n("User", {"name": "Bob"}))
-    .var_as(
-        "follow",
-        g()
-        .n(NodeRef.var("alice"))
-        .add_e(
-            "FOLLOWS",
-            NodeRef.var("bob"),
-            {"since": "2026-07-24"},
-        ),
-    )
-    .var_as(
-        "friends",
-        g()
-        .n(NodeRef.var("alice"))
-        .out("FOLLOWS")
-        .value_map(["$id", "name"]),
-    )
-    .returning(["alice", "bob", "friends"])
-    .to_query_request(query_name="write_users")
-)
-
-result = Client("http://localhost:6969").query(request)
-print(result)
-```
-
-```json JSON [expandable]
-{
-  "request_type": "write",
-  "query_name": "write_users",
-  "query": {
-    "write": {
-      "entries": [
-        {
-          "query": {
-            "name": "alice",
-            "root": {
-              "add_n": {
-                "label": "User",
-                "properties": [
-                  ["name", { "value": { "string": "Alice" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "bob",
-            "root": {
-              "add_n": {
-                "label": "User",
-                "properties": [
-                  ["name", { "value": { "string": "Bob" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "follow",
-            "root": {
-              "add_e": {
-                "input": {
-                  "nodes": { "reference": { "var": "alice" } }
-                },
-                "label": "FOLLOWS",
-                "to": { "var": "bob" },
-                "properties": [
-                  ["since", { "value": { "string": "2026-07-24" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "friends",
-            "root": {
-              "value_map": {
-                "input": {
-                  "out": {
-                    "input": {
-                      "nodes": { "reference": { "var": "alice" } }
-                    },
-                    "label": "FOLLOWS"
-                  }
-                },
-                "properties": ["$id", "name"]
-              }
-            }
-          }
-        }
-      ],
-      "returns": ["alice", "bob", "friends"]
-    }
-  }
-}
-```
-
-{/* sdk-commands: no JSON representation */}
-```bash Rust
-cargo run --bin queries
-```
-
-```bash TypeScript
-npm run queries
-```
-
-```bash Go
-go run queries.go
-```
-
-```bash Python
-python queries.py
-```
-
-  you need to run this in the directory created by `helix init local`.
-
-Each SDK decodes the same JSON response. Your terminal's object formatting differs by
-language, but the response body is:
-
-```json
-{
-  "alice": [{ "$id": 0 }],
-  "bob": [{ "$id": 1 }],
-  "friends": [{ "$id": 1, "name": "Bob" }]
-}
-```
-
-  </Step>
-
-  <Step title="Open the dashboard">
+  <Step title="Run the generated query">
 
 ```bash
-helix dashboard
+helix query dev --file examples/request.json
 ```
 
-This opens the dashboard at `http://localhost:3000/`. You can explore the graph and query it with the UI.
+The generated request counts nodes with the `User` label. A new database
+returns a `node_count` of zero. Edit the JSON file and run the same command
+again to iterate.
+
+  </Step>
+  <Step title="Stop the instance">
+
+```bash
+helix stop dev
+```
+
+`helix stop` is idempotent, so it also exits successfully when the instance is
+already stopped.
 
   </Step>
 
-## What just happened
+## Use an SDK
 
-- `writeBatch()` made invalid read-only mutation states unrepresentable.
-- Each `varAs` added one named query entry.
-- `NodeRef.var("alice")` referred to the result of the first entry.
-- Each chained operation wrapped the preceding operation as `input`.
-- `returning(...)` selected the named values in the response.
-- The `follow` entry still ran even though it was not returned.
+The SDKs build the same JSON operation tree that `helix query` sends to
+`POST /v2/query`. Create the language project separately with one of these
+guides:
 
-The [query walkthrough](/database/helix-db/core-concepts/overview) takes this same query
-apart operation by operation and explains the request and response JSON.
-
-## Clean up
-
-```bash
-helix stop local
-```
+  <Card title="Rust SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/rust-project-setup">
+    Build and execute typed Rust queries.
+  </Card>
+  <Card title="TypeScript SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
+    Build and execute TypeScript queries.
+  </Card>
+  <Card title="Go SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/go-project-setup">
+    Build and execute Go queries.
+  </Card>
+  <Card title="Python SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/python-project-setup">
+    Build and execute synchronous or asynchronous Python queries.
+  </Card>
 
 ## Next steps
 
+  <Card title="Query walkthrough" icon="route" href="/database/helix-db/core-concepts/overview">
+    Learn how SDK builders become the JSON request sent to HelixDB.
+  </Card>
   <Card title="Data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model">
     Learn how nodes, edges, labels, and properties fit together.
   </Card>
   <Card title="Writing data" icon="pen" href="/database/helix-db/query-guides/writing-data">
     Add, update, and remove graph data.
   </Card>
-  <Card title="Reading data" icon="book-open" href="/database/helix-db/query-guides/reading-data">
-    Select data by ID, label, or indexed property.
-  </Card>
-  <Card title="Use another SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
-    Switch to Rust, Go, or Python with the same query model.
+  <Card title="CLI reference" icon="terminal" href="/cli/command-reference">
+    See every current CLI command and option.
   </Card>
 
 # Deployment options
@@ -5547,57 +5316,16 @@ helix chef
 
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
 
-For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by hand: `helix init local` → `helix start dev` → `helix query dev --file …` (see the Local quickstart below). This path never prompts and never logs in.
+For a fully scriptable setup with **no** Cloud auth, skip `chef` and follow the
+[canonical local quickstart](/database/helix-db/start-here/quickstart). This path
+never prompts and never logs in.
 
 ## Local quickstart
 
-```bash
-curl -sSL "https://install.helix-db.com" | bash
-```
-
-If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
-
-```bash
-mkdir my-helix-app
-cd my-helix-app
-helix init
-```
-
-`helix init` scaffolds:
-
-- `helix.toml` with a single `[local.dev]` instance.
-- `.helix/` workspace state (added to `.gitignore`).
-- `examples/request.json` — a runnable read request you can send straight away.
-
-In a TTY, `helix init` prompts you to pick `local` or `enterprise`. Pass the subcommand directly to skip the prompt: `helix init local`.
-
-```bash
-helix start dev
-```
-
-`helix start` pulls `ghcr.io/helixdb/helixdb:v0.0.4`, starts a background container named `helix-<project>-dev`, publishes port `6969`, and waits for `GET /healthz` to report ready before returning.
-
-To stream logs in the foreground instead, use `helix start dev --foreground` and stop the container with Ctrl-C.
-
-For persistent local data, use `helix start dev --disk`. Disk mode starts a CLI-managed MinIO sidecar and keeps data across `helix stop`.
-
-The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
-
-```bash
-helix query dev --file examples/request.json
-```
-
-The example request runs a read query that counts `User` nodes. Pass `--compact`
-to print on a single line, or `--warm` to populate caches. A standalone local
-warm read prints its normal response; Helix Cloud fanout returns no body.
-
-```bash
-helix stop dev
-```
-
-`helix stop` is idempotent — it reports cleanly if the instance was not running.
-
-Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
+Use the [canonical local quickstart](/database/helix-db/start-here/quickstart)
+for the executable `helix init local` → `helix start dev` → `helix query dev`
+→ `helix stop dev` journey. It lists the exact generated files, instance name,
+and query file so this CLI guide does not maintain a second copy of the tutorial.
 
 ## Helix Cloud quickstart
 

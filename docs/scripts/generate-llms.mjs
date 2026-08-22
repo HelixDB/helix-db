@@ -27,7 +27,7 @@ const QUICKSTART = [
   'helix query dev -e \'readBatch().varAs("users", g().nWithLabel("User")).returning(["users"])\'',
   '```',
   '',
-  'Full walkthrough: https://docs.helix-db.com/cli/getting-started',
+  'Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickstart',
 ].join('\n');
 
 const OPTIONAL_PREFIXES = ['change-log/', 'benchmarks/'];
