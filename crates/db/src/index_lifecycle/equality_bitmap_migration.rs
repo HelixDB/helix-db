@@ -17,10 +17,16 @@ use crate::encoding::property::decode_properties;
 use crate::encoding::v1::keys::tenant::DataScope;
 #[cfg(test)]
 use crate::encoding::v1::keys::tenant::TenantId;
+#[cfg(feature = "migration-parity")]
+use crate::encoding::v2::keys::SecondaryEntryKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, GlobalKey, IndexEntity, Key, RecordKind, ScopedKey,
     SecondaryEntryLane, SecondaryEqualityBitmapKey,
 };
+#[cfg(feature = "migration-parity")]
+use crate::encoding::v2::values::decode_metadata_value;
+#[cfg(feature = "migration-parity")]
+use crate::encoding::v2::values::encode_secondary_entry;
 use crate::encoding::v2::values::{
     decode_index_record, decode_operation_record, encode_metadata_value, encode_operation_record,
     SecondaryEqualityBitmapValue,
@@ -33,6 +39,8 @@ use super::operation::{
 };
 #[cfg(test)]
 use super::tenant_envelope_migration;
+#[cfg(feature = "migration-parity")]
+use super::IndexElementKind;
 use super::{
     IndexOperationRecord, IndexStateV2, IndexStorageVersion, IndexV2MetadataValue,
     OperationCounters, OperationQueuePointerValue, PhysicalGeneration,
@@ -195,6 +203,130 @@ pub(super) async fn cleanup_v3_nonunique_equality_rows(db: &Db) -> Result<()> {
     clear_all_v3_nonunique_equality_rows(db).await?;
     trip(EqualityBitmapMigrationFailpoint::CleanupAfter)?;
     verify_v3_equality_absent_and_publish_cleanup(db).await
+}
+
+/// Adds legacy non-unique equality rows and publishes an exact V2/V3 fixture.
+///
+/// This inverse exists only for the migration-parity and Kind acceptance
+/// harnesses. Existing bitmaps remain as a valid partial-migration state so
+/// already-open current readers stay correct. The caller must quiesce every
+/// write before invoking it.
+#[cfg(feature = "migration-parity")]
+pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Result<()> {
+    if !matches!(version, 2 | 3) {
+        return Err(HelixDbError::Config(format!(
+            "legacy equality fixture version must be 2 or 3, got {version}"
+        )));
+    }
+    let marker = db
+        .get(
+            Key::Global {
+                kind: GlobalKey::StorageVersion,
+            }
+            .to_bytes(),
+        )
+        .await?
+        .ok_or_else(|| corruption("legacy fixture source has no storage version"))?;
+    let IndexV2MetadataValue::StorageVersion(source_version) = decode_metadata_value(&marker)?
+    else {
+        return Err(corruption(
+            "legacy fixture source has a non-version storage marker",
+        ));
+    };
+    let target_version = IndexStorageVersion::new(version)?;
+    if source_version != IndexStorageVersion::CURRENT && source_version != target_version {
+        return Err(corruption(
+            "legacy fixture source must be current or already at the requested version",
+        ));
+    }
+
+    let catalog = discover_catalog(db).await?;
+    if !catalog.building.is_empty() {
+        return Err(corruption(
+            "legacy equality fixture cannot contain a building equality generation",
+        ));
+    }
+    for generation in &catalog.active {
+        copy_bitmap_generation_to_legacy_entries(db, generation).await?;
+    }
+
+    let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    transaction.delete(Bytes::from_static(
+        b"\xFFkv_migration_ready:index_storage_v4_cleanup",
+    ))?;
+    transaction.put(
+        Key::Global {
+            kind: GlobalKey::StorageVersion,
+        }
+        .to_bytes(),
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(target_version)),
+    )?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "migration-parity")]
+async fn copy_bitmap_generation_to_legacy_entries(
+    db: &Db,
+    generation: &EqualityGeneration,
+) -> Result<()> {
+    let mut rows = db.scan_prefix(bitmap_prefix(generation), ..).await?;
+    while let Some(row) = rows.next().await? {
+        let Key::Data {
+            scope,
+            kind: ScopedKey::SecondaryEqualityBitmap(key),
+        } = Key::parse_from_slice(generation.scope, &row.key)?
+        else {
+            return Err(corruption("V4 equality prefix yielded another key kind"));
+        };
+        if scope != generation.scope
+            || key.index_id != generation.index_id
+            || key.generation != generation.generation
+            || key.element_kind != generation.definition.element_kind()
+        {
+            return Err(corruption("V4 equality row escaped its fixture generation"));
+        }
+        let lane = match key.element_kind {
+            IndexElementKind::Node => SecondaryEntryLane::NodeEquality,
+            IndexElementKind::Edge => SecondaryEntryLane::EdgeEquality,
+        };
+        let ids = SecondaryEqualityBitmapValue::decode(&row.value)?.into_ids();
+        if ids.is_empty() {
+            return Err(corruption("V4 equality fixture bitmap must not be empty"));
+        }
+        let mut ids = ids.into_iter();
+        loop {
+            let batch = ids.by_ref().take(MIGRATION_BATCH_SIZE).collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
+            }
+            let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+            for entity_id in batch {
+                let entity_id = super::IndexEntityId::new(entity_id);
+                transaction.put(
+                    Key::Data {
+                        scope: generation.scope,
+                        kind: ScopedKey::SecondaryEntry(SecondaryEntryKey::try_new(
+                            generation.index_id,
+                            generation.generation,
+                            lane,
+                            CanonicalSecondaryValue::Equality(key.value.clone()),
+                            Some(entity_id),
+                        )?),
+                    }
+                    .to_bytes(),
+                    encode_secondary_entry(&super::work::SecondaryEntryValue {
+                        index_id: generation.index_id,
+                        generation: generation.generation,
+                        lane,
+                        entity_id,
+                    }),
+                )?;
+            }
+            transaction.commit().await?;
+        }
+    }
+    Ok(())
 }
 
 async fn discover_catalog(db: &Db) -> Result<MigrationCatalog> {
@@ -1075,6 +1207,95 @@ mod tests {
                 super::super::repository::ReaderStorageCompatibility::LegacyEqualityUnion
             );
             assert_node_and_edge_reader_queries(&reader).await;
+            reader.close().await.unwrap();
+            db.close().await.unwrap();
+        }
+    }
+
+    #[cfg(feature = "migration-parity")]
+    #[tokio::test]
+    async fn migration_parity_fixture_adds_v2_and_v3_rows_without_removing_bitmaps() {
+        let _guard = TEST_LOCK.lock().await;
+        for version in [2, 3] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let database = format!("migration-parity-equality-v{version}");
+            let db = legacy_db_with_store(&database, Arc::clone(&store), 3).await;
+            let generation = put_active_index(&db, DataScope::LegacyUnscoped).await;
+            for entity_id in 0..2 {
+                put_graph_entity(&db, generation.scope, entity_id, "shared").await;
+                put_v3_entry(
+                    &db,
+                    generation.scope,
+                    generation.index_id,
+                    generation.generation,
+                    entity_id,
+                    "shared",
+                )
+                .await;
+            }
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            crate::migrations::stage_reader_compatible_storage_schema_for_tests(&transaction)
+                .unwrap();
+            transaction.commit().await.unwrap();
+            migrate_v3_to_v4(&db).await.unwrap();
+
+            make_legacy_equality_fixture(&db, version).await.unwrap();
+            db.flush().await.unwrap();
+            assert!(!db
+                .scan_prefix(bitmap_prefix(&generation), ..)
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .is_none());
+            assert!(!db
+                .scan_prefix(
+                    Key::data_prefix(
+                        generation.scope,
+                        ScopedKey::generation_prefix(
+                            RecordKind::SecondaryEntry,
+                            generation.index_id,
+                            generation.generation,
+                        ),
+                    ),
+                    ..,
+                )
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .is_none());
+
+            let reader = crate::HelixDB::open_reader_with_object_store_for_tests(
+                database,
+                Arc::clone(&store),
+            )
+            .await
+            .expect("converted V2/V3 fixture is reader-compatible");
+            assert_reader_queries(&reader).await;
+
+            migrate_v3_to_v4(&db).await.unwrap();
+            db.flush().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    assert_reader_queries(&reader).await;
+                    if reader.reader_storage_compatibility_for_tests()
+                        == super::super::repository::ReaderStorageCompatibility::Current
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the fixture reader switches to current after migration publication");
+            assert_active_migrated(&db, &generation).await;
+
             reader.close().await.unwrap();
             db.close().await.unwrap();
         }

@@ -35,6 +35,8 @@ mod catalog;
 #[cfg(test)]
 mod cursor_contracts;
 mod equality_bitmap_migration;
+#[cfg(feature = "migration-parity")]
+pub(crate) use equality_bitmap_migration::make_legacy_equality_fixture;
 pub(crate) mod failpoints;
 pub(crate) mod graph_mutation;
 pub(crate) mod lifecycle;

@@ -35,7 +35,7 @@ use crate::encoding::v2::keys::{GlobalKey, ScopedKey, SecondaryEntryKey, GLOBAL_
 use crate::encoding::v2::values::{
     decode_corpus_statistics, decode_index_record, decode_metadata_value, decode_operation_record,
     decode_secondary_entry, decode_statistics_entity, decode_term_statistics,
-    encode_corpus_statistics, encode_metadata_value, SecondaryEqualityBitmapValue,
+    encode_corpus_statistics, SecondaryEqualityBitmapValue,
 };
 use crate::{migrations, search, HelixDB, HelixStorage, Result};
 
@@ -342,6 +342,23 @@ pub struct MigrationParityIndexState {
     pub vector_non_metadata_namespace_digests: BTreeMap<u64, String>,
 }
 
+/// Exact legacy equality storage version emitted by the Kind fixture gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationParityLegacyStorageVersion {
+    V2,
+    V3,
+}
+
+impl MigrationParityLegacyStorageVersion {
+    const fn get(self) -> u16 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+}
+
 /// Stable index-outbox crash boundaries exercised by the cross-version harness.
 pub fn migration_parity_index_outbox_failpoints() -> [&'static str; 16] {
     crate::index_lifecycle::failpoints::IndexOutboxFailpoint::ALL
@@ -365,19 +382,20 @@ impl HelixDB {
     /// The feature-gated parity harness is the only supported caller. Normal
     /// runtime code must never move a durable version backwards.
     pub async fn migration_parity_make_storage_v2_fixture(&self) -> Result<()> {
+        self.migration_parity_make_legacy_equality_fixture(MigrationParityLegacyStorageVersion::V2)
+            .await
+    }
+
+    /// Converts current equality bitmaps into a complete V2 or V3 fixture.
+    ///
+    /// The caller must stop query admission for the duration. This method is
+    /// absent unless the explicit migration-parity feature is enabled.
+    pub async fn migration_parity_make_legacy_equality_fixture(
+        &self,
+        version: MigrationParityLegacyStorageVersion,
+    ) -> Result<()> {
         let db = self.migration_parity_inner_db()?;
-        let version = crate::index_lifecycle::IndexStorageVersion::new(0x0002)?;
-        db.put(
-            IndexKey::Global {
-                kind: GlobalKey::StorageVersion,
-            }
-            .to_bytes(),
-            encode_metadata_value(
-                &crate::index_lifecycle::IndexV2MetadataValue::StorageVersion(version),
-            ),
-        )
-        .await?;
-        Ok(())
+        crate::index_lifecycle::make_legacy_equality_fixture(&db, version.get()).await
     }
 
     /// Mutates one exact text-statistics row in an otherwise valid Active generation.
