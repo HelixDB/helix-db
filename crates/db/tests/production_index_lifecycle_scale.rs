@@ -56,22 +56,3 @@ async fn traversal_vector_prefilter_1m_scale_contract() {
 async fn index_lifecycle_blocked_limit_scale_contracts() {
     db::production_coverage::index_lifecycle_blocked_limit_scale_contracts().await;
 }
-
-/// Measures and bounds vector migration work at 100,000 legacy entities.
-#[tokio::test(flavor = "multi_thread")]
-async fn vector_migration_scale_100k() {
-    db::production_coverage::vector_migration_scale_100k().await;
-}
-
-/// Measures and bounds vector migration work at one million legacy entities.
-#[tokio::test(flavor = "multi_thread")]
-async fn vector_migration_scale_1m() {
-    db::production_coverage::vector_migration_scale_1m().await;
-}
-
-/// Measures and bounds the ten-million-row release soak when explicitly selected.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "opt-in ten-million-row migration release soak"]
-async fn vector_migration_scale_10m() {
-    db::production_coverage::vector_migration_scale_10m().await;
-}

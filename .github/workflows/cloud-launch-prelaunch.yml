@@ -36,14 +36,22 @@ jobs:
       matrix:
         include:
           - name: secondary, text, and tenant 100k
+            target: production_index_lifecycle_scale
             test: index_lifecycle_secondary_text_and_tenant_scale_contracts
           - name: vector 100k
+            target: production_index_lifecycle_scale
             test: index_lifecycle_vector_scale_contract
+          - name: vector migration 100k
+            target: production_vector_migration_scale
+            test: vector_migration_scale_100k
           - name: blocked configured limits
+            target: production_index_lifecycle_scale
             test: index_lifecycle_blocked_limit_scale_contracts
           - name: text drop smoke
+            target: production_index_lifecycle_scale
             test: index_lifecycle_text_drop_smoke
           - name: text multi-split drop smoke
+            target: production_index_lifecycle_scale
             test: index_lifecycle_text_drop_multi_split_smoke
     steps:
       - uses: actions/checkout@v6
@@ -52,7 +60,7 @@ jobs:
       - name: Run one independently bounded release-scale contract
         run: >-
           cargo test --release -p db --features production-scale
-          --test production_index_lifecycle_scale ${{ matrix.test }}
+          --test ${{ matrix.target }} ${{ matrix.test }}
           -- --exact --nocapture --test-threads=1
 
   release-contracts:

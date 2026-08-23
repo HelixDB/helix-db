@@ -155,5 +155,9 @@ name = "production_index_lifecycle_scale"
 required-features = ["production-scale"]
 
 [[test]]
+name = "production_vector_migration_scale"
+required-features = ["production-scale"]
+
+[[test]]
 name = "index_lifecycle_contracts"
 required-features = ["index-lifecycle-testing"]
