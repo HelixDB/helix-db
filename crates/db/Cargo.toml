@@ -127,6 +127,10 @@ name = "production_index_lifecycle_contracts"
 required-features = ["production-coverage"]
 
 [[test]]
+name = "production_secondary_equality_hot_path_contracts"
+required-features = ["production-coverage"]
+
+[[test]]
 name = "production_migration_contracts"
 required-features = [
     "production-coverage",
