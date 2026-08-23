@@ -3380,8 +3380,11 @@ async fn build_restart_after_upload_preserves_the_orphan_and_completes() {
         0,
         "manifest-root initialization does not upload a split"
     );
-    db::index_lifecycle_testing::inject_index_outbox_error_once("commit_before")
-        .expect("commit failpoint installs");
+    db::index_lifecycle_testing::inject_index_outbox_error_once_for_operation(
+        "commit_before",
+        operation_id,
+    )
+    .expect("operation-scoped commit failpoint installs");
     let error = controller
         .advance(&writer, target)
         .await

@@ -11,6 +11,8 @@ use std::sync::Mutex;
 
 use crate::error::{HelixDbError, Result};
 
+use super::IndexOperationId;
+
 /// Every stable boundary surrounding an outbox durability transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndexOutboxFailpoint {
@@ -110,7 +112,13 @@ impl IndexOutboxFailpoint {
     }
 }
 
-static INJECTED_FAILPOINT: Mutex<Option<IndexOutboxFailpoint>> = Mutex::new(None);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InjectedFailpoint {
+    failpoint: IndexOutboxFailpoint,
+    operation_id: Option<IndexOperationId>,
+}
+
+static INJECTED_FAILPOINT: Mutex<Option<InjectedFailpoint>> = Mutex::new(None);
 static FAILPOINT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 /// Installs one process-local failure for deterministic recovery tests.
@@ -120,10 +128,35 @@ static FAILPOINT_TRIGGERED: AtomicBool = AtomicBool::new(false);
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) fn inject_once(failpoint: IndexOutboxFailpoint) -> Result<()> {
+    inject(failpoint, None)
+}
+
+/// Installs one failure that only the named operation can consume.
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
+pub(crate) fn inject_for_operation_once(
+    failpoint: IndexOutboxFailpoint,
+    operation_id: IndexOperationId,
+) -> Result<()> {
+    inject(failpoint, Some(operation_id))
+}
+
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
+fn inject(failpoint: IndexOutboxFailpoint, operation_id: Option<IndexOperationId>) -> Result<()> {
     let mut injected = INJECTED_FAILPOINT.lock().map_err(|_| {
         HelixDbError::InvariantViolation("index outbox failpoint mutex was poisoned".to_string())
     })?;
-    *injected = Some(failpoint);
+    *injected = Some(InjectedFailpoint {
+        failpoint,
+        operation_id,
+    });
     FAILPOINT_TRIGGERED.store(false, Ordering::SeqCst);
     Ok(())
 }
@@ -140,10 +173,30 @@ pub(crate) fn was_triggered() -> bool {
 
 /// Trips a configured crash boundary without changing durable data itself.
 pub(crate) fn trip(failpoint: IndexOutboxFailpoint) -> Result<()> {
+    trip_for_operation_inner(failpoint, None)
+}
+
+/// Trips a configured boundary for one exact durable operation.
+pub(crate) fn trip_for_operation(
+    failpoint: IndexOutboxFailpoint,
+    operation_id: IndexOperationId,
+) -> Result<()> {
+    trip_for_operation_inner(failpoint, Some(operation_id))
+}
+
+fn trip_for_operation_inner(
+    failpoint: IndexOutboxFailpoint,
+    operation_id: Option<IndexOperationId>,
+) -> Result<()> {
     let mut injected = INJECTED_FAILPOINT.lock().map_err(|_| {
         HelixDbError::InvariantViolation("index outbox failpoint mutex was poisoned".to_string())
     })?;
-    if *injected == Some(failpoint) {
+    if injected.is_some_and(|injected| {
+        injected.failpoint == failpoint
+            && injected
+                .operation_id
+                .is_none_or(|expected| Some(expected) == operation_id)
+    }) {
         *injected = None;
         FAILPOINT_TRIGGERED.store(true, Ordering::SeqCst);
         return Err(injected_error(failpoint));
@@ -188,5 +241,15 @@ mod tests {
         assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_err());
         assert!(was_triggered());
         assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_ok());
+
+        let expected = IndexOperationId::new_v4();
+        let other = IndexOperationId::new_v4();
+        inject_for_operation_once(IndexOutboxFailpoint::CommitBefore, expected).unwrap();
+        assert!(trip_for_operation(IndexOutboxFailpoint::CommitBefore, other).is_ok());
+        assert!(!was_triggered());
+        assert!(trip(IndexOutboxFailpoint::CommitBefore).is_ok());
+        assert!(!was_triggered());
+        assert!(trip_for_operation(IndexOutboxFailpoint::CommitBefore, expected).is_err());
+        assert!(was_triggered());
     }
 }

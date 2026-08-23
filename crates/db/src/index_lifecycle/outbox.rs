@@ -1145,7 +1145,10 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             IndexOperationStepResult::TransientFailure => return Ok(None),
         };
         failpoints::trip(IndexOutboxFailpoint::CheckpointStagingAfter)?;
-        failpoints::trip(IndexOutboxFailpoint::CommitBefore)?;
+        failpoints::trip_for_operation(
+            IndexOutboxFailpoint::CommitBefore,
+            operation.operation_id(),
+        )?;
         Ok(Some(StagedOperationStep {
             transaction,
             index,
@@ -1202,7 +1205,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     driver
         .after_commit(claimed.scope, &index, &operation, committed)
         .await;
-    failpoints::trip(IndexOutboxFailpoint::CommitAfter)?;
+    failpoints::trip_for_operation(IndexOutboxFailpoint::CommitAfter, operation.operation_id())?;
     Ok(CommittedOperationStepEvidence {
         outcome: committed,
         before_stage,
@@ -1559,9 +1562,9 @@ async fn release_transient_claim(
         encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
     )?;
     failpoints::trip(IndexOutboxFailpoint::CheckpointStagingAfter)?;
-    failpoints::trip(IndexOutboxFailpoint::CommitBefore)?;
+    failpoints::trip_for_operation(IndexOutboxFailpoint::CommitBefore, operation.operation_id())?;
     transaction.commit().await?;
-    failpoints::trip(IndexOutboxFailpoint::CommitAfter)?;
+    failpoints::trip_for_operation(IndexOutboxFailpoint::CommitAfter, operation.operation_id())?;
     Ok(())
 }
 

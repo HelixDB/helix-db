@@ -191,6 +191,20 @@ pub fn inject_index_outbox_error_once(name: &str) -> Result<()> {
     crate::index_lifecycle::failpoints::inject_once(failpoint)
 }
 
+/// Injects one recoverable error that only the named operation can consume.
+pub fn inject_index_outbox_error_once_for_operation(
+    name: &str,
+    operation_id: IndexOperationId,
+) -> Result<()> {
+    let Some(failpoint) = crate::index_lifecycle::failpoints::IndexOutboxFailpoint::parse(name)
+    else {
+        return Err(HelixDbError::Config(format!(
+            "unknown Index V2 outbox failpoint {name}"
+        )));
+    };
+    crate::index_lifecycle::failpoints::inject_for_operation_once(failpoint, operation_id)
+}
+
 /// Reports whether the most recently injected one-shot error fired.
 pub fn index_outbox_error_was_triggered() -> bool {
     crate::index_lifecycle::failpoints::was_triggered()
