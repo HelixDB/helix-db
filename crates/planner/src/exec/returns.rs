@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(returned.shape(), ReturnShape::List);
         let single = ExecutableReturnVariables::new(ir::AtLeast::from_one(returned.clone()))
             .expect("one return name is unique");
-        assert_eq!(single.as_ref(), &[returned.clone()]);
+        assert_eq!(single.as_ref(), std::slice::from_ref(&returned));
         let duplicate = ir::AtLeast::from_one_and_rest(
             returned,
             vec![ExecutableReturn::new(name("result"), ReturnShape::Object)],
