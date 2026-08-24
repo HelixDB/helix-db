@@ -218,7 +218,7 @@ async fn lookup_legacy_equality_entries(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     lane: SecondaryEntryLane,
-    value: &crate::encoding::v1::property::equality_value::CanonicalEqualityValue,
+    value: &crate::encoding::v2::values::property::equality_index_value::CanonicalEqualityValue,
 ) -> Result<roaring::RoaringTreemap> {
     let logical_prefix = ScopedKey::secondary_equality_entry_value_prefix(
         handle.index_id(),
