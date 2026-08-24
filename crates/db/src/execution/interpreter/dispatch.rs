@@ -38,7 +38,7 @@ impl<'db> ExecutionContext<'db> {
         op: &exec::ExecOp,
         input: ExecutionValue,
     ) -> Result<ExecutionValue> {
-        let execution_control = self.execution_control.clone();
+        let execution_control = self.execution_control;
         let value = match op {
             exec::ExecOp::Access { plan } => execution_control.run(self.execute_access(plan)).await,
             exec::ExecOp::Count { plan } => {
@@ -366,70 +366,6 @@ mod tests {
             assert!(matches!(value, ExecutionValue::IndexDdlReceipt(_)));
         }
         db.close().await.expect("writer closes");
-    }
-
-    #[tokio::test]
-    async fn index_ddl_claims_the_gate_only_for_an_actual_commit() {
-        use crate::execution_control::{ExecutionControl, WriteCommitGate, WriteCommitState};
-
-        let db = test_support::open_db("dispatch-index-ddl-exact-commit-gate").await;
-        let spec = ir::IndexDdlCreateSpec::NodeEquality {
-            key: helix_planner::catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
-            uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
-        };
-
-        let commit_gate = WriteCommitGate::new();
-        let mut create = ExecutionContext::new_scoped_controlled(
-            &db,
-            context::ParamBindings::default(),
-            crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
-            ExecutionControl::unlimited().with_write_commit_gate(commit_gate.clone()),
-        );
-        assert!(matches!(
-            create
-                .execute_op(
-                    &exec::ExecOp::IndexDdl {
-                        plan: ir::IndexDdlPlan::Create {
-                            spec: spec.clone(),
-                            mode: ir::IndexCreateMode::ErrorIfExists,
-                        },
-                    },
-                    ExecutionValue::Stream(Vec::new()),
-                )
-                .await
-                .unwrap(),
-            ExecutionValue::IndexDdlReceipt(
-                crate::index_lifecycle::IndexDdlReceipt::Accepted { .. }
-            )
-        ));
-        assert_eq!(commit_gate.state(), WriteCommitState::CommitStarted);
-
-        let no_op_gate = WriteCommitGate::new();
-        let mut no_op = ExecutionContext::new_scoped_controlled(
-            &db,
-            context::ParamBindings::default(),
-            crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
-            ExecutionControl::unlimited().with_write_commit_gate(no_op_gate.clone()),
-        );
-        assert!(matches!(
-            no_op
-                .execute_op(
-                    &exec::ExecOp::IndexDdl {
-                        plan: ir::IndexDdlPlan::Create {
-                            spec,
-                            mode: ir::IndexCreateMode::IfNotExists,
-                        },
-                    },
-                    ExecutionValue::Stream(Vec::new()),
-                )
-                .await
-                .unwrap(),
-            ExecutionValue::IndexDdlReceipt(
-                crate::index_lifecycle::IndexDdlReceipt::ExistingOperation { .. }
-            )
-        ));
-        assert_eq!(no_op_gate.state(), WriteCommitState::PreCommit);
-        db.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -617,11 +617,6 @@ impl QueryServiceError {
         matches!(self, Self::Db(HelixDbError::QueryDeadlineExceeded))
     }
 
-    /// Returns true when a bounded drain proved the write never entered commit.
-    pub fn is_write_aborted_by_drain(&self) -> bool {
-        matches!(self, Self::Db(HelixDbError::WriteAbortedByDrain))
-    }
-
     /// Returns true when fencing made a started commit's outcome unknowable.
     pub fn is_commit_outcome_unknown(&self) -> bool {
         matches!(
@@ -778,63 +773,6 @@ mod tests {
 
         let after = db.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped);
         assert_eq!(after, before + 1, "planning is the request's only refresh");
-    }
-
-    #[tokio::test]
-    async fn query_service_write_commit_obeys_the_request_gate() {
-        use crate::execution_control::{WriteAbortClaim, WriteCommitGate, WriteCommitState};
-
-        let db = Arc::new(
-            HelixDB::open(HelixDbSource::InMemory {
-                database: "query-service-write-commit-gate".to_string(),
-            })
-            .await
-            .expect("writer should open"),
-        );
-        db.wait_for_startup_cache_warm().await;
-        let service = HelixQueryService::new(Arc::clone(&db));
-
-        let committed = WriteCommitGate::new();
-        service
-            .execute_query_with_mode_scoped_controlled(
-                QueryRequest::write(write_batch().var_as(
-                    "created",
-                    g().add_n("Committed", Vec::<(&str, PropertyInput)>::new()),
-                )),
-                QueryMode::Execute,
-                DataScope::LegacyUnscoped,
-                ExecutionControl::unlimited().with_write_commit_gate(committed.clone()),
-            )
-            .await
-            .expect("write commits after claiming its gate");
-        assert_eq!(committed.state(), WriteCommitState::CommitStarted);
-        assert_eq!(committed.claim_abort(), WriteAbortClaim::CommitStarted);
-
-        let aborted = WriteCommitGate::new();
-        assert_eq!(aborted.claim_abort(), WriteAbortClaim::AbortClaimed);
-        let error = service
-            .execute_query_with_mode_scoped_controlled(
-                QueryRequest::write(write_batch().var_as(
-                    "created",
-                    g().add_n("Aborted", Vec::<(&str, PropertyInput)>::new()),
-                )),
-                QueryMode::Execute,
-                DataScope::LegacyUnscoped,
-                ExecutionControl::unlimited().with_write_commit_gate(aborted),
-            )
-            .await
-            .expect_err("an abort claim must prevent write execution");
-        assert!(error.is_write_aborted_by_drain());
-
-        let response = service
-            .execute_query(QueryRequest::read(
-                read_batch()
-                    .var_as("aborted", g().n_with_label("Aborted").count())
-                    .returning(["aborted"]),
-            ))
-            .await
-            .expect("absence query succeeds");
-        assert_eq!(response.returns()["aborted"], JsonValue::from(0));
     }
 
     #[tokio::test]

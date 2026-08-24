@@ -104,8 +104,6 @@ pub enum QueryErrorCode {
     RequestReadViewChanged,
     /// The query exceeded its execution deadline.
     QueryDeadlineExceeded,
-    /// A bounded writer drain aborted the write before commit began.
-    WriteAbortedByDrain,
     /// A supplied node ID is invalid.
     InvalidNodeId,
     /// A requested node does not exist.
@@ -233,7 +231,6 @@ impl QueryErrorCode {
         Self::TransactionConflict,
         Self::RequestReadViewChanged,
         Self::QueryDeadlineExceeded,
-        Self::WriteAbortedByDrain,
         Self::InvalidNodeId,
         Self::NodeNotFound,
         Self::EdgeNotFound,
@@ -322,7 +319,6 @@ impl QueryErrorCode {
             Self::TransactionConflict => "transaction_conflict",
             Self::RequestReadViewChanged => "request_read_view_changed",
             Self::QueryDeadlineExceeded => "query_deadline_exceeded",
-            Self::WriteAbortedByDrain => "write_aborted_by_drain",
             Self::InvalidNodeId => "invalid_node_id",
             Self::NodeNotFound => "node_not_found",
             Self::EdgeNotFound => "edge_not_found",

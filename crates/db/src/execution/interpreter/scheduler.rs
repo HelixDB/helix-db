@@ -136,7 +136,7 @@ impl<'db> ExecutionContext<'db> {
             request_write_scope: runtime_context::RequestWriteScopeState::Disabled,
             pending_catalog_freshness: runtime_context::PendingCatalogFreshness::Consumed,
             row_mode_max_rows: self.row_mode_max_rows,
-            execution_control: self.execution_control.clone(),
+            execution_control: self.execution_control,
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
             #[cfg(test)]

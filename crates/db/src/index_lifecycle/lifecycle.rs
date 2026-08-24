@@ -216,6 +216,7 @@ async fn create_index_operation_in_transaction_with_physical(
     vector_physical: VectorPhysicalSelection,
     execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexDdlReceipt> {
+    execution_control.check()?;
     let family = operation_family(definition.family());
     if initial_progress.family() != family {
         return Err(HelixDbError::InvariantViolation(
@@ -344,7 +345,6 @@ async fn create_index_operation_in_transaction_with_physical(
     .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
     outbox::stage_operation(&transaction, scope, expected, &next_index, &operation).await?;
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
-    execution_control.claim_write_commit()?;
     transaction
         .commit()
         .await
@@ -425,6 +425,7 @@ pub(crate) async fn drop_index_operation_with_control(
     expected_definition: &ValidatedDynamicIndexDefinition,
     execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexDdlReceipt> {
+    execution_control.check()?;
     let identity = expected_definition.identity();
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -461,7 +462,6 @@ pub(crate) async fn drop_index_operation_with_control(
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
             )?;
             failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
-            execution_control.claim_write_commit()?;
             transaction
                 .commit()
                 .await
@@ -503,7 +503,6 @@ pub(crate) async fn drop_index_operation_with_control(
             )
             .await?;
             failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
-            execution_control.claim_write_commit()?;
             transaction
                 .commit()
                 .await
@@ -704,9 +703,6 @@ mod tests {
     use crate::encoding::v2::keys::metadata::MetadataKey;
     use crate::encoding::v2::keys::{DataKey, DataKeyKind, GlobalKeyKind, NodePropertyKey};
     use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
-    use crate::execution_control::{
-        ExecutionControl, WriteAbortClaim, WriteCommitGate, WriteCommitState,
-    };
     use crate::index_lifecycle::outbox::{
         ClaimPermission, CommittedOperationStep, IndexOperationDriver, IndexOperationStepExecution,
         IndexOperationStepResult, OperationPointerObservation,
@@ -841,22 +837,15 @@ mod tests {
 
         for definition in definitions {
             let expected_family = operation_family(definition.family());
-            let create_gate = WriteCommitGate::new();
-            let create_control =
-                ExecutionControl::unlimited().with_write_commit_gate(create_gate.clone());
-            let receipt = create_index_operation_in_transaction(
-                db.begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .unwrap(),
+            let receipt = create_index_operation(
+                &db,
                 scope,
                 definition.clone(),
                 helix_planner::ir::IndexCreateMode::ErrorIfExists,
                 initial_progress(scope, &definition),
-                &create_control,
             )
             .await
             .expect("new family operation is accepted");
-            assert_eq!(create_gate.state(), WriteCommitState::CommitStarted);
             let IndexDdlReceipt::Accepted {
                 operation_id,
                 index_id,
@@ -865,66 +854,6 @@ mod tests {
             else {
                 panic!("new definition must return an accepted receipt");
             };
-
-            let no_op_gate = WriteCommitGate::new();
-            let no_op_control =
-                ExecutionControl::unlimited().with_write_commit_gate(no_op_gate.clone());
-            assert!(matches!(
-                create_index_operation_in_transaction(
-                    db.begin(IsolationLevel::SerializableSnapshot)
-                        .await
-                        .unwrap(),
-                    scope,
-                    definition.clone(),
-                    helix_planner::ir::IndexCreateMode::IfNotExists,
-                    initial_progress(scope, &definition),
-                    &no_op_control,
-                )
-                .await
-                .expect("idempotent create converges without committing"),
-                IndexDdlReceipt::ExistingOperation { .. }
-            ));
-            assert_eq!(no_op_gate.state(), WriteCommitState::PreCommit);
-
-            let prior_commit_gate = WriteCommitGate::new();
-            let prior_commit_control =
-                ExecutionControl::unlimited().with_write_commit_gate(prior_commit_gate.clone());
-            prior_commit_control.claim_write_commit().unwrap();
-            assert!(matches!(
-                create_index_operation_in_transaction(
-                    db.begin(IsolationLevel::SerializableSnapshot)
-                        .await
-                        .unwrap(),
-                    scope,
-                    definition.clone(),
-                    helix_planner::ir::IndexCreateMode::IfNotExists,
-                    initial_progress(scope, &definition),
-                    &prior_commit_control,
-                )
-                .await
-                .expect("a prior request commit remains terminal across no-op DDL"),
-                IndexDdlReceipt::ExistingOperation { .. }
-            ));
-            assert_eq!(prior_commit_gate.state(), WriteCommitState::CommitStarted);
-
-            let rejected_gate = WriteCommitGate::new();
-            let rejected_control =
-                ExecutionControl::unlimited().with_write_commit_gate(rejected_gate.clone());
-            assert!(matches!(
-                create_index_operation_in_transaction(
-                    db.begin(IsolationLevel::SerializableSnapshot)
-                        .await
-                        .unwrap(),
-                    scope,
-                    definition.clone(),
-                    helix_planner::ir::IndexCreateMode::ErrorIfExists,
-                    initial_progress(scope, &definition),
-                    &rejected_control,
-                )
-                .await,
-                Err(HelixDbError::IndexAlreadyExists(_))
-            ));
-            assert_eq!(rejected_gate.state(), WriteCommitState::PreCommit);
             assert_eq!(generation, IndexGenerationId::initial());
             let operation = outbox::read_operation(&db, scope, operation_id)
                 .await
@@ -941,14 +870,9 @@ mod tests {
                 IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
             )
             .await;
-            let drop_gate = WriteCommitGate::new();
-            let drop_control =
-                ExecutionControl::unlimited().with_write_commit_gate(drop_gate.clone());
-            let drop_receipt =
-                drop_index_operation_with_control(&db, scope, &definition, &drop_control)
-                    .await
-                    .expect("every active family accepts one drop operation");
-            assert_eq!(drop_gate.state(), WriteCommitState::CommitStarted);
+            let drop_receipt = drop_index_operation(&db, scope, &definition)
+                .await
+                .expect("every active family accepts one drop operation");
             let IndexDdlReceipt::Accepted {
                 operation_id: drop_operation_id,
                 index_id: drop_index_id,
@@ -981,67 +905,6 @@ mod tests {
             .await;
         }
         db.close().await.expect("database closes");
-    }
-
-    #[tokio::test]
-    async fn building_drop_claims_commit_only_after_abort_can_no_longer_win() {
-        let db = test_db("lifecycle-building-drop-commit-gate").await;
-        let scope = DataScope::LegacyUnscoped;
-        let definition = ValidatedDynamicIndexDefinition::try_from(
-            SecondaryIndexDefinition::node_equality("User", "email").expect("secondary definition"),
-        )
-        .expect("validated secondary definition");
-        let IndexDdlReceipt::Accepted { operation_id, .. } = create_index_operation(
-            &db,
-            scope,
-            definition.clone(),
-            helix_planner::ir::IndexCreateMode::ErrorIfExists,
-            initial_progress(scope, &definition),
-        )
-        .await
-        .expect("build fixture is enqueued") else {
-            panic!("new definition must be accepted");
-        };
-
-        let abort_gate = WriteCommitGate::new();
-        assert_eq!(abort_gate.claim_abort(), WriteAbortClaim::AbortClaimed);
-        let abort_control =
-            ExecutionControl::unlimited().with_write_commit_gate(abort_gate.clone());
-        assert!(matches!(
-            drop_index_operation_with_control(&db, scope, &definition, &abort_control).await,
-            Err(HelixDbError::WriteAbortedByDrain)
-        ));
-        assert!(matches!(
-            outbox::read_operation(&db, scope, operation_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .progress(),
-            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(_))
-        ));
-
-        let commit_gate = WriteCommitGate::new();
-        let commit_control =
-            ExecutionControl::unlimited().with_write_commit_gate(commit_gate.clone());
-        assert!(matches!(
-            drop_index_operation_with_control(&db, scope, &definition, &commit_control)
-                .await
-                .expect("building drop commits its abort transition"),
-            IndexDdlReceipt::ExistingOperation { .. }
-        ));
-        assert_eq!(commit_gate.state(), WriteCommitState::CommitStarted);
-
-        let no_op_gate = WriteCommitGate::new();
-        let no_op_control =
-            ExecutionControl::unlimited().with_write_commit_gate(no_op_gate.clone());
-        assert!(matches!(
-            drop_index_operation_with_control(&db, scope, &definition, &no_op_control)
-                .await
-                .expect("already-aborting drop is a no-op"),
-            IndexDdlReceipt::ExistingOperation { .. }
-        ));
-        assert_eq!(no_op_gate.state(), WriteCommitState::PreCommit);
-        db.close().await.unwrap();
     }
 
     #[tokio::test]

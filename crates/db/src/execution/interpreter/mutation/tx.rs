@@ -258,7 +258,6 @@ impl<'db> ExecutionContext<'db> {
             .iter()
             .filter_map(|write| write.retirement().cloned())
             .collect::<Vec<_>>();
-        self.execution_control.claim_write_commit()?;
         let committed = match txn.commit().await {
             Ok(committed) => committed,
             Err(error) => {
