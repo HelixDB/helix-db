@@ -748,8 +748,8 @@ fn find_users(tenant_id: String, limit: i64) -> ReadBatch {
 }
 ```
 
-`#[query]` converts typed arguments into request parameters and sets `query_name` to
-the function name.
+`#[query]` converts typed arguments into request parameters, sets `query_name` to
+the function name, and returns `Result<QueryRequest, QueryError>`.
 
 ## Execute
 
@@ -757,7 +757,7 @@ the function name.
 use helix_db::Client;
 
 let client = Client::new(Some("http://localhost:6969"))?;
-let request = find_users("acme".to_string(), 25);
+let request = find_users("acme".to_string(), 25)?;
 let response: serde_json::Value = client.query(request).send().await?;
 ```
 
@@ -788,10 +788,12 @@ for storage, cache, and handle configuration.
 
 ## Verify
 
-Rust SDK documentation examples are doctests:
+Rust SDK crate docs are doctests, and the public `#[query]` journey is
+compile-tested as `examples/basic_query.rs`:
 
 ```bash
-cargo test --manifest-path sdks/rust/Cargo.toml --doc
+cargo test --manifest-path sdks/rust/Cargo.toml --lib --doc
+cargo check --manifest-path sdks/rust/Cargo.toml --example basic_query
 ```
 
 ## Next steps
@@ -1818,7 +1820,7 @@ execute; they are simply not serialized back to the client.
 ## 6. Name the request
 
 ```rust Rust
-let request = write_users();
+let request = write_users()?;
 ```
 
 ```ts TypeScript
@@ -1839,9 +1841,10 @@ request = query.to_query_request(query_name="write_users")
 }
 ```
 
-Rust's `#[query]` macro rewrites the function to return a request and sets `query_name`
-from the function name. TypeScript and Python convert a batch with `toQueryRequest` /
-`to_query_request`, and Go's `WriteQuery(name)` took the name up front.
+Rust's `#[query]` macro rewrites the function to return
+`Result<QueryRequest, QueryError>` and sets `query_name` from the function name.
+TypeScript and Python convert a batch with `toQueryRequest` / `to_query_request`,
+and Go's `WriteQuery(name)` took the name up front.
 
 `query_name` is optional diagnostic metadata for gateway logs and query diagnostics. It
 does not create a stored endpoint or deploy anything; a missing or `null` name is
@@ -3757,7 +3760,7 @@ fn find_users(tenant_id: String, limit: i64) -> ReadBatch {
         .returning(["users"])
 }
 
-let request = find_users("acme".to_string(), 25);
+let request = find_users("acme".to_string(), 25)?;
 ```
 
 ```ts TypeScript

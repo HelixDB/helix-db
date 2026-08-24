@@ -3,7 +3,8 @@
 Procedural macros for the [`helix-db`](../README.md) query DSL.
 
 This crate provides the `#[query]` attribute macro, which transforms a typed
-query-building function into a callable function returning `QueryRequest`.
+query-building function into a callable function returning
+`Result<QueryRequest, QueryError>`.
 
 ## Usage
 
@@ -22,12 +23,15 @@ fn create_post(payload: ParamObject) -> WriteBatch {
     write_batch()
         .create_node("Post", payload)
 }
+
+let request = find_user("alice".to_string())?;
 ```
 
 The macro preserves the function's visibility and parameters, builds the query
 AST with `Expr::param(...)` references, inserts parameter values and types, sets
-`query_name` to the function name, and returns the complete request. It does not
-register or persist queries.
+`query_name` to the function name, and returns the complete request (or a
+`QueryError` if parameter coercion fails). It does not register or persist
+queries.
 
 ## Supported parameter types
 

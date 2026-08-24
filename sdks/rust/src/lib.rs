@@ -45,6 +45,31 @@
 //! use helix_db::dsl::prelude::*;
 //! ```
 //!
+//! ## Query helpers
+//!
+//! Annotate a builder with [`query`] to get a callable function that returns
+//! [`Result<QueryRequest, QueryError>`]. Parameter coercion failures surface as
+//! [`QueryError`] instead of panicking:
+//!
+//! ```
+//! #![recursion_limit = "256"]
+//! use helix_db::dsl::prelude::*;
+//!
+//! #[query]
+//! fn find_user(name: String) -> ReadBatch {
+//!     read_batch()
+//!         .var_as(
+//!             "user",
+//!             g().n_where(SourcePredicate::eq("username", name)),
+//!         )
+//!         .returning(["user"])
+//! }
+//!
+//! let request = find_user("alice".to_string())?;
+//! assert_eq!(request.query_name(), Some("find_user"));
+//! # Ok::<(), helix_db::QueryError>(())
+//! ```
+//!
 //! ## Running queries
 //!
 //! Build a [`Client`], then send a [`QueryRequest`] to `/v2/query`:
@@ -58,17 +83,29 @@
 //! #[derive(Deserialize)]
 //! struct Friends { friends: Vec<u64> }
 //!
-//! # async fn run(request: QueryRequest) -> Result<(), helix_db::HelixError> {
+//! #[query]
+//! fn friends_of(name: String) -> ReadBatch {
+//!     read_batch()
+//!         .var_as(
+//!             "friends",
+//!             g().n_where(SourcePredicate::eq("username", name))
+//!                 .out(Some("FOLLOWS")),
+//!         )
+//!         .returning(["friends"])
+//! }
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::new(Some("https://cluster.helix-db.com"))?
 //!     .with_api_key(Some("hx_your_api_key"));
 //!
-//! let response: Friends = client.query(request).send().await?;
+//! let response: Friends = client.query(friends_of("alice".to_string())?).send().await?;
 //! # let _ = response.friends;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! See [`Client`] for the full request-building surface and error handling.
+//! The compile-tested end-to-end binary is `examples/basic_query.rs`.
 
 pub mod dsl;
 pub mod graph;
