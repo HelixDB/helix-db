@@ -16,8 +16,8 @@ use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
 use serde::Serialize;
 
 use crate::config::SecondaryIndexDefinition;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v2::keys::{Key, RecordKind, ScopedKey};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::{ManagedIndexKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::SecondaryEqualityBitmapValue;
 use crate::execution::interpreter::{ExecutionScalar, ExecutionValue};
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
@@ -233,7 +233,7 @@ impl SecondaryEqualityHotPathFixture {
         let HelixStorage::Writer(writer) = self.db.storage() else {
             unreachable!("hot-path benchmark opens a writer")
         };
-        let v3_prefix = Key::data_prefix(
+        let v3_prefix = ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
             ScopedKey::logical_prefix(RecordKind::SecondaryEntry),
         );
@@ -247,7 +247,7 @@ impl SecondaryEqualityHotPathFixture {
             );
         }
 
-        let v4_prefix = Key::data_prefix(
+        let v4_prefix = ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
             ScopedKey::logical_prefix(RecordKind::SecondaryEqualityBitmap),
         );
@@ -290,7 +290,7 @@ impl SecondaryEqualityHotPathFixture {
         let HelixStorage::Writer(writer) = self.db.storage() else {
             unreachable!("hot-path correctness fixture opens a writer")
         };
-        let prefix = Key::data_prefix(
+        let prefix = ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
             ScopedKey::logical_prefix(RecordKind::SecondaryEqualityBitmap),
         );

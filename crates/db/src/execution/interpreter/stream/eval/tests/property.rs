@@ -205,8 +205,8 @@ async fn row_property_reads_edge_properties_and_empty_current_id() {
 async fn row_resolver_does_not_cache_property_decode_errors() {
     let db = test_support::open_db("stream-eval-row-property-corruption").await;
     let id = 11;
-    let key = crate::encoding::keys::Key::Data {
-        scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+    let key = crate::encoding::keys::DataKey::Data {
+        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         kind: crate::encoding::keys::DataKeyKind::NodeProperty(
             crate::encoding::keys::NodePropertyKey::new(id),
         ),
@@ -244,8 +244,8 @@ async fn endpoint_property_lookup_propagates_corrupt_node_properties() {
     let from = test_support::add_user(&db, "from").await;
     let to = test_support::add_user(&db, "to").await;
     let edge = test_support::add_edge(&db, from, to, "LINK").await;
-    let key = crate::encoding::keys::Key::Data {
-        scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+    let key = crate::encoding::keys::DataKey::Data {
+        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         kind: crate::encoding::keys::DataKeyKind::NodeProperty(
             crate::encoding::keys::NodePropertyKey::new(from),
         ),

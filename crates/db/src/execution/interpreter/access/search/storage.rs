@@ -448,8 +448,8 @@ mod tests {
 
     use super::*;
     use crate::config::TextIndexDefinition;
-    use crate::encoding::keys::tenant::DataScope;
-    use crate::encoding::v2::keys::Key;
+    use crate::encoding::keys::scope::DataScope;
+    use crate::encoding::v2::keys::ManagedIndexKey;
     use crate::encoding::v2::keys::{
         IndexEntity, ScopedKey, TextEntityStateKey, TextManifestPageKey, TextManifestRootKey,
     };
@@ -624,7 +624,7 @@ mod tests {
         .unwrap();
         transaction
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::index_record(active.identity().clone()),
                 }
@@ -640,7 +640,7 @@ mod tests {
         };
         transaction
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::TextManifestRoot(root),
                 }
@@ -662,7 +662,7 @@ mod tests {
             let page = u32::try_from(page).unwrap();
             transaction
                 .put(
-                    Key::Data {
+                    ManagedIndexKey::Data {
                         scope: DataScope::LegacyUnscoped,
                         kind: ScopedKey::TextManifestPage(TextManifestPageKey { root, page }),
                     }
@@ -709,7 +709,7 @@ mod tests {
             statistics.push(transition).unwrap();
             transaction
                 .put(
-                    Key::Data {
+                    ManagedIndexKey::Data {
                         scope: DataScope::LegacyUnscoped,
                         kind: ScopedKey::TextEntityState(TextEntityStateKey { root, entity }),
                     }
@@ -825,7 +825,7 @@ mod tests {
         database
             .inner_db()
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::TextEntityState(TextEntityStateKey {
                         root,
@@ -881,7 +881,7 @@ mod tests {
             .unwrap();
         corrupt_manifest
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::TextManifestRoot(root),
                 }
@@ -901,7 +901,7 @@ mod tests {
             .unwrap();
         corrupt_manifest
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::TextManifestPage(TextManifestPageKey { root, page: 0 }),
                 }

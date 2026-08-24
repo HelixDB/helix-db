@@ -27,13 +27,13 @@ pub mod search;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
-#[cfg(feature = "production-coverage")]
+#[cfg(all(feature = "production-coverage", not(test)))]
 #[path = "../tests/production_support/mod.rs"]
 pub mod production_coverage;
-#[cfg(all(test, not(feature = "production-coverage")))]
+#[cfg(test)]
 #[path = "../tests/production_support/index_lifecycle_text_rows.rs"]
 mod production_text_lifecycle_rows;
-#[cfg(all(test, not(feature = "production-coverage")))]
+#[cfg(test)]
 pub mod production_coverage {
     /// Verifies the complete durable row graph for one settled text generation.
     pub async fn index_lifecycle_text_steady_state_contracts(
@@ -92,7 +92,7 @@ use slatedb::{CacheTarget, Db, DbCacheManagerOps, DbMetadataOps, DbReader};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 
 /// Open mode for a [`HelixDB`] handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2877,7 +2877,7 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::keys::tenant::TenantId;
+    use crate::encoding::keys::scope::TenantId;
     use helix_ast::batch::{read_batch, write_batch};
     use helix_ast::graph::NodeRef;
     use helix_ast::query::QueryRequest;
@@ -3600,9 +3600,9 @@ mod tests {
         use bytes::Bytes;
         use slatedb::IsolationLevel;
 
-        use crate::encoding::v1::keys::vectors::{VectorKey, VectorUpperVectorKey};
-        use crate::encoding::v1::keys::{DataKeyKind, Key};
+        use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorUpperVectorKey};
         use crate::encoding::v2::keys::ScopedKey;
+        use crate::encoding::v2::keys::{DataKey, DataKeyKind};
         use crate::encoding::v2::values::encode_index_record;
 
         let db = HelixDB::open(HelixDbSource::InMemory {
@@ -3657,12 +3657,12 @@ mod tests {
             physical_index_id,
         )
         .unwrap();
-        let record_key = crate::encoding::v2::keys::Key::Data {
+        let record_key = crate::encoding::v2::keys::ManagedIndexKey::Data {
             scope,
             kind: ScopedKey::index_record(record.identity().clone()),
         }
         .to_bytes();
-        let vector_key = Key::Data {
+        let vector_key = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 physical_index_id.get(),
@@ -3999,7 +3999,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_control_facade_and_dsl_use_the_exact_request_scope() {
-        use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
+        use crate::encoding::v2::keys::{DataKey, DataKeyKind, NodePropertyKey};
 
         let db = HelixDB::open(HelixDbSource::InMemory {
             database: "lifecycle-control-facade".to_string(),
@@ -4013,7 +4013,7 @@ mod tests {
         )
         .expect("validated secondary definition");
         let cursor = index_lifecycle::IndexCursor::try_new(
-            Key::Data {
+            DataKey::Data {
                 scope,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(42)),
             }
@@ -4099,7 +4099,7 @@ mod tests {
 
     #[tokio::test]
     async fn disk_source_reopens_as_reader() {
-        use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
+        use crate::encoding::v2::keys::{DataKey, DataKeyKind, NodePropertyKey};
 
         let root = tempfile::tempdir().expect("disk root");
         let database = "facade-disk".to_string();
@@ -4116,7 +4116,7 @@ mod tests {
         )
         .expect("validated secondary definition");
         let cursor = index_lifecycle::IndexCursor::try_new(
-            Key::Data {
+            DataKey::Data {
                 scope,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(42)),
             }

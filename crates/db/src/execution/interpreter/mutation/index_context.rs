@@ -381,7 +381,7 @@ async fn classify_commit_error(
 mod tests {
     use super::super::super::test_support;
     use super::*;
-    use crate::encoding::v1::keys;
+    use crate::encoding::v2::keys;
     use crate::{config, index_lifecycle};
 
     #[tokio::test]
@@ -404,7 +404,7 @@ mod tests {
                 if error.kind() == slatedb::ErrorKind::Invalid
         ));
 
-        let scope = keys::tenant::DataScope::LegacyUnscoped;
+        let scope = keys::scope::DataScope::LegacyUnscoped;
         let definition = index_lifecycle::ValidatedDynamicIndexDefinition::try_from(
             config::SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("secondary definition validates"),
@@ -426,7 +426,7 @@ mod tests {
             .expect("active record projects an active handle");
         inner
             .put(
-                crate::encoding::v2::keys::Key::Data {
+                crate::encoding::v2::keys::ManagedIndexKey::Data {
                     scope,
                     kind: crate::encoding::v2::keys::ScopedKey::index_record(
                         record.identity().clone(),

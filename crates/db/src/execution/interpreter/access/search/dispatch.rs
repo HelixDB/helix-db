@@ -8,7 +8,7 @@ use super::limits::SearchReadLimit;
 use super::tenant::{validate_text_search_tenant, validate_vector_search_tenant};
 use super::*;
 use crate::config::{TextElementType, VectorElementType};
-use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
 use crate::search::text::{RestrictedTextCandidates, TextSearchScope};
 use crate::search::vector::distance::{Cosine, Euclidean, Manhattan};
 use crate::search::vector::RestrictedVectorCandidates;

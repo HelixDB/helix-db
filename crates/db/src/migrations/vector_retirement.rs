@@ -13,14 +13,16 @@ use bytes::Bytes;
 use slatedb::{DbReadOps, DbTransaction};
 
 use crate::config;
-use crate::encoding::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::{
-    VectorIndexMetadataKey, VectorKey, VectorStorageLane, VectorTxnGuardKey,
+use crate::encoding::keys::scope::DataScope;
+use crate::encoding::v2::keys::indexes::vector::{
+    VectorIndexMetadataKey, VectorKey, VectorStorageLane,
 };
-use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v1::values::vectors::metadata::decode_legacy_metadata;
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::keys::{DataKey as Key, DataKeyKind};
 use crate::encoding::v2::keys::{GlobalKey, RecordKind, ScopedKey};
+use crate::encoding::v2::legacy::vector::{
+    metadata::decode_legacy_metadata, transaction_guard::LegacyVectorTxnGuardKey,
+};
 use crate::encoding::v2::values::{
     decode_index_record, decode_metadata_value, encode_metadata_value,
 };
@@ -583,7 +585,7 @@ pub(super) async fn delete_core_batch(
             .to_bytes(),
             Key::Data {
                 scope,
-                kind: DataKeyKind::Vector(VectorKey::TxnGuard(VectorTxnGuardKey::new(
+                kind: DataKeyKind::Vector(VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(
                     physical_id.get(),
                 ))),
             }
@@ -687,7 +689,8 @@ pub(super) async fn delete_definitions_batch(
         let Some(row) = rows.next().await? else {
             break;
         };
-        let decoded = LegacyDefinitionRow::decode(scope, row.key.clone(), &row.value)?;
+        let decoded = LegacyDefinitionRow::decode(scope, row.key.clone(), &row.value)
+            .map_err(super::legacy_catalog_corruption)?;
         let LegacyDynamicIndexCatalogEntry::Definition(legacy) = decoded.entry else {
             return Err(HelixDbError::MigrationRequired {
                 reason: "legacy tombstone survived into vector definition cleanup".to_string(),
@@ -833,7 +836,7 @@ pub(super) async fn release_reservations_batch(
             .to_bytes();
             let guard_key = Key::Data {
                 scope,
-                kind: DataKeyKind::Vector(VectorKey::TxnGuard(VectorTxnGuardKey::new(
+                kind: DataKeyKind::Vector(VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(
                     physical_id.get(),
                 ))),
             }
@@ -1006,7 +1009,7 @@ mod tests {
         let key = if metadata {
             VectorKey::IndexMetadata(VectorIndexMetadataKey::new(physical_id.get()))
         } else {
-            VectorKey::TxnGuard(VectorTxnGuardKey::new(physical_id.get()))
+            VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(physical_id.get()))
         };
         Key::Data {
             scope,

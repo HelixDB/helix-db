@@ -3,7 +3,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use bytes::Bytes;
 
 use crate::config::{SearchIndexBatchLimits, TextBackfillCompactionLimits, TextIndexDefinition};
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::{keys as index_keys, values as index_values};
 use crate::index_lifecycle::work;
 use crate::index_lifecycle::{
@@ -108,7 +108,7 @@ pub(super) fn artifact_row(
         split: split(seed, 128),
     };
     (
-        index_keys::Key::Data {
+        index_keys::ManagedIndexKey::Data {
             scope,
             kind: index_keys::ScopedKey::TextBuildArtifact(key),
         }

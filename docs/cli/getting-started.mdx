@@ -135,7 +135,7 @@ helix add cloud --name production --cluster-id <cluster-id>
 <Step title="Sync metadata and query">
 ```bash
 helix sync production
-export HELIX_API_KEY="..."   # or whatever query_auth_env resolves to
+export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
 helix query production --file examples/request.json
 ```
 

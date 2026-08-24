@@ -325,8 +325,8 @@ async fn predicates_cover_alias_comparisons_membership_arrays_and_errors() {
 async fn null_predicates_propagate_corrupt_property_blobs() {
     let db = test_support::open_db("stream-eval-predicate-corrupt-property").await;
     let id = 12;
-    let key = crate::encoding::keys::Key::Data {
-        scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+    let key = crate::encoding::keys::DataKey::Data {
+        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         kind: crate::encoding::keys::DataKeyKind::NodeProperty(
             crate::encoding::keys::NodePropertyKey::new(id),
         ),

@@ -7,7 +7,7 @@ use slatedb::object_store::ObjectStore;
 use slatedb::DbTransaction;
 
 use crate::config::ActiveTextMutationLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::scope::DataScope;
 use crate::error::{ActiveTextMutationResource, HelixDbError, Result};
 use crate::index_lifecycle::graph_mutation::{GraphEntity, GraphMutationTransition};
 
@@ -243,7 +243,7 @@ mod tests {
 
     use super::*;
     use crate::config::SearchIndexBackfillLimits;
-    use crate::encoding::v1::property::{encode_properties, Property};
+    use crate::encoding::v2::values::property::{encode_properties, Property};
     use crate::index_lifecycle::graph_mutation::{
         CanonicalPropertyRow, PropertyEdit, PropertyEditOutcome,
     };

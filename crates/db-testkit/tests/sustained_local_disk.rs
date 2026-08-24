@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use db::encoding::v1::keys::tenant::{DataScope, TenantId};
+use db::encoding::v2::keys::scope::{DataScope, TenantId};
 use db::{DbConfig, HelixDB};
 use helix_ast::batch;
 use helix_ast::expr::Predicate;

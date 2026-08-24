@@ -8,10 +8,10 @@
 use bytes::Bytes;
 use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::{VectorKey, VectorStorageLane};
-use crate::encoding::v1::keys::{DataKeyKind, Key as GraphKey, KeyPrefix};
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorStorageLane};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
+use crate::encoding::v2::keys::{DataKey as GraphKey, DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{
     GlobalKey, RecordKind, ScopedKey, VectorPartitionMappingKey, GLOBAL_SENTINEL,
 };
@@ -33,7 +33,7 @@ use super::{
 const UUID_ALLOCATION_ATTEMPTS: usize = 16;
 
 fn global_key(key: GlobalKey) -> Bytes {
-    Key::Global { kind: key }.to_bytes()
+    ManagedIndexKey::Global { kind: key }.to_bytes()
 }
 
 fn metadata_or_migration_required(
@@ -428,12 +428,12 @@ pub(crate) async fn load_scope_catalog(
     scope: DataScope,
 ) -> Result<LoadedV2ScopeCatalog> {
     let logical_prefix = ScopedKey::logical_prefix(RecordKind::IndexRecord);
-    let physical_prefix = Key::data_prefix(scope, logical_prefix);
+    let physical_prefix = ManagedIndexKey::data_prefix(scope, logical_prefix);
     let mut rows = reader.scan_prefix(&physical_prefix, ..).await?;
     let mut loaded = LoadedV2ScopeCatalog::new(scope);
     while let Some(row) = rows.next().await? {
-        let parsed = Key::parse_from_slice(scope, &row.key)?;
-        let Key::Data {
+        let parsed = ManagedIndexKey::parse_from_slice(scope, &row.key)?;
+        let ManagedIndexKey::Data {
             kind: ScopedKey::IndexRecord(key),
             ..
         } = parsed
@@ -463,7 +463,7 @@ pub(crate) async fn load_index_record(
     scope: DataScope,
     identity: &IndexIdentity,
 ) -> Result<Option<IndexRecordV2>> {
-    let key = Key::Data {
+    let key = ManagedIndexKey::Data {
         scope,
         kind: ScopedKey::index_record(identity.clone()),
     }
@@ -516,7 +516,7 @@ pub(crate) async fn revalidate_active_handle_row(
     handle: &ActiveIndexHandle,
 ) -> Result<(Bytes, Bytes)> {
     let logical = ScopedKey::index_record(handle.identity().clone());
-    let key = Key::Data {
+    let key = ManagedIndexKey::Data {
         scope: handle.scope(),
         kind: logical,
     }
@@ -538,7 +538,7 @@ fn complete_cursor_is_valid(scope: DataScope, cursor: &[u8]) -> bool {
     if is_global {
         GlobalKey::parse_from_slice(cursor).is_ok()
     } else {
-        Key::parse_from_slice(scope, cursor).is_ok()
+        ManagedIndexKey::parse_from_slice(scope, cursor).is_ok()
             || GraphKey::parse_from_slice(scope, cursor).is_ok()
     }
 }
@@ -644,10 +644,10 @@ fn scoped_cursor_is_valid(
     expectation: ScopedCursorExpectation,
     cursor: &[u8],
 ) -> bool {
-    let Ok(Key::Data {
+    let Ok(ManagedIndexKey::Data {
         scope: cursor_scope,
         kind,
-    }) = Key::parse_from_slice(scope, cursor)
+    }) = ManagedIndexKey::parse_from_slice(scope, cursor)
     else {
         return false;
     };
@@ -775,8 +775,8 @@ fn text_partition_upper_bound_is_valid(
     cursor: &[u8],
 ) -> bool {
     matches!(
-        Key::parse_from_slice(scope, cursor),
-        Ok(Key::Data {
+        ManagedIndexKey::parse_from_slice(scope, cursor),
+        Ok(ManagedIndexKey::Data {
             scope: cursor_scope,
             kind: ScopedKey::TextEntityState(key),
         }) if cursor_scope == scope
@@ -984,10 +984,10 @@ pub(super) fn operation_record_cursors_are_valid(
                                 cursor.as_bytes(),
                             );
                         };
-                        let Ok(Key::Data {
+                        let Ok(ManagedIndexKey::Data {
                             kind: ScopedKey::TextManifestPage(key),
                             ..
-                        }) = Key::parse_from_slice(scope, cursor.as_bytes())
+                        }) = ManagedIndexKey::parse_from_slice(scope, cursor.as_bytes())
                         else {
                             return false;
                         };
@@ -1269,7 +1269,7 @@ fn vector_partition_mapping_key(
     generation: IndexGenerationId,
     partition: &VectorTenantPartition,
 ) -> Bytes {
-    Key::Data {
+    ManagedIndexKey::Data {
         scope,
         kind: ScopedKey::VectorPartitionMapping(VectorPartitionMappingKey {
             index_id,
@@ -1301,7 +1301,7 @@ async fn allocate_operation_id_from(
     attempts: usize,
 ) -> Result<IndexOperationId> {
     for candidate in candidates {
-        let scoped = Key::Data {
+        let scoped = ManagedIndexKey::Data {
             scope,
             kind: ScopedKey::operation(candidate),
         }
@@ -1324,9 +1324,9 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::*;
-    use crate::encoding::v1::keys::metadata::MetadataKey;
-    use crate::encoding::v1::keys::tenant::{TenantId, TENANT_KEY_PREFIX};
-    use crate::encoding::v1::keys::{DataKeyKind, Key as GraphKey};
+    use crate::encoding::v2::keys::metadata::MetadataKey;
+    use crate::encoding::v2::keys::scope::{TenantId, TENANT_KEY_PREFIX};
+    use crate::encoding::v2::keys::{DataKey as GraphKey, DataKeyKind};
 
     #[test]
     fn storage_version_four_is_current() {
@@ -1473,7 +1473,7 @@ mod tests {
             let tenant = TenantId::from_ulid_str("01KZ6WZ9QREKZZ87492YXBTFJ3").unwrap();
             assert_eq!(tenant.as_u128().to_be_bytes()[0], 0x01);
             let logical =
-                DataKeyKind::NodeProperty(crate::encoding::v1::keys::NodePropertyKey::new(11));
+                DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(11));
             let mut tenant_key = Vec::new();
             tenant_key.extend_from_slice(&tenant.as_u128().to_be_bytes());
             logical.encode_into(&mut tenant_key);
@@ -1536,7 +1536,7 @@ mod tests {
         .unwrap();
         let scope =
             DataScope::Tenant(TenantId::from_ulid_str("01KZ6WZ9QREKZZ87492YXBTFJ3").unwrap());
-        let migrated_key = Key::Data {
+        let migrated_key = ManagedIndexKey::Data {
             scope,
             kind: ScopedKey::operation(IndexOperationId::from_bytes([0x11; 16]).unwrap()),
         }
@@ -1611,7 +1611,7 @@ mod tests {
         .await
         .unwrap();
         let tenant = TenantId::from_ulid_str("01KZ6WZ9QREKZZ87492YXBTFJ3").unwrap();
-        let kind = DataKeyKind::NodeProperty(crate::encoding::v1::keys::NodePropertyKey::new(11));
+        let kind = DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(11));
         let mut legacy_key = Vec::new();
         legacy_key.extend_from_slice(&tenant.as_u128().to_be_bytes());
         kind.encode_into(&mut legacy_key);
@@ -1645,7 +1645,7 @@ mod tests {
     #[test]
     fn tenant_v2_cursor_uses_the_v2_envelope_parser() {
         let scope = DataScope::Tenant(TenantId::from_u128(7));
-        let cursor = Key::Data {
+        let cursor = ManagedIndexKey::Data {
             scope,
             kind: ScopedKey::operation(IndexOperationId::from_bytes([0x11; 16]).unwrap()),
         }
@@ -1666,7 +1666,7 @@ mod tests {
             .unwrap();
         let scope = DataScope::Tenant(TenantId::from_u128(7));
         db.put(
-            Key::Data {
+            ManagedIndexKey::Data {
                 scope,
                 kind: ScopedKey::operation(IndexOperationId::from_bytes([0x11; 16]).unwrap()),
             }
@@ -1716,14 +1716,14 @@ mod tests {
         let cases = [
             (
                 "global",
-                Key::Global {
+                ManagedIndexKey::Global {
                     kind: GlobalKey::OperationPointer(operation_id),
                 }
                 .to_bytes(),
             ),
             (
                 "unscoped",
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::operation(operation_id),
                 }
@@ -1731,7 +1731,7 @@ mod tests {
             ),
             (
                 "tenant",
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::Tenant(adversarial_tenant),
                     kind: ScopedKey::operation(operation_id),
                 }

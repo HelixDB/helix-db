@@ -9,7 +9,6 @@ use crate::logical::AccessSourceKind;
 
 pub(super) fn pipeline_has_local_simplification_candidate(pipeline: &AccessPipeline) -> bool {
     pipeline.access().source_kind() == AccessSourceKind::Empty
-        || has_adjacent_ops(pipeline.ops(), StreamPipelineOpKind::Filter)
         || has_distinct_simplification_candidate(pipeline.ops())
 }
 
@@ -25,8 +24,6 @@ fn has_adjacent_ops(ops: &[StreamPipelineOp], kind: StreamPipelineOpKind) -> boo
 
 #[cfg(test)]
 mod tests {
-    use helix_ast::expr::Predicate;
-
     use super::*;
     use crate::ir;
     use crate::logical::{AccessPath, NodeAccessPath};
@@ -43,25 +40,11 @@ mod tests {
         }
     }
 
-    fn filter_op(property: &'static str) -> StreamPipelineOp {
-        StreamPipelineOp::Filter {
-            predicate: ir::PredicatePlan::new(Predicate::eq(property, true)).unwrap(),
-        }
-    }
-
     #[test]
     fn local_simplification_candidate_is_conservative_for_known_rewrites() {
         let empty = AccessPipeline::new(
             access(ir::NodeAccessPlan::Empty),
             ir::AtLeast::<_, 1>::from_one(limit_op()),
-        )
-        .unwrap();
-        let adjacent_filters = AccessPipeline::new(
-            access(ir::NodeAccessPlan::AllScan),
-            ir::AtLeast::<_, 1>::from_one_and_rest(
-                filter_op("active"),
-                vec![filter_op("verified")],
-            ),
         )
         .unwrap();
         let leading_distinct = AccessPipeline::new(
@@ -86,7 +69,6 @@ mod tests {
         .unwrap();
 
         assert!(empty.has_local_simplification_candidate());
-        assert!(adjacent_filters.has_local_simplification_candidate());
         assert!(leading_distinct.has_local_simplification_candidate());
         assert!(adjacent_distinct.has_local_simplification_candidate());
         assert!(!ordinary.has_local_simplification_candidate());

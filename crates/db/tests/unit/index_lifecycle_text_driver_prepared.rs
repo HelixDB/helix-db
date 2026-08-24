@@ -676,7 +676,7 @@ fn text_driver_key_projection_and_counter_helpers_fail_closed() {
             property::Property::string("$label", "Document"),
             property::Property::new(
                 "body",
-                crate::encoding::v1::property::property_value::PropertyValue::I64(1),
+                crate::encoding::v2::values::property::property_value::PropertyValue::I64(1),
             ),
         ],
         &state,

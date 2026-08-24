@@ -64,7 +64,7 @@ pub enum IndexOperationModelError {
 /// Complete typed key used by a bounded resume-after scan.
 ///
 /// The owning scoped repository additionally validates these bytes through the
-/// exact `encoding/v1` key parser for its known scope. Keeping scope outside the
+/// exact `encoding/v2` key parser for its known scope. Keeping scope outside the
 /// value prevents a cursor from carrying an independently variable tenant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexCursor(Bytes);
@@ -582,7 +582,7 @@ impl IndexOperationProgress {
 
     /// Validates every complete resume key owned by this progress variant.
     ///
-    /// The caller supplies scope-aware `encoding/v1` parsing because scope is
+    /// The caller supplies scope-aware `encoding/v2` parsing because scope is
     /// deliberately not duplicated inside persisted cursor bytes.
     pub(crate) fn cursors_are_valid(&self, mut validate: impl FnMut(&IndexCursor) -> bool) -> bool {
         let source_is_valid =

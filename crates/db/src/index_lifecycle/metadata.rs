@@ -1,6 +1,6 @@
 //! Typed V2 storage marker, allocator, and global queue-pointer values.
 
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::scope::DataScope;
 
 use super::{
     IndexGenerationId, IndexId, IndexOperationId, IndexOperationRevision, VectorPhysicalIndexId,

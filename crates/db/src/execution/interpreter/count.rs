@@ -582,7 +582,7 @@ impl<'db> ExecutionContext<'db> {
             if threshold.is_some_and(|threshold| count >= threshold) {
                 break;
             }
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id)),
             }
@@ -600,7 +600,7 @@ impl<'db> ExecutionContext<'db> {
             if threshold.is_some_and(|threshold| count >= threshold) {
                 break;
             }
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(*id)),
             }
@@ -2444,7 +2444,8 @@ mod tests {
         for value in [
             PropertyValue::Array(Vec::new()),
             PropertyValue::String("x".repeat(
-                crate::encoding::v1::property::equality_value::MAX_EQUALITY_CANONICAL_LEN + 1,
+                crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN
+                    + 1,
             )),
         ] {
             assert!(execute_direct_count_with_params(
@@ -2484,14 +2485,14 @@ mod tests {
         }
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
                 }
                 .to_bytes(),
-                crate::encoding::v1::property::encode_properties(&[
-                    crate::encoding::v1::property::Property::string("$label", "User"),
-                    crate::encoding::v1::property::Property::string(
+                crate::encoding::v2::values::property::encode_properties(&[
+                    crate::encoding::v2::values::property::Property::string("$label", "User"),
+                    crate::encoding::v2::values::property::Property::string(
                         "email",
                         "different@example.com",
                     ),
@@ -2764,8 +2765,8 @@ mod tests {
         .await;
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(node)),
                 }
                 .to_bytes(),
@@ -2775,8 +2776,8 @@ mod tests {
             .unwrap();
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(edge)),
                 }
                 .to_bytes(),
@@ -3567,8 +3568,8 @@ mod tests {
         .await;
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(node)),
                 }
                 .to_bytes(),
@@ -4265,7 +4266,7 @@ mod tests {
         let mut expired = ExecutionContext::new_scoped_controlled(
             &db,
             context::ParamBindings::default(),
-            crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             crate::execution_control::ExecutionControl::from_timeout(std::time::Duration::ZERO),
         );
         assert!(expired
@@ -4564,14 +4565,17 @@ mod tests {
 
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
                 }
                 .to_bytes(),
-                crate::encoding::v1::property::encode_properties(&[
-                    crate::encoding::v1::property::Property::string("$label", "Other"),
-                    crate::encoding::v1::property::Property::string("email", "alice@example.com"),
+                crate::encoding::v2::values::property::encode_properties(&[
+                    crate::encoding::v2::values::property::Property::string("$label", "Other"),
+                    crate::encoding::v2::values::property::Property::string(
+                        "email",
+                        "alice@example.com",
+                    ),
                 ]),
             )
             .await
@@ -4591,8 +4595,8 @@ mod tests {
         ));
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
                 }
                 .to_bytes(),

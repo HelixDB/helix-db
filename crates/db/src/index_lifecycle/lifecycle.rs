@@ -8,14 +8,14 @@
 use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
 use crate::config::NonEmptyDefinitionDifferences;
-use crate::encoding::v1::keys::metadata::MetadataKey;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{
-    DataKeyKind, EdgePropertyByIdKey, GlobalKeyKind, Key, NodePropertyKey,
-};
-use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
+use crate::encoding::v2::keys::metadata::MetadataKey;
+use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::GlobalKey;
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::keys::{
+    DataKey, DataKeyKind, EdgePropertyByIdKey, GlobalKeyKind, NodePropertyKey,
+};
+use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
 use crate::encoding::v2::values::{
     decode_index_record, decode_metadata_value, decode_operation_record, encode_index_record,
     encode_metadata_value, encode_operation_record,
@@ -224,7 +224,7 @@ async fn create_index_operation_in_transaction_with_physical(
     }
     if !super::repository::operation_cursors_are_valid(scope, &initial_progress.0) {
         return Err(HelixDbError::InvariantViolation(
-            "initial index build cursor is not an exact typed V1 key".to_string(),
+            "initial index build cursor is not an exact typed key".to_string(),
         ));
     }
 
@@ -381,7 +381,7 @@ pub(crate) async fn capture_source_upper_bound(
         IndexElementKind::Node => MetadataKey::next_node_id_key(),
         IndexElementKind::Edge => MetadataKey::next_edge_id_key(),
     };
-    let watermark_key = Key::Global {
+    let watermark_key = DataKey::Global {
         kind: GlobalKeyKind::Metadata(metadata),
     }
     .to_bytes();
@@ -393,12 +393,12 @@ pub(crate) async fn capture_source_upper_bound(
         .map_or(0, IdAllocationWatermarkValue::exclusive_id);
     let inclusive_id = exclusive_id.saturating_sub(1);
     let key = match element_kind {
-        IndexElementKind::Node => Key::Data {
+        IndexElementKind::Node => DataKey::Data {
             scope,
             kind: DataKeyKind::NodeProperty(NodePropertyKey::new(inclusive_id)),
         }
         .to_bytes(),
-        IndexElementKind::Edge => Key::Data {
+        IndexElementKind::Edge => DataKey::Data {
             scope,
             kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(inclusive_id)),
         }
@@ -701,9 +701,9 @@ mod tests {
         SearchIndexBackfillLimits, SecondaryIndexDefinition, TextIndexDefinition,
         VectorIndexDefinition,
     };
-    use crate::encoding::v1::keys::metadata::MetadataKey;
-    use crate::encoding::v1::keys::{DataKeyKind, GlobalKeyKind, Key, NodePropertyKey};
-    use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
+    use crate::encoding::v2::keys::metadata::MetadataKey;
+    use crate::encoding::v2::keys::{DataKey, DataKeyKind, GlobalKeyKind, NodePropertyKey};
+    use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
     use crate::execution_control::{
         ExecutionControl, WriteAbortClaim, WriteCommitGate, WriteCommitState,
     };
@@ -754,7 +754,7 @@ mod tests {
 
     fn source_upper_bound(scope: DataScope) -> IndexCursor {
         IndexCursor::try_new(
-            Key::Data {
+            DataKey::Data {
                 scope,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(42)),
             }
@@ -1047,7 +1047,7 @@ mod tests {
     #[tokio::test]
     async fn public_create_captures_the_source_watermark_in_its_enqueue_transaction() {
         let db = test_db("lifecycle-current-source-create").await;
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
             0xC0FFEE,
         ));
         let definition = ValidatedDynamicIndexDefinition::try_from(
@@ -1055,7 +1055,7 @@ mod tests {
         )
         .expect("validated secondary definition");
         db.put(
-            Key::Global {
+            DataKey::Global {
                 kind: GlobalKeyKind::Metadata(MetadataKey::next_node_id_key()),
             }
             .to_bytes(),
@@ -1091,7 +1091,7 @@ mod tests {
         assert_eq!(
             inclusive_upper_bound,
             &IndexCursor::try_new(
-                Key::Data {
+                DataKey::Data {
                     scope,
                     kind: DataKeyKind::NodeProperty(NodePropertyKey::new(7)),
                 }
@@ -1355,10 +1355,8 @@ mod tests {
         let db = test_db("lifecycle-scope-and-cursor").await;
         let unscoped = DataScope::LegacyUnscoped;
         let tenant_scope = DataScope::Tenant(
-            crate::encoding::v1::keys::tenant::TenantId::from_ulid_str(
-                "00000000000000000000000001",
-            )
-            .expect("canonical tenant ULID"),
+            crate::encoding::v2::keys::scope::TenantId::from_ulid_str("00000000000000000000000001")
+                .expect("canonical tenant ULID"),
         );
         let definition = ValidatedDynamicIndexDefinition::try_from(
             SecondaryIndexDefinition::node_equality("User", "email").expect("secondary definition"),

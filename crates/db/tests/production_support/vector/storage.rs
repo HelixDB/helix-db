@@ -2,7 +2,7 @@
 //!
 //! This feature-gated child module exercises tenant-scoped key construction,
 //! current row codecs, opaque canonical/candidate/reverse tokens, measured
-//! writes, and exhaustive lane cleanup. It uses only existing `encoding::v1`
+//! writes, and exhaustive lane cleanup. It uses only canonical `encoding::v2`
 //! keys and values in isolated databases, so deployed bytes remain unchanged.
 
 use std::num::NonZeroU64;
@@ -14,9 +14,9 @@ use slatedb::{Db, IsolationLevel};
 
 use super::*;
 use crate::config::VectorIndexDefinition;
-use crate::encoding::keys::tenant::TenantId;
-use crate::encoding::v1::keys::vectors::VectorTxnGuardKey;
-use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+use crate::encoding::keys::scope::TenantId;
+use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey;
+use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::index_lifecycle::{ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition};
 use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
 use crate::search::vector::{distance, encode_item, Item, VectorDistanceMetric, VectorIndexConfig};
@@ -46,14 +46,14 @@ fn run_legacy_validation_codec_contracts() {
         (
             VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),
         ),
         (
-            VectorKey::TxnGuard(VectorTxnGuardKey::new(index_id)),
-            crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
+            VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(index_id)),
+            crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
         ),
         (
             VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(index_id, 1)),
@@ -75,10 +75,7 @@ fn run_legacy_validation_codec_contracts() {
             VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, 1)),
             item.clone(),
         ),
-        (
-            VectorKey::Vector(VectorItemKey::new(index_id, 17, 1)),
-            item,
-        ),
+        (VectorKey::Vector(VectorItemKey::new(index_id, 17, 1)), item),
         (
             VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 2, 1)),
             encode_empty_marker(),
@@ -122,7 +119,7 @@ fn run_legacy_validation_codec_contracts() {
     mismatched.config.dimension = 4;
     assert!(validate_legacy_row::<distance::Cosine>(
         &VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)),
-        &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+        &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
             &mismatched,
         ),
         &config,
@@ -133,7 +130,7 @@ fn run_legacy_validation_codec_contracts() {
     invalid_state.max_layer = 1;
     assert!(validate_legacy_row::<distance::Cosine>(
         &VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)),
-        &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+        &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
             &invalid_state,
         ),
         &config,
@@ -178,7 +175,7 @@ async fn run_legacy_migration_read_contracts() {
                 keyspace.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),
@@ -343,7 +340,7 @@ async fn run_simhash_directory_migration_contracts() {
         .put(
             &metadata_key,
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),
@@ -1218,7 +1215,7 @@ async fn run_legacy_validation_scan_contracts() {
                 keyspace.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),
@@ -1226,10 +1223,10 @@ async fn run_legacy_validation_scan_contracts() {
         .unwrap();
     transaction
         .put(
-            keyspace.key(VectorKey::TxnGuard(VectorTxnGuardKey::new(
+            keyspace.key(VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(
                 keyspace.index_id(),
             ))),
-            crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
+            crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
         )
         .unwrap();
     transaction.commit().await.unwrap();
@@ -1381,7 +1378,7 @@ async fn run_legacy_validation_scan_contracts() {
                 mismatch.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &mismatch_metadata,
                 ),
             ),
@@ -1450,7 +1447,7 @@ async fn run_legacy_validation_entry_point_contracts() {
                     keyspace.index_id(),
                 ))),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
@@ -1533,7 +1530,7 @@ async fn run_legacy_validation_entry_point_contracts() {
                 keyspace.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),
@@ -1630,7 +1627,7 @@ async fn run_row_contracts() {
                 legacy_keyspace.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &legacy_metadata,
                 ),
             ),
@@ -1656,7 +1653,7 @@ async fn run_row_contracts() {
                 mismatch_keyspace.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &legacy_metadata,
                 ),
             ),

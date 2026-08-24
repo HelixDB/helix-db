@@ -22,6 +22,7 @@ pub use stream::AccessStream;
 pub use unary::{AccessDistinct, AccessFilter, AccessOrder, AccessWindow};
 pub use window::AccessWindowRange;
 
+pub(crate) use pipeline::canonicalize_stream_pipeline_ops;
 pub(in crate::logical) use pipeline::{
-    combine_effect, pipeline_ops_effect, validate_stream_pipeline_ops,
+    combine_effect, pipeline_ops_effect, CanonicalStreamPipelineOps,
 };

@@ -11,7 +11,7 @@ use super::migrations::MigrationTuning;
 use super::search_index_backfill::SearchIndexBackfillLimits;
 use super::secondary_index_lifecycle::SecondaryIndexLifecycleTuning;
 use super::utils::{ConfigError, ConfigResult};
-use crate::encoding::v1::values::edges::{
+use crate::encoding::v2::values::adjacency::{
     EDGE_UPDATE_ADAPTIVE, EDGE_UPDATE_EAGER, EDGE_UPDATE_LAZY, ENCODING_TYPE_EFP,
     ENCODING_TYPE_NONE,
 };

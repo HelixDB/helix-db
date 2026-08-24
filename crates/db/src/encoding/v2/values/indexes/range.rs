@@ -14,6 +14,34 @@ use super::super::{
 
 const SECONDARY_ENTRY_KIND: u8 = 0x05;
 
+/// Validated deployed range-row presence value.
+///
+/// Range membership is encoded entirely in the key. A non-empty value is not
+/// a deployed row and must fail closed during lifecycle recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) struct SecondaryRangePresence;
+
+#[cfg(any(test, feature = "fuzzing"))]
+impl SecondaryRangePresence {
+    /// Returns the exact deployed empty presence value.
+    #[cfg(test)]
+    pub(crate) const fn encode() -> Bytes {
+        Bytes::new()
+    }
+
+    /// Accepts only the exact deployed empty presence value.
+    pub(crate) fn decode(data: &[u8]) -> Result<Self, EncodingError> {
+        if !data.is_empty() {
+            return Err(EncodingError::Custom(format!(
+                "secondary range presence value must be empty, got {} bytes",
+                data.len()
+            )));
+        }
+        Ok(Self)
+    }
+}
+
 pub(crate) fn encode_entry(value: &SecondaryEntryValue) -> Result<Bytes, EncodingError> {
     if value.lane.is_equality() {
         return Err(EncodingError::Custom(
@@ -92,5 +120,15 @@ mod tests {
             hex(&encoded),
             @"010500000000000000010000000000000002030000000000000003"
         );
+    }
+
+    #[test]
+    fn range_presence_accepts_only_the_deployed_empty_value() {
+        assert_eq!(SecondaryRangePresence::encode(), Bytes::new());
+        assert_eq!(
+            SecondaryRangePresence::decode(&SecondaryRangePresence::encode()).unwrap(),
+            SecondaryRangePresence
+        );
+        assert!(SecondaryRangePresence::decode(&[0]).is_err());
     }
 }

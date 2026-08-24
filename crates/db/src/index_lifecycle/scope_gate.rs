@@ -19,7 +19,7 @@ use tokio::sync::{
     Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
 };
 
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::scope::DataScope;
 
 /// Shared authority retained by one graph mutation transaction.
 #[derive(Debug)]
@@ -150,7 +150,7 @@ mod tests {
         let gates = Arc::new(IndexScopeGates::default());
         let first_scope = DataScope::LegacyUnscoped;
         let other_scope =
-            DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(7));
+            DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(7));
         let catalog = gates.catalog_permit(first_scope).await;
         let mutation = gates.mutation_permit(first_scope).await;
         let waiting = {
@@ -194,7 +194,7 @@ mod tests {
         let gates = Arc::new(IndexScopeGates::default());
         let first_scope = DataScope::LegacyUnscoped;
         let other_scope =
-            DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(7));
+            DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(7));
         let first = gates.catalog_refresh_permit(first_scope).await;
         let waiting = {
             let gates = Arc::clone(&gates);

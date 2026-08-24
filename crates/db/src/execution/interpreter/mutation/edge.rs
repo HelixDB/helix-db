@@ -370,7 +370,7 @@ impl<'db> ExecutionContext<'db> {
                 .next()
                 .expect("each observed edge has one endpoint result")
                 .map(|value| {
-                    crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue::decode(&value)
+                    crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::decode(&value)
                         .map(|endpoints| (endpoints.source(), endpoints.target()))
                 })
                 .transpose()?;
@@ -406,7 +406,7 @@ impl<'db> ExecutionContext<'db> {
         let pair_keys = pairs
             .iter()
             .map(|(from, to)| {
-                keys::Key::Data {
+                keys::DataKey::Data {
                     scope: self.tenant_scope,
                     kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(*from, *to)),
                 }
@@ -420,7 +420,7 @@ impl<'db> ExecutionContext<'db> {
             .map(|(pair, value)| {
                 let edge_ids = value
                     .map(|value| {
-                        values::secondary::SecondaryEqualityValue::decode(&value)
+                        values::indexes::SecondaryEqualityValue::decode(&value)
                             .map(|value| value.into_ids())
                     })
                     .transpose()?
@@ -442,7 +442,7 @@ impl<'db> ExecutionContext<'db> {
         let property_keys = pair_edge_ids
             .iter()
             .map(|edge_id| {
-                keys::Key::Data {
+                keys::DataKey::Data {
                     scope: self.tenant_scope,
                     kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(
                         *edge_id,

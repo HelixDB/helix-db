@@ -52,7 +52,7 @@ impl<'db> ExecutionContext<'db> {
         let mut rows = Vec::new();
         for id in ids {
             self.check_execution_deadline()?;
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
             }
@@ -78,7 +78,7 @@ impl<'db> ExecutionContext<'db> {
         let mut rows = Vec::new();
         for id in ids {
             self.check_execution_deadline()?;
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(id)),
             }
@@ -111,7 +111,7 @@ impl<'db> ExecutionContext<'db> {
                     "edge-bound vector result reached node row materialization".to_string(),
                 ));
             };
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(entity_id)),
             }
@@ -144,7 +144,7 @@ impl<'db> ExecutionContext<'db> {
                     "node-bound vector result reached edge row materialization".to_string(),
                 ));
             };
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(entity_id)),
             }
@@ -171,7 +171,7 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for result in results {
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(result.entity_id)),
             }
@@ -198,7 +198,7 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for result in results {
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(
                     result.entity_id,
@@ -240,7 +240,7 @@ mod tests {
 
     use super::super::super::test_support;
     use super::*;
-    use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+    use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
     use crate::search::vector::{DistanceScore, SearchResult};
 
     fn vector_result(kind: VectorEntityKind, entity_id: u64) -> TypedVectorSearchResult {

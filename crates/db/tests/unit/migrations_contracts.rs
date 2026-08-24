@@ -6,10 +6,10 @@ use slatedb::{Db, IsolationLevel};
 use super::*;
 
 fn legacy_secondary(
-    element_type: config::SecondaryIndexElementType,
-    kind: config::SecondaryIndexKind,
+    element_type: LegacySecondaryElementType,
+    kind: LegacySecondaryKind,
     unique: bool,
-    direction: config::RangeIndexDirection,
+    direction: LegacyRangeDirection,
 ) -> LegacySecondaryIndexDefinition {
     LegacySecondaryIndexDefinition {
         element_type,
@@ -23,34 +23,32 @@ fn legacy_secondary(
 
 #[test]
 fn legacy_secondary_definition_matrix_accepts_only_representable_algorithms() {
-    use config::{RangeIndexDirection, SecondaryIndexElementType, SecondaryIndexKind};
-
     for element_type in [
-        SecondaryIndexElementType::Node,
-        SecondaryIndexElementType::Edge,
+        LegacySecondaryElementType::Node,
+        LegacySecondaryElementType::Edge,
     ] {
-        for kind in [SecondaryIndexKind::Equality, SecondaryIndexKind::Range] {
+        for kind in [LegacySecondaryKind::Equality, LegacySecondaryKind::Range] {
             for unique in [false, true] {
-                for direction in [RangeIndexDirection::Asc, RangeIndexDirection::Desc] {
+                for direction in [LegacyRangeDirection::Asc, LegacyRangeDirection::Desc] {
                     let result =
                         legacy_secondary(element_type, kind, unique, direction).into_runtime();
                     let expected_valid = matches!(
                         (element_type, kind, unique, direction),
                         (
-                            SecondaryIndexElementType::Node,
-                            SecondaryIndexKind::Equality,
+                            LegacySecondaryElementType::Node,
+                            LegacySecondaryKind::Equality,
                             false | true,
-                            RangeIndexDirection::Asc,
+                            LegacyRangeDirection::Asc,
                         ) | (
-                            SecondaryIndexElementType::Node | SecondaryIndexElementType::Edge,
-                            SecondaryIndexKind::Range,
+                            LegacySecondaryElementType::Node | LegacySecondaryElementType::Edge,
+                            LegacySecondaryKind::Range,
                             false,
-                            RangeIndexDirection::Asc | RangeIndexDirection::Desc,
+                            LegacyRangeDirection::Asc | LegacyRangeDirection::Desc,
                         ) | (
-                            SecondaryIndexElementType::Edge,
-                            SecondaryIndexKind::Equality,
+                            LegacySecondaryElementType::Edge,
+                            LegacySecondaryKind::Equality,
                             false,
-                            RangeIndexDirection::Asc,
+                            LegacyRangeDirection::Asc,
                         )
                     );
                     assert_eq!(
@@ -64,14 +62,14 @@ fn legacy_secondary_definition_matrix_accepts_only_representable_algorithms() {
     }
 }
 
-fn legacy_vector(element_type: config::VectorElementType) -> LegacyVectorIndexDefinition {
+fn legacy_vector(element_type: LegacyVectorElementType) -> LegacyVectorIndexDefinition {
     LegacyVectorIndexDefinition {
         element_type,
         label: "Document".to_string(),
         property: "embedding".to_string(),
         tenant_property: Some("tenant".to_string()),
         dimension: 3,
-        metric: crate::search::vector::VectorDistanceMetric::Cosine,
+        metric: LegacyVectorMetric::Cosine,
         m: 8,
         m0: 16,
         ef_construction: 64,
@@ -83,13 +81,13 @@ fn legacy_vector(element_type: config::VectorElementType) -> LegacyVectorIndexDe
     }
 }
 
-fn legacy_text(element_type: config::TextElementType) -> LegacyTextIndexDefinition {
+fn legacy_text(element_type: LegacyTextElementType) -> LegacyTextIndexDefinition {
     LegacyTextIndexDefinition {
         element_type,
         label: "Document".to_string(),
         property: "body".to_string(),
         tenant_property: Some("tenant".to_string()),
-        analyzer: config::TextAnalyzerKind::StandardStemEn,
+        analyzer: LegacyTextAnalyzer::StandardStemEn,
         positions_enabled: true,
     }
 }
@@ -100,15 +98,15 @@ fn legacy_dynamic_definition_families_preserve_identity_and_runtime_shape() {
 
     let definitions = [
         LegacyDynamicIndexDefinition::Secondary(legacy_secondary(
-            config::SecondaryIndexElementType::Node,
-            config::SecondaryIndexKind::Equality,
+            LegacySecondaryElementType::Node,
+            LegacySecondaryKind::Equality,
             true,
-            config::RangeIndexDirection::Asc,
+            LegacyRangeDirection::Asc,
         )),
-        LegacyDynamicIndexDefinition::Vector(legacy_vector(config::VectorElementType::Node)),
-        LegacyDynamicIndexDefinition::Vector(legacy_vector(config::VectorElementType::Edge)),
-        LegacyDynamicIndexDefinition::Text(legacy_text(config::TextElementType::Node)),
-        LegacyDynamicIndexDefinition::Text(legacy_text(config::TextElementType::Edge)),
+        LegacyDynamicIndexDefinition::Vector(legacy_vector(LegacyVectorElementType::Node)),
+        LegacyDynamicIndexDefinition::Vector(legacy_vector(LegacyVectorElementType::Edge)),
+        LegacyDynamicIndexDefinition::Text(legacy_text(LegacyTextElementType::Node)),
+        LegacyDynamicIndexDefinition::Text(legacy_text(LegacyTextElementType::Edge)),
     ];
 
     for definition in definitions {
@@ -298,11 +296,11 @@ fn migration_job_state_machine_preserves_counters_and_rejects_invalid_transition
 fn legacy_range_direction_preserves_both_physical_directions() {
     assert_eq!(
         legacy_range_direction(config::RangeIndexDirection::Asc),
-        crate::encoding::v1::indexes::range::RangeIndexDirection::Asc
+        crate::encoding::v2::keys::indexes::range::RangeIndexDirection::Asc
     );
     assert_eq!(
         legacy_range_direction(config::RangeIndexDirection::Desc),
-        crate::encoding::v1::indexes::range::RangeIndexDirection::Desc
+        crate::encoding::v2::keys::indexes::range::RangeIndexDirection::Desc
     );
 }
 
@@ -488,10 +486,10 @@ async fn legacy_tombstone_retirement_requires_exact_source_and_v2_absence() {
     .unwrap();
     let scope = DataScope::LegacyUnscoped;
     let identity = LegacyDynamicIndexDefinition::Secondary(legacy_secondary(
-        config::SecondaryIndexElementType::Node,
-        config::SecondaryIndexKind::Equality,
+        LegacySecondaryElementType::Node,
+        LegacySecondaryKind::Equality,
         false,
-        config::RangeIndexDirection::Asc,
+        LegacyRangeDirection::Asc,
     ))
     .key();
     let storage_key = scoped_metadata_key(scope, b"external/legacy/tombstone");
@@ -508,10 +506,10 @@ async fn legacy_tombstone_retirement_requires_exact_source_and_v2_absence() {
     ));
 
     let expected = LegacyDynamicIndexDefinition::Secondary(legacy_secondary(
-        config::SecondaryIndexElementType::Node,
-        config::SecondaryIndexKind::Equality,
+        LegacySecondaryElementType::Node,
+        LegacySecondaryKind::Equality,
         false,
-        config::RangeIndexDirection::Asc,
+        LegacyRangeDirection::Asc,
     ))
     .into_validated()
     .unwrap();

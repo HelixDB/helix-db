@@ -64,6 +64,33 @@ fn native_access_stream_lowers_composed_ops_to_pipeline_contract() {
 }
 
 #[test]
+fn native_access_stream_canonicalizes_filters_before_shape_selection() {
+    let predicate = Predicate::and(vec![
+        Predicate::eq("active", true),
+        Predicate::eq("verified", true),
+    ]);
+    let filtered = nodes()
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("active", true),
+        )
+        .unwrap()
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("verified", true),
+        )
+        .unwrap()
+        .into_logical_expr()
+        .unwrap();
+
+    assert!(matches!(
+        filtered,
+        logical::LogicalExpr::AccessFilter(filter)
+            if filter.predicate().as_ref() == &predicate
+    ));
+}
+
+#[test]
 fn native_access_stream_lowers_single_pipeline_ops_to_typed_pipeline_contract() {
     let dynamic_limit = nodes()
         .limit(&StreamBound::expr(Expr::param("limit")))

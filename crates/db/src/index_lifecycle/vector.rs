@@ -17,17 +17,20 @@ use slatedb::DbTransaction;
 
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::{
-    VectorIndexMetadataKey, VectorKey, VectorStorageLane, VectorTxnGuardKey,
+use crate::encoding::v2::keys::indexes::vector::{
+    VectorIndexMetadataKey, VectorKey, VectorStorageLane,
 };
-use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v1::property::encode_index_partition_value;
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
+use crate::encoding::v2::legacy::vector::transaction_guard::{
+    decode_active_txn_guard, LegacyVectorTxnGuardKey,
+};
 #[cfg(test)]
 use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::encode_build_delta;
+use crate::encoding::v2::values::property::encode_index_partition_value;
 use crate::error::{HelixDbError, Result};
 use crate::search;
 use crate::search::vector::{
@@ -617,34 +620,33 @@ async fn reclaim_empty_tenant_partition<D: Distance>(
     }
 
     let physical_index_id = generation.physical_index_id();
-    let metadata_key = Key::Data {
+    let metadata_key = DataKey::Data {
         scope,
         kind: DataKeyKind::Vector(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
             physical_index_id,
         ))),
     }
     .to_bytes();
-    let guard_key = Key::Data {
+    let guard_key = DataKey::Data {
         scope,
-        kind: DataKeyKind::Vector(VectorKey::TxnGuard(VectorTxnGuardKey::new(
+        kind: DataKeyKind::Vector(VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(
             physical_index_id,
         ))),
     }
     .to_bytes();
     for lane in VectorStorageLane::ALL {
-        let prefix = Key::data_prefix(scope, lane.prefix_key(physical_index_id).to_bytes());
+        let prefix = DataKey::data_prefix(scope, lane.prefix_key(physical_index_id).to_bytes());
         let mut rows = transaction.scan_prefix(prefix, ..).await?;
         while let Some(row) = rows.next().await? {
             if lane == VectorStorageLane::Core && row.key == metadata_key {
                 continue;
             }
             if lane == VectorStorageLane::Core && row.key == guard_key {
-                crate::encoding::v1::values::vectors::markers::decode_active_txn_guard(&row.value)
-                    .map_err(|error| {
-                        HelixDbError::InvariantViolation(format!(
-                            "empty tenant vector partition has a malformed transaction guard: {error}"
-                        ))
-                    })?;
+                decode_active_txn_guard(&row.value).map_err(|error| {
+                    HelixDbError::InvariantViolation(format!(
+                        "empty tenant vector partition has a malformed transaction guard: {error}"
+                    ))
+                })?;
                 continue;
             }
             return Err(HelixDbError::InvariantViolation(format!(
@@ -1836,7 +1838,7 @@ mod tests {
             .unwrap()
             .is_some());
         for lane in VectorStorageLane::ALL {
-            let prefix = Key::data_prefix(
+            let prefix = DataKey::data_prefix(
                 DataScope::LegacyUnscoped,
                 lane.prefix_key(first_physical.get()).to_bytes(),
             );
@@ -1928,16 +1930,19 @@ mod tests {
         >(&active, physical)
         .unwrap();
         let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
-        let residue_key = Key::Data {
+        let residue_key = DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: DataKeyKind::Vector(VectorKey::SimHash(
-                crate::encoding::v1::keys::vectors::VectorSimHashKey::new(physical.get(), 999),
+                crate::encoding::v2::keys::indexes::vector::VectorSimHashKey::new(
+                    physical.get(),
+                    999,
+                ),
             )),
         }
         .to_bytes();
         db.put(
             residue_key,
-            crate::encoding::v1::values::vectors::simhash::encode_simhash(17),
+            crate::encoding::v2::values::indexes::vector::simhash::encode_simhash(17),
         )
         .await
         .unwrap();

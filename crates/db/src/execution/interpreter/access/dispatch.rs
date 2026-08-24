@@ -347,16 +347,16 @@ pub(super) mod tests {
 
         let mut results = vec![
             crate::search::vector::TypedVectorSearchResult::from_physical(
-                crate::encoding::v1::values::vector_generation::VectorEntityKind::Node,
-                crate::encoding::v1::values::vector_generation::ActiveScoreSemantic::ManhattanF32V1,
+                crate::encoding::v2::values::indexes::vector::VectorEntityKind::Node,
+                crate::encoding::v2::values::indexes::vector::ActiveScoreSemantic::ManhattanF32V1,
                 crate::search::vector::SearchResult::new(
                     1,
                     crate::search::vector::DistanceScore::try_new(0.1).unwrap(),
                 ),
             ),
             crate::search::vector::TypedVectorSearchResult::from_physical(
-                crate::encoding::v1::values::vector_generation::VectorEntityKind::Node,
-                crate::encoding::v1::values::vector_generation::ActiveScoreSemantic::ManhattanF32V1,
+                crate::encoding::v2::values::indexes::vector::VectorEntityKind::Node,
+                crate::encoding::v2::values::indexes::vector::ActiveScoreSemantic::ManhattanF32V1,
                 crate::search::vector::SearchResult::new(
                     2,
                     crate::search::vector::DistanceScore::try_new(0.2).unwrap(),
@@ -958,10 +958,10 @@ pub(super) mod tests {
         corrupt_db
             .inner_db()
             .put(
-                crate::encoding::v1::keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                        crate::encoding::v1::keys::NodePropertyKey::new(node),
+                crate::encoding::v2::keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                    kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+                        crate::encoding::v2::keys::NodePropertyKey::new(node),
                     ),
                 }
                 .to_bytes(),
@@ -972,10 +972,10 @@ pub(super) mod tests {
         corrupt_db
             .inner_db()
             .put(
-                crate::encoding::v1::keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v1::keys::DataKeyKind::EdgePropertyById(
-                        crate::encoding::v1::keys::EdgePropertyByIdKey::new(edge),
+                crate::encoding::v2::keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                    kind: crate::encoding::v2::keys::DataKeyKind::EdgePropertyById(
+                        crate::encoding::v2::keys::EdgePropertyByIdKey::new(edge),
                     ),
                 }
                 .to_bytes(),

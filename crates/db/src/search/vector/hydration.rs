@@ -3,7 +3,7 @@
 //! The runtime supplies canonical [`ActiveIndexHandle`] values and one stable
 //! SlateDB snapshot. This module enumerates only physical namespaces owned by
 //! those Active generations, validates every tenant-partition mapping through
-//! the V1 key/value codecs, divides the configured budget deterministically,
+//! the canonical key/value codecs, divides the configured budget deterministically,
 //! and publishes completed stores through [`VectorCacheRegistry`]. Partial
 //! budget-limited stores are safe because managed reads fall back to the same
 //! snapshot for every absent row. Corrupt or cancelled loads never publish.
@@ -18,9 +18,9 @@ use super::memory_store::{
     VectorMemoryAdmissionBudget, VectorMemoryStore, VectorMemoryStoreLoadCompletion,
 };
 use super::ValidatedVectorGenerationHandle;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 #[cfg(test)]
-use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::keys::{RecordKind, ScopedKey};
 use crate::encoding::v2::values::decode_partition_mapping;
 use crate::error::{HelixDbError, Result};
@@ -279,8 +279,8 @@ mod tests {
 
     use super::*;
     use crate::config::VectorIndexDefinition;
-    use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-    use crate::encoding::v1::keys::vectors::{VectorKey, VectorUpperVectorKey};
+    use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorUpperVectorKey};
+    use crate::encoding::v2::keys::scope::{DataScope, TenantId};
     use crate::encoding::v2::keys::VectorPartitionMappingKey;
     use crate::encoding::v2::values::encode_partition_mapping;
     use crate::index_lifecycle::work::{VectorPartitionMappingValue, VectorTenantPartition};
@@ -299,7 +299,7 @@ mod tests {
     }
 
     fn active_vector(
-        scope: crate::encoding::v1::keys::tenant::DataScope,
+        scope: crate::encoding::v2::keys::scope::DataScope,
         index_id: u64,
         physical_index_id: u64,
         partitioned: bool,
@@ -349,10 +349,10 @@ mod tests {
     #[tokio::test]
     async fn active_hydration_publishes_exact_snapshot_and_refreshes_immutably() {
         let db = raw_db("vector-cache-active-hydration").await;
-        let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
         let physical_index_id = 71;
         let (active, handle) = active_vector(scope, 7, physical_index_id, false);
-        let first_key = Key::Data {
+        let first_key = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 physical_index_id,
@@ -384,7 +384,7 @@ mod tests {
             Some(b"first".as_slice())
         );
 
-        let second_key = Key::Data {
+        let second_key = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 physical_index_id,
@@ -431,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn partitioned_hydration_requires_a_cross_checked_v2_mapping() {
         let db = raw_db("vector-cache-partitioned-hydration").await;
-        let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
         let index_id = IndexId::new(9).unwrap();
         let physical_index_id = VectorPhysicalIndexId::new(91).unwrap();
         let (active, handle) = active_vector(scope, index_id.get(), physical_index_id.get(), true);
@@ -451,7 +451,7 @@ mod tests {
             partition,
             physical_index_id,
         });
-        let vector_key = Key::Data {
+        let vector_key = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 physical_index_id.get(),
@@ -493,7 +493,7 @@ mod tests {
         let high_physical_id = 202;
         let (low_active, low_handle) = active_vector(scope, 10, low_physical_id, false);
         let (high_active, high_handle) = active_vector(scope, 20, high_physical_id, false);
-        let low_key = Key::Data {
+        let low_key = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 low_physical_id,
@@ -501,7 +501,7 @@ mod tests {
             ))),
         }
         .to_bytes();
-        let high_key = Key::Data {
+        let high_key = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 high_physical_id,
@@ -543,7 +543,7 @@ mod tests {
         let (first_active, first_handle) = active_vector(first_scope, 30, physical_index_id, false);
         let (second_active, second_handle) =
             active_vector(second_scope, 30, physical_index_id, false);
-        let first_key = Key::Data {
+        let first_key = DataKey::Data {
             scope: first_scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 physical_index_id,
@@ -551,7 +551,7 @@ mod tests {
             ))),
         }
         .to_bytes();
-        let second_key = Key::Data {
+        let second_key = DataKey::Data {
             scope: second_scope,
             kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
                 physical_index_id,

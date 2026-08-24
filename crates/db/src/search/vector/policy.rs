@@ -11,7 +11,7 @@ use super::{
     CollisionThreshold, DistanceScore, FailureProbability, SearchBeamWidth, SimHashMode,
     UnitInterval,
 };
-use crate::encoding::v1::values::vector_generation::ActiveMetricKind;
+use crate::encoding::v2::values::indexes::vector::ActiveMetricKind;
 
 /// Metric-qualified filtering behavior for one query.
 #[derive(Debug, Clone, Copy, PartialEq)]

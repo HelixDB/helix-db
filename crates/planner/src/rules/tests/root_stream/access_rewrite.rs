@@ -91,6 +91,92 @@ fn root_stream_access_rewrite_rule_preserves_pipeline_suffix_after_index_rewrite
 }
 
 #[test]
+fn root_stream_access_rewrite_rule_does_not_combine_filters_across_limit() {
+    let rule = RootStreamAccessRewriteRule::default();
+    let pipeline = logical::AccessPipeline::new(
+        node_access_path(ir::NodeAccessPlan::AllScan),
+        ir::AtLeast::<_, 1>::from_one_and_rest(
+            logical::StreamPipelineOp::Filter {
+                predicate: username_predicate(),
+            },
+            vec![
+                logical::StreamPipelineOp::Limit {
+                    count: ir::StreamBoundPlan::Literal(10),
+                },
+                logical::StreamPipelineOp::Filter {
+                    predicate: label_predicate(),
+                },
+            ],
+        ),
+    )
+    .unwrap();
+    let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
+        logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)),
+        ir::ProjectionPlan::Exists,
+    ));
+
+    assert_eq!(
+        rule.apply(optimizer::RuleInput {
+            expr: &expr,
+            storage: &cost::StorageCostProfile::default(),
+            indexes: &username_indexes(),
+            planner_limits: default_planner_limits(),
+            stats: default_stats(),
+        }),
+        optimizer::RuleResult::NotApplicable
+    );
+}
+
+#[test]
+fn root_stream_access_rewrite_rule_preserves_residual_after_leading_filter_rewrite() {
+    let rule = RootStreamAccessRewriteRule::default();
+    let active_predicate =
+        ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true)).unwrap();
+    let pipeline = logical::AccessPipeline::new(
+        node_access_path(ir::NodeAccessPlan::AllScan),
+        ir::AtLeast::<_, 1>::from_one_and_rest(
+            logical::StreamPipelineOp::Filter {
+                predicate: username_predicate(),
+            },
+            vec![
+                logical::StreamPipelineOp::Filter {
+                    predicate: label_predicate(),
+                },
+                logical::StreamPipelineOp::Filter {
+                    predicate: active_predicate.clone(),
+                },
+            ],
+        ),
+    )
+    .unwrap();
+    let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
+        logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)),
+        ir::ProjectionPlan::Exists,
+    ));
+
+    let rewritten = logical_expr(rule.apply(optimizer::RuleInput {
+        expr: &expr,
+        storage: &cost::StorageCostProfile::default(),
+        indexes: &username_indexes(),
+        planner_limits: default_planner_limits(),
+        stats: default_stats(),
+    }));
+
+    let logical::LogicalExpr::StreamProject(project) = rewritten else {
+        panic!("expected stream project rewrite");
+    };
+    let logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)) = project.input()
+    else {
+        panic!("expected indexed access with a residual filter");
+    };
+    assert_indexed_access(pipeline.access());
+    assert!(matches!(
+        pipeline.ops(),
+        [logical::StreamPipelineOp::Filter { predicate }] if predicate == &active_predicate
+    ));
+}
+
+#[test]
 fn root_stream_access_rewrite_rule_declines_non_access_inputs() {
     let rule = RootStreamAccessRewriteRule::default();
     let expr = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
@@ -132,6 +218,10 @@ fn user_label_access() -> logical::AccessPath {
 
 fn username_predicate() -> ir::PredicatePlan {
     ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("username", "alice")).unwrap()
+}
+
+fn label_predicate() -> ir::PredicatePlan {
+    ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("$label", "User")).unwrap()
 }
 
 fn username_indexes() -> catalog::IndexCatalogSnapshot {

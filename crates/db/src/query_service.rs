@@ -15,7 +15,7 @@ use serde::ser::Serializer;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::error::HelixDbError;
 use crate::execution::interpreter::{
@@ -1230,7 +1230,7 @@ mod tests {
         let plan = helix_planner::planning::plan_write_batch(&batch, prepared.context())
             .expect("write plans");
         let tenant_scope = DataScope::Tenant(
-            crate::encoding::keys::tenant::TenantId::from_ulid_str("0000000000000000000000000A")
+            crate::encoding::keys::scope::TenantId::from_ulid_str("0000000000000000000000000A")
                 .expect("tenant ULID is valid"),
         );
 

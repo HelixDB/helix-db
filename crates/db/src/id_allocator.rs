@@ -15,8 +15,8 @@ use slatedb::Db;
 use tokio::sync::Mutex;
 
 use super::error::Result;
-use crate::encoding::v1::keys::metadata;
-use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
+use crate::encoding::v2::keys::metadata;
+use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
 
 /// Default number of IDs to lease at a time
 pub const DEFAULT_LEASE_SIZE: u64 = 1000;

@@ -1,7 +1,7 @@
 //! Closed projection from authoritative graph properties to text-index source state.
 
-use crate::encoding::v1::property::property_value::PropertyValue;
-use crate::encoding::v1::property::Property;
+use crate::encoding::v2::values::property::property_value::PropertyValue;
+use crate::encoding::v2::values::property::Property;
 use crate::index_lifecycle::{work, ValidatedTextIndexDefinition};
 
 /// One definition's complete source projection.
@@ -60,8 +60,9 @@ pub(super) fn project(
             if matches!(tenant_property.value, PropertyValue::Null) {
                 return Err(TextSourceProjectionError::NullTenant);
             }
-            let encoded =
-                crate::encoding::v1::property::encode_index_partition_value(&tenant_property.value);
+            let encoded = crate::encoding::v2::values::property::encode_index_partition_value(
+                &tenant_property.value,
+            );
             work::TextPartition::try_tenant_value(encoded)
                 .map_err(|_| TextSourceProjectionError::OversizedTenant)?
         }

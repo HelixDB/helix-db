@@ -6,14 +6,14 @@ use super::support::*;
 use crate::config::SecondaryIndexDefinition;
 use crate::encoding::indexes::equality::{EqualityIndexKey, GlobalEdgeEqualityIndexKey};
 use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDirection;
-use crate::encoding::indexes::{hash_property_name, hash_property_value, IndexKey};
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v2::keys::Key as ManagedKey;
+use crate::encoding::indexes::{hash_property_name, hash_property_value, PropertyIndexKey};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey as ManagedKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, ScopedKey, SecondaryEntryKey, SecondaryEntryLane,
     SecondaryEqualityBitmapKey,
 };
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::values::{
     encode_index_record, encode_secondary_entry, SecondaryEqualityBitmapValue,
 };
@@ -2060,25 +2060,25 @@ async fn dynamic_equality_ignores_legacy_bitmaps_while_builtin_label_scan_remain
     let node_property = crate::config::scoped_secondary_index_property("User", "status");
     let edge_property = crate::config::scoped_secondary_index_property("FOLLOWS", "status");
     for key in [
-        Key::Data {
+        DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(IndexKey::Equality(EqualityIndexKey::new(
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
                 hash_property_name("$label"),
                 hash_property_value("User"),
             ))),
         }
         .to_bytes(),
-        Key::Data {
+        DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(IndexKey::Equality(EqualityIndexKey::new(
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
                 hash_property_name(&node_property),
                 hash_property_value("active"),
             ))),
         }
         .to_bytes(),
-        Key::Data {
+        DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(IndexKey::GlobalEdgeEquality(
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::GlobalEdgeEquality(
                 GlobalEdgeEqualityIndexKey::new(
                     hash_property_name(&edge_property),
                     hash_property_value("active"),

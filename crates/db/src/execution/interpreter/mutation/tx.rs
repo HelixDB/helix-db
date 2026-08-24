@@ -333,7 +333,7 @@ mod additional_tests {
             crate::search::vector::distance::Cosine,
         >(
             crate::search::vector::VectorGenerationIdentity::try_new(
-                crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 6,
                 "transaction-cache-generation".to_string(),
                 60,
@@ -353,7 +353,7 @@ mod additional_tests {
         handle: &crate::search::vector::ValidatedVectorGenerationHandle,
     ) -> Arc<crate::search::vector::VectorMemoryStore> {
         let store = Arc::new(crate::search::vector::VectorMemoryStore::new(
-            crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             handle.physical_index_id(),
             0,
         ));
@@ -366,10 +366,10 @@ mod additional_tests {
 
     /// Writes one typed row so the request has a real SlateDB commit sequence.
     fn stage_storage_write(active: &ActiveWriteTx, value: &'static [u8]) {
-        let key = crate::encoding::v1::keys::Key::Data {
-            scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-            kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v1::keys::NodePropertyKey::new(99),
+        let key = crate::encoding::v2::keys::DataKey::Data {
+            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+                crate::encoding::v2::keys::NodePropertyKey::new(99),
             ),
         }
         .to_bytes();
@@ -379,7 +379,7 @@ mod additional_tests {
     #[tokio::test]
     async fn prepared_catalog_authority_covers_write_open_then_mutation_commit() {
         let db = Arc::new(test_support::open_db("mutation-catalog-authority-transfer").await);
-        let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
         let prepared = db
             .planner_context_scoped_prepared(context::ParamBindings::default(), scope)
             .await
@@ -449,7 +449,7 @@ mod additional_tests {
     #[tokio::test]
     async fn overlapping_refresh_keeps_prepared_catalog_until_write_snapshot_opens() {
         use crate::config::{TextAnalyzerKind, TextIndexDefinition, VectorIndexDefinition};
-        use crate::encoding::v2::keys::Key;
+        use crate::encoding::v2::keys::ManagedIndexKey;
         use crate::encoding::v2::keys::ScopedKey;
         use crate::encoding::v2::values::encode_index_record;
         use crate::index_lifecycle::{
@@ -461,7 +461,7 @@ mod additional_tests {
         use crate::search::vector::VectorDistanceMetric;
 
         let db = Arc::new(test_support::open_db("mutation-recreated-catalog-settings").await);
-        let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
         let old_vector = ValidatedDynamicIndexDefinition::try_from(
             VectorIndexDefinition::new_node(
                 "Document",
@@ -546,7 +546,7 @@ mod additional_tests {
             .unwrap();
         for record in &old_records {
             seed.put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope,
                     kind: ScopedKey::index_record(record.identity().clone()),
                 }
@@ -585,7 +585,7 @@ mod additional_tests {
                 for record in &new_records {
                     transaction
                         .put(
-                            Key::Data {
+                            ManagedIndexKey::Data {
                                 scope,
                                 kind: ScopedKey::index_record(record.identity().clone()),
                             }
@@ -677,8 +677,8 @@ mod additional_tests {
         let db = test_support::open_db("mutation-deadline-after-commit-start").await;
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.enable_request_write_scope().await.unwrap();
-        let key = crate::encoding::keys::Key::Data {
-            scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+        let key = crate::encoding::keys::DataKey::Data {
+            scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
             kind: crate::encoding::keys::DataKeyKind::NodeProperty(
                 crate::encoding::keys::NodePropertyKey::new(100),
             ),
@@ -744,8 +744,8 @@ mod additional_tests {
 
         context.abort_request_write_scope();
         assert!(store.get_upper_vector(7).is_some());
-        let key = crate::encoding::keys::Key::Data {
-            scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+        let key = crate::encoding::keys::DataKey::Data {
+            scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
             kind: crate::encoding::keys::DataKeyKind::NodeProperty(
                 crate::encoding::keys::NodePropertyKey::new(99),
             ),
@@ -771,8 +771,8 @@ mod additional_tests {
 
         drop(context);
 
-        let key = crate::encoding::keys::Key::Data {
-            scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+        let key = crate::encoding::keys::DataKey::Data {
+            scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
             kind: crate::encoding::keys::DataKeyKind::NodeProperty(
                 crate::encoding::keys::NodePropertyKey::new(99),
             ),
@@ -804,10 +804,10 @@ mod additional_tests {
             .begin(slatedb::IsolationLevel::Snapshot)
             .await
             .unwrap();
-        let key = crate::encoding::v1::keys::Key::Data {
-            scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-            kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v1::keys::NodePropertyKey::new(99),
+        let key = crate::encoding::v2::keys::DataKey::Data {
+            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+                crate::encoding::v2::keys::NodePropertyKey::new(99),
             ),
         }
         .to_bytes();
@@ -888,10 +888,10 @@ mod additional_tests {
             .begin(slatedb::IsolationLevel::Snapshot)
             .await
             .unwrap();
-        let key = crate::encoding::v1::keys::Key::Data {
-            scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-            kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v1::keys::NodePropertyKey::new(99),
+        let key = crate::encoding::v2::keys::DataKey::Data {
+            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+                crate::encoding::v2::keys::NodePropertyKey::new(99),
             ),
         }
         .to_bytes();
@@ -910,7 +910,7 @@ mod additional_tests {
     #[tokio::test]
     async fn mutation_scope_projects_canonical_active_definitions() {
         use crate::config::SecondaryIndexDefinition;
-        use crate::encoding::v2::keys::Key;
+        use crate::encoding::v2::keys::ManagedIndexKey;
         use crate::encoding::v2::keys::ScopedKey;
         use crate::encoding::v2::values::encode_index_record;
         use crate::index_lifecycle::{
@@ -919,7 +919,7 @@ mod additional_tests {
         };
 
         let db = test_support::open_db("mutation-configured-catalog-authority").await;
-        let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
         let definition = ValidatedDynamicIndexDefinition::try_from(
             SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
         )
@@ -938,7 +938,7 @@ mod additional_tests {
         .unwrap();
         db.inner_db()
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope,
                     kind: ScopedKey::index_record(active.identity().clone()),
                 }
@@ -965,8 +965,8 @@ mod additional_tests {
         use slatedb::object_store::ObjectStore;
 
         use crate::config::VectorIndexDefinition;
-        use crate::encoding::v1::keys::{DataKeyKind, Key as GraphKey};
-        use crate::encoding::v2::keys::{Key, ScopedKey};
+        use crate::encoding::v2::keys::{DataKey as GraphKey, DataKeyKind};
+        use crate::encoding::v2::keys::{ManagedIndexKey, ScopedKey};
         use crate::encoding::v2::values::encode_index_record;
         use crate::index_lifecycle::{
             IndexGenerationId, IndexOperationId, IndexRecordV2, IndexRevision,
@@ -1018,8 +1018,8 @@ mod additional_tests {
         .transition(IndexStateTransition::Activate)
         .unwrap();
         seed.put(
-            Key::Data {
-                scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+            ManagedIndexKey::Data {
+                scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 kind: ScopedKey::index_record(active.identity().clone()),
             }
             .to_bytes(),
@@ -1046,8 +1046,8 @@ mod additional_tests {
             .unwrap();
         db.inner_db()
             .put(
-                Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                ManagedIndexKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: ScopedKey::index_record(dropping.identity().clone()),
                 }
                 .to_bytes(),
@@ -1065,8 +1065,8 @@ mod additional_tests {
             }) if stale_index_id == index_id.get()
         ));
         let staged_graph_key = GraphKey::Data {
-            scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-            kind: DataKeyKind::NodeProperty(crate::encoding::v1::keys::NodePropertyKey::new(99)),
+            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            kind: DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(99)),
         }
         .to_bytes();
         assert!(db.inner_db().get(staged_graph_key).await.unwrap().is_none());

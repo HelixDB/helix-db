@@ -572,7 +572,7 @@ pub(crate) async fn run_production_contracts() {
                     id: entity_id,
                 },
             ),
-            crate::encoding::v1::property::encode_properties(&[
+            crate::encoding::v2::values::property::encode_properties(&[
                 Property::string("$label", definition.label().as_str()),
                 Property::string(definition.property().as_str(), value),
             ]),
@@ -636,9 +636,9 @@ pub(crate) async fn run_production_contracts() {
     .await
     .unwrap()
     .is_empty());
-    let oversized = PropertyValue::String(
-        "x".repeat(crate::encoding::v1::property::equality_value::MAX_EQUALITY_CANONICAL_LEN + 1),
-    );
+    let oversized = PropertyValue::String("x".repeat(
+        crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN + 1,
+    ));
     assert!(matches!(
         lookup_active_equality_point_literal(&db, &equality, &oversized).await,
         Err(HelixDbError::SecondaryIndexValue(
@@ -994,10 +994,10 @@ mod tests {
             ));
         }
 
-        let oversized =
-            PropertyValue::String("x".repeat(
-                crate::encoding::v1::property::equality_value::MAX_EQUALITY_CANONICAL_LEN + 1,
-            ));
+        let oversized = PropertyValue::String("x".repeat(
+            crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN
+                + 1,
+        ));
         assert!(matches!(
             lookup_active_equality_point_literal(&db, &handle, &oversized).await,
             Err(HelixDbError::SecondaryIndexValue(

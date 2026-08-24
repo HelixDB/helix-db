@@ -9,6 +9,7 @@ mod pure;
 mod root;
 mod variables;
 
+pub(crate) use self::access::canonicalize_stream_pipeline_ops;
 pub use self::access::{
     AccessDistinct, AccessFilter, AccessOrder, AccessPath, AccessPipeline, AccessSourceKind,
     AccessStream, AccessWindow, AccessWindowRange, EdgeAccessPath, NodeAccessPath,
