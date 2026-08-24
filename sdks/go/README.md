@@ -58,7 +58,7 @@ err = client.Exec(ctx, FindUsers("acme", 25), &out)
 ```
 
 For Helix Cloud, use the managed constructor with the dashboard database ID. It
-sends that ID in the `x-helix-tenant-id` header on query and warm requests:
+sends that ID in the `x-helix-database-id` header on query and warm requests:
 
 ```go
 client, err := helix.NewManagedClient(

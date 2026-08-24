@@ -193,7 +193,7 @@ for (const databaseId of ["", "   "]) {
   assert.equal(req.path, "/v2/query");
   assert.equal(req.headers["content-type"], "application/json");
   assert.equal(req.headers["authorization"], "Bearer hx_secret");
-  assert.equal(req.headers["x-helix-tenant-id"], "db_123");
+  assert.equal(req.headers["x-helix-database-id"], "db_123");
   assert.equal(req.headers["x-helix-warm"], "true");
   assert.equal(req.headers["x-helix-require-writer"], "true");
   assert.equal(req.body, sampleRequest().toJsonString());
@@ -206,7 +206,7 @@ for (const databaseId of ["", "   "]) {
   await client.query(sampleRequest()).send();
   const req = await server.captured;
   await server.close();
-  assert.equal(req.headers["x-helix-tenant-id"], "db_123");
+  assert.equal(req.headers["x-helix-database-id"], "db_123");
 }
 
 {
@@ -217,7 +217,7 @@ for (const databaseId of ["", "   "]) {
   await request.send();
   const req = await server.captured;
   await server.close();
-  assert.equal(req.headers["x-helix-tenant-id"], "db_initial");
+  assert.equal(req.headers["x-helix-database-id"], "db_initial");
 }
 
 {

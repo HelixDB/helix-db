@@ -145,7 +145,7 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         request = calls[0]
         self.assertEqual(str(request.url), "http://127.0.0.1:6969/v2/query")
         self.assertEqual(request.headers["authorization"], "Bearer hx_secret")
-        self.assertEqual(request.headers["x-helix-tenant-id"], "db_123")
+        self.assertEqual(request.headers["x-helix-database-id"], "db_123")
         self.assertEqual(request.headers["x-helix-require-writer"], "true")
         self.assertEqual(request.headers["x-helix-warm"], "true")
         self.assertEqual(request.headers["x-helix-await-durable"], "false")

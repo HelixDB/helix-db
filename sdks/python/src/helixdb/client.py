@@ -111,7 +111,7 @@ class Client:
         return self
 
     def with_database_id(self, database_id: str | None = None) -> "Client":
-        """Set or clear the managed database ID sent as ``x-helix-tenant-id``."""
+        """Set or clear the managed database ID sent as ``x-helix-database-id``."""
 
         if self._mode == "server":
             self._database_id = database_id

@@ -651,7 +651,7 @@ func TestClientExec(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
 		capturedAuth = r.Header.Get("Authorization")
-		capturedDatabaseID = r.Header.Get("x-helix-tenant-id")
+		capturedDatabaseID = r.Header.Get("x-helix-database-id")
 		capturedWriter = r.Header.Get("x-helix-require-writer")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"users":[{"$id":9223372036854775807,"name":"Alice"}]}`))

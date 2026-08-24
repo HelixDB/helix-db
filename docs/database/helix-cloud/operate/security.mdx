@@ -18,7 +18,7 @@ Authorization: Bearer <token>
 
 The SDK clients attach this header for you—set the key once with `withApiKey`
 (TypeScript), `with_api_key` (Rust and Python), or `WithAPIKey` (Go). Managed clients
-also require the dashboard database ID and send it as `x-helix-tenant-id`; see
+also require the dashboard database ID and send it as `x-helix-database-id`; see
 `Client.managed`, `Client::managed`, `AsyncClient.managed`, or `NewManagedClient`.
 See the
 [cross-language Cloud connection example](/database/helix-cloud/start-here/working-with-enterprise#connect-and-send-a-request).

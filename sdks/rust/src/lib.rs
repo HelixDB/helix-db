@@ -103,7 +103,7 @@ use reqwest::{Client as ReqwestClient, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
 
-const DATABASE_ID_HEADER: &str = "x-helix-tenant-id";
+const DATABASE_ID_HEADER: &str = "x-helix-database-id";
 
 /// Async HTTP client for running queries against a Helix instance.
 ///
@@ -270,7 +270,7 @@ impl Client {
 
     /// Create a managed Helix Cloud client with a required database ID.
     ///
-    /// The database ID is sent as `x-helix-tenant-id` with every server request.
+    /// The database ID is sent as `x-helix-database-id` with every server request.
     ///
     /// # Errors
     ///
@@ -280,10 +280,9 @@ impl Client {
     pub fn managed(url: Option<&str>, database_id: &str) -> Result<Self, HelixError> {
         let mut client = Self::server(url)?;
         validate_database_id(Some(database_id), true)?;
-        if let ClientBackend::Server(server) = &mut client.backend {
-            server.database_id = Some(database_id.to_string());
-            server.require_database_id = true;
-        }
+        let ClientBackend::Server(server) = &mut client.backend;
+        server.database_id = Some(database_id.to_string());
+        server.require_database_id = true;
         Ok(client)
     }
 
@@ -355,14 +354,13 @@ impl Client {
         self
     }
 
-    /// Attach (or clear) the managed database ID sent as `x-helix-tenant-id`.
+    /// Attach (or clear) the managed database ID sent as `x-helix-database-id`.
     ///
     /// An empty value is rejected when the first server request is sent. Use
     /// [`Client::managed`] when the endpoint must always have a database ID.
     pub fn with_database_id(mut self, database_id: Option<&str>) -> Self {
-        if let ClientBackend::Server(server) = &mut self.backend {
-            server.database_id = database_id.map(str::to_string);
-        }
+        let ClientBackend::Server(server) = &mut self.backend;
+        server.database_id = database_id.map(str::to_string);
         self
     }
 
@@ -1352,7 +1350,7 @@ mod client_tests {
 
     // ---- Request routing (exercises the real `send()` path) -----------------
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize)]
     struct EmptyResp {}
 
     /// Spawn a one-shot HTTP server on a random port. Returns its base URL and a
@@ -1363,11 +1361,19 @@ mod client_tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let n = socket.read(&mut buf).await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            // Accumulate bytes until the full HTTP header block has arrived.
+            loop {
+                let n = socket.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
             let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
             socket.write_all(resp.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&buf[..n]).into_owned()
+            String::from_utf8_lossy(&buf).into_owned()
         });
         (base, handle)
     }
@@ -1388,7 +1394,7 @@ mod client_tests {
             .with_api_key(Some("hx_secret"));
         let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
         let captured = handle.await.unwrap();
-        assert!(captured.contains("x-helix-tenant-id: db_123"));
+        assert!(captured.contains("x-helix-database-id: db_123"));
         assert!(captured.contains("authorization: Bearer hx_secret"));
     }
 

@@ -17,7 +17,7 @@ type ErrorKind string
 type QueryErrorCode string
 
 const (
-	DatabaseIDHeader                   = "x-helix-tenant-id"
+	DatabaseIDHeader                   = "x-helix-database-id"
 	ErrorNetwork             ErrorKind = "Network"
 	ErrorRemote              ErrorKind = "Remote"
 	ErrorSerialization       ErrorKind = "Serialization"
@@ -154,7 +154,7 @@ func WithAPIKey(apiKey string) ClientOption {
 }
 
 // WithDatabaseID configures the managed database sent in the
-// x-helix-tenant-id header for server requests.
+// x-helix-database-id header for server requests.
 func WithDatabaseID(databaseID string) ClientOption {
 	return func(c *Client) { c.setDatabaseID(databaseID) }
 }
@@ -183,7 +183,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 }
 
 // NewManagedClient creates a server client that requires a database ID and
-// sends it using the canonical x-helix-tenant-id header.
+// sends it using the canonical x-helix-database-id header.
 func NewManagedClient(baseURL, databaseID string, opts ...ClientOption) (*Client, error) {
 	client, err := NewClient(baseURL, opts...)
 	if err != nil {

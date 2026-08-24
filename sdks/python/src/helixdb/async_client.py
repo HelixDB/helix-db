@@ -240,7 +240,7 @@ class AsyncClient:
         return self
 
     def with_database_id(self, database_id: str | None = None) -> "AsyncClient":
-        """Set or clear the managed database ID sent as ``x-helix-tenant-id``."""
+        """Set or clear the managed database ID sent as ``x-helix-database-id``."""
 
         backend = self._state.backend
         if isinstance(backend, _ServerBackend):

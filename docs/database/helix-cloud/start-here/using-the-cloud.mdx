@@ -67,7 +67,7 @@ export HELIX_API_KEY="<api-key>"
 curl --fail-with-body \
   "$HELIX_ENDPOINT/v2/query" \
   --header "Authorization: Bearer $HELIX_API_KEY" \
-  --header "x-helix-tenant-id: $HELIX_DATABASE_ID" \
+  --header "x-helix-database-id: $HELIX_DATABASE_ID" \
   --header "Content-Type: application/json" \
   --data '{
     "request_type": "read",

@@ -13,7 +13,7 @@ import { GraphSelection, NativeGraph, loadGraph } from "./graph.js";
 
 const DEFAULT_URL = "http://localhost:6969";
 const QUERY_PATH = "/v2/query";
-const DATABASE_ID_HEADER = "x-helix-tenant-id";
+const DATABASE_ID_HEADER = "x-helix-database-id";
 
 /**
  * Error raised by the network {@link Client}.
@@ -251,7 +251,7 @@ export class Client {
     return this;
   }
 
-  /** Set (or clear) the managed database ID sent as `x-helix-tenant-id`. */
+  /** Set (or clear) the managed database ID sent as `x-helix-database-id`. */
   withDatabaseId(databaseId?: string | null): Client {
     if (this.backend.kind === "server") this.backend.databaseId = databaseId ?? undefined;
     return this;

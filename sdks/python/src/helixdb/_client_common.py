@@ -11,7 +11,7 @@ from .dsl import QueryRequest
 
 DEFAULT_URL = "http://localhost:6969"
 QUERY_PATH = "/v2/query"
-DATABASE_ID_HEADER = "x-helix-tenant-id"
+DATABASE_ID_HEADER = "x-helix-database-id"
 
 
 class HelixError(Exception):
