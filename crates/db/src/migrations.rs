@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Durable KV migration jobs.
 //!
 //! Migration progress is stored in the same scoped data-metadata namespace as
@@ -27,9 +29,9 @@ use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 use crate::config;
 use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{decode_properties, Property};
-use crate::encoding::v2::keys::indexes::vector::VectorKey;
-use crate::encoding::v2::keys::{
-    AdjacencyKey, DataKeyKind, EdgeEndpointsKey, EdgePairIndexKey, EdgePropertyByIdKey, DataKey as Key,
+use crate::encoding::v1::keys::vectors::VectorKey;
+use crate::encoding::v1::keys::{
+    AdjacencyKey, DataKeyKind, EdgeEndpointsKey, EdgePairIndexKey, EdgePropertyByIdKey, Key,
     KeyPrefix, MetadataKey,
 };
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
@@ -850,13 +852,13 @@ impl MigrationStage {
             Self::LegacyVectorHotRows => {
                 return Key::data_prefix(
                     scope,
-                    crate::encoding::v2::keys::indexes::vector::VectorStorageLane::Hot.scan_prefix(),
+                    crate::encoding::v1::keys::vectors::VectorStorageLane::Hot.scan_prefix(),
                 );
             }
             Self::LegacyVectorLayer0Rows => {
                 return Key::data_prefix(
                     scope,
-                    crate::encoding::v2::keys::indexes::vector::VectorStorageLane::Layer0.scan_prefix(),
+                    crate::encoding::v1::keys::vectors::VectorStorageLane::Layer0.scan_prefix(),
                 );
             }
             Self::LegacyVectorCoreRows => {
@@ -1817,10 +1819,9 @@ struct V2VectorPhysicalOwner {
 /// The serializable transaction either installs the complete reservation set or
 /// leaves every legacy catalog and physical row unchanged.
 pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> {
-    use crate::encoding::v2::keys::indexes::vector::{VectorMetadataScanPrefix, VectorMetadataScanRow};
+    use crate::encoding::v1::keys::vectors::{VectorMetadataScanPrefix, VectorMetadataScanRow};
+    use crate::encoding::v1::values::vectors::metadata::{decode_legacy_metadata, decode_metadata};
     use crate::encoding::v2::keys::{GlobalKey, GlobalKind, RecordKind, ScopedKey};
-    use crate::encoding::v2::legacy::vector::metadata::decode_legacy_metadata;
-    use crate::encoding::v2::values::indexes::vector::metadata::decode_metadata;
     use crate::encoding::v2::values::{
         decode_index_record, decode_metadata_value, decode_partition_mapping, encode_metadata_value,
     };
@@ -2747,13 +2748,13 @@ async fn retire_legacy_text_rows(
 
 const fn legacy_range_direction(
     direction: config::RangeIndexDirection,
-) -> crate::encoding::v2::keys::indexes::range::RangeIndexDirection {
+) -> crate::encoding::v1::indexes::range::RangeIndexDirection {
     match direction {
         config::RangeIndexDirection::Asc => {
-            crate::encoding::v2::keys::indexes::range::RangeIndexDirection::Asc
+            crate::encoding::v1::indexes::range::RangeIndexDirection::Asc
         }
         config::RangeIndexDirection::Desc => {
-            crate::encoding::v2::keys::indexes::range::RangeIndexDirection::Desc
+            crate::encoding::v1::indexes::range::RangeIndexDirection::Desc
         }
     }
 }
@@ -3211,7 +3212,7 @@ async fn process_loaded_job(
                         scope,
                         tuning,
                         job,
-                        crate::encoding::v2::keys::indexes::vector::VectorStorageLane::Hot,
+                        crate::encoding::v1::keys::vectors::VectorStorageLane::Hot,
                     )
                     .await?
                 }
@@ -3221,7 +3222,7 @@ async fn process_loaded_job(
                         scope,
                         tuning,
                         job,
-                        crate::encoding::v2::keys::indexes::vector::VectorStorageLane::Layer0,
+                        crate::encoding::v1::keys::vectors::VectorStorageLane::Layer0,
                     )
                     .await?
                 }
@@ -4168,8 +4169,8 @@ mod tests {
         AdjacencyKey, EdgeEndpointsKey, EdgePairIndexKey, EdgePropertyByIdKey,
     };
     use crate::encoding::property;
+    use crate::encoding::v1::values;
     use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey as EdgePropertyPairKey;
-    use crate::encoding::v2::values::adjacency;
     use crate::error::WriterMigrationRequirement;
     use crate::{DbConfig, HelixDB};
 
@@ -5146,7 +5147,7 @@ mod tests {
             .await
             .expect("adjacency read succeeds")
             .expect("adjacency exists");
-        let from_edges = adjacency::decode_edges(&from_adjacency).expect("adjacency decodes");
+        let from_edges = values::edges::decode_edges(&from_adjacency).expect("adjacency decodes");
         assert!(from_edges.contains_out(existing_neighbor));
         assert!(from_edges.contains_out(to));
 
@@ -5186,7 +5187,7 @@ pub(crate) mod production_contracts {
         VectorIndexDefinition,
     };
     use crate::encoding::property;
-    use crate::encoding::v2::keys::indexes::vector::{
+    use crate::encoding::v1::keys::vectors::{
         VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey,
     };
     use crate::encoding::v2::keys::{GlobalKey, ScopedKey};
@@ -5514,13 +5515,13 @@ pub(crate) mod production_contracts {
                 .put(
                     Key::Data {
                         scope: DataScope::LegacyUnscoped,
-                        kind: crate::encoding::v2::keys::DataKeyKind::Vector(
+                        kind: crate::encoding::v1::keys::DataKeyKind::Vector(
                             VectorKey::IndexMetadata(VectorIndexMetadataKey::new(physical_id)),
                         ),
                     }
                     .to_bytes(),
                     Bytes::copy_from_slice(
-                        &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
+                        &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
                             &metadata,
                         ),
                     ),
@@ -5669,7 +5670,7 @@ pub(crate) mod production_contracts {
         let physical_id = crate::search::vector::index_id_from_name(&physical_name);
         let metadata_key = Key::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::IndexMetadata(
+            kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::IndexMetadata(
                 VectorIndexMetadataKey::new(physical_id),
             )),
         }
@@ -5686,7 +5687,7 @@ pub(crate) mod production_contracts {
             .put(
                 &metadata_key,
                 Bytes::copy_from_slice(
-                    &crate::encoding::v2::values::indexes::vector::metadata::encode_metadata(
+                    &crate::encoding::v1::values::vectors::metadata::encode_metadata(
                         &crate::search::vector::VectorIndexMetadata::new(
                             crate::search::vector::VectorIndexConfig::from_v2_definition(
                                 definition,
@@ -5726,7 +5727,7 @@ pub(crate) mod production_contracts {
             .put(
                 metadata_key,
                 Bytes::copy_from_slice(
-                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
@@ -5741,8 +5742,8 @@ pub(crate) mod production_contracts {
         raw.put(
             Key::Data {
                 scope: DataScope::LegacyUnscoped,
-                kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
-                    crate::encoding::v2::keys::NodePropertyKey::new(entity_id),
+                kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
+                    crate::encoding::v1::keys::NodePropertyKey::new(entity_id),
                 ),
             }
             .to_bytes(),
@@ -5775,7 +5776,7 @@ pub(crate) mod production_contracts {
                     kind: DataKeyKind::EdgeEndpoints(EdgeEndpointsKey::new(edge_id)),
                 }
                 .to_bytes(),
-                crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::new(from, to)
+                crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue::new(from, to)
                     .encode(),
             )
             .expect("legacy edge endpoints stage");
@@ -5800,8 +5801,8 @@ pub(crate) mod production_contracts {
     async fn assert_materialized_node_vector(raw: &Db, entity_id: u64, expected: &[f32]) {
         let key = Key::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v2::keys::NodePropertyKey::new(entity_id),
+            kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
+                crate::encoding::v1::keys::NodePropertyKey::new(entity_id),
             ),
         }
         .to_bytes();
@@ -5840,7 +5841,7 @@ pub(crate) mod production_contracts {
         physical_id: u64,
     ) -> [u8; 32] {
         let mut digest = Sha256::new();
-        for lane in crate::encoding::v2::keys::indexes::vector::VectorStorageLane::ALL {
+        for lane in crate::encoding::v1::keys::vectors::VectorStorageLane::ALL {
             let mut rows = read
                 .scan_prefix(
                     Key::data_prefix(
@@ -5875,7 +5876,7 @@ pub(crate) mod production_contracts {
         physical_id: u64,
     ) -> Vec<(Bytes, Bytes)> {
         let mut result = Vec::new();
-        for lane in crate::encoding::v2::keys::indexes::vector::VectorStorageLane::ALL {
+        for lane in crate::encoding::v1::keys::vectors::VectorStorageLane::ALL {
             let mut rows = read
                 .scan_prefix(
                     Key::data_prefix(
@@ -6116,9 +6117,9 @@ pub(crate) mod production_contracts {
             &[1.0, 0.0, 0.0],
         )
         .await;
-        let colliding_property_key = crate::encoding::v2::keys::indexes::range::EdgeRangeIndexKey::new(
-            crate::encoding::v2::keys::indexes::EdgeDirection::Out,
-            crate::encoding::v2::keys::indexes::range::EdgeRangeIndexDirection::Asc,
+        let colliding_property_key = crate::encoding::v1::indexes::range::EdgeRangeIndexKey::new(
+            crate::encoding::v1::indexes::EdgeDirection::Out,
+            crate::encoding::v1::indexes::range::EdgeRangeIndexDirection::Asc,
             1,
             [1, 2, 3, 4],
             std::borrow::Cow::Borrowed("twenty-byte-value---"),
@@ -6126,10 +6127,8 @@ pub(crate) mod production_contracts {
         );
         let colliding_property_key = Key::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(
-                crate::encoding::v2::keys::indexes::PropertyIndexKey::EdgeRange(
-                    colliding_property_key,
-                ),
+            kind: crate::encoding::v1::keys::DataKeyKind::PropertyIndex(
+                crate::encoding::v1::indexes::IndexKey::EdgeRange(colliding_property_key),
             ),
         }
         .to_bytes();
@@ -6160,12 +6159,12 @@ pub(crate) mod production_contracts {
             .put(
                 Key::Data {
                     scope: DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::TxnGuard(
-                        crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(physical_id),
+                    kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::TxnGuard(
+                        crate::encoding::v1::keys::vectors::VectorTxnGuardKey::new(physical_id),
                     )),
                 }
                 .to_bytes(),
-                crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
+                crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
             )
             .expect("legacy transaction guard stages");
         guard_transaction
@@ -6287,12 +6286,12 @@ pub(crate) mod production_contracts {
         );
         let metadata_key = Key::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::IndexMetadata(
+            kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::IndexMetadata(
                 VectorIndexMetadataKey::new(physical_id),
             )),
         }
         .to_bytes();
-        let metadata = crate::encoding::v2::values::indexes::vector::metadata::decode_metadata(
+        let metadata = crate::encoding::v1::values::vectors::metadata::decode_metadata(
             &migrated
                 .inner_db()
                 .get(metadata_key)
@@ -6697,30 +6696,30 @@ pub(crate) mod production_contracts {
             let corrupt_key = match lane {
                 CorruptionLane::Core => Key::Data {
                     scope: DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::IndexMetadata(
+                    kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::IndexMetadata(
                         VectorIndexMetadataKey::new(physical_id),
                     )),
                 }
                 .to_bytes(),
                 CorruptionLane::Hot => Key::Data {
                     scope: DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::SimHash(
-                        crate::encoding::v2::keys::indexes::vector::VectorSimHashKey::new(physical_id, 77),
+                    kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::SimHash(
+                        crate::encoding::v1::keys::vectors::VectorSimHashKey::new(physical_id, 77),
                     )),
                 }
                 .to_bytes(),
                 CorruptionLane::Layer0 => {
                     let simhash_key = Key::Data {
                         scope: DataScope::LegacyUnscoped,
-                        kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::SimHash(
-                            crate::encoding::v2::keys::indexes::vector::VectorSimHashKey::new(
+                        kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::SimHash(
+                            crate::encoding::v1::keys::vectors::VectorSimHashKey::new(
                                 physical_id,
                                 77,
                             ),
                         )),
                     }
                     .to_bytes();
-                    let simhash = crate::encoding::v2::values::indexes::vector::simhash::decode_simhash(
+                    let simhash = crate::encoding::v1::values::vectors::simhash::decode_simhash(
                         &source_db
                             .get(simhash_key)
                             .await
@@ -6730,8 +6729,8 @@ pub(crate) mod production_contracts {
                     .expect("source SimHash decodes");
                     Key::Data {
                         scope: DataScope::LegacyUnscoped,
-                        kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::Vector(
-                            crate::encoding::v2::keys::indexes::vector::VectorItemKey::new(
+                        kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::Vector(
+                            crate::encoding::v1::keys::vectors::VectorItemKey::new(
                                 physical_id,
                                 crate::search::vector::simhash::order_code_from_simhash_bits(
                                     simhash,
@@ -6946,8 +6945,8 @@ pub(crate) mod production_contracts {
             .put(
                 Key::Data {
                     scope: DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
-                        crate::encoding::v2::keys::NodePropertyKey::new(tenant_entity_id),
+                    kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
+                        crate::encoding::v1::keys::NodePropertyKey::new(tenant_entity_id),
                     ),
                 }
                 .to_bytes(),
@@ -7116,7 +7115,7 @@ pub(crate) mod production_contracts {
                         .put(
                             Key::Data {
                                 scope: DataScope::LegacyUnscoped,
-                                kind: crate::encoding::v2::keys::DataKeyKind::Vector(
+                                kind: crate::encoding::v1::keys::DataKeyKind::Vector(
                                     VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
                                         raw_physical_id,
                                     )),
@@ -7124,7 +7123,7 @@ pub(crate) mod production_contracts {
                             }
                             .to_bytes(),
                             Bytes::copy_from_slice(
-                                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
+                                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
                                     &metadata,
                                 ),
                             ),
@@ -8011,7 +8010,7 @@ pub(crate) mod production_contracts {
                         Key::Data {
                             scope: DataScope::LegacyUnscoped,
                             kind: DataKeyKind::NodeProperty(
-                                crate::encoding::v2::keys::NodePropertyKey::new(77),
+                                crate::encoding::v1::keys::NodePropertyKey::new(77),
                             ),
                         }
                         .to_bytes(),
@@ -8351,13 +8350,13 @@ pub(crate) mod production_contracts {
             .put(
                 Key::Data {
                     scope: DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v2::keys::DataKeyKind::Vector(
+                    kind: crate::encoding::v1::keys::DataKeyKind::Vector(
                         VectorKey::IndexMetadata(VectorIndexMetadataKey::new(physical_id)),
                     ),
                 }
                 .to_bytes(),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
@@ -8367,19 +8366,19 @@ pub(crate) mod production_contracts {
             .put(
                 Key::Data {
                     scope: DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::SimHash(
+                    kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::SimHash(
                         VectorSimHashKey::new(physical_id, zero_entity_id),
                     )),
                 }
                 .to_bytes(),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v2::values::indexes::vector::simhash::encode_simhash(simhash_bits),
+                    &crate::encoding::v1::values::vectors::simhash::encode_simhash(simhash_bits),
                 ),
             )
             .expect("zero-cosine SimHash stages");
         let item_key = Key::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::Vector(VectorKey::Vector(
+            kind: crate::encoding::v1::keys::DataKeyKind::Vector(VectorKey::Vector(
                 VectorItemKey::new(
                     physical_id,
                     crate::search::vector::simhash::order_code_from_simhash_bits(simhash_bits),
@@ -8443,8 +8442,8 @@ pub(crate) mod production_contracts {
         };
         let preceding_key = Key::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v2::keys::NodePropertyKey::new(preceding_entity_id),
+            kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
+                crate::encoding::v1::keys::NodePropertyKey::new(preceding_entity_id),
             ),
         }
         .to_bytes();

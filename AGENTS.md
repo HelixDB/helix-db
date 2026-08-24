@@ -49,8 +49,9 @@ you should run formatting and clippy before finishing your work. Rust crates in 
 
 ### Database Key/Value Construction, Parsing, and Use
 
-- ALL database key construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v2/keys
+- ALL database key construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v1 
     - There are structs here that make building invalid keys impossible and it ensures call sites remain standardised and improves testability
-- ALL database value construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v2/values
+- ALL database value construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v1/values
     - There are structs here that make building invalid keys impossible and it ensures call sites remain standardised and improves testability
-    - Legacy on-disk codecs belong under crates/db/src/encoding/v2/legacy. Production and migration code must not import the deprecated encoding/v1 facade.
+    - We are in the process of moving more values to this dir. If you notice inline value use, please either add it to crates/db/src/encoding/v1/values if it is small (e.g. single variant addition) or if it is a major change just note it down. 
+

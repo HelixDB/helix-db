@@ -9,10 +9,10 @@ use slatedb::IsolationLevel;
 use crate::config::SecondaryIndexDefinition;
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{encode_properties, Property};
-use crate::encoding::v2::keys::indexes::range::RangeIndexDirection;
-use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::{DataKeyKind, EdgeEndpointsKey, EdgePropertyByIdKey, DataKey as Key};
-use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
+use crate::encoding::v1::indexes::range::RangeIndexDirection;
+use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v1::keys::{DataKeyKind, EdgeEndpointsKey, EdgePropertyByIdKey, Key};
+use crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue;
 use crate::index_lifecycle::secondary::{
     lookup_active_equality_generation, scan_active_range_generation,
 };

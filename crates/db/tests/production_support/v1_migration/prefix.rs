@@ -16,7 +16,7 @@ pub struct V1PrefixSuccessorObservation {
 /// Projects the production prefix-successor helper over the E4 boundary set.
 pub async fn v1_prefix_successor_contract() -> V1PrefixSuccessorObservation {
     let prefix = Bytes::from_static(&[0x03, 0x01, 0xAA]);
-    let end = crate::encoding::v2::keys::indexes::prefix::exclusive_prefix_end_bound(&prefix)
+    let end = crate::encoding::v1::indexes::scan_prefixes::exclusive_prefix_end_bound(&prefix)
         .expect("typed E4 prefix has a successor");
     let candidates = [
         vec![0x03, 0x01, 0xAA],
@@ -33,7 +33,7 @@ pub async fn v1_prefix_successor_contract() -> V1PrefixSuccessorObservation {
         included,
         first_outside_excluded: [0x03, 0x01, 0xAB].as_slice() >= end.as_ref(),
         all_ff_is_unbounded:
-            crate::encoding::v2::keys::indexes::prefix::exclusive_prefix_end_bound(
+            crate::encoding::v1::indexes::scan_prefixes::exclusive_prefix_end_bound(
                 &Bytes::from_static(&[0xFF]),
             )
             .is_none(),

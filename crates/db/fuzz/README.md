@@ -1,6 +1,6 @@
 # Database decoder fuzz targets
 
-These Cargo Fuzz targets exercise the canonical `encoding/v2` decoders through the
+These Cargo Fuzz targets exercise the real `encoding/v1` decoders through the
 feature-gated `db::fuzzing` byte-slice boundary. They never construct alternate
 persisted DTOs or emit database rows.
 

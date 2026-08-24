@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
 use crate::config::SearchIndexBatchLimits;
-use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v1::keys::tenant::DataScope;
 #[cfg(test)]
-use crate::encoding::v2::keys::{DataKeyKind, DataKey as Key};
+use crate::encoding::v1::keys::{DataKeyKind, Key};
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{GlobalKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::{
@@ -1329,10 +1329,10 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::*;
-    use crate::encoding::v2::keys::indexes::vector::{
+    use crate::encoding::v1::keys::vectors::{
         VectorKey, VectorSimHashDirectoryKey, VectorStorageLane,
     };
-    use crate::encoding::v2::values::indexes::vector::markers::{
+    use crate::encoding::v1::values::vectors::markers::{
         decode_simhash_directory_marker_v1, encode_simhash_directory_marker_v1,
     };
     use crate::encoding::v2::values::encode_metadata_value;

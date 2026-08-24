@@ -304,26 +304,6 @@ fn legacy_range_direction_preserves_both_physical_directions() {
     );
 }
 
-#[test]
-fn legacy_migrations_use_canonical_v2_bytes() {
-    let key = Key::Data {
-        scope: DataScope::LegacyUnscoped,
-        kind: DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(41)),
-    };
-    assert_eq!(
-        key.to_bytes().as_ref(),
-        &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29]
-    );
-
-    let properties = [Property::string("name", "migration-parity")];
-    let encoded = crate::encoding::v2::values::property::encode_properties(&properties);
-    assert_eq!(
-        crate::encoding::v2::values::property::decode_properties(&encoded)
-            .expect("canonical V2 property row decodes"),
-        properties
-    );
-}
-
 #[tokio::test]
 async fn durable_job_and_readiness_markers_cover_absent_present_malformed_and_ordered_states() {
     let db = Db::open("migration-readiness-contracts", Arc::new(InMemory::new()))

@@ -15,7 +15,7 @@ use slatedb::{DbReadOps, DbTransaction};
 use crate::config;
 use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{self, Property};
-use crate::encoding::v2::keys::{DataKeyKind, EdgePropertyByIdKey, DataKey as Key, KeyPrefix};
+use crate::encoding::v1::keys::{DataKeyKind, EdgePropertyByIdKey, Key, KeyPrefix};
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{IndexElementKind, ValidatedDynamicIndexDefinition};
 use crate::search;
@@ -406,11 +406,11 @@ mod tests {
     use super::*;
     use crate::config::VectorIndexDefinition;
     use crate::encoding::keys::{EdgeEndpointsKey, EdgePropertyByIdKey, NodePropertyKey};
-    use crate::encoding::v2::keys::indexes::vector::{
+    use crate::encoding::v1::keys::vectors::{
         VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey,
     };
-    use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
-    use crate::encoding::v2::values::indexes::vector::simhash;
+    use crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue;
+    use crate::encoding::v1::values::vectors::simhash;
     use crate::encoding::v2::legacy::vector::metadata as legacy_metadata;
     use crate::index_lifecycle::ValidatedVectorIndexDefinition;
     use crate::search::vector::{self, Item, VectorDistanceMetric, VectorIndexConfig};

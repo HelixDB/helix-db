@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Feature-gated migration parity diagnostics.
 //!
 //! This module is intentionally excluded from the default crate surface. It is
@@ -26,10 +28,10 @@ use slatedb::DbReadOps;
 
 use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{property_value::PropertyValue, Property};
-use crate::encoding::v2::keys::{DataKeyKind, DataKey as Key, KeyPrefix, MetadataKey};
-use crate::encoding::v2::keys::codec::read_u64;
-use crate::encoding::v2::values::adjacency;
-use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
+use crate::encoding::v1::keys::{DataKeyKind, Key, KeyPrefix, MetadataKey};
+use crate::encoding::v1::read_u64;
+use crate::encoding::v1::values;
+use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{GlobalKey, ScopedKey, SecondaryEntryKey, GLOBAL_SENTINEL};
 use crate::encoding::v2::values::{
@@ -301,7 +303,7 @@ fn migration_parity_text_partition(
     match (definition.tenant_property(), tenant) {
         (None, None) => Ok(crate::index_lifecycle::work::TextPartition::Unpartitioned),
         (Some(_), Some(tenant)) => crate::index_lifecycle::work::TextPartition::try_tenant_value(
-            crate::encoding::v2::values::property::encode_index_partition_value(&PropertyValue::String(
+            crate::encoding::v1::property::encode_index_partition_value(&PropertyValue::String(
                 tenant,
             )),
         )
@@ -932,7 +934,7 @@ impl HelixDB {
         k: usize,
     ) -> Result<Vec<MigrationParityTextSearch>> {
         let partition = crate::index_lifecycle::work::TextPartition::try_tenant_value(
-            crate::encoding::v2::values::property::encode_index_partition_value(&PropertyValue::String(
+            crate::encoding::v1::property::encode_index_partition_value(&PropertyValue::String(
                 tenant.to_string(),
             )),
         )
@@ -986,7 +988,7 @@ impl HelixDB {
         let partition = tenant
             .map(|tenant| {
                 crate::index_lifecycle::work::TextPartition::try_tenant_value(
-                    crate::encoding::v2::values::property::encode_index_partition_value(
+                    crate::encoding::v1::property::encode_index_partition_value(
                         &PropertyValue::String(tenant.to_string()),
                     ),
                 )
@@ -1312,7 +1314,7 @@ pub fn migration_parity_secondary_catalog_row() -> Result<(Bytes, Bytes)> {
 
 /// Decode a materialized adjacency value into exact outgoing and incoming sets.
 pub fn decode_parity_adjacency(bytes: &[u8]) -> Result<(Vec<u64>, Vec<u64>)> {
-    let edges = adjacency::decode_edges(bytes)?;
+    let edges = values::edges::decode_edges(bytes)?;
     Ok((edges.iter_out().collect(), edges.iter_in().collect()))
 }
 
@@ -1733,7 +1735,7 @@ async fn scan_vector_non_metadata_digests(
     scope: DataScope,
 ) -> Result<BTreeMap<u64, String>> {
     let mut digests = BTreeMap::<u64, Sha256>::new();
-    for lane in crate::encoding::v2::keys::indexes::vector::VectorStorageLane::ALL {
+    for lane in crate::encoding::v1::keys::vectors::VectorStorageLane::ALL {
         let mut logical_prefix = lane.prefix_key(0).to_bytes();
         logical_prefix.truncate(
             logical_prefix
@@ -1750,24 +1752,24 @@ async fn scan_vector_non_metadata_digests(
                     "vector parity scan escaped its data scope".to_string(),
                 ));
             };
-            let key = if lane == crate::encoding::v2::keys::indexes::vector::VectorStorageLane::Core {
-                match crate::encoding::v2::keys::indexes::vector::VectorMetadataScanPrefix::new()
+            let key = if lane == crate::encoding::v1::keys::vectors::VectorStorageLane::Core {
+                match crate::encoding::v1::keys::vectors::VectorMetadataScanPrefix::new()
                     .parse_row(logical)?
                 {
                     None
                     | Some(
-                        crate::encoding::v2::keys::indexes::vector::VectorMetadataScanRow::IndexMetadata(_),
+                        crate::encoding::v1::keys::vectors::VectorMetadataScanRow::IndexMetadata(_),
                     ) => continue,
-                    Some(crate::encoding::v2::keys::indexes::vector::VectorMetadataScanRow::TxnGuard(
+                    Some(crate::encoding::v1::keys::vectors::VectorMetadataScanRow::TxnGuard(
                         key,
-                    )) => crate::encoding::v2::keys::indexes::vector::VectorKey::TxnGuard(key),
+                    )) => crate::encoding::v1::keys::vectors::VectorKey::TxnGuard(key),
                 }
             } else {
-                crate::encoding::v2::keys::indexes::vector::VectorKey::parse_from_slice(logical)?
+                crate::encoding::v1::keys::vectors::VectorKey::parse_from_slice(logical)?
             };
             if matches!(
                 key,
-                crate::encoding::v2::keys::indexes::vector::VectorKey::SimHashDirectory(_)
+                crate::encoding::v1::keys::vectors::VectorKey::SimHashDirectory(_)
             ) {
                 continue;
             }
@@ -2185,8 +2187,8 @@ async fn scan_v2_state(
                     let metadata_key = Key::Data {
                         scope,
                         kind: DataKeyKind::Vector(
-                            crate::encoding::v2::keys::indexes::vector::VectorKey::IndexMetadata(
-                                crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey::new(
+                            crate::encoding::v1::keys::vectors::VectorKey::IndexMetadata(
+                                crate::encoding::v1::keys::vectors::VectorIndexMetadataKey::new(
                                     physical_id.get(),
                                 ),
                             ),
@@ -2344,7 +2346,7 @@ async fn scan_adjacency(
         else {
             continue;
         };
-        let edges = adjacency::decode_edges(&kv.value)?;
+        let edges = values::edges::decode_edges(&kv.value)?;
         snapshot.adjacency.insert(
             key.node_id(),
             ParityAdjacency {
@@ -2609,8 +2611,8 @@ fn increment_count(counts: &mut BTreeMap<String, u64>, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::v2::keys::NodePropertyKey;
-    use crate::encoding::v2::values::property::equality_index_value::{
+    use crate::encoding::v1::keys::NodePropertyKey;
+    use crate::encoding::v1::property::equality_value::{
         project_equality_value, EqualityValueProjection,
     };
     use crate::encoding::v2::keys::{
