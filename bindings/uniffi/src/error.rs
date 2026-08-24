@@ -121,6 +121,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::IndexCatalogCorruption(_)
             | HelixDbError::LegacyZeroNormCosineVector { .. }
             | HelixDbError::QueryDeadlineExceeded
+            | HelixDbError::QueryCancelledByReaderRetirement
             | HelixDbError::InvariantViolation(_) => Self::Internal {
                 error: error_code,
                 msg,
@@ -201,6 +202,16 @@ mod tests {
             HelixError::from(HelixDbError::QueryDeadlineExceeded),
             HelixError::Internal { error, msg }
                 if error == "query_deadline_exceeded" && msg.contains("deadline")
+        ));
+    }
+
+    #[test]
+    fn reader_retirement_does_not_expand_the_stable_binding_error_contract() {
+        assert!(matches!(
+            HelixError::from(HelixDbError::QueryCancelledByReaderRetirement),
+            HelixError::Internal { error, msg }
+                if error == "query_cancelled_by_reader_retirement"
+                    && msg.contains("reader is retiring")
         ));
     }
 
