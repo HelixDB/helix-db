@@ -278,6 +278,19 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remote.exception.status_code, 503)
         self.assertTrue(error_stream.closed)
 
+    async def test_warm_no_content_is_success(self) -> None:
+        calls: list[httpx.Request] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(204)
+
+        async with AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await client.execute(read_request(), warm_only=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(calls[0].headers["x-helix-warm"], "true")
+
     async def test_cancellation_closes_response_and_client_is_reusable(self) -> None:
         stream = ControlledStream(b'{"blocked":true}', block=True)
         transport = SequencedTransport(stream)

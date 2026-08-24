@@ -391,6 +391,23 @@ mod tests {
         db.close().await.expect("coalescing fixture closes");
     }
 
+    #[test]
+    fn irrelevant_followup_still_completes_an_existing_coalesced_transition() {
+        let scope = DataScope::LegacyUnscoped;
+        let limits = SearchIndexBackfillLimits::default().active_text_mutation();
+        let indexed = properties("indexed");
+        let mut runtime = ActiveTextMutationRuntime::new();
+
+        runtime
+            .collect_routed(create(scope, 9, &indexed), true, limits)
+            .expect("relevant create collects");
+        runtime
+            .collect_routed(delete(scope, 9, &indexed), false, limits)
+            .expect("irrelevant followup preserves coalescing continuity");
+
+        assert!(collecting(&runtime).is_empty());
+    }
+
     #[tokio::test]
     async fn flush_drains_one_epoch_and_prepare_is_terminal() {
         let (db, object_store) = test_db("lifecycle").await;

@@ -776,7 +776,7 @@ async fn seed_active_text_generation_with(
         .build()
         .await
         .expect("raw Active-text fixture opens");
-    crate::index_lifecycle::repository::bootstrap_writer(&raw)
+    crate::migrations::startup::bootstrap_writer(&raw)
         .await
         .expect("raw Active-text fixture bootstraps");
     let active = IndexRecordV2::building(

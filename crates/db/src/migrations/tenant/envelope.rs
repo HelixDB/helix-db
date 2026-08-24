@@ -24,7 +24,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 
-use super::IndexCursor;
+use crate::index_lifecycle::IndexCursor;
 
 const MIGRATION_BATCH_SIZE: usize = 256;
 
@@ -213,7 +213,7 @@ fn migration_row(key: Bytes, value: Bytes) -> Result<Option<TenantKeyMigrationRo
 }
 
 /// Returns whether one markerless row needs the blocking tenant-envelope rewrite.
-pub(super) fn legacy_key_requires_migration(key: Bytes, value: Bytes) -> Result<bool> {
+pub(crate) fn legacy_key_requires_migration(key: Bytes, value: Bytes) -> Result<bool> {
     Ok(migration_row(key, value)?.is_some())
 }
 
@@ -337,7 +337,7 @@ fn parse_logical_key_without_value(logical: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-pub(super) fn legacy_data_key(scope: DataScope, kind: ScopedKey) -> Bytes {
+pub(crate) fn legacy_data_key(scope: DataScope, kind: ScopedKey) -> Bytes {
     let mut logical = Vec::with_capacity(kind.encoded_len());
     kind.encode_into(&mut logical);
     match scope {
@@ -543,7 +543,9 @@ mod tests {
         let scope = DataScope::Tenant(TenantId::from_u128(0xABCD));
         for (operation, expected_cursor) in operation_cases(scope) {
             assert!(
-                !super::super::repository::operation_record_cursors_are_valid(scope, &operation)
+                !crate::index_lifecycle::repository::operation_record_cursors_are_valid(
+                    scope, &operation,
+                )
             );
             let encoded = encode_operation_record(&operation);
             let migrated = migrate_legacy_value(
@@ -559,7 +561,11 @@ mod tests {
                 operation.operation_revision()
             );
             assert_eq!(migrated.execution_state(), operation.execution_state());
-            assert!(super::super::repository::operation_record_cursors_are_valid(scope, &migrated));
+            assert!(
+                crate::index_lifecycle::repository::operation_record_cursors_are_valid(
+                    scope, &migrated,
+                )
+            );
             assert!(migrated
                 .progress()
                 .cursors_are_valid(|cursor| cursor.as_bytes() == &expected_cursor));
@@ -580,7 +586,7 @@ mod tests {
         let operation = operation(
             7,
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
-                SecondaryBuildStage::Scan(super::super::SourceScanProgress {
+                SecondaryBuildStage::Scan(crate::index_lifecycle::SourceScanProgress {
                     inclusive_upper_bound: graph_cursor.clone(),
                     cursor: Some(graph_cursor),
                     counters: OperationCounters::default(),

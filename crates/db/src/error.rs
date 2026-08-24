@@ -219,6 +219,10 @@ pub enum HelixDbError {
     #[error("Explicit secondary lifecycle stepping requires Disabled worker mode")]
     SecondaryLifecycleSteppingRequiresDisabledMode,
 
+    /// Explicit migration stepping is only valid under Disabled scheduling.
+    #[error("Explicit migration stepping requires Disabled worker mode")]
+    MigrationSteppingRequiresDisabledMode,
+
     /// A request-owned Active text mutation exceeded exact serialized admission.
     #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}")]
     ActiveTextMutationLimitExceeded {
@@ -500,6 +504,9 @@ impl HelixDbError {
             }
             Self::SecondaryLifecycleSteppingRequiresDisabledMode => {
                 error_code::QueryErrorCode::SecondaryLifecycleSteppingRequiresDisabledMode
+            }
+            Self::MigrationSteppingRequiresDisabledMode => {
+                error_code::QueryErrorCode::MigrationSteppingRequiresDisabledMode
             }
             Self::ActiveTextMutationLimitExceeded { .. } => {
                 error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
@@ -783,6 +790,10 @@ mod tests {
             (
                 HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode,
                 Code::SecondaryLifecycleSteppingRequiresDisabledMode,
+            ),
+            (
+                HelixDbError::MigrationSteppingRequiresDisabledMode,
+                Code::MigrationSteppingRequiresDisabledMode,
             ),
             (
                 HelixDbError::ActiveTextMutationLimitExceeded {

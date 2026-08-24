@@ -1220,7 +1220,7 @@ impl IndexOperationRecord {
 
     /// Rewrites every complete cursor without changing operation revisions or
     /// execution state. This is reserved for blocking physical-key migrations.
-    pub(super) fn try_map_cursors<E>(
+    pub(crate) fn try_map_cursors<E>(
         &self,
         mut map: impl FnMut(&IndexCursor) -> Result<IndexCursor, E>,
     ) -> Result<Self, E> {

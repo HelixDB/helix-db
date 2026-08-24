@@ -988,7 +988,7 @@ mod additional_tests {
             .build()
             .await
             .unwrap();
-        crate::index_lifecycle::repository::bootstrap_writer(&raw)
+        crate::migrations::startup::bootstrap_writer(&raw)
             .await
             .unwrap();
         let seed = raw

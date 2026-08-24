@@ -292,7 +292,7 @@ impl SecondaryMachine {
             .build()
             .await
             .expect("state-machine database opens");
-        crate::index_lifecycle::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .expect("state-machine database bootstraps V2 metadata");
         Self {
@@ -984,7 +984,7 @@ async fn exercise_create_ddl_failpoint(
     let db = Db::open(database.as_str(), Arc::clone(&store))
         .await
         .expect("DDL CREATE database opens");
-    crate::index_lifecycle::repository::bootstrap_writer(&db)
+    crate::migrations::startup::bootstrap_writer(&db)
         .await
         .expect("DDL CREATE database bootstraps V2 metadata");
     let definition = family.definition();
@@ -1062,7 +1062,7 @@ async fn exercise_drop_ddl_failpoint(
     let db = Db::open(database.as_str(), Arc::clone(&store))
         .await
         .expect("DDL DROP database opens");
-    crate::index_lifecycle::repository::bootstrap_writer(&db)
+    crate::migrations::startup::bootstrap_writer(&db)
         .await
         .expect("DDL DROP database bootstraps V2 metadata");
     let definition = family.definition();

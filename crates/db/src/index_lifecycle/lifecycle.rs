@@ -686,7 +686,7 @@ mod tests {
             .build()
             .await
             .expect("in-memory lifecycle database opens");
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .expect("empty writer bootstraps V2 metadata");
         db

@@ -79,11 +79,13 @@ pub async fn writer_migration_requirement_contracts() {
 }
 
 /// Runs the exhaustive exact cardinality interpreter contract matrix.
+#[cfg(not(test))]
 pub async fn interpreter_cardinality_program_contracts() {
     crate::execution::interpreter::run_cardinality_production_contracts().await;
 }
 
 /// Exercises literal secondary reads and verified ranges through exact storage primitives.
+#[cfg(not(test))]
 pub async fn secondary_exact_storage_contracts() {
     crate::index_lifecycle::secondary::run_exact_production_contracts().await;
 }
@@ -91,6 +93,11 @@ pub async fn secondary_exact_storage_contracts() {
 /// Rejects or completes legacy secondary work when automatic driving is disabled.
 pub async fn migration_disabled_secondary_worker_open_contract() {
     crate::migrations::production_contracts::run_disabled_secondary_worker_open_contract().await;
+}
+
+/// Proves manual migration steps require disabled automatic scheduling.
+pub async fn migration_worker_mode_stepping_contract() {
+    crate::migrations::production_contracts::run_migration_worker_mode_stepping_contract().await;
 }
 
 /// Proves populated legacy HNSW adoption, cold reopen, DROP, and recreate.
@@ -267,6 +274,12 @@ pub async fn vector_write_transaction_contracts() {
 /// measured transactions without introducing a new physical representation.
 pub async fn vector_storage_contracts() {
     crate::search::vector::run_storage_contracts().await;
+}
+
+/// Requires a real tenant-indexed vector delete to fail without its mapping.
+#[cfg(not(test))]
+pub async fn vector_missing_partition_mapping_delete_contract() {
+    crate::index_lifecycle::vector::run_missing_partition_mapping_delete_contract().await;
 }
 
 /// Characterizes the independent finite-score magnitude oracle and active kernels.

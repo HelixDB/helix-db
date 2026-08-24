@@ -409,7 +409,7 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	if err != nil {
 		return &HelixError{Kind: ErrorNetwork, Err: err, Details: err.Error()}
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		remoteErr := decodeRemoteError(respBody, resp.Status, resp.StatusCode)
 		if resp.StatusCode == http.StatusConflict {
 			remoteErr.Err = ErrConflict

@@ -1869,7 +1869,7 @@ mod tests {
             .build()
             .await
             .expect("raw startup fixture opens");
-        crate::index_lifecycle::repository::bootstrap_writer(&raw)
+        crate::migrations::startup::bootstrap_writer(&raw)
             .await
             .expect("V2 repository bootstraps");
         let fixture = seed_active_legacy::<vector::distance::Cosine>(

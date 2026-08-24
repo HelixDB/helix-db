@@ -67,7 +67,7 @@ The CLI handles authentication, workspace/project/cluster selection, metadata sy
     helix sync production
     ```
 
-    `helix sync` writes the latest `gateway_url`, `query_auth_header`, `query_auth_env`, and node-type values from the cloud into `[enterprise.production]` in `helix.toml`. Re-run after any cluster change.
+    `helix sync` writes the latest `gateway_url`, `query_auth_header`, `query_auth_env`, `query_auth_scheme`, and node-type values from the cloud into `[enterprise.production]` in `helix.toml`. Re-run after any cluster change.
 
     If the cluster has not published a `gateway_url` yet, the CLI prints a warning. Set `gateway_url` manually under `[enterprise.production]` once you know it, or re-run `helix sync` later.
   </Step>

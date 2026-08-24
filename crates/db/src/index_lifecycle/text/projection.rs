@@ -4,6 +4,19 @@ use crate::encoding::v2::values::property::property_value::PropertyValue;
 use crate::encoding::v2::values::property::Property;
 use crate::index_lifecycle::{work, ValidatedTextIndexDefinition};
 
+/// One label/property membership decision before indexed-value validation.
+///
+/// A candidate can still fail text or tenant validation. Keeping that state
+/// distinct from definite absence lets mutation admission skip only entities
+/// that cannot contribute to the index while preserving fail-closed behavior
+/// for malformed indexed documents.
+pub(super) enum TextSourceCandidate<'a> {
+    /// The label does not match or the indexed property is absent.
+    NotIndexed,
+    /// The indexed property is present and still requires complete validation.
+    Candidate(&'a Property),
+}
+
 /// One definition's complete source projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TextSourceProjection {
@@ -34,15 +47,7 @@ pub(super) fn project(
     definition: &ValidatedTextIndexDefinition,
     properties: &[Property],
 ) -> Result<TextSourceProjection, TextSourceProjectionError> {
-    let label_matches = properties.iter().any(|property| {
-        property.name == "$label" && property.value.as_str() == Some(definition.label().as_str())
-    });
-    if !label_matches {
-        return Ok(TextSourceProjection::NotIndexed);
-    }
-    let Some(indexed_property) = properties
-        .iter()
-        .find(|property| property.name == definition.property().as_str())
+    let TextSourceCandidate::Candidate(indexed_property) = source_candidate(definition, properties)
     else {
         return Ok(TextSourceProjection::NotIndexed);
     };
@@ -68,6 +73,26 @@ pub(super) fn project(
         }
     };
     Ok(TextSourceProjection::Indexed { partition, text })
+}
+
+/// Classifies only definite index absence without validating candidate data.
+pub(super) fn source_candidate<'a>(
+    definition: &ValidatedTextIndexDefinition,
+    properties: &'a [Property],
+) -> TextSourceCandidate<'a> {
+    let label_matches = properties.iter().any(|property| {
+        property.name == "$label" && property.value.as_str() == Some(definition.label().as_str())
+    });
+    if !label_matches {
+        return TextSourceCandidate::NotIndexed;
+    }
+    let Some(indexed_property) = properties
+        .iter()
+        .find(|property| property.name == definition.property().as_str())
+    else {
+        return TextSourceCandidate::NotIndexed;
+    };
+    TextSourceCandidate::Candidate(indexed_property)
 }
 
 #[cfg(test)]

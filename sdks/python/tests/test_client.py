@@ -302,6 +302,20 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(ctx.exception.details, "conflict")
         self.assertIsNone(ctx.exception.code)
 
+    def test_warm_no_content_is_success(self) -> None:
+        request = QueryRequest.read(read_batch())
+        calls = []
+
+        def fake_urlopen(req):
+            calls.append(req)
+            return FakeResponse(body=b"", status=204, reason="No Content")
+
+        with patch("helixdb.client.urlopen", fake_urlopen):
+            result = Client("http://127.0.0.1:6969").execute(request, warm_only=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(calls[0].headers["X-helix-warm"], "true")
+
     def test_remote_error_parses_new_legacy_future_missing_and_malformed_bodies(self) -> None:
         request = QueryRequest.read(read_batch())
         cases = [

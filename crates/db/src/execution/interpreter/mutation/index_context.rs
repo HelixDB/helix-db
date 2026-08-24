@@ -139,13 +139,7 @@ impl MutationIndexContext {
             &graph,
         )
         .await?;
-        let text_relevant = routes.iter().any(|target| {
-            matches!(
-                target,
-                crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(_)
-                    | crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(_)
-            )
-        });
+        let text_relevant = self.text.routed_transition_relevant(&routes, &graph)?;
         self.active_text_runtime
             .collect_routed(graph, text_relevant, text_limits)
     }

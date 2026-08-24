@@ -20,7 +20,8 @@ const DATABASE_ID_HEADER = "x-helix-database-id";
  *
  * Strict port of the Rust `HelixError` enum:
  * - `Network` ↔ `ReqwestError` (the request failed to reach the server)
- * - `Remote` ↔ `RemoteError` (the server returned a non-200 response)
+ * - `Remote` ↔ `RemoteError` (the server returned neither query success `200`
+ *   nor Cloud warm success `204`)
  * - `Serialization` ↔ `SerializationError` (request/response (de)serialization failed)
  * - `InvalidUrl` ↔ `InvalidURL` (the client URL could not be parsed)
  * - `InvalidRequest` ↔ `InvalidRequest` (server-only options were used in embedded mode)
@@ -160,6 +161,11 @@ interface RequestParts {
   backend: ClientBackend;
   headers: Record<string, string>;
   query: QueryRequest;
+}
+
+interface QueryResponse {
+  status: number;
+  body: Uint8Array;
 }
 
 export type HelixDbSource =
@@ -393,7 +399,7 @@ function snapshotBackend(backend: ClientBackend): ClientBackend {
 export class QueryExecutionRequest<R = unknown> {
   constructor(private readonly parts: RequestParts) {}
 
-  async sendBytes(): Promise<Uint8Array> {
+  private async execute(): Promise<QueryResponse> {
     const { backend, headers, query } = this.parts;
 
     if (backend.kind === "embedded") {
@@ -407,7 +413,7 @@ export class QueryExecutionRequest<R = unknown> {
       } catch (error) {
         throw embeddedError(error);
       }
-      return response;
+      return { status: 200, body: response };
     }
 
     let url: string;
@@ -429,9 +435,8 @@ export class QueryExecutionRequest<R = unknown> {
       throw HelixError.network(error instanceof Error ? error.message : String(error), url);
     }
 
-    // Mirror the Rust client: only HTTP 200 is treated as success.
-    if (response.status === 200) {
-      return new Uint8Array(await response.arrayBuffer());
+    if (response.status === 200 || response.status === 204) {
+      return { status: response.status, body: new Uint8Array(await response.arrayBuffer()) };
     }
 
     let body: string;
@@ -443,10 +448,15 @@ export class QueryExecutionRequest<R = unknown> {
     throw remoteError(body, response.statusText || `unknown error with code: ${response.status}`, response.status);
   }
 
+  async sendBytes(): Promise<Uint8Array> {
+    return (await this.execute()).body;
+  }
+
   async send(): Promise<R> {
-    const response = await this.sendBytes();
+    const response = await this.execute();
+    if (response.status === 204) return undefined as R;
     try {
-      return parseJson(new TextDecoder().decode(response)) as R;
+      return parseJson(new TextDecoder().decode(response.body)) as R;
     } catch (error) {
       throw HelixError.serialization(error instanceof Error ? error.message : String(error));
     }

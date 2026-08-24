@@ -34,7 +34,6 @@
 mod catalog;
 #[cfg(test)]
 mod cursor_contracts;
-mod equality_bitmap_migration;
 pub(crate) mod failpoints;
 pub(crate) mod graph_mutation;
 pub(crate) mod lifecycle;
@@ -47,7 +46,6 @@ mod public;
 pub(crate) mod repository;
 mod scope_gate;
 pub(crate) mod secondary;
-mod tenant_envelope_migration;
 pub(crate) mod text;
 pub(crate) mod vector;
 pub(crate) mod work;

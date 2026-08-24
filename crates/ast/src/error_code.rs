@@ -118,6 +118,8 @@ pub enum QueryErrorCode {
     IndexLifecycleUnavailable,
     /// Explicit secondary stepping requires disabled worker mode.
     SecondaryLifecycleSteppingRequiresDisabledMode,
+    /// Explicit migration stepping requires disabled worker mode.
+    MigrationSteppingRequiresDisabledMode,
     /// An active text mutation exceeded an admission limit.
     ActiveTextMutationLimitExceeded,
     /// Existing graph data cannot satisfy an index source contract.
@@ -238,6 +240,7 @@ impl QueryErrorCode {
         Self::InvalidConfiguration,
         Self::IndexLifecycleUnavailable,
         Self::SecondaryLifecycleSteppingRequiresDisabledMode,
+        Self::MigrationSteppingRequiresDisabledMode,
         Self::ActiveTextMutationLimitExceeded,
         Self::InvalidIndexSourceData,
         Self::InvalidIndexModel,
@@ -327,6 +330,9 @@ impl QueryErrorCode {
             Self::IndexLifecycleUnavailable => "index_lifecycle_unavailable",
             Self::SecondaryLifecycleSteppingRequiresDisabledMode => {
                 "secondary_lifecycle_stepping_requires_disabled_mode"
+            }
+            Self::MigrationSteppingRequiresDisabledMode => {
+                "migration_stepping_requires_disabled_mode"
             }
             Self::ActiveTextMutationLimitExceeded => "active_text_mutation_limit_exceeded",
             Self::InvalidIndexSourceData => "invalid_index_source_data",

@@ -82,6 +82,7 @@ case "$#" in
                 --lib \
                 --test index_lifecycle_contracts \
                 --test production_contracts \
+                --test production_index_delete_regressions \
                 --test production_index_lifecycle_contracts \
                 --test production_internal_contracts \
                 --test production_migration_contracts \

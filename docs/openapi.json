@@ -291,7 +291,7 @@
         "name": "X-Helix-Database-Id",
         "in": "header",
         "required": false,
-        "description": "Database identifier shown in Helix Cloud connection details. It is not needed by a standalone local server.",
+        "description": "Database identifier shown in Helix Cloud connection details. Required by the GA shared gateway, not needed by a standalone local server, and not allowed by a database-specific cluster-mode gateway. The legacy X-Helix-Tenant-Id alias is also accepted in GA mode.",
         "schema": {
           "type": "string",
           "minLength": 1

@@ -294,7 +294,7 @@ async fn run_inner(entity_count: u64) -> Result<VectorMigrationScaleReport> {
             .build()
             .await?,
     );
-    crate::index_lifecycle::repository::bootstrap_writer(db.as_ref()).await?;
+    crate::migrations::startup::bootstrap_writer(db.as_ref()).await?;
     let writer = crate::HelixWriter::new(Arc::clone(&db), config::DbConfig::new().id_lease_size());
     let scope = DataScope::LegacyUnscoped;
     let definition: ValidatedDynamicIndexDefinition = config::VectorIndexDefinition::new_node(

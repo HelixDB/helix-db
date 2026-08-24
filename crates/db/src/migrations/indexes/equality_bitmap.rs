@@ -27,17 +27,14 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 
-use super::operation::{
-    IndexOperationExecutionState, IndexOperationProgress, SecondaryBuildProgress,
-    SecondaryBuildStage, SourceScanProgress,
-};
-#[cfg(test)]
-use super::tenant_envelope_migration;
-use super::{
-    IndexOperationRecord, IndexStateV2, IndexStorageVersion, IndexV2MetadataValue,
-    OperationCounters, OperationQueuePointerValue, PhysicalGeneration,
+use crate::index_lifecycle::{
+    self, IndexOperationExecutionState, IndexOperationProgress, IndexOperationRecord, IndexStateV2,
+    IndexStorageVersion, IndexV2MetadataValue, OperationCounters, OperationQueuePointerValue,
+    PhysicalGeneration, SecondaryBuildProgress, SecondaryBuildStage, SourceScanProgress,
     ValidatedDynamicIndexDefinition, ValidatedSecondaryIndexDefinition,
 };
+#[cfg(test)]
+use crate::migrations::tenant::envelope as tenant_envelope_migration;
 
 const MIGRATION_BATCH_SIZE: usize = 256;
 
@@ -45,14 +42,14 @@ const MIGRATION_BATCH_SIZE: usize = 256;
 struct EqualityGeneration {
     scope: DataScope,
     definition: ValidatedSecondaryIndexDefinition,
-    index_id: super::IndexId,
-    generation: super::IndexGenerationId,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
 }
 
 #[derive(Debug, Clone)]
 struct BuildingEqualityGeneration {
     generation: EqualityGeneration,
-    operation_id: super::IndexOperationId,
+    operation_id: index_lifecycle::IndexOperationId,
 }
 
 #[derive(Debug, Default)]
@@ -158,7 +155,7 @@ fn injected_error(failpoint: EqualityBitmapMigrationFailpoint) -> HelixDbError {
     ))
 }
 
-pub(super) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
+pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
     trip(EqualityBitmapMigrationFailpoint::InitializationBefore)?;
     let catalog = discover_catalog(db).await?;
     trip(EqualityBitmapMigrationFailpoint::InitializationAfter)?;
@@ -190,7 +187,7 @@ pub(super) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
     cleanup_v3_nonunique_equality_rows(db).await
 }
 
-pub(super) async fn cleanup_v3_nonunique_equality_rows(db: &Db) -> Result<()> {
+pub(crate) async fn cleanup_v3_nonunique_equality_rows(db: &Db) -> Result<()> {
     trip(EqualityBitmapMigrationFailpoint::CleanupBefore)?;
     clear_all_v3_nonunique_equality_rows(db).await?;
     trip(EqualityBitmapMigrationFailpoint::CleanupAfter)?;
@@ -225,7 +222,7 @@ async fn discover_catalog(db: &Db) -> Result<MigrationCatalog> {
         let ValidatedDynamicIndexDefinition::Secondary(definition) = record.definition() else {
             continue;
         };
-        if !super::secondary::definition_uses_equality_bitmap(definition) {
+        if !index_lifecycle::secondary::definition_uses_equality_bitmap(definition) {
             continue;
         }
         let generation = EqualityGeneration {
@@ -273,8 +270,10 @@ fn index_record_candidates(key: &[u8]) -> Result<Vec<(DataScope, ScopedKey)>> {
 
 async fn rebuild_active_generation(db: &Db, generation: &EqualityGeneration) -> Result<()> {
     clear_prefix(db, &bitmap_prefix(generation)).await?;
-    let source_prefix =
-        super::secondary::source_prefix(generation.scope, generation.definition.element_kind());
+    let source_prefix = index_lifecycle::secondary::source_prefix(
+        generation.scope,
+        generation.definition.element_kind(),
+    );
     let mut rows = db.scan_prefix(source_prefix, ..).await?;
     loop {
         let mut additions = BTreeMap::<Bytes, RoaringTreemap>::new();
@@ -284,7 +283,7 @@ async fn rebuild_active_generation(db: &Db, generation: &EqualityGeneration) -> 
                 break;
             };
             source_rows += 1;
-            let Some(entity_id) = super::secondary::source_entity(
+            let Some(entity_id) = index_lifecycle::secondary::source_entity(
                 generation.scope,
                 generation.definition.element_kind(),
                 &row.key,
@@ -320,8 +319,10 @@ async fn rebuild_active_generation(db: &Db, generation: &EqualityGeneration) -> 
 }
 
 async fn verify_graph_to_bitmaps(db: &Db, generation: &EqualityGeneration) -> Result<()> {
-    let source_prefix =
-        super::secondary::source_prefix(generation.scope, generation.definition.element_kind());
+    let source_prefix = index_lifecycle::secondary::source_prefix(
+        generation.scope,
+        generation.definition.element_kind(),
+    );
     let mut rows = db.scan_prefix(source_prefix, ..).await?;
     loop {
         let mut expected = BTreeMap::<Bytes, RoaringTreemap>::new();
@@ -331,7 +332,7 @@ async fn verify_graph_to_bitmaps(db: &Db, generation: &EqualityGeneration) -> Re
                 break;
             };
             source_rows += 1;
-            let Some(entity_id) = super::secondary::source_entity(
+            let Some(entity_id) = index_lifecycle::secondary::source_entity(
                 generation.scope,
                 generation.definition.element_kind(),
                 &row.key,
@@ -395,7 +396,7 @@ async fn verify_bitmaps_to_graph(db: &Db, generation: &EqualityGeneration) -> Re
             let batch = entity_ids
                 .by_ref()
                 .take(MIGRATION_BATCH_SIZE)
-                .map(super::IndexEntityId::new)
+                .map(index_lifecycle::IndexEntityId::new)
                 .collect::<Vec<_>>();
             if batch.is_empty() {
                 break;
@@ -403,7 +404,7 @@ async fn verify_bitmaps_to_graph(db: &Db, generation: &EqualityGeneration) -> Re
             let property_keys = batch
                 .iter()
                 .map(|entity_id| {
-                    super::secondary::authoritative_property_key(
+                    index_lifecycle::secondary::authoritative_property_key(
                         generation.scope,
                         IndexEntity {
                             kind: generation.definition.element_kind(),
@@ -433,12 +434,12 @@ async fn verify_bitmaps_to_graph(db: &Db, generation: &EqualityGeneration) -> Re
 
 fn authoritative_bitmap_key(
     generation: &EqualityGeneration,
-    entity_id: super::IndexEntityId,
+    entity_id: index_lifecycle::IndexEntityId,
     properties: &[u8],
 ) -> Result<Option<Bytes>> {
     let properties = decode_properties(properties)?;
     let canonical =
-        super::secondary::canonical_value(&generation.definition, &properties, entity_id)
+        index_lifecycle::secondary::canonical_value(&generation.definition, &properties, entity_id)
             .map_err(|_| corruption("authoritative equality value cannot be indexed"))?;
     match canonical {
         Some(CanonicalSecondaryValue::Equality(value)) => Ok(Some(
@@ -491,7 +492,7 @@ async fn restart_building_generation(db: &Db, building: &BuildingEqualityGenerat
         clear_prefix(db, &prefix).await?;
     }
 
-    let upper_bound = super::lifecycle::capture_source_upper_bound(
+    let upper_bound = index_lifecycle::lifecycle::capture_source_upper_bound(
         db,
         building.generation.scope,
         building.generation.definition.element_kind(),
@@ -757,7 +758,7 @@ mod tests {
         entity_id: u64,
         email: &str,
     ) {
-        let entity_id = super::super::IndexEntityId::new(entity_id);
+        let entity_id = index_lifecycle::IndexEntityId::new(entity_id);
         let key = tenant_envelope_migration::legacy_data_key(
             scope,
             ScopedKey::SecondaryEntry(
@@ -793,11 +794,11 @@ mod tests {
             definition.clone(),
             IndexRevision::initial(),
             PhysicalGeneration::Secondary { generation },
-            super::super::IndexOperationId::new_v4(),
+            index_lifecycle::IndexOperationId::new_v4(),
         )
         .unwrap();
         let active = building
-            .transition(super::super::IndexStateTransition::Activate)
+            .transition(index_lifecycle::IndexStateTransition::Activate)
             .unwrap();
         db.put(
             tenant_envelope_migration::legacy_data_key(
@@ -888,7 +889,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().await;
         let (db, generation) = setup_active_fixture("v4-equality-active-migration").await;
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 
@@ -912,12 +913,12 @@ mod tests {
         .await
         .unwrap();
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
         inject_once(EqualityBitmapMigrationFailpoint::CleanupBefore).unwrap();
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .expect("completed V4 startup skips cleanup discovery");
         assert!(!was_triggered());
@@ -963,7 +964,7 @@ mod tests {
         )
         .await;
 
-        let edge_id = super::super::IndexEntityId::new(53);
+        let edge_id = index_lifecycle::IndexEntityId::new(53);
         let edge_kind = ScopedKey::SecondaryEntry(
             SecondaryEntryKey::try_new(
                 IndexId::new(33).unwrap(),
@@ -986,7 +987,7 @@ mod tests {
         .await
         .unwrap();
 
-        let unique_id = super::super::IndexEntityId::new(54);
+        let unique_id = index_lifecycle::IndexEntityId::new(54);
         let unique_kind = ScopedKey::SecondaryEntry(
             SecondaryEntryKey::try_new(
                 IndexId::new(34).unwrap(),
@@ -1015,7 +1016,7 @@ mod tests {
         .await
         .unwrap();
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 
@@ -1070,7 +1071,7 @@ mod tests {
             .await
             .unwrap());
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 
@@ -1112,7 +1113,7 @@ mod tests {
                     properties.clone(),
                 )
                 .unwrap();
-            let entity_id = super::super::IndexEntityId::new(entity_id);
+            let entity_id = index_lifecycle::IndexEntityId::new(entity_id);
             transaction
                 .put(
                     tenant_envelope_migration::legacy_data_key(
@@ -1139,7 +1140,7 @@ mod tests {
         }
         transaction.commit().await.unwrap();
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 
@@ -1162,7 +1163,7 @@ mod tests {
     async fn bounded_verification_rejects_missing_and_extra_membership() {
         let _guard = TEST_LOCK.lock().await;
         let (db, generation) = setup_active_fixture("v4-equality-bounded-verification").await;
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 
@@ -1209,7 +1210,7 @@ mod tests {
         ));
         let unscoped = put_active_index(&db, DataScope::LegacyUnscoped).await;
         let tenant_generation = put_active_index(&db, tenant).await;
-        let unique_entity = super::super::IndexEntityId::new(99);
+        let unique_entity = index_lifecycle::IndexEntityId::new(99);
         let unique_kind = ScopedKey::SecondaryEntry(
             SecondaryEntryKey::try_new(
                 IndexId::new(2).unwrap(),
@@ -1256,7 +1257,7 @@ mod tests {
             .await
             .unwrap();
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 
@@ -1306,14 +1307,14 @@ mod tests {
                 index_id: IndexId::new(2).unwrap(),
                 generation: IndexGenerationId::initial(),
                 lane: SecondaryEntryLane::NodeUniqueEquality,
-                entity_id: super::super::IndexEntityId::new(entity_id),
+                entity_id: index_lifecycle::IndexEntityId::new(entity_id),
             })
         };
         db.put(old_key, value(1)).await.unwrap();
         db.put(new_key, value(2)).await.unwrap();
 
         assert!(matches!(
-            super::super::repository::bootstrap_writer(&db).await,
+            crate::migrations::startup::bootstrap_writer(&db).await,
             Err(HelixDbError::IndexCatalogCorruption(message))
                 if message.contains("destination conflicts with its legacy source")
         ));
@@ -1345,11 +1346,11 @@ mod tests {
             index_id: IndexId::new(2).unwrap(),
             generation: IndexGenerationId::initial(),
             lane: SecondaryEntryLane::NodeUniqueEquality,
-            entity_id: super::super::IndexEntityId::new(1),
+            entity_id: index_lifecycle::IndexEntityId::new(1),
         });
         db.put(&old_key, value.clone()).await.unwrap();
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
         assert_eq!(db.get(old_key).await.unwrap(), None);
@@ -1367,12 +1368,12 @@ mod tests {
             let (db, generation) =
                 setup_active_fixture(&format!("v4-equality-restart-{ordinal}")).await;
             inject_once(failpoint).unwrap();
-            assert!(super::super::repository::bootstrap_writer(&db)
+            assert!(crate::migrations::startup::bootstrap_writer(&db)
                 .await
                 .is_err());
             assert!(was_triggered());
 
-            super::super::repository::bootstrap_writer(&db)
+            crate::migrations::startup::bootstrap_writer(&db)
                 .await
                 .unwrap();
             assert_active_migrated(&db, &generation).await;
@@ -1388,7 +1389,7 @@ mod tests {
         let definition = equality_definition();
         let index_id = IndexId::initial();
         let generation = IndexGenerationId::initial();
-        let operation_id = super::super::IndexOperationId::new_v4();
+        let operation_id = index_lifecycle::IndexOperationId::new_v4();
         let record = IndexRecordV2::building(
             index_id,
             definition.clone(),
@@ -1460,7 +1461,7 @@ mod tests {
         put_graph_entity(&db, scope, 0, "shared").await;
         put_v3_entry(&db, scope, index_id, generation, 0, "shared").await;
 
-        super::super::repository::bootstrap_writer(&db)
+        crate::migrations::startup::bootstrap_writer(&db)
             .await
             .unwrap();
 

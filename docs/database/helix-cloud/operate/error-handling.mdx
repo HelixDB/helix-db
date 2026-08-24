@@ -58,6 +58,10 @@ response body separately.
 | Python     | `HelixError.status_code`    | `HelixError.code`           | `HelixError.details`           | Not exposed separately            |
 | Go         | `HelixError.StatusCode`     | `HelixError.Code`           | `HelixError.Details`           | Not exposed separately            |
 
+The current SDK error objects do not expose response headers, including
+`Retry-After`. Use direct HTTP or an application transport that retains headers
+when the exact Cloud rate-limit delay is required.
+
 Branch on the stable code while retaining the diagnostic:
 
 <CodeGroup>

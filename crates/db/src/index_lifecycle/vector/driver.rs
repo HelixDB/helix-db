@@ -3344,7 +3344,7 @@ mod tests {
         claim_operation, execute_claimed_step, observe_operation_pointer, ClaimPermission,
         CommittedOperationStep, OperationPointerObservation,
     };
-    use crate::index_lifecycle::repository::{bootstrap_writer, peek_vector_physical_id};
+    use crate::index_lifecycle::repository::peek_vector_physical_id;
     use crate::index_lifecycle::vector::{
         load_mutation_set, maintain_entity, VectorEntityMutation,
     };
@@ -3352,6 +3352,7 @@ mod tests {
         ActiveIndexHandle, ClaimSequence, IndexDdlReceipt, IndexOperationId, IndexScopeGates,
         IndexStateV2, WriterEpoch,
     };
+    use crate::migrations::startup::bootstrap_writer;
     use crate::search::vector::{
         DistanceScore, SearchParams, SimHashMode, SimHasherRegistry,
         ValidatedVectorGenerationHandle, VectorCacheRegistry, VectorCacheWriteSet,

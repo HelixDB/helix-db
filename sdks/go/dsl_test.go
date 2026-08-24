@@ -733,6 +733,27 @@ func TestClientExecConflictError(t *testing.T) {
 	}
 }
 
+func TestClientExecWarmNoContentIsSuccess(t *testing.T) {
+	var warmHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		warmHeader = r.Header.Get("x-helix-warm")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out findUsersResponse
+	if err := client.Exec(context.Background(), findUsers("acme", 25), &out, WarmOnly()); err != nil {
+		t.Fatal(err)
+	}
+	if warmHeader != "true" {
+		t.Fatalf("expected warm header, got %q", warmHeader)
+	}
+}
+
 func TestClientExecParsesNewLegacyFutureMissingAndMalformedErrors(t *testing.T) {
 	cases := []struct {
 		body    string

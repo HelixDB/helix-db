@@ -294,6 +294,12 @@ fn disabled_secondary_worker_never_hangs_writer_open() {
     run_contract(db::production_coverage::migration_disabled_secondary_worker_open_contract);
 }
 
+/// Manual migration stepping must have exclusive controller ownership.
+#[test]
+fn migration_worker_mode_controls_manual_stepping() {
+    run_contract(db::production_coverage::migration_worker_mode_stepping_contract);
+}
+
 /// Adopts a populated HNSW namespace without reconstruction, then exercises
 /// cold reopen, ordinary DROP cleanup, and recreation allocation.
 #[test]

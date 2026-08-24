@@ -62,6 +62,11 @@ retrying, and add jitter when many workers share the same database. The response
 does not currently include `RateLimit-*` or `X-RateLimit-*` limit, remaining, or
 reset headers.
 
+Current official SDK error objects expose the HTTP status, stable code, and
+diagnostic, but not response headers. Use direct HTTP or an application
+transport that retains headers when the exact `Retry-After` value is required;
+otherwise use a configured, bounded status/code-aware delay with jitter.
+
 If the gateway cannot make a safe distributed rate-limit decision, it fails
 closed before database execution:
 

@@ -414,7 +414,7 @@ class AsyncQueryExecutionRequest:
         except httpx.RequestError as exc:
             raise HelixError.network(str(exc), cause=exc) from exc
 
-        if status != 200:
+        if status not in {200, 204}:
             raise remote_error(response_body, reason, status_code=status)
         return response_body
 

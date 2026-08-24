@@ -7,11 +7,17 @@
 //! completion before a writer handle is returned; background migrations use the
 //! same job state and can resume after restart.
 
+pub(crate) mod background;
+mod indexes;
+pub(crate) mod startup;
+mod tenant;
 mod vector_properties;
 mod vector_retirement;
 #[cfg(feature = "production-scale")]
 mod vector_scale;
 mod vector_simhash_directory;
+
+pub(crate) use tenant::envelope::legacy_key_requires_migration;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -1107,7 +1113,6 @@ impl AsRef<[u8]> for MigrationJobKey {
 }
 
 /// Prefix used to scan all migration jobs for one scope.
-#[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
 pub(crate) fn migration_job_scan_prefix_scoped(scope: DataScope) -> Bytes {
     scoped_metadata_key(scope, MIGRATION_JOB_PREFIX)
 }
@@ -3094,7 +3099,6 @@ async fn process_migration_once_by_id_with_catalog_measured(
 }
 
 /// Process one runnable background migration job.
-#[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
 pub(crate) async fn process_migration_once(
     writer: &HelixWriter,
     scope: DataScope,
@@ -4877,7 +4881,7 @@ mod tests {
                 .expect("storage schema completion marker reads"),
             "reader must not create the storage schema completion marker"
         );
-        crate::index_lifecycle::repository::bootstrap_writer(&raw)
+        crate::migrations::startup::bootstrap_writer(&raw)
             .await
             .expect("writer bootstrap tuple commits");
         raw.flush().await.expect("bootstrap tuple flushes");
@@ -4993,6 +4997,51 @@ mod tests {
                 .expect("label lookup succeeds")
                 .contains(edge_id)
         );
+    }
+
+    #[tokio::test]
+    async fn default_writer_starts_owned_background_cleanup_worker() {
+        let object_store = Arc::new(InMemory::new());
+        let database = "migration-default-background-worker";
+        let raw = Db::builder(database, object_store.clone())
+            .build()
+            .await
+            .expect("raw db opens");
+        let legacy_key = Key::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::EdgePropertyPair(EdgePropertyPairKey::new(11, 17)),
+        }
+        .to_bytes();
+        raw.put(
+            &legacy_key,
+            property::encode_properties(&[Property::string("$label", "FOLLOWS")]),
+        )
+        .await
+        .expect("legacy pair row writes");
+        raw.close().await.expect("raw db closes");
+
+        let db = HelixDB::open_with_object_store(database, object_store)
+            .await
+            .expect("default writer opens and starts its migration worker");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if db
+                    .inner_db()
+                    .get(&legacy_key)
+                    .await
+                    .expect("legacy key read succeeds")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned background worker removes the obsolete row");
+
+        db.close().await.expect("writer joins its migration worker");
     }
 
     #[tokio::test]
@@ -5142,7 +5191,7 @@ pub(crate) mod production_contracts {
 
     use super::*;
     use crate::config::{
-        MigrationBatchRows, MigrationTuning, SecondaryIndexDefinition,
+        MigrationBatchRows, MigrationTuning, MigrationWorkerMode, SecondaryIndexDefinition,
         SecondaryIndexLifecycleBatchRows, SecondaryIndexLifecycleTuning, TextIndexDefinition,
         VectorIndexDefinition,
     };
@@ -5179,7 +5228,7 @@ pub(crate) mod production_contracts {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let database = database("writer-migration-requirements");
         let fixture = raw(&database, store).await;
-        crate::index_lifecycle::repository::bootstrap_writer(&fixture)
+        crate::migrations::startup::bootstrap_writer(&fixture)
             .await
             .expect("current bootstrap tuple commits");
 
@@ -7220,7 +7269,7 @@ pub(crate) mod production_contracts {
         let tuple_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let tuple_database = database("reader-gate-tuple-only");
         let tuple = raw(&tuple_database, Arc::clone(&tuple_store)).await;
-        crate::index_lifecycle::repository::bootstrap_writer(&tuple)
+        crate::migrations::startup::bootstrap_writer(&tuple)
             .await
             .expect("tuple-only writer bootstrap commits");
         assert_current_storage_version(&tuple).await;
@@ -7262,7 +7311,7 @@ pub(crate) mod production_contracts {
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let database = database(&format!("reader-gate-{name}"));
             let fixture = raw(&database, Arc::clone(&store)).await;
-            crate::index_lifecycle::repository::bootstrap_writer(&fixture)
+            crate::migrations::startup::bootstrap_writer(&fixture)
                 .await
                 .expect("malformed-readiness bootstrap commits");
             fixture
@@ -7474,6 +7523,92 @@ pub(crate) mod production_contracts {
         }
     }
 
+    /// Proves explicit migration stepping has exclusive controller ownership.
+    pub(crate) async fn run_migration_worker_mode_stepping_contract() {
+        let _failpoint_guard = MIGRATION_FAILPOINT_CONTRACT_LOCK.lock().await;
+        let scope = DataScope::LegacyUnscoped;
+
+        let background = HelixDB::open_with_object_store_for_migration_parity(
+            database("migration-background-step-rejection"),
+            Arc::new(InMemory::new()),
+            one_row_config(),
+        )
+        .await
+        .expect("Background-mode writer opens");
+        let worker = background
+            .inner
+            .migration_worker
+            .lock()
+            .await
+            .take()
+            .expect("Background mode owns an automatic migration worker");
+        worker.stop().await;
+        let job = MigrationJob::new(MigrationId::GraphFormatV1Cleanup, MigrationMode::Background);
+        put_migration_job(background.inner_db().as_ref(), job).await;
+        let key = MigrationJobKey::new(scope, MigrationId::GraphFormatV1Cleanup);
+        let before = background
+            .inner_db()
+            .get(key.as_ref())
+            .await
+            .expect("Background-mode job reads")
+            .expect("Background-mode job exists");
+
+        assert!(matches!(
+            background.process_migration_once().await,
+            Err(HelixDbError::MigrationSteppingRequiresDisabledMode)
+        ));
+        assert_eq!(
+            background
+                .inner_db()
+                .get(key.as_ref())
+                .await
+                .expect("rejected Background-mode job reads")
+                .expect("rejected Background-mode job remains"),
+            before,
+            "rejection must happen before the migration controller mutates its job"
+        );
+        background
+            .close()
+            .await
+            .expect("Background-mode writer closes");
+
+        let disabled_config = one_row_config().with_migration_tuning(
+            MigrationTuning::default()
+                .with_batch_rows(MigrationBatchRows::new(1).expect("one row is positive"))
+                .with_worker_mode(MigrationWorkerMode::Disabled),
+        );
+        let disabled = HelixDB::open_with_object_store_for_migration_parity(
+            database("migration-disabled-manual-step"),
+            Arc::new(InMemory::new()),
+            disabled_config,
+        )
+        .await
+        .expect("Disabled-mode writer opens");
+        assert!(!migration_completed(
+            disabled.inner_db().as_ref(),
+            scope,
+            MigrationId::GraphFormatV1Cleanup,
+        )
+        .await
+        .expect("pending Disabled-mode job reads"));
+        assert!(disabled
+            .process_migration_once()
+            .await
+            .expect("Disabled mode permits one deterministic step"));
+        assert!(migration_completed(
+            disabled.inner_db().as_ref(),
+            scope,
+            MigrationId::GraphFormatV1Cleanup,
+        )
+        .await
+        .expect("completed Disabled-mode job reads"));
+        assert!(!disabled
+            .process_migration_once()
+            .await
+            .expect("drained Disabled-mode scan succeeds"));
+        disabled.close().await.expect("Disabled-mode writer closes");
+    }
+
     async fn seed_bootstrap_tuple(
         raw: &Db,
         marker: Bytes,
@@ -7549,7 +7684,7 @@ pub(crate) mod production_contracts {
             let database = database(name);
             let raw = raw(&database, Arc::clone(&store)).await;
             seed_bootstrap_tuple(&raw, marker, include_logical, include_vector).await;
-            let error = crate::index_lifecycle::repository::bootstrap_writer(&raw)
+            let error = crate::migrations::startup::bootstrap_writer(&raw)
                 .await
                 .expect_err("invalid bootstrap tuple must fail closed");
             assert!(
@@ -8551,5 +8686,5 @@ pub(crate) mod production_contracts {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/migrations_contracts.rs"]
+#[path = "../../tests/unit/migrations_contracts.rs"]
 mod external_contracts;

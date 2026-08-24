@@ -73,7 +73,8 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::ActiveTextMutationLimitExceeded { .. }
             | HelixDbError::InvalidIndexSourceData { .. }
             | HelixDbError::SecondaryIndexValue(_)
-            | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode => {
+            | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode
+            | HelixDbError::MigrationSteppingRequiresDisabledMode => {
                 Self::InvalidRequest {
                     error: error_code,
                     msg,
@@ -301,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn secondary_errors_remain_caller_actionable() {
+    fn explicit_control_errors_remain_caller_actionable() {
         assert!(matches!(
             HelixError::from(HelixDbError::SecondaryIndexValue(
                 SecondaryIndexValueError::NaNRangeValue
@@ -311,6 +312,11 @@ mod tests {
         assert!(matches!(
             HelixError::from(HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode),
             HelixError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            HelixError::from(HelixDbError::MigrationSteppingRequiresDisabledMode),
+            HelixError::InvalidRequest { error, .. }
+                if error == "migration_stepping_requires_disabled_mode"
         ));
     }
 }
