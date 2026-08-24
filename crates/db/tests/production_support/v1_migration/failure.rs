@@ -10,8 +10,8 @@ use slatedb::IsolationLevel;
 use crate::config::SecondaryIndexDefinition;
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{decode_properties, encode_properties, Property};
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::{DataKeyKind, DataKey as Key, NodePropertyKey};
 use crate::index_lifecycle::secondary::lookup_active_equality_generation;
 use crate::index_lifecycle::{
     IndexOperationBlockerCode, IndexOperationStatus, IndexStateV2, ValidatedDynamicIndexDefinition,
@@ -708,7 +708,7 @@ pub async fn v1_range_failure_preservation_contract() -> V1RangeFailureMigration
         (
             "oversized",
             PropertyValue::String(
-                "x".repeat(crate::encoding::v1::property::range_value::MAX_RANGE_ENCODED_LEN),
+                "x".repeat(crate::encoding::v2::values::property::range_index_value::MAX_RANGE_ENCODED_LEN),
             ),
         ),
     ];

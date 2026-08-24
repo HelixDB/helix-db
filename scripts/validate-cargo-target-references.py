@@ -27,6 +27,9 @@ MATRIX_FUZZ = re.compile(
     re.MULTILINE,
 )
 MATRIX_TEST = re.compile(r"^\s+test:\s*(?P<test>[A-Za-z0-9_:.-]+)\s*$", re.MULTILINE)
+V1_ENCODING_PATH = re.compile(
+    r"\bencoding\s*::\s*(?:v1\b|\{[^}]*\bv1\b)", re.DOTALL
+)
 FLAG_KIND = {"--test": "test", "--bench": "bench", "--bin": "bin"}
 TARGET_KIND_ORDER = ("lib", "test", "bench", "bin")
 CODEC_OWNERS = {
@@ -488,6 +491,14 @@ def forbidden_codec_source(path: str, text: str) -> list[str]:
     return errors
 
 
+def forbidden_v1_encoding_use(path: str, text: str) -> list[str]:
+    if path.startswith("crates/db/src/encoding/v1/"):
+        return []
+    if V1_ENCODING_PATH.search(text):
+        return [f"{path}: use V2 or V2 legacy encoding directly"]
+    return []
+
+
 def validate_codec_architecture(root: Path) -> list[str]:
     errors = []
     source_root = root / "crates" / "db" / "src"
@@ -646,22 +657,10 @@ def validate_codec_architecture(root: Path) -> list[str]:
     ):
         errors.append(f"{encoding_root.relative_to(root)}: root V1 module is not deprecated")
 
-    def v1_import_allowed(relative_path: str) -> bool:
-        return (
-            relative_path == "crates/db/src/migration_parity.rs"
-            or relative_path == "crates/db/src/migrations.rs"
-            or relative_path.startswith("crates/db/src/migrations/")
-            or relative_path == "crates/db/tests/public_encoding_compatibility.rs"
-            or relative_path == "crates/db/tests/production_support/v1_migration.rs"
-            or relative_path.startswith("crates/db/tests/production_support/v1_migration/")
-            or relative_path
-            == "crates/db/tests/production_support/migration_text_rebuild.rs"
-        )
-
-    for path in (root / "crates").rglob("*.rs"):
-        relative_path = path.relative_to(root).as_posix()
-        if "encoding::v1" in path.read_text() and not v1_import_allowed(relative_path):
-            errors.append(f"{relative_path}: V1 import is outside migration code")
+    for source_directory in ("bindings", "crates", "sdks", "tools"):
+        for path in (root / source_directory).rglob("*.rs"):
+            relative_path = path.relative_to(root).as_posix()
+            errors.extend(forbidden_v1_encoding_use(relative_path, path.read_text()))
 
     for relative_path, owner in CODEC_OWNERS.items():
         path = v2 / relative_path

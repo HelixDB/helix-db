@@ -102,6 +102,36 @@ class CargoTargetReferenceTests(unittest.TestCase):
             [],
         )
 
+    def test_v1_encoding_use_is_limited_to_the_compatibility_facade(self):
+        self.assertEqual(
+            MODULE.forbidden_v1_encoding_use(
+                "crates/db/src/migrations.rs",
+                "use crate::encoding::v1::keys::Key;",
+            ),
+            ["crates/db/src/migrations.rs: use V2 or V2 legacy encoding directly"],
+        )
+        self.assertEqual(
+            MODULE.forbidden_v1_encoding_use(
+                "crates/db/src/migrations.rs",
+                "use crate::encoding::{property,\n    v1::{keys, values}};",
+            ),
+            ["crates/db/src/migrations.rs: use V2 or V2 legacy encoding directly"],
+        )
+        self.assertEqual(
+            MODULE.forbidden_v1_encoding_use(
+                "crates/db/src/migrations.rs",
+                "use crate::encoding::v2::legacy::edge_property_pair;",
+            ),
+            [],
+        )
+        self.assertEqual(
+            MODULE.forbidden_v1_encoding_use(
+                "crates/db/src/encoding/v1/keys/mod.rs",
+                "pub use crate::encoding::v2::keys::*;",
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

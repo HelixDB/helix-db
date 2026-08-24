@@ -22,10 +22,11 @@ use crate::config::{
 };
 use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{self, property_value::PropertyValue, Property};
-use crate::encoding::v1::keys::{
-    DataKeyKind, EdgeEndpointsKey, EdgePropertyByIdKey, Key, NodePropertyKey,
+use crate::encoding::v2::keys::{
+    DataKeyKind, EdgeEndpointsKey, EdgePropertyByIdKey, DataKey as Key, NodePropertyKey,
 };
-use crate::encoding::v1::values;
+use crate::encoding::v2::legacy::text::{live_state, manifest, version_counter};
+use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
 use crate::search;
 use crate::search::text::{persist_documents_as_manifest, TextDocumentInput, TextIndexLiveState};
 use crate::{DbConfig, Result};
@@ -290,7 +291,7 @@ fn put_entity(
                     kind: DataKeyKind::EdgeEndpoints(EdgeEndpointsKey::new(entity_id)),
                 }
                 .to_bytes(),
-                values::edge_endpoints::EdgeEndpointsValue::new(entity_id + 1, entity_id + 2)
+                EdgeEndpointsValue::new(entity_id + 1, entity_id + 2)
                     .encode(),
             )
             .expect("legacy edge endpoint stages");
@@ -427,13 +428,13 @@ async fn seed_legacy_text_fixture(
     source
         .put(
             &legacy_manifest_key,
-            values::text_index::encode_manifest(&legacy_manifest).expect("legacy manifest encodes"),
+            manifest::encode_for_contract(&legacy_manifest).expect("legacy manifest encodes"),
         )
         .await?;
     source
         .put(
             &legacy_live_state_key,
-            values::text_index::encode_live_state(&TextIndexLiveState::live(1))
+            live_state::encode_for_retained_api(&TextIndexLiveState::live(1))
                 .expect("legacy live state encodes"),
         )
         .await?;
@@ -443,7 +444,7 @@ async fn seed_legacy_text_fixture(
     source
         .put(
             &legacy_version_counter_key,
-            values::text_index::encode_version_counter(
+            version_counter::encode_for_contract(
                 NonZeroU64::new(1).expect("legacy version is positive"),
             )
             .expect("legacy version encodes"),

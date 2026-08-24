@@ -29,12 +29,12 @@ use slatedb::{Db, IsolationLevel};
 
 use crate::config;
 use crate::encoding::property::{self, Property};
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey, VectorStorageLane,
 };
-use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
-use crate::encoding::v1::values::vectors::simhash;
+use crate::encoding::v2::keys::{DataKeyKind, DataKey as Key, NodePropertyKey};
+use crate::encoding::v2::values::indexes::vector::simhash;
 use crate::encoding::v2::keys::{GlobalKey, ManagedIndexKey as IndexKey, ScopedKey};
 use crate::encoding::v2::legacy::vector::metadata as legacy_metadata;
 use crate::encoding::v2::values::indexes::vector::metadata;

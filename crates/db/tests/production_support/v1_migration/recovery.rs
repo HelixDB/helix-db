@@ -12,8 +12,9 @@ use crate::config::{
 };
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{encode_properties, Property};
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, EdgePropertyPairKey, Key, NodePropertyKey};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::{DataKey as Key, DataKeyKind, NodePropertyKey};
+use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey as EdgePropertyPairKey;
 use crate::index_lifecycle::secondary::lookup_active_equality_generation;
 use crate::index_lifecycle::{IndexStateV2, ValidatedDynamicIndexDefinition};
 use crate::migrations::MigrationFailpoint;

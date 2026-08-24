@@ -941,8 +941,8 @@ mod tests {
     use slatedb::{Db, IsolationLevel};
 
     use super::*;
-    use crate::encoding::v1::keys::vectors::{VectorItemKey, VectorSimHashKey};
-    use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+    use crate::encoding::v2::keys::indexes::vector::{VectorItemKey, VectorSimHashKey};
+    use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
     use crate::index_lifecycle::IndexElementKind;
     use crate::search::vector::VectorDistanceMetric;
 
