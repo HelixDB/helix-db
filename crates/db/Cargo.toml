@@ -118,6 +118,15 @@ name = "fts_prefilter"
 harness = false
 required-features = ["production-coverage"]
 
+[[bench]]
+name = "deletion_batches"
+harness = false
+required-features = ["production-coverage", "index-lifecycle-testing"]
+
+[[example]]
+name = "deletion_benchmark_compare"
+required-features = ["production-coverage"]
+
 [[test]]
 name = "production_internal_contracts"
 required-features = ["production-coverage"]

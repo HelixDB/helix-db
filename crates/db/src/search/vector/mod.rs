@@ -177,6 +177,9 @@ pub use batch_benchmark::{
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
 #[cfg(feature = "production-coverage")]
+#[doc(hidden)]
+pub use benchmark_telemetry::VectorMutationBenchmarkTelemetry;
+#[cfg(feature = "production-coverage")]
 pub(crate) use benchmark_telemetry::{
     observe_retained_payload as observe_benchmark_retained_payload,
     record_cache_stats as record_benchmark_cache_stats, record_delete as record_benchmark_delete,
@@ -184,7 +187,6 @@ pub(crate) use benchmark_telemetry::{
     record_multi_get as record_benchmark_multi_get, record_point_get as record_benchmark_point_get,
     record_put as record_benchmark_put, record_scan as record_benchmark_scan,
     reset as reset_benchmark_telemetry, snapshot as benchmark_telemetry_snapshot,
-    VectorMutationBenchmarkTelemetry,
 };
 pub use configuration::VectorConfigError;
 pub(crate) use configuration::VectorIndexState;
@@ -227,6 +229,7 @@ pub(crate) use model::Candidate;
 pub(crate) use mutation::production_contracts::run as run_mutation_contracts;
 pub(crate) use mutation::{
     ActiveVectorMutationRuntime, VectorBuildSession, VectorBuildSessionStats,
+    VectorGenerationAfterDeletion,
 };
 pub use parameters::{
     CollisionThreshold, Connections, ConstructionBeamWidth, DistanceScore, FailureProbability,

@@ -227,8 +227,14 @@ impl<'db> ExecutionContext<'db> {
     ///
     /// Active index finalization stages all remaining transaction-owned rows.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
+        #[cfg(feature = "production-coverage")]
+        let preparation_started = std::time::Instant::now();
         active.index_context.prepare_topology(&active.txn).await?;
         active.index_context.prepare_secondary(&active.txn).await?;
+        active
+            .index_context
+            .prepare_active_vectors(&active.txn)
+            .await?;
         active
             .index_context
             .prepare_active_text(
@@ -242,10 +248,11 @@ impl<'db> ExecutionContext<'db> {
                 self.db.path(),
             )
             .await?;
-        active
-            .index_context
-            .prepare_active_vectors(&active.txn)
-            .await?;
+        #[cfg(feature = "production-coverage")]
+        super::benchmark_telemetry::record_phase(
+            super::benchmark_telemetry::MutationBenchmarkPhase::Preparation,
+            preparation_started.elapsed(),
+        );
         let ActiveWriteTx { txn, index_context } = active;
         let prepared_index_context = index_context.into_prepared()?;
         let vector_cache_effects = prepared_index_context.vector_cache_writes().entries();
@@ -258,6 +265,8 @@ impl<'db> ExecutionContext<'db> {
             .iter()
             .filter_map(|write| write.retirement().cloned())
             .collect::<Vec<_>>();
+        #[cfg(feature = "production-coverage")]
+        let commit_started = std::time::Instant::now();
         let committed = match txn.commit().await {
             Ok(committed) => committed,
             Err(error) => {
@@ -266,6 +275,13 @@ impl<'db> ExecutionContext<'db> {
                     .await);
             }
         };
+        #[cfg(feature = "production-coverage")]
+        super::benchmark_telemetry::record_phase(
+            super::benchmark_telemetry::MutationBenchmarkPhase::Commit,
+            commit_started.elapsed(),
+        );
+        #[cfg(feature = "production-coverage")]
+        let post_commit_started = std::time::Instant::now();
         let committed_sequence = committed.map(|committed| committed.seqnum());
         let committed_sequence = if pending_vector_cache.is_empty() {
             None
@@ -289,6 +305,11 @@ impl<'db> ExecutionContext<'db> {
         if text_compaction_staged {
             self.db.wake_index_worker().await;
         }
+        #[cfg(feature = "production-coverage")]
+        super::benchmark_telemetry::record_phase(
+            super::benchmark_telemetry::MutationBenchmarkPhase::PostCommit,
+            post_commit_started.elapsed(),
+        );
         Ok(())
     }
 

@@ -319,6 +319,13 @@ impl SecondaryMutationRuntime {
             &[][..],
             super::graph_mutation::CanonicalPropertyRow::properties,
         );
+        #[cfg(feature = "production-coverage")]
+        let terminal_deletion = matches!(
+            transition,
+            super::graph_mutation::GraphMutationTransition::Delete { .. }
+        );
+        #[cfg(feature = "production-coverage")]
+        let mut observed_terminal_deletions = 0usize;
         for ordinal in routes.iter().filter_map(|target| match target {
             super::mutation_catalog::MutationRouteTarget::Secondary(ordinal) => Some(ordinal),
             super::mutation_catalog::MutationRouteTarget::Vector(_)
@@ -334,6 +341,10 @@ impl SecondaryMutationRuntime {
                 .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
             if old_value == new_value {
                 continue;
+            }
+            #[cfg(feature = "production-coverage")]
+            if terminal_deletion && old_value.is_some() {
+                observed_terminal_deletions = observed_terminal_deletions.saturating_add(1);
             }
             let pending = PendingSecondaryMutation {
                 scope,
@@ -354,6 +365,10 @@ impl SecondaryMutationRuntime {
                 }
             }
         }
+        #[cfg(feature = "production-coverage")]
+        crate::execution::interpreter::mutation::benchmark_telemetry::record_secondary_deletions(
+            observed_terminal_deletions,
+        );
         Ok(())
     }
 
