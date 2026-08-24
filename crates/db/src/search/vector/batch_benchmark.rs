@@ -16,9 +16,9 @@ use sha2::{Digest, Sha256};
 use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::VectorStorageLane;
-use crate::encoding::v1::keys::Key;
+use crate::encoding::v2::keys::indexes::vector::VectorStorageLane;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::DataKey;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::IndexElementKind;
 
@@ -448,7 +448,7 @@ impl VectorBatchBenchmarkFixture {
         let mut rows = 0_u64;
         let mut encoded_bytes = 0_u64;
         for lane in VectorStorageLane::ALL {
-            let prefix = Key::data_prefix(
+            let prefix = DataKey::data_prefix(
                 DataScope::LegacyUnscoped,
                 lane.prefix_key(self.index.index_id()).to_bytes(),
             );

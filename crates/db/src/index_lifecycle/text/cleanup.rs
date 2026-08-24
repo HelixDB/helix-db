@@ -9,9 +9,9 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::config::SearchIndexBatchLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::outbox::IndexOperationStepResult;
 use crate::index_lifecycle::{
@@ -103,7 +103,7 @@ async fn delete_metadata(
     let mut resume = progress.cursor.as_ref().map(IndexCursor::as_bytes);
 
     loop {
-        let prefix = Key::data_prefix(
+        let prefix = ManagedIndexKey::data_prefix(
             scope,
             index_keys::ScopedKey::generation_prefix(
                 lane.record_kind(),
@@ -218,10 +218,10 @@ fn cleanup_lane_from_cursor(
     operation: &IndexOperationRecord,
     cursor: &IndexCursor,
 ) -> Result<CleanupLane> {
-    let Key::Data {
+    let ManagedIndexKey::Data {
         scope: cursor_scope,
         kind: key,
-    } = Key::parse_from_slice(scope, cursor.as_bytes())?
+    } = ManagedIndexKey::parse_from_slice(scope, cursor.as_bytes())?
     else {
         return Err(corruption("text cleanup cursor is not a scoped V2 key"));
     };
@@ -243,10 +243,10 @@ fn validate_owned_key(
     expected_lane: CleanupLane,
     bytes: &[u8],
 ) -> Result<()> {
-    let Key::Data {
+    let ManagedIndexKey::Data {
         scope: key_scope,
         kind: key,
-    } = Key::parse_from_slice(scope, bytes)?
+    } = ManagedIndexKey::parse_from_slice(scope, bytes)?
     else {
         return Err(corruption("text cleanup scan yielded a non-data key"));
     };

@@ -1,6 +1,6 @@
 ---
 title: "Get Started"
-description: "Start HelixDB locally, write data, and follow an edge in ten minutes"
+description: "Initialize HelixDB, start a local instance, run the generated query, and stop it"
 sidebarTitle: "Get Started"
 icon: "rocket"
 pageType: "Tutorial"
@@ -8,360 +8,152 @@ pageType: "Tutorial"
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-You will start a local HelixDB server, create two `User` nodes connected by a
-`FOLLOWS` edge, and read them back with one of the forthcoming v3 SDKs.
+This is the canonical local HelixDB quickstart. You will create a project, start
+the generated `dev` instance, run the generated JSON request, and stop the
+instance.
 
 ## Prerequisites
 
-- Docker or Podman
-- Rust, Node.js 20+, Go, Python 3.11+, or the `helix` CLI for raw JSON
+- Docker, or Podman configured as described below
+- A terminal on macOS or Linux, or PowerShell on Windows
 
 <Steps>
   <Step title="Install the CLI">
+
+macOS and Linux:
 
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
 ```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+If the CLI is already installed, run [`helix update`](/cli/command-reference/update).
+
   </Step>
-  <Step title="Setup a local project">
+  <Step title="Create a local project">
+
+Create and enter an empty directory, then initialize it:
 
 ```bash
-helix init local # --lang {rs,ts,go,py}
+mkdir my-helix-app
+cd my-helix-app
+helix init local
 ```
 
-This creates the project structure, example query files, and installs dependencies.
+`helix init local` creates:
 
-<Note>
-  you can choose a language to use with the `--lang` flag. The default is TypeScript.
-</Note>
+- `helix.toml` with one local instance named `dev` on port `6969`.
+- `.helix/` for CLI-managed instance state.
+- `.gitignore` entries for `.helix/`, `.env`, `target/`, and `*.log`.
+- `AGENTS.md` with the current CLI workflow for coding agents.
+- `examples/request.json` with a runnable read request.
+
+It does not create a Rust, TypeScript, Go, or Python project. Choose an SDK
+after this CLI journey.
+
+If you use Podman, set `container_runtime = "podman"` under `[project]` in
+`helix.toml` before you start the generated instance. New projects otherwise
+default to Docker.
 
   </Step>
-  <Step title="Start the local database">
+  <Step title="Start the generated instance">
 
 ```bash
-helix start local
+helix start dev
 ```
 
-This starts the local database at `http://localhost:6969/`.
+The CLI starts the local container, publishes it at `http://localhost:6969`,
+and waits for the database health check before it returns.
+
+<Warning>
+The default storage mode is in-memory. Stopping the instance removes its data.
+Use `helix start dev --disk` when you need local persistence.
+</Warning>
 
   </Step>
-  <Step title="Create and query the graph">
+  <Step title="Run the generated query">
 
-In the generated after running `helix init local`, you will find a file called `queries.rs` (the file suffix will be different depending on the language you chose).
-For the language you chose, paste the following code into the file:
-
-<CodeGroup>
-
-```rust Rust [expandable]
-use helix_db::dsl::prelude::*;
-use helix_db::Client;
-
-#[query]
-fn write_users() -> WriteBatch {
-    write_batch()
-        .var_as("alice", g().add_n("User", vec![("name", "Alice")]))
-        .var_as("bob", g().add_n("User", vec![("name", "Bob")]))
-        .var_as(
-            "follow",
-            g()
-                .n(NodeRef::var("alice"))
-                .add_e(
-                    "FOLLOWS",
-                    NodeRef::var("bob"),
-                    vec![("since", "2026-07-24")],
-                ),
-        )
-        .var_as(
-            "friends",
-            g()
-                .n(NodeRef::var("alice"))
-                .out(Some("FOLLOWS"))
-                .value_map(Some(vec!["$id", "name"])),
-        )
-        .returning(["alice", "bob", "friends"])
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let result: serde_json::Value = Client::new(None)?
-        .query(write_users())
-        .send()
-        .await?;
-    println!("{result:?}");
-    Ok(())
-}
+```bash
+helix query dev --file examples/request.json
 ```
 
-```ts TypeScript [expandable]
-import { Client, NodeRef, g, writeBatch } from "@helix-db/helix-db";
+The generated request counts nodes with the `User` label. A new database
+returns a `node_count` of zero. Edit the JSON file and run the same command
+again to iterate.
 
-const query = writeBatch()
-  .varAs("alice", g().addN("User", { name: "Alice" }))
-  .varAs("bob", g().addN("User", { name: "Bob" }))
-  .varAs(
-    "follow",
-    g()
-      .n(NodeRef.var("alice"))
-      .addE("FOLLOWS", NodeRef.var("bob"), { since: "2026-07-24" }),
-  )
-  .varAs(
-    "friends",
-    g().n(NodeRef.var("alice")).out("FOLLOWS").valueMap(["$id", "name"]),
-  )
-  .returning(["alice", "bob", "friends"]);
+  </Step>
+  <Step title="Stop the instance">
 
-const client = Client.server("http://localhost:6969");
-const result = await client
-  .query(query.toQueryRequest({ queryName: "write_users" }))
-  .send();
-console.log(result);
+```bash
+helix stop dev
 ```
 
-```go Go [expandable]
-package main
+`helix stop` is idempotent, so it also exits successfully when the instance is
+already stopped.
 
-import (
-	"context"
-	"fmt"
-	"log"
+  </Step>
+</Steps>
 
-	helix "github.com/helixdb/helix-db/sdks/go"
-)
+## Use an SDK
 
-func main() {
-	request := helix.WriteQuery("write_users").
-		VarAs("alice", helix.G().AddN(
-			"User",
-			helix.Props{helix.Prop("name", "Alice")},
-		)).
-		VarAs("bob", helix.G().AddN(
-			"User",
-			helix.Props{helix.Prop("name", "Bob")},
-		)).
-		VarAs(
-			"follow",
-			helix.G().
-				N(helix.NodeVar("alice")).
-				AddE(
-					"FOLLOWS",
-					helix.NodeVar("bob"),
-					helix.Props{helix.Prop("since", "2026-07-24")},
-				),
-		).
-		VarAs(
-			"friends",
-			helix.G().
-				N(helix.NodeVar("alice")).
-				Out("FOLLOWS").
-				ValueMap("$id", "name"),
-		).
-		Returning("alice", "bob", "friends")
+The SDKs build the same JSON operation tree that `helix query` sends to
+`POST /v2/query`. Initialize a normal language project and install one released
+SDK:
 
-	client, err := helix.NewClient("http://localhost:6969")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var result map[string]any
-	if err := client.Exec(context.Background(), request, &result); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(result)
-}
-```
-
-```python Python [expandable]
-from helixdb import Client, NodeRef, g, write_batch
-
-request = (
-    write_batch()
-    .var_as("alice", g().add_n("User", {"name": "Alice"}))
-    .var_as("bob", g().add_n("User", {"name": "Bob"}))
-    .var_as(
-        "follow",
-        g()
-        .n(NodeRef.var("alice"))
-        .add_e(
-            "FOLLOWS",
-            NodeRef.var("bob"),
-            {"since": "2026-07-24"},
-        ),
-    )
-    .var_as(
-        "friends",
-        g()
-        .n(NodeRef.var("alice"))
-        .out("FOLLOWS")
-        .value_map(["$id", "name"]),
-    )
-    .returning(["alice", "bob", "friends"])
-    .to_query_request(query_name="write_users")
-)
-
-result = Client("http://localhost:6969").query(request)
-print(result)
-```
-
-```json JSON [expandable]
-{
-  "request_type": "write",
-  "query_name": "write_users",
-  "query": {
-    "write": {
-      "entries": [
-        {
-          "query": {
-            "name": "alice",
-            "root": {
-              "add_n": {
-                "label": "User",
-                "properties": [
-                  ["name", { "value": { "string": "Alice" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "bob",
-            "root": {
-              "add_n": {
-                "label": "User",
-                "properties": [
-                  ["name", { "value": { "string": "Bob" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "follow",
-            "root": {
-              "add_e": {
-                "input": {
-                  "nodes": { "reference": { "var": "alice" } }
-                },
-                "label": "FOLLOWS",
-                "to": { "var": "bob" },
-                "properties": [
-                  ["since", { "value": { "string": "2026-07-24" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "friends",
-            "root": {
-              "value_map": {
-                "input": {
-                  "out": {
-                    "input": {
-                      "nodes": { "reference": { "var": "alice" } }
-                    },
-                    "label": "FOLLOWS"
-                  }
-                },
-                "properties": ["$id", "name"]
-              }
-            }
-          }
-        }
-      ],
-      "returns": ["alice", "bob", "friends"]
-    }
-  }
-}
-```
-
-</CodeGroup>
-
-</Step>
-
-<Step title="Run the query">
-
-{/* sdk-commands: no JSON representation */}
+{/* package-install: no JSON representation */}
 <CodeGroup>
 ```bash Rust
-cargo run --bin queries
+cargo add helix-db@3.0.0 tokio serde_json
 ```
 
 ```bash TypeScript
-npm run queries
+npm install @helix-db/helix-db@3.0.4
 ```
 
 ```bash Go
-go run queries.go
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```bash Python
-python queries.py
+python -m pip install helix-db==0.3.4
 ```
 </CodeGroup>
-<Note>
-  you need to run this in the directory created by `helix init local`.
-</Note>
 
-Each SDK decodes the same JSON response. Your terminal's object formatting differs by
-language, but the response body is:
+Continue with the full setup guide for your language:
 
-```json
-{
-  "alice": [{ "$id": 0 }],
-  "bob": [{ "$id": 1 }],
-  "friends": [{ "$id": 1, "name": "Bob" }]
-}
-```
-
-  </Step>
-
-  <Step title="Open the dashboard">
-
-```bash
-helix dashboard
-```
-
-This opens the dashboard at `http://localhost:3000/`. You can explore the graph and query it with the UI.
-
-  </Step>
-
-</Steps>
-
-## What just happened
-
-- `writeBatch()` made invalid read-only mutation states unrepresentable.
-- Each `varAs` added one named query entry.
-- `NodeRef.var("alice")` referred to the result of the first entry.
-- Each chained operation wrapped the preceding operation as `input`.
-- `returning(...)` selected the named values in the response.
-- The `follow` entry still ran even though it was not returned.
-
-The [query walkthrough](/database/helix-db/core-concepts/overview) takes this same query
-apart operation by operation and explains the request and response JSON.
-
-## Clean up
-
-```bash
-helix stop local
-```
+<CardGroup cols={2}>
+  <Card title="Rust SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/rust-project-setup">
+    Build and execute typed Rust queries.
+  </Card>
+  <Card title="TypeScript SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
+    Build and execute TypeScript queries.
+  </Card>
+  <Card title="Go SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/go-project-setup">
+    Build and execute Go queries.
+  </Card>
+  <Card title="Python SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/python-project-setup">
+    Build and execute synchronous or asynchronous Python queries.
+  </Card>
+</CardGroup>
 
 ## Next steps
 
 <CardGroup cols={2}>
+  <Card title="Query walkthrough" icon="route" href="/database/helix-db/core-concepts/overview">
+    Learn how SDK builders become the JSON request sent to HelixDB.
+  </Card>
   <Card title="Data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model">
     Learn how nodes, edges, labels, and properties fit together.
   </Card>
   <Card title="Writing data" icon="pen" href="/database/helix-db/query-guides/writing-data">
     Add, update, and remove graph data.
   </Card>
-  <Card title="Reading data" icon="book-open" href="/database/helix-db/query-guides/reading-data">
-    Select data by ID, label, or indexed property.
-  </Card>
-  <Card title="Use another SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
-    Switch to Rust, Go, or Python with the same query model.
+  <Card title="CLI reference" icon="terminal" href="/cli/command-reference">
+    See every current CLI command and option.
   </Card>
 </CardGroup>

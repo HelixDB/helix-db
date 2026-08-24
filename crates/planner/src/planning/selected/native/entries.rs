@@ -51,6 +51,7 @@ pub(super) fn initial_query_entry(
         exec::SelectedExecutableRunEntry {
             root: selected.root,
             output: query_output(query)?,
+            return_shape: exec::return_shape_from_ast(&query.root),
             condition: initial_query_condition(query)?,
         },
     )))
@@ -64,6 +65,7 @@ pub(super) fn followup_query_entry(
         exec::SelectedExecutableRunEntry {
             root: selected.root,
             output: query_output(query)?,
+            return_shape: exec::return_shape_from_ast(&query.root),
             condition: followup_query_condition(query)?,
         },
     )))

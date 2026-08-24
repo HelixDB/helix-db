@@ -13,7 +13,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbReadOps, IsolationLevel};
 
 use super::*;
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::search::vector::distance::{Cosine, Euclidean, Manhattan};
 use crate::search::vector::{
     VectorDimension, VectorGenerationIdentity, VectorMemoryStore, VectorReadView,

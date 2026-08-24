@@ -61,6 +61,7 @@ fn selected_executable_batch_lowers_control_root_pipeline_terminal_with_selected
                     },
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("count")),
+                return_shape: ReturnShape::Scalar,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),

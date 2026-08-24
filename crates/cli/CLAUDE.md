@@ -83,7 +83,7 @@ Defined in `src/commands/chef.rs`, dispatched from `src/main.rs` (`Commands::Che
    - `write_agent_prompt` + `write_example_queries` — writes `HELIX_CHEF_PROMPT.md` (the system prompt) and `examples/{seed,read_users}.json`.
    - `run_database` — `helix start dev` (port 8080, in-memory).
    - `seed_starter_data` — runs `examples/seed.json`.
-5. **Agent detection** (`detect_agent`) — first available of `AGENT_PRIORITY`: Claude Code (`claude`) → OpenAI Codex (`codex`) → OpenCode (`opencode`), via `utils::command_exists`.
+5. **Agent detection** (`detect_agent`) — first available of `AGENT_PRIORITY`: Claude Code → OpenAI Codex → OpenCode → Cursor Agent (`claude` → `codex` → `opencode` → `cursor-agent`), via `external_tools::available`.
 6. **Permission prompt** (`select_permission_mode`) — "Give the agent full autonomy?": Yes (full auto) / Scoped (ask per command) / Don't launch. Non-interactive → `None` (skip launch).
 7. **Launch** (`launch_agent`, async) — Claude goes through `launch_claude_streaming`; codex/opencode through a captured stdout/stderr path so `chef` can include a transcript in the snapshot.
 8. **Post-run** — on success, print the agent's structured summary and `try_open_frontend` (open `http://localhost:3000` if `web/package.json` exists and the server responds). On failure / abort / no-agent → `print_paste_prompt_hint` points the user at `HELIX_CHEF_PROMPT.md`.

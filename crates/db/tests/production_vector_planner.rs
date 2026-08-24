@@ -11,7 +11,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use db::config::{DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, VectorElementType};
-use db::encoding::v1::keys::tenant::DataScope;
+use db::encoding::v2::keys::scope::DataScope;
 use db::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue,
 };
@@ -36,6 +36,7 @@ fn step(id: usize, dependencies: Vec<exec::ExecStepId>, op: exec::ExecOp) -> exe
         id: exec::ExecStepId::new(id).expect("fixture step ids are positive"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -534,7 +535,7 @@ async fn execute_ddl_to_success(db: &HelixDB, plan: &exec::ExecutablePlan) {
         loop {
             match db
                 .get_index_operation(
-                    db::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                    db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     operation_id,
                 )
                 .await
@@ -554,7 +555,7 @@ async fn execute_ddl_to_success(db: &HelixDB, plan: &exec::ExecutablePlan) {
     .expect("fixture DDL worker should converge");
     db.planner_context_scoped(
         context::ParamBindings::default(),
-        db::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+        db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
     )
     .await
     .expect("terminal DDL is visible through a refreshed planner catalog");

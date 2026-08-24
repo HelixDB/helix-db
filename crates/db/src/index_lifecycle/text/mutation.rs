@@ -16,8 +16,8 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::encoding::property::Property;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 #[cfg(test)]
 use crate::encoding::v2::keys::RecordKind;
 use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
@@ -278,14 +278,14 @@ pub(crate) async fn load_mutation_set(
     scope: DataScope,
 ) -> Result<TextMutationSet> {
     let logical_prefix = ScopedKey::logical_prefix(RecordKind::IndexRecord);
-    let physical_prefix = Key::data_prefix(scope, logical_prefix);
+    let physical_prefix = ManagedIndexKey::data_prefix(scope, logical_prefix);
     let mut rows = transaction.scan_prefix(&physical_prefix, ..).await?;
     let mut mutations = TextMutationSet::default();
     while let Some(row) = rows.next().await? {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: ScopedKey::IndexRecord(key),
             ..
-        } = Key::parse_from_slice(scope, &row.key)?
+        } = ManagedIndexKey::parse_from_slice(scope, &row.key)?
         else {
             return Err(corruption(
                 "text mutation catalog prefix yielded another key kind",
@@ -605,9 +605,9 @@ pub(super) fn stage_validated_text_build_deltas(
     Ok(())
 }
 
-/// Encodes one scoped V2 key through the canonical `encoding/v1` boundary.
+/// Encodes one scoped V2 key through the canonical `encoding/v2` boundary.
 fn scoped_index_key(scope: DataScope, key: ScopedKey) -> bytes::Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 fn corruption(message: &str) -> HelixDbError {
@@ -715,7 +715,7 @@ mod tests {
             .await
             .expect("coalesced text delta commits");
 
-        let prefix = Key::data_prefix(
+        let prefix = ManagedIndexKey::data_prefix(
             scope,
             ScopedKey::generation_prefix(RecordKind::BuildDelta, index_id, generation),
         );

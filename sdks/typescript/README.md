@@ -102,6 +102,49 @@ remains supported as a deprecated compatibility alias.
 `details`. See the canonical
 [query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx).
 
+Remote errors expose `statusCode`, `code`, `serverMessage`, `serverDetails`, and
+the decoded response `rawBody`. Retry idempotent reads after rate limits or
+temporary server failures with backoff:
+
+```ts
+import { Client, HelixError, QueryRequest } from "@helix-db/helix-db";
+
+const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function sendReadWithRetry<T>(client: Client, readRequest: QueryRequest): Promise<T> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await client.query<T>(readRequest).send();
+    } catch (error) {
+      const retryable =
+        error instanceof HelixError &&
+        (error.isRateLimited() || (error.statusCode !== undefined && error.statusCode >= 500 && error.statusCode < 600));
+      if (!retryable || attempt === 2) throw error;
+      await sleep(100 * (attempt + 1));
+    }
+  }
+  throw new Error("unreachable");
+}
+```
+
+For write conflicts, reload the current state before rebuilding the mutation.
+Do not blindly retry writes after server errors because the commit may have
+succeeded before the response failed:
+
+```ts
+try {
+  await client.query(writeRequest).send();
+} catch (error) {
+  if (error instanceof HelixError && error.isConflict()) {
+    console.error("write conflict", error.serverMessage);
+  }
+}
+```
+
+Validation and authentication failures should be handled directly rather than
+retried. `rawBody` retains the decoded response text before message fallbacks;
+`details` preserves the previous fallback behavior.
+
 ## Parameter Schemas
 
 Supported schemas are `param.bool()`, `param.i64()`, `param.f64()`,

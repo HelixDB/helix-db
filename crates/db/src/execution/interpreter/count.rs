@@ -82,6 +82,16 @@ enum CountCursorLeaf<'a> {
         key: &'a helix_planner::catalog::ScopedPropertyKey,
         param: &'a ir::NonEmptyString,
     },
+    NodeDynamicMembership {
+        index: &'a helix_planner::catalog::NodeEqualityIndexMeta,
+        key: &'a helix_planner::catalog::ScopedPropertyKey,
+        values: &'a ir::RuntimeEqualitySet,
+    },
+    EdgeDynamicMembership {
+        index: &'a helix_planner::catalog::EdgeEqualityIndexMeta,
+        key: &'a helix_planner::catalog::ScopedPropertyKey,
+        values: &'a ir::RuntimeEqualitySet,
+    },
 }
 
 enum CountCursorStructural<'a> {
@@ -173,6 +183,8 @@ fn count_plan_window(plan: &exec::ExecCountPlan) -> Option<&exec::ExecCountWindo
         exec::ExecCountPlan::EdgeTextSearch(plan) => Some(&plan.window),
         exec::ExecCountPlan::NodeDynamicEquality(plan) => Some(&plan.window),
         exec::ExecCountPlan::EdgeDynamicEquality(plan) => Some(&plan.window),
+        exec::ExecCountPlan::NodeDynamicMembership(plan) => Some(&plan.window),
+        exec::ExecCountPlan::EdgeDynamicMembership(plan) => Some(&plan.window),
         exec::ExecCountPlan::Stream(plan) => Some(&plan.window),
     }
 }
@@ -414,6 +426,30 @@ impl<'db> ExecutionContext<'db> {
                 let ids = read.await?;
                 window.apply(ids.len() as usize)
             }
+            exec::ExecCountPlan::NodeDynamicMembership(plan) => {
+                validate_node_equality_index(&plan.index.index_id, &plan.key)?;
+                let window = evaluated_window.expect("dynamic counts carry a window");
+                let ids = self
+                    .dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        &plan.key,
+                        &plan.values,
+                    )
+                    .await?;
+                window.apply(ids.len() as usize)
+            }
+            exec::ExecCountPlan::EdgeDynamicMembership(plan) => {
+                validate_edge_equality_index(&plan.index.index_id, &plan.key)?;
+                let window = evaluated_window.expect("dynamic counts carry a window");
+                let ids = self
+                    .dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        &plan.key,
+                        &plan.values,
+                    )
+                    .await?;
+                window.apply(ids.len() as usize)
+            }
             exec::ExecCountPlan::Stream(plan) => {
                 let mut dependency = Some(input);
                 self.count_cursor_cardinality(
@@ -546,7 +582,7 @@ impl<'db> ExecutionContext<'db> {
             if threshold.is_some_and(|threshold| count >= threshold) {
                 break;
             }
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id)),
             }
@@ -564,7 +600,7 @@ impl<'db> ExecutionContext<'db> {
             if threshold.is_some_and(|threshold| count >= threshold) {
                 break;
             }
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(*id)),
             }
@@ -1048,6 +1084,26 @@ impl<'db> ExecutionContext<'db> {
                     .await?
                     .len() as usize
                 }
+                exec::ExecCountCursorPlan::NodeDynamicMembership { index, key, values } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    self.dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        values,
+                    )
+                    .await?
+                    .len() as usize
+                }
+                exec::ExecCountCursorPlan::EdgeDynamicMembership { index, key, values } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    self.dynamic_membership_ids(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        values,
+                    )
+                    .await?
+                    .len() as usize
+                }
                 exec::ExecCountCursorPlan::Filter { input, predicate } => {
                     let rows = self.count_cursor(input, dependency).await?;
                     let mut accepted = 0usize;
@@ -1224,6 +1280,16 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecCountCursorPlan::EdgeDynamicEquality { index, key, param } => self
                 .count_cursor_leaf(
                     CountCursorLeaf::EdgeDynamicEquality { index, key, param },
+                    dependency,
+                ),
+            exec::ExecCountCursorPlan::NodeDynamicMembership { index, key, values } => self
+                .count_cursor_leaf(
+                    CountCursorLeaf::NodeDynamicMembership { index, key, values },
+                    dependency,
+                ),
+            exec::ExecCountCursorPlan::EdgeDynamicMembership { index, key, values } => self
+                .count_cursor_leaf(
+                    CountCursorLeaf::EdgeDynamicMembership { index, key, values },
                     dependency,
                 ),
             exec::ExecCountCursorPlan::Union { driver, rest } => self
@@ -1525,6 +1591,34 @@ impl<'db> ExecutionContext<'db> {
                         core::slice::from_ref(&value),
                     );
                     let ids = read.await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
+                        .collect())
+                }
+                CountCursorLeaf::NodeDynamicMembership { index, key, values } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    let ids = self
+                        .dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            values,
+                        )
+                        .await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                        .collect())
+                }
+                CountCursorLeaf::EdgeDynamicMembership { index, key, values } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    let ids = self
+                        .dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Edge,
+                            key,
+                            values,
+                        )
+                        .await?;
                     Ok(ids
                         .into_iter()
                         .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
@@ -2350,7 +2444,8 @@ mod tests {
         for value in [
             PropertyValue::Array(Vec::new()),
             PropertyValue::String("x".repeat(
-                crate::encoding::v1::property::equality_value::MAX_EQUALITY_CANONICAL_LEN + 1,
+                crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN
+                    + 1,
             )),
         ] {
             assert!(execute_direct_count_with_params(
@@ -2390,14 +2485,14 @@ mod tests {
         }
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
                 }
                 .to_bytes(),
-                crate::encoding::v1::property::encode_properties(&[
-                    crate::encoding::v1::property::Property::string("$label", "User"),
-                    crate::encoding::v1::property::Property::string(
+                crate::encoding::v2::values::property::encode_properties(&[
+                    crate::encoding::v2::values::property::Property::string("$label", "User"),
+                    crate::encoding::v2::values::property::Property::string(
                         "email",
                         "different@example.com",
                     ),
@@ -2670,8 +2765,8 @@ mod tests {
         .await;
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(node)),
                 }
                 .to_bytes(),
@@ -2681,8 +2776,8 @@ mod tests {
             .unwrap();
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(edge)),
                 }
                 .to_bytes(),
@@ -3473,8 +3568,8 @@ mod tests {
         .await;
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(node)),
                 }
                 .to_bytes(),
@@ -4171,7 +4266,7 @@ mod tests {
         let mut expired = ExecutionContext::new_scoped_controlled(
             &db,
             context::ParamBindings::default(),
-            crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             crate::execution_control::ExecutionControl::from_timeout(std::time::Duration::ZERO),
         );
         assert!(expired
@@ -4470,14 +4565,17 @@ mod tests {
 
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
                 }
                 .to_bytes(),
-                crate::encoding::v1::property::encode_properties(&[
-                    crate::encoding::v1::property::Property::string("$label", "Other"),
-                    crate::encoding::v1::property::Property::string("email", "alice@example.com"),
+                crate::encoding::v2::values::property::encode_properties(&[
+                    crate::encoding::v2::values::property::Property::string("$label", "Other"),
+                    crate::encoding::v2::values::property::Property::string(
+                        "email",
+                        "alice@example.com",
+                    ),
                 ]),
             )
             .await
@@ -4497,8 +4595,8 @@ mod tests {
         ));
         db.inner_db()
             .put(
-                keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                     kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
                 }
                 .to_bytes(),

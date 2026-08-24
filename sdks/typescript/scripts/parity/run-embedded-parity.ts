@@ -10,6 +10,7 @@ const EXPECTED_RUNTIME = 233;
 const typescriptRoot = join(workspaceRoot, "sdks", "typescript");
 const pythonRoot = join(workspaceRoot, "sdks", "python");
 const goRoot = join(workspaceRoot, "sdks", "go");
+const goEmbeddedTemplates = join(goRoot, "internal", "embedded_templates");
 const rustManifest = join(workspaceRoot, "sdks", "rust", "Cargo.toml");
 const bindingManifest = join(workspaceRoot, "bindings", "uniffi", "Cargo.toml");
 const bindingConfig = join(workspaceRoot, "bindings", "uniffi", "uniffi.toml");
@@ -40,6 +41,11 @@ try {
     cp(goRoot, goSdk, { recursive: true }),
     ...Object.values(disks).map((root) => mkdir(root, { recursive: true })),
   ]);
+  await Promise.all(
+    ["embedded_uniffi.go", "native_graph_uniffi.go", "embedded_generated_test.go", "graph_generated_test.go"].map((file) =>
+      copyFile(join(goEmbeddedTemplates, `${file}.tmpl`), join(goSdk, file)),
+    ),
+  );
   run("cargo", ["build", "--locked", "-p", "helixdb-uniffi"], workspaceRoot, 900_000);
 
   run(

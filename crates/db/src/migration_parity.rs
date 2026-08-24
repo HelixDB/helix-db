@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Feature-gated migration parity diagnostics.
 //!
 //! This module is intentionally excluded from the default crate surface. It is
@@ -24,13 +26,13 @@ use slatedb::config::ScanOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::DbReadOps;
 
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{property_value::PropertyValue, Property};
 use crate::encoding::v1::keys::{DataKeyKind, Key, KeyPrefix, MetadataKey};
 use crate::encoding::v1::read_u64;
 use crate::encoding::v1::values;
 use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{GlobalKey, ScopedKey, SecondaryEntryKey, GLOBAL_SENTINEL};
 use crate::encoding::v2::values::{
     decode_corpus_statistics, decode_index_record, decode_metadata_value, decode_operation_record,
@@ -2222,7 +2224,7 @@ async fn scan_v2_state(
         })?;
     state.vector_migration.reused_physical_ids.sort_unstable();
 
-    let legacy_prefix = Key::data_prefix(scope, MetadataKey::dynamic_index_prefix().to_bytes());
+    let legacy_prefix = crate::encoding::v2::legacy::index_catalog::catalog_scan_prefix(scope);
     let mut legacy = read.scan_prefix(legacy_prefix, ..).await?;
     while legacy.next().await?.is_some() {
         state.legacy_definition_rows += 1;
@@ -2606,7 +2608,7 @@ mod tests {
 
     #[test]
     fn tenant_envelope_parity_identity_is_typed_and_legacy_shaped() {
-        let scope = DataScope::Tenant(crate::encoding::keys::tenant::TenantId::from_u128(
+        let scope = DataScope::Tenant(crate::encoding::keys::scope::TenantId::from_u128(
             0x7777_7777_7777_7777_7777_7777_7777_7777,
         ));
         let key = Key::Data {
@@ -2633,7 +2635,7 @@ mod tests {
             &managed[core::mem::size_of::<u8>()..]
         );
 
-        let mut untyped = vec![crate::encoding::keys::tenant::TENANT_KEY_PREFIX];
+        let mut untyped = vec![crate::encoding::keys::scope::TENANT_KEY_PREFIX];
         untyped.extend_from_slice(&[0x77; core::mem::size_of::<u128>()]);
         untyped.extend_from_slice(b"not-a-typed-logical-key");
         assert!(matches!(

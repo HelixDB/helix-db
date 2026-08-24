@@ -10,7 +10,7 @@
 //! their local identity and score semantic. Public callers select an explicit
 //! [`DistanceOutputVersion`] only after that binding.
 
-use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
 use crate::encoding::{EdgeId, NodeId};
 
 use super::DistanceScore;

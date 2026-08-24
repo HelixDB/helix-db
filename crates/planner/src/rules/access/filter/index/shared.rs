@@ -1,7 +1,7 @@
 //! Shared access-filter index application flow.
 
 use super::super::atoms::{
-    AccessFilterIndexAtom, AccessFilterIndexAtoms, AccessFilterIndexPlan,
+    AccessEqualityDomain, AccessFilterIndexAtom, AccessFilterIndexAtoms, AccessFilterIndexPlan,
     AccessFilterIndexPlanMatch,
 };
 use super::super::labels::access_filter_label;
@@ -209,11 +209,21 @@ where
     F: AccessFilterIndexFamily,
 {
     match atom {
-        AccessFilterIndexAtom::Equality { property, value } => {
+        AccessFilterIndexAtom::Equality { property, domain } => {
             let key = catalog::ScopedPropertyKey::new(label.clone(), property.clone());
-            F::equality_index(indexes, &key)
-                .map(|index| F::equality_source(index, key, value.clone()))
-                .ok_or(MissingAccessIndex::Equality)
+            let index = F::equality_index(indexes, &key).ok_or(MissingAccessIndex::Equality)?;
+            Ok(match domain {
+                AccessEqualityDomain::One(value) => F::equality_source(index, key, value.clone()),
+                AccessEqualityDomain::Many(values) => F::union_source(
+                    values
+                        .iter()
+                        .map(|value| F::equality_source(index.clone(), key.clone(), value.clone()))
+                        .collect(),
+                ),
+                AccessEqualityDomain::Runtime(values) => {
+                    F::equality_source(index, key, ir::IndexValue::ParamSet(values.clone()))
+                }
+            })
         }
         AccessFilterIndexAtom::Range { property, range } => [
             helix_ast::index::RangeIndexDirection::Asc,

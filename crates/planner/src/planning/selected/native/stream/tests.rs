@@ -64,6 +64,33 @@ fn native_access_stream_lowers_composed_ops_to_pipeline_contract() {
 }
 
 #[test]
+fn native_access_stream_canonicalizes_filters_before_shape_selection() {
+    let predicate = Predicate::and(vec![
+        Predicate::eq("active", true),
+        Predicate::eq("verified", true),
+    ]);
+    let filtered = nodes()
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("active", true),
+        )
+        .unwrap()
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("verified", true),
+        )
+        .unwrap()
+        .into_logical_expr()
+        .unwrap();
+
+    assert!(matches!(
+        filtered,
+        logical::LogicalExpr::AccessFilter(filter)
+            if filter.predicate().as_ref() == &predicate
+    ));
+}
+
+#[test]
 fn native_access_stream_lowers_single_pipeline_ops_to_typed_pipeline_contract() {
     let dynamic_limit = nodes()
         .limit(&StreamBound::expr(Expr::param("limit")))
@@ -138,13 +165,24 @@ fn native_access_stream_validates_stream_bounds() {
 }
 
 #[test]
-fn native_access_stream_filter_propagates_each_validation_stage() {
+fn native_access_stream_filter_validates_predicates_and_defers_missing_bindings() {
     let ctx = crate::context::PlannerContext::default();
-    for predicate in [
-        Predicate::eq("", 1),
-        Predicate::eq_param("status", "missing"),
-        Predicate::eq("$label", ""),
-    ] {
+    for predicate in [Predicate::eq("", 1), Predicate::eq("$label", "")] {
         assert!(nodes().filter(&ctx, &predicate).is_err());
     }
+
+    let predicate = Predicate::and(vec![
+        Predicate::eq_param("status", "missing_status"),
+        Predicate::is_in_param("group", "missing_groups"),
+    ]);
+    let filtered = nodes()
+        .filter(&ctx, &predicate)
+        .unwrap()
+        .into_logical_expr()
+        .unwrap();
+    assert!(matches!(
+        filtered,
+        logical::LogicalExpr::AccessFilter(filter)
+            if filter.predicate() == &ir::PredicatePlan::new(predicate).unwrap()
+    ));
 }

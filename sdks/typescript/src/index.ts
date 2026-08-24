@@ -28,14 +28,33 @@ const DATABASE_ID_HEADER = "x-helix-database-id";
 export class HelixError extends Error {
   readonly kind: "Network" | "Remote" | "Serialization" | "InvalidUrl" | "InvalidRequest" | "EmbeddedUnavailable" | "Embedded";
   readonly details?: string;
+  readonly statusCode?: number;
   readonly code?: string;
+  readonly serverMessage?: string;
+  readonly serverDetails?: unknown;
+  readonly rawBody?: string;
 
-  private constructor(kind: HelixError["kind"], message: string, details?: string, code?: string) {
+  private constructor(
+    kind: HelixError["kind"],
+    message: string,
+    details?: string,
+    code?: string,
+    remote?: {
+      statusCode: number;
+      serverMessage: string;
+      serverDetails?: unknown;
+      rawBody: string;
+    },
+  ) {
     super(message);
     this.name = "HelixError";
     this.kind = kind;
     this.details = details;
+    this.statusCode = remote?.statusCode;
     this.code = code;
+    this.serverMessage = remote?.serverMessage;
+    this.serverDetails = remote?.serverDetails;
+    this.rawBody = remote?.rawBody;
   }
 
   static network(message: string, url?: string): HelixError {
@@ -45,8 +64,48 @@ export class HelixError extends Error {
     return new HelixError("Network", `error communicating with server: ${message}.${hint}`, message);
   }
 
-  static remote(details: string, code?: string): HelixError {
-    return new HelixError("Remote", `got error from server: ${details}`, details, code);
+  static remote(details: string, code?: string): HelixError;
+  static remote(statusCode: number, rawBody: string, statusText: string): HelixError;
+  static remote(statusCodeOrDetails: number | string, rawBodyOrCode = "", statusText = ""): HelixError {
+    if (typeof statusCodeOrDetails === "string") {
+      return new HelixError("Remote", `got error from server: ${statusCodeOrDetails}`, statusCodeOrDetails, rawBodyOrCode || undefined);
+    }
+
+    const statusCode = statusCodeOrDetails;
+    const rawBody = rawBodyOrCode;
+    let code: string | undefined;
+    let serverMessage: string | undefined;
+    let serverDetails: unknown;
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const body = parsed as Record<string, unknown>;
+        const errorField = typeof body.error === "string" && body.error.length > 0 ? body.error : undefined;
+        const msgField = typeof body.msg === "string" && body.msg.length > 0 ? body.msg : undefined;
+        const codeField = typeof body.code === "string" && body.code.length > 0 ? body.code : undefined;
+        const messageField = typeof body.message === "string" && body.message.length > 0 ? body.message : undefined;
+        if (errorField !== undefined && msgField !== undefined) {
+          code = errorField;
+          serverMessage = msgField;
+        } else if (errorField !== undefined && codeField !== undefined) {
+          code = codeField;
+          serverMessage = errorField;
+        } else {
+          code = codeField;
+          serverMessage = messageField ?? errorField;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "details")) serverDetails = body.details;
+      }
+    } catch {}
+
+    serverMessage = (serverMessage ?? rawBody) || statusText || `unknown error with code: ${statusCode}`;
+    const details = serverMessage;
+    return new HelixError("Remote", `got error from server: ${serverMessage}`, details, code, {
+      statusCode,
+      serverMessage,
+      serverDetails,
+      rawBody,
+    });
   }
 
   static serialization(message: string): HelixError {
@@ -68,6 +127,14 @@ export class HelixError extends Error {
   static embedded(message: string, code?: string): HelixError {
     return new HelixError("Embedded", `embedded HelixDB error: ${message}`, message, code);
   }
+
+  isConflict(): boolean {
+    return this.kind === "Remote" && this.statusCode === 409;
+  }
+
+  isRateLimited(): boolean {
+    return this.kind === "Remote" && this.statusCode === 429;
+  }
 }
 
 function embeddedError(error: unknown): HelixError {
@@ -80,22 +147,8 @@ function embeddedError(error: unknown): HelixError {
   return HelixError.embedded(error instanceof Error ? error.message : String(error));
 }
 
-function remoteError(body: string, fallback: string): HelixError {
-  try {
-    const parsed = JSON.parse(body) as unknown;
-    if (typeof parsed === "object" && parsed !== null) {
-      const fields = parsed as { error?: unknown; msg?: unknown; code?: unknown };
-      if (typeof fields.error === "string" && typeof fields.msg === "string") {
-        return HelixError.remote(fields.msg, fields.error);
-      }
-      if (typeof fields.error === "string") {
-        return HelixError.remote(fields.error, typeof fields.code === "string" ? fields.code : undefined);
-      }
-    }
-  } catch {
-    // Non-JSON response bodies remain useful human-readable details.
-  }
-  return HelixError.remote(body.length === 0 ? fallback : body);
+function remoteError(body: string, fallback: string, statusCode: number): HelixError {
+  return HelixError.remote(statusCode, body, fallback);
 }
 
 type ClientBackend =
@@ -387,7 +440,7 @@ export class QueryExecutionRequest<R = unknown> {
     } catch {
       body = "";
     }
-    throw remoteError(body, response.statusText || `unknown error with code: ${response.status}`);
+    throw remoteError(body, response.statusText || `unknown error with code: ${response.status}`, response.status);
   }
 
   async send(): Promise<R> {

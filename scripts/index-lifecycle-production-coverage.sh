@@ -32,8 +32,8 @@ jq -e '
         .[];
         (.path
             | startswith("crates/db/src/index_lifecycle/")
-                or . == "crates/db/src/encoding/v1/keys/index_lifecycle.rs"
-                or startswith("crates/db/src/encoding/v1/values/index_lifecycle/"))
+                or . == "crates/db/src/encoding/v2/keys/lifecycle.rs"
+                or startswith("crates/db/src/encoding/v2/values/lifecycle/"))
         and (.lines | type == "array")
         and (.lines | all(.[]; type == "number" and . > 0 and floor == .))
         and (.functions | type == "array")
@@ -132,8 +132,8 @@ SUMMARY="$({
         '
         def selected_path($filename):
             ($filename | startswith($root + "/crates/db/src/index_lifecycle/"))
-            or ($filename | endswith("/crates/db/src/encoding/v1/keys/index_lifecycle.rs"))
-            or ($filename | startswith($root + "/crates/db/src/encoding/v1/values/index_lifecycle/"));
+            or ($filename | endswith("/crates/db/src/encoding/v2/keys/lifecycle.rs"))
+            or ($filename | startswith($root + "/crates/db/src/encoding/v2/values/lifecycle/"));
 
         def relative_path($filename):
             $filename | sub("^" + $root + "/"; "");

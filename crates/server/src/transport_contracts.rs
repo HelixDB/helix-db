@@ -5,10 +5,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request as HttpRequest, StatusCode};
-use db::encoding::keys::tenant::{DataScope, TenantId};
+use db::encoding::keys::scope::{DataScope, TenantId};
 use db::encoding::property::Property as DbProperty;
 use db::execution::interpreter::{
-    ElementRef, ExecutionResult, ExecutionRow, ExecutionValue, RowPath, RowSack,
+    ElementRef, ExecutionResult, ExecutionRow, ExecutionValue, ReturnedValue, RowPath, RowSack,
     RowVirtualProperties,
 };
 use db::query_service::{
@@ -238,6 +238,33 @@ fn transport_response_uses_empty_default_planner_diagnostics() {
 }
 
 #[test]
+fn transport_response_preserves_declared_empty_return_shapes() {
+    let response = QueryResponse::from_execution_result(ExecutionResult {
+        last: None,
+        variables: BTreeMap::new(),
+        returns: BTreeMap::from([
+            (
+                NonEmptyString::new("list").expect("return name is non-empty"),
+                ReturnedValue::EmptyList,
+            ),
+            (
+                NonEmptyString::new("object").expect("return name is non-empty"),
+                ReturnedValue::EmptyObject,
+            ),
+        ]),
+    })
+    .expect("shaped empty execution result converts");
+
+    assert_eq!(
+        response.returns(),
+        &BTreeMap::from([
+            ("list".to_string(), serde_json::json!([])),
+            ("object".to_string(), serde_json::Value::Null),
+        ])
+    );
+}
+
+#[test]
 fn transport_response_preserves_ranked_public_element_metadata() {
     let row = |current: ElementRef, property: &str, value: f64| ExecutionRow {
         current: Some(current.clone()),
@@ -257,11 +284,19 @@ fn transport_response_preserves_ranked_public_element_metadata() {
         returns: BTreeMap::from([
             (
                 NonEmptyString::new("distance").expect("return name is non-empty"),
-                ExecutionValue::Stream(vec![row(ElementRef::Node(7), "$distance", 0.25)]),
+                ReturnedValue::Present(ExecutionValue::Stream(vec![row(
+                    ElementRef::Node(7),
+                    "$distance",
+                    0.25,
+                )])),
             ),
             (
                 NonEmptyString::new("score").expect("return name is non-empty"),
-                ExecutionValue::Stream(vec![row(ElementRef::Edge(9), "$score", 1.5)]),
+                ReturnedValue::Present(ExecutionValue::Stream(vec![row(
+                    ElementRef::Edge(9),
+                    "$score",
+                    1.5,
+                )])),
             ),
         ]),
     })

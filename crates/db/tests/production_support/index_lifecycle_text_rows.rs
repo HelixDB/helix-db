@@ -9,9 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::time::{Duration, Instant};
 
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::index_lifecycle::work::{AppliedFamilyState, SplitRef};
 use crate::HelixStorage;
@@ -61,7 +61,7 @@ pub(super) async fn verify_dropped(db: &crate::HelixDB) {
                 index_keys::RecordKind::TextTermStatistics,
                 index_keys::RecordKind::TextStatisticsEntity,
             ] {
-                let prefix = Key::data_prefix(
+                let prefix = ManagedIndexKey::data_prefix(
                     DataScope::LegacyUnscoped,
                     index_keys::ScopedKey::logical_prefix(kind),
                 );
@@ -130,7 +130,8 @@ async fn observe_steady_state(
         index_keys::RecordKind::BuildDelta,
         index_keys::RecordKind::TextBuildArtifact,
     ] {
-        let prefix = Key::data_prefix(scope, index_keys::ScopedKey::logical_prefix(kind));
+        let prefix =
+            ManagedIndexKey::data_prefix(scope, index_keys::ScopedKey::logical_prefix(kind));
         let mut rows = writer
             .db()
             .scan_prefix(
@@ -186,7 +187,7 @@ async fn observe_steady_state(
     }
 
     let mut roots = HashMap::new();
-    let root_prefix = Key::data_prefix(
+    let root_prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::logical_prefix(index_keys::RecordKind::TextManifestRoot),
     );
@@ -203,10 +204,11 @@ async fn observe_steady_state(
         .await
         .expect("text manifest root scan succeeds")
     {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestRoot(root_key),
             ..
-        } = Key::parse_from_slice(scope, &row.key).expect("text manifest root key decodes")
+        } = ManagedIndexKey::parse_from_slice(scope, &row.key)
+            .expect("text manifest root key decodes")
         else {
             panic!("text manifest root prefix returned a different typed key");
         };
@@ -226,7 +228,7 @@ async fn observe_steady_state(
     );
 
     let mut pages = HashMap::<index_keys::TextManifestPageKey, Vec<SplitRef>>::new();
-    let page_prefix = Key::data_prefix(
+    let page_prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::logical_prefix(index_keys::RecordKind::TextManifestPage),
     );
@@ -243,10 +245,11 @@ async fn observe_steady_state(
         .await
         .expect("text manifest page scan succeeds")
     {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestPage(page_key),
             ..
-        } = Key::parse_from_slice(scope, &row.key).expect("text manifest page key decodes")
+        } = ManagedIndexKey::parse_from_slice(scope, &row.key)
+            .expect("text manifest page key decodes")
         else {
             panic!("text manifest page prefix returned a different typed key");
         };
@@ -282,7 +285,7 @@ async fn observe_steady_state(
         assert_eq!(split_count, root.split_count());
     }
 
-    let state_prefix = Key::data_prefix(
+    let state_prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::logical_prefix(index_keys::RecordKind::TextEntityState),
     );
@@ -301,10 +304,11 @@ async fn observe_steady_state(
         .await
         .expect("text entity-state scan succeeds")
     {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextEntityState(state_key),
             ..
-        } = Key::parse_from_slice(scope, &row.key).expect("text entity-state key decodes")
+        } = ManagedIndexKey::parse_from_slice(scope, &row.key)
+            .expect("text entity-state key decodes")
         else {
             panic!("text entity-state prefix returned a different typed key");
         };
@@ -329,7 +333,7 @@ async fn observe_steady_state(
     }
     assert_eq!(live_entities, expected_live_entities);
 
-    let applied_prefix = Key::data_prefix(
+    let applied_prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::logical_prefix(index_keys::RecordKind::AppliedState),
     );
@@ -346,10 +350,11 @@ async fn observe_steady_state(
         .await
         .expect("builder-applied text-state scan succeeds")
     {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::AppliedState(applied_key),
             ..
-        } = Key::parse_from_slice(scope, &row.key).expect("builder-applied state key decodes")
+        } = ManagedIndexKey::parse_from_slice(scope, &row.key)
+            .expect("builder-applied state key decodes")
         else {
             panic!("builder-applied prefix returned a different typed key");
         };

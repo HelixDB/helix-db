@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::config::{TextIndexDefinition, VectorIndexDefinition};
-use crate::encoding::v1::property::encode_index_partition_value;
+use crate::encoding::v2::values::property::encode_index_partition_value;
 use crate::error::{IndexFamily, IndexLifecycleUnavailableReason};
 use crate::index_lifecycle::work::{TextPartition, VectorTenantPartition};
 use crate::index_lifecycle::{
@@ -293,7 +293,7 @@ impl<'db> ExecutionContext<'db> {
 async fn resolve_text_generation_in_view(
     _context: &ExecutionContext<'_>,
     reader: &(impl slatedb::DbReadOps + Sync),
-    scope: crate::encoding::v1::keys::tenant::DataScope,
+    scope: crate::encoding::v2::keys::scope::DataScope,
     requested: &ValidatedTextIndexDefinition,
     partition: RequestedTextPartition,
 ) -> Result<TextSearchAuthority<ResolvedTextGenerationHandle>> {
@@ -336,7 +336,7 @@ async fn resolve_text_generation_in_view(
 async fn resolve_vector_generation_in_view<D: Distance>(
     _context: &ExecutionContext<'_>,
     reader: &(impl slatedb::DbReadOps + Sync),
-    scope: crate::encoding::v1::keys::tenant::DataScope,
+    scope: crate::encoding::v2::keys::scope::DataScope,
     requested: &ValidatedVectorIndexDefinition,
     partition: RequestedVectorPartition,
 ) -> Result<VectorSearchAuthority<ResolvedVectorGenerationHandle>> {
@@ -415,8 +415,8 @@ mod tests {
 
     use super::*;
     use crate::config::TextAnalyzerKind;
-    use crate::encoding::v1::keys::tenant::DataScope;
-    use crate::encoding::v2::keys::Key;
+    use crate::encoding::v2::keys::scope::DataScope;
+    use crate::encoding::v2::keys::ManagedIndexKey;
     use crate::encoding::v2::keys::ScopedKey;
     use crate::encoding::v2::values::encode_index_record;
     use crate::index_lifecycle::{
@@ -483,7 +483,7 @@ mod tests {
         .unwrap();
         transaction
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::index_record(record.identity().clone()),
                 }
@@ -521,7 +521,7 @@ mod tests {
         .unwrap();
         transaction
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::index_record(record.identity().clone()),
                 }
@@ -771,7 +771,7 @@ mod tests {
             .unwrap();
         db.inner_db()
             .put(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope: DataScope::LegacyUnscoped,
                     kind: ScopedKey::index_record(dropping.identity().clone()),
                 }

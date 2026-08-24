@@ -1,0 +1,151 @@
+---
+title: "HelixDB HTTP API and OpenAPI specification"
+description: "Call the HelixDB v2 query endpoint and discover its machine-readable OpenAPI 3.1 contract"
+sidebarTitle: "HTTP API and OpenAPI"
+pageType: "Reference"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
+
+The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
+same contract is available from a local server and a Helix Cloud gateway.
+
+## Machine-readable specification
+
+The canonical OpenAPI 3.1 document is published at both predictable URLs:
+
+- [https://www.helix-db.com/openapi.json](https://www.helix-db.com/openapi.json)
+- [https://docs.helix-db.com/openapi.json](https://docs.helix-db.com/openapi.json)
+
+Use the specification to discover request headers, response codes, health
+endpoints, query-envelope variants, and example read and write requests. Use the
+typed SDKs or `helix query` to build the nested operation tree.
+
+## Endpoint
+
+```http
+POST /v2/query
+Content-Type: application/json
+```
+
+Local development uses `http://localhost:6969/v2/query` by default. For Helix
+Cloud, use the gateway URL and database ID shown in the dashboard or written to
+`helix.toml` by [`helix sync`](/cli/command-reference/sync). The
+`cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
+shared query endpoint.
+
+The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
+local HelixDB server. The Helix Cloud gateway is advertised only for
+`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
+this specification.
+
+Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
+gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
+client must work against both environments.
+
+## Authentication
+
+Local servers do not require authentication by default. Helix Cloud requires a
+cluster API key and database ID:
+
+```http
+Authorization: Bearer <cluster-api-key>
+X-Helix-Database-Id: <database-id>
+```
+
+Create or rotate the cluster key in the Helix Cloud dashboard. Do not put keys
+in source control, agent instructions, `llms.txt`, or catalog manifests.
+
+The hosted HelixDB MCP server has a separate browser OAuth flow. See the
+[HelixDB MCP guide](/database/helix-cloud/connect/mcp) and the public
+[HelixDB authentication guide](https://www.helix-db.com/auth.md).
+
+## Request envelope
+
+`request_type` and the single `query` variant must agree: `read` with `read`, or
+`write` with `write`. `query_name` is optional diagnostic metadata. Parameters
+can be untyped, or every parameter can have a matching entry in
+`parameter_types`.
+
+For raw HTTP JSON, send floating-point values without `parameter_types`.
+The HTTP schema does not advertise typed `f32` or `f64` declarations because
+JSON Schema cannot distinguish an integral number token such as `5` from the
+integer representation that exact typed decoding rejects.
+
+```json
+{
+  "request_type": "read",
+  "query_name": "node_count",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "node_count",
+            "root": {
+              "count": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["node_count"]
+    }
+  }
+}
+```
+
+## Execution headers
+
+| Header | Applies to | Purpose |
+| --- | --- | --- |
+| `X-Helix-Warm` | Reads | Warm eligible execution state before normal traffic. |
+| `X-Helix-Require-Writer` | Reads and writes | Reject execution when the selected server is not a writer. |
+| `X-Helix-Await-Durable` | Writes | Flush the writer before returning success. |
+| `X-Helix-Database-Id` | Helix Cloud | Select the managed database behind a gateway. |
+
+Boolean execution headers accept `true`, `false`, `1`, or `0`. Warm writes and
+durability waits on reads are rejected with `400 Bad Request`.
+
+## Responses
+
+- `200` returns a JSON object keyed by the requested return variables.
+- `204` means Helix Cloud completed a cache-warming read without a body.
+- `400` reports invalid input or request options. On Helix Cloud, it also
+  reports a missing or malformed authentication header.
+- `401` reports an invalid Helix Cloud API key.
+- `402` reports that Helix Cloud query processing is disabled because credit is
+  exhausted.
+- `403` reports that the Helix Cloud API key lacks permission for the query.
+- `408` reports that a Helix Cloud query exceeded its wall-clock limit.
+- `409` reports a transaction conflict that can be retried.
+- `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
+  rejects it before query parsing.
+- `429` reports a Helix Cloud rate limit and can include `Retry-After`.
+- `500` reports an internal query or storage failure.
+- `503` reports that a required writer or ready database is unavailable.
+
+Local servers and Helix Cloud gateways return
+`{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
+`error` and treat `msg` as diagnostic text. An oversized Cloud request uses
+`payload_too_large` as its stable error code. See
+[Error handling](/database/helix-db/query-guides/error-handling) for local error
+codes and retry guidance.
+
+## Related resources
+
+- [`helix query`](/cli/command-reference/query) builds and sends requests from JSON or the TypeScript DSL.
+- [Build and run a query](/database/helix-db/core-concepts/overview) explains the operation tree.
+- [Parameters](/database/helix-db/query-guides/parameters) defines typed and untyped runtime values.

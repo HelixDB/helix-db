@@ -126,7 +126,7 @@ impl<'db> ExecutionContext<'db> {
 }
 
 fn physical_element_key(
-    scope: crate::encoding::keys::tenant::DataScope,
+    scope: crate::encoding::keys::scope::DataScope,
     key: &exec::KvKey,
 ) -> (exec::ElementKeyspace, u64, Bytes) {
     let keyspace = key.keyspace();
@@ -139,7 +139,7 @@ fn physical_element_key(
             keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(id))
         }
     };
-    let physical = keys::Key::Data { scope, kind }.to_bytes();
+    let physical = keys::DataKey::Data { scope, kind }.to_bytes();
     (keyspace, id, physical)
 }
 
@@ -254,8 +254,8 @@ mod tests {
 
     #[test]
     fn element_id_parser_rejects_typed_metadata_keys() {
-        let key = keys::Key::Data {
-            scope: keys::tenant::DataScope::LegacyUnscoped,
+        let key = keys::DataKey::Data {
+            scope: keys::scope::DataScope::LegacyUnscoped,
             kind: keys::DataKeyKind::IndexMetadata(keys::metadata::MetadataKey::new(b"catalog")),
         }
         .to_bytes();

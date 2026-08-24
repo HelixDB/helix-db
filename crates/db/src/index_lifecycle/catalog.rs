@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::config::RuntimeIndexCatalog;
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::scope::DataScope;
 
 use super::{
     IndexGenerationId, IndexId, IndexIdentity, IndexRecordV2, IndexRevision, IndexStateV2,

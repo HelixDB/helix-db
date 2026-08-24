@@ -13,8 +13,8 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, IsolationLevel};
 
 use super::*;
-use crate::encoding::v1::keys::vectors::{VectorEntryCandidateNodeKey, VectorKey};
-use crate::encoding::v1::values::vectors::entry::encode_entry_candidate_layer;
+use crate::encoding::v2::keys::indexes::vector::{VectorEntryCandidateNodeKey, VectorKey};
+use crate::encoding::v2::values::indexes::vector::entry_candidate::encode_entry_candidate_layer;
 use crate::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
 use crate::search::vector::{self, VectorIndexConfig, VectorWriteMeasurement};
 
@@ -1062,7 +1062,7 @@ async fn run_graph_delete_contracts(db: &Db) {
 }
 
 fn session_identity(
-    scope: crate::encoding::v1::keys::tenant::DataScope,
+    scope: crate::encoding::v2::keys::scope::DataScope,
     physical_index_id: u64,
 ) -> VectorGenerationIdentity {
     VectorGenerationIdentity::try_new(
@@ -1083,7 +1083,7 @@ async fn session_test_db(name: &str) -> Arc<Db> {
 }
 
 fn run_build_session_identity_contract<D: Distance>() {
-    use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
+    use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 
     let first = session_identity(DataScope::Tenant(TenantId::from_u128(1)), 31);
     let second = session_identity(DataScope::Tenant(TenantId::from_u128(2)), 31);
@@ -1123,7 +1123,7 @@ fn run_build_session_identity_contract<D: Distance>() {
 }
 
 async fn run_build_session_limit_contract<D: Distance>() {
-    use crate::encoding::v1::keys::tenant::DataScope;
+    use crate::encoding::v2::keys::scope::DataScope;
 
     let identity = session_identity(DataScope::LegacyUnscoped, 41);
     let mut session =
@@ -1180,7 +1180,7 @@ async fn run_build_session_limit_contract<D: Distance>() {
 }
 
 async fn run_build_session_flush_recovery_contract<D: Distance>() {
-    use crate::encoding::v1::keys::tenant::DataScope;
+    use crate::encoding::v2::keys::scope::DataScope;
 
     let identity = session_identity(DataScope::LegacyUnscoped, 51);
     let row = MutationOpCache::<D>::node_row_id(0, 1);
@@ -1222,7 +1222,7 @@ async fn run_build_session_flush_recovery_contract<D: Distance>() {
 }
 
 async fn run_build_session_flush_edge_contract<D: Distance>() {
-    use crate::encoding::v1::keys::tenant::DataScope;
+    use crate::encoding::v2::keys::scope::DataScope;
 
     let identity = session_identity(DataScope::LegacyUnscoped, 52);
     let db = session_test_db(&format!(
@@ -1258,7 +1258,7 @@ async fn run_build_session_flush_edge_contract<D: Distance>() {
 }
 
 async fn run_build_session_reuse_contract() {
-    use crate::encoding::v1::keys::tenant::DataScope;
+    use crate::encoding::v2::keys::scope::DataScope;
 
     let identity = session_identity(DataScope::LegacyUnscoped, 61);
     let handle =

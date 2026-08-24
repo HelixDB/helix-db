@@ -6,12 +6,19 @@ use crate::ir;
 pub(in crate::rules::access::filter) enum AccessFilterIndexAtom {
     Equality {
         property: ir::NonEmptyString,
-        value: ir::IndexValue,
+        domain: AccessEqualityDomain,
     },
     Range {
         property: ir::NonEmptyString,
         range: ir::IndexRange,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::rules::access::filter) enum AccessEqualityDomain {
+    One(ir::IndexValue),
+    Many(ir::AtLeast<ir::IndexValue, 2>),
+    Runtime(ir::RuntimeEqualitySet),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +95,6 @@ pub(in crate::rules::access::filter) enum AccessFilterIndexPlanMatch {
 pub(in crate::rules::access::filter) enum AccessFilterIndexPlanRejection {
     NotIndexCandidate,
     PropertyNotIndexable,
-    LiteralValueNotIndexable,
     EmptyIndexAtoms,
     TooFewIndexBranches,
     BranchLimitDisabled,
@@ -141,7 +147,9 @@ mod tests {
     fn atom_and_branch_wrappers_preserve_cardinality_through_fallible_maps() {
         let atom = AccessFilterIndexAtom::Equality {
             property: ir::NonEmptyString::new("age").unwrap(),
-            value: ir::IndexValue::Param(ir::NonEmptyString::new("age").unwrap()),
+            domain: AccessEqualityDomain::One(ir::IndexValue::Param(
+                ir::NonEmptyString::new("age").unwrap(),
+            )),
         };
         let atoms = AccessFilterIndexAtoms::new(vec![atom]).unwrap();
         let branches = AccessFilterIndexBranches::new(vec![atoms.clone(), atoms.clone()]).unwrap();

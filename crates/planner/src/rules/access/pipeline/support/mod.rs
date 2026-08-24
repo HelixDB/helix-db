@@ -2,11 +2,10 @@
 //!
 //! The public rule wrappers live in the parent module. This facade composes
 //! narrow support contracts for access-pipeline rebuilds, empty-source
-//! collapse, adjacent filter merging, and distinct simplification.
+//! collapse, and distinct simplification.
 
 mod distinct;
 mod empty;
-mod filter;
 mod rebuild;
 
 use super::contracts;
@@ -29,13 +28,6 @@ pub(super) fn simplify_pipeline(
         contracts::EmptyPipelineResult::NotEmpty(rejection) => rejection,
     };
 
-    let filters = match filter::merge_pipeline_filters(pipeline) {
-        contracts::PipelineFilterMerge::Merged(result) => {
-            return contracts::PipelineSimplification::Rewritten(result);
-        }
-        contracts::PipelineFilterMerge::NotApplicable(rejection) => rejection,
-    };
-
     let distinct = match distinct::simplify_pipeline_distinct(pipeline) {
         contracts::PipelineDistinctSimplification::Rewritten(result) => {
             return contracts::PipelineSimplification::Rewritten(result);
@@ -44,11 +36,7 @@ pub(super) fn simplify_pipeline(
     };
 
     contracts::PipelineSimplification::NotApplicable(
-        contracts::PipelineSimplificationRejection::NoLocalSimplification {
-            empty,
-            filters,
-            distinct,
-        },
+        contracts::PipelineSimplificationRejection::NoLocalSimplification { empty, distinct },
     )
 }
 
@@ -80,7 +68,6 @@ mod tests {
             contracts::PipelineSimplification::NotApplicable(
                 contracts::PipelineSimplificationRejection::NoLocalSimplification {
                     empty: contracts::EmptyPipelineRejection::NonEmptyAccessSource,
-                    filters: contracts::PipelineFilterMergeRejection::NoAdjacentFilters,
                     distinct: contracts::PipelineDistinctRejection::NoReducibleDistinct,
                 }
             )

@@ -66,6 +66,20 @@ function sampleRequest(): QueryRequest {
   );
 }
 
+async function remoteError(status: number, body: string): Promise<HelixError> {
+  const server = await spawnCaptureServer({ status, body });
+  const client = new Client(server.base);
+  try {
+    await client.query(sampleRequest()).send();
+    assert.fail("non-success response should return a remote error");
+  } catch (error) {
+    assert.ok(error instanceof HelixError);
+    return error;
+  } finally {
+    await server.close();
+  }
+}
+
 async function withFakeNativeModule<T>(run: (moduleUrl: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "helixdb-ts-native-"));
   const modulePath = join(dir, "native.mjs");
@@ -250,13 +264,68 @@ for (const databaseId of ["", "   "]) {
 // ---- Non-200 response surfaces a remote error -------------------------------
 
 {
-  const server = await spawnCaptureServer({ status: 500, body: "boom" });
-  const client = new Client(server.base);
-  await assert.rejects(
-    client.query(sampleRequest()).send(),
-    (error: unknown) => error instanceof HelixError && error.kind === "Remote" && error.details === "boom",
-  );
-  await server.close();
+  const body = '{"error":"write conflict","code":"write_conflict","details":{"retryable":true}}';
+  const error = await remoteError(409, body);
+
+  assert.equal(error.kind, "Remote");
+  assert.equal(error.statusCode, 409);
+  assert.equal(error.code, "write_conflict");
+  assert.equal(error.serverMessage, "write conflict");
+  assert.deepEqual(error.serverDetails, { retryable: true });
+  assert.equal(error.rawBody, body);
+  assert.equal(error.details, "write conflict");
+  assert.equal(error.isConflict(), true);
+  assert.equal(error.isRateLimited(), false);
+}
+
+for (const status of [400, 401, 403, 409, 429, 503]) {
+  const body = JSON.stringify({ message: `status ${status}`, code: "test_error" });
+  const error = await remoteError(status, body);
+
+  assert.equal(error.statusCode, status);
+  assert.equal(error.code, "test_error");
+  assert.equal(error.serverMessage, `status ${status}`);
+  assert.equal(error.rawBody, body);
+  assert.equal(error.isConflict(), status === 409);
+  assert.equal(error.isRateLimited(), status === 429);
+}
+
+{
+  const error = await remoteError(500, "upstream failed");
+
+  assert.equal(error.statusCode, 500);
+  assert.equal(error.code, undefined);
+  assert.equal(error.serverMessage, "upstream failed");
+  assert.equal(error.serverDetails, undefined);
+  assert.equal(error.rawBody, "upstream failed");
+  assert.equal(error.details, "upstream failed");
+}
+
+{
+  const body = '{"message":"write conflict","code":42,"details":null}';
+  const error = await remoteError(409, body);
+
+  assert.equal(error.code, undefined);
+  assert.equal(error.serverMessage, "write conflict");
+  assert.equal(error.serverDetails, null);
+  assert.equal(error.rawBody, body);
+}
+
+{
+  const error = await remoteError(503, "");
+
+  assert.equal(error.serverMessage, "Service Unavailable");
+  assert.equal(error.rawBody, "");
+  assert.equal(error.details, "Service Unavailable");
+}
+
+{
+  const error = HelixError.remote("legacy remote error", "legacy_code");
+
+  assert.equal(error.kind, "Remote");
+  assert.equal(error.details, "legacy remote error");
+  assert.equal(error.code, "legacy_code");
+  assert.equal(error.statusCode, undefined);
 }
 
 for (const testCase of [
@@ -267,6 +336,11 @@ for (const testCase of [
   },
   {
     body: '{"error":"legacy message","code":"index_not_found"}',
+    code: "index_not_found",
+    details: "legacy message",
+  },
+  {
+    body: '{"error":"legacy message","code":"index_not_found","message":"generic message"}',
     code: "index_not_found",
     details: "legacy message",
   },

@@ -295,16 +295,16 @@ mod tests {
         let nodes = vec![1, 2, 3];
         let set = NeighborSet::try_from_canonical(9, limit(3), nodes.clone()).unwrap();
         assert_eq!(
-            crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors(
+            crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors(
                 set.as_slice(),
             )
             .unwrap(),
-            crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors(&nodes)
+            crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors(&nodes)
                 .unwrap(),
         );
         assert_eq!(
-            crate::encoding::v1::values::vectors::encode_layer0_neighbors(set.as_slice()),
-            crate::encoding::v1::values::vectors::encode_layer0_neighbors(&nodes),
+            crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors(set.as_slice()),
+            crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors(&nodes),
         );
     }
 }

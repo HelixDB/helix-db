@@ -66,7 +66,9 @@ async fn mount_cluster(server: &MockServer) {
                 "cluster_id":"cluster-1",
                 "name":"production",
                 "project_id":"project-1",
-                "gateway_url":server.uri()
+                "gateway_url":server.uri(),
+                "query_auth_header":"x-api-key",
+                "query_auth_env":"HELIX_API_KEY"
             }]
         })))
         .expect(1)
@@ -120,6 +122,9 @@ async fn sync_reconciliation_covers_push_pull_divergence_fallback_and_errors() {
     );
     assert!(local_only.contains("Cloud files to be created"));
     assert!(local_only.contains("Enterprise sync reconciliation applied"));
+    assert!(fs::read_to_string(project.join("helix.toml"))
+        .unwrap()
+        .contains("query_auth_scheme = \"raw\""));
 
     server.reset().await;
     mount_cluster(&server).await;

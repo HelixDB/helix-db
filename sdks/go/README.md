@@ -1,11 +1,12 @@
 # HelixDB Go SDK
 
-Go SDK for building and executing HelixDB queries.
+Go SDK for building and executing HelixDB server queries. Version `v0.3.1`
+ships the operation-tree query builder and HTTP client.
 
 ## Install
 
 ```sh
-go get github.com/helixdb/helix-db/sdks/go
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -245,8 +246,9 @@ create a binding.
 
 `Client.Exec` does not retry HTTP 409 conflicts automatically. Callers should
 retry only when the operation is safe to replay. Remote errors are returned as
-`*helix.HelixError` with `StatusCode` and the static `Code` populated, and `helix.IsConflict(err)`
-or `errors.Is(err, helix.ErrConflict)` checks for HTTP 409:
+`*helix.HelixError` with `StatusCode` and the static `Code` populated. Use
+`helix.IsConflict(err)` or `errors.Is(err, helix.ErrConflict)` to detect HTTP
+409:
 
 The canonical [query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx)
 documents the complete catalog and migration contract.
@@ -264,42 +266,14 @@ func ExecWithConflictRetry(ctx context.Context, client *helix.Client, build func
 }
 ```
 
-## Embedded cache profiles
+## Release scope
 
-Configured embedded constructors accept vector-memory-only, memory, or hybrid
-cache profiles. Vector-memory-only disables SlateDB and object-store caches;
-canonical data still uses the selected storage source.
-
-```go
-client, err := helix.NewEmbeddedClientWithConfig(
-	helix.DiskSource{Root: "/data/helix", Database: "app"},
-	helix.EmbeddedCacheConfig{
-		VectorMemoryBytes: 256 * 1024 * 1024,
-		Mode:              helix.VectorMemoryOnlyCache{},
-	},
-)
-```
-
-## Native graph algorithms
-
-Native graph support is included when the generated UniFFI tree is linked with
-the `helixdb_uniffi` build tag:
-
-```go
-selection := helix.GraphSelection{
-	NodeTraversal: helix.G().NWhere(helix.SourceHasKey("$id")),
-	EdgeTraversal: helix.G().EWhere(helix.SourceHasKey("$id")),
-	Direction: helix.GraphDirected,
-	AllowFullScan: true,
-}
-graph, err := client.Graph(ctx, selection)
-if err != nil { return err }
-scores, err := graph.BetweennessCentrality(helix.GraphifyBetweennessOptions())
-```
-
-The load performs one ordinary query and all later algorithms run locally.
-Without generated native bindings, `Client.Graph` returns
-`ErrNativeGraphUnavailable` before issuing the query.
+Version `v0.3.1` does not distribute the generated native bindings required by
+the embedded database or native graph algorithms. A standard module install
+returns `ErrNativeBindingsUnavailable` from embedded constructors and
+`ErrNativeGraphUnavailable` from `Client.Graph`. Do not enable the
+`helixdb_uniffi` build tag unless you separately generate and link compatible
+bindings and native libraries.
 
 ## Notes
 

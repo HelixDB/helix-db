@@ -24,7 +24,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         kind: keys::DataKeyKind<'a>,
     ) -> Bytes {
-        keys::Key::Data {
+        keys::DataKey::Data {
             scope: self.tenant_scope,
             kind,
         }
@@ -99,7 +99,7 @@ impl<'db> ExecutionContext<'db> {
         end: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
-        let (start, end) = keys::Key::data_range(self.tenant_scope, start, end);
+        let (start, end) = keys::DataKey::data_range(self.tenant_scope, start, end);
         if let Some(active) = self.active_write_tx() {
             let mut iter = active.txn.scan(start..end).await?;
             return collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control)
@@ -139,7 +139,7 @@ impl<'db> ExecutionContext<'db> {
         prefix: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
-        let prefix = keys::Key::data_prefix(self.tenant_scope, prefix);
+        let prefix = keys::DataKey::data_prefix(self.tenant_scope, prefix);
         if let Some(active) = self.active_write_tx() {
             let mut iter = active.txn.scan_prefix(prefix, ..).await?;
             return collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control)
@@ -174,7 +174,7 @@ impl<'db> ExecutionContext<'db> {
 async fn collect_limited(
     iter: &mut slatedb::DbIterator,
     limit: Option<usize>,
-    tenant_scope: crate::encoding::keys::tenant::DataScope,
+    tenant_scope: crate::encoding::keys::scope::DataScope,
     execution_control: crate::execution_control::ExecutionControl,
 ) -> Result<Vec<(Bytes, Bytes)>> {
     let mut rows = Vec::new();
@@ -259,10 +259,10 @@ mod tests {
     async fn tenant_scoped_raw_reads_and_scans_are_isolated() {
         let db = test_support::open_db("storage-tenant-scope").await;
         let tenant_a =
-            crate::encoding::keys::tenant::TenantId::from_ulid_str("0000000000000000000000000A")
+            crate::encoding::keys::scope::TenantId::from_ulid_str("0000000000000000000000000A")
                 .expect("valid tenant");
         let tenant_b =
-            crate::encoding::keys::tenant::TenantId::from_ulid_str("0000000000000000000000000B")
+            crate::encoding::keys::scope::TenantId::from_ulid_str("0000000000000000000000000B")
                 .expect("valid tenant");
         let scope_a = crate::DataScope::Tenant(tenant_a);
         let scope_b = crate::DataScope::Tenant(tenant_b);
@@ -272,7 +272,7 @@ mod tests {
         let raw = db.inner_db();
 
         raw.put(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: scope_a,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(1)),
             }
@@ -282,7 +282,7 @@ mod tests {
         .await
         .unwrap();
         raw.put(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: scope_b,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(1)),
             }
@@ -292,8 +292,8 @@ mod tests {
         .await
         .unwrap();
         raw.put(
-            keys::Key::Data {
-                scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+            keys::DataKey::Data {
+                scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(1)),
             }
             .to_bytes(),
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(
             ctx_a
                 .get_raw(
-                    &keys::Key::Data {
+                    &keys::DataKey::Data {
                         scope: scope_a,
                         kind: logical_key.clone(),
                     }
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(
             ctx_b
                 .get_raw(
-                    &keys::Key::Data {
+                    &keys::DataKey::Data {
                         scope: scope_b,
                         kind: logical_key.clone(),
                     }
@@ -332,8 +332,8 @@ mod tests {
         assert_eq!(
             legacy_ctx
                 .get_raw(
-                    &keys::Key::Data {
-                        scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+                    &keys::DataKey::Data {
+                        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
                         kind: logical_key,
                     }
                     .to_bytes(),

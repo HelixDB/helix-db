@@ -6,14 +6,14 @@ use super::support::*;
 use crate::config::SecondaryIndexDefinition;
 use crate::encoding::indexes::equality::{EqualityIndexKey, GlobalEdgeEqualityIndexKey};
 use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDirection;
-use crate::encoding::indexes::{hash_property_name, hash_property_value, IndexKey};
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v2::keys::Key as ManagedKey;
+use crate::encoding::indexes::{hash_property_name, hash_property_value, PropertyIndexKey};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey as ManagedKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, ScopedKey, SecondaryEntryKey, SecondaryEntryLane,
     SecondaryEqualityBitmapKey,
 };
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::values::{
     encode_index_record, encode_secondary_entry, SecondaryEqualityBitmapValue,
 };
@@ -962,6 +962,122 @@ async fn dynamic_equality_is_the_only_runtime_classifier_for_null_nan_and_indexe
         )
         .await,
         ExecutionValue::Scalars(Vec::new())
+    );
+}
+
+#[tokio::test]
+async fn dynamic_membership_batches_safe_values_and_falls_back_authoritatively() {
+    let db = test_support::open_db("access-dynamic-membership").await;
+    let active = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("status", PropertyValue::from("active"))],
+    )
+    .await;
+    let paused = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("status", PropertyValue::from("paused"))],
+    )
+    .await;
+    let explicit_null =
+        test_support::add_node_with_properties(&db, "User", vec![("status", PropertyValue::Null)])
+            .await;
+    let missing = test_support::add_node_with_properties(&db, "User", Vec::new()).await;
+    let _wrong_label = test_support::add_node_with_properties(
+        &db,
+        "Account",
+        vec![("status", PropertyValue::Null)],
+    )
+    .await;
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        61,
+        &[("active", active), ("paused", paused)],
+    )
+    .await;
+    let param = test_support::name("late_statuses");
+    let plan = exec::ExecNodeAccessPlan::DynamicMembership {
+        index: catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status")),
+        key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+        values: ir::RuntimeEqualitySet::new(param.clone(), std::num::NonZeroUsize::new(2).unwrap()),
+    };
+
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan.clone(),
+            context::ParamBindings::default()
+                .with_value(param.clone(), PropertyValue::StringArray(Vec::new())),
+        )
+        .await,
+        ExecutionValue::Scalars(Vec::new())
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.multi_get_calls, 0);
+    assert_eq!(metrics.scans, 0);
+
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan.clone(),
+            context::ParamBindings::default().with_value(
+                param.clone(),
+                PropertyValue::StringArray(vec![
+                    "active".to_owned(),
+                    "paused".to_owned(),
+                    "active".to_owned(),
+                ]),
+            ),
+        )
+        .await,
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::NodeId(active),
+            ExecutionScalar::NodeId(paused),
+        ])
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.multi_get_calls, 1);
+    assert_eq!(metrics.scans, 0);
+
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan.clone(),
+            context::ParamBindings::default().with_value(
+                param.clone(),
+                PropertyValue::Array(vec![PropertyValue::from("active"), PropertyValue::Null]),
+            ),
+        )
+        .await,
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::NodeId(active),
+            ExecutionScalar::NodeId(explicit_null),
+            ExecutionScalar::NodeId(missing),
+        ])
+    );
+
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            plan,
+            context::ParamBindings::default().with_value(
+                param,
+                PropertyValue::StringArray(vec![
+                    "active".to_owned(),
+                    "paused".to_owned(),
+                    "absent".to_owned(),
+                ]),
+            ),
+        )
+        .await,
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::NodeId(active),
+            ExecutionScalar::NodeId(paused),
+        ])
     );
 }
 
@@ -1944,25 +2060,25 @@ async fn dynamic_equality_ignores_legacy_bitmaps_while_builtin_label_scan_remain
     let node_property = crate::config::scoped_secondary_index_property("User", "status");
     let edge_property = crate::config::scoped_secondary_index_property("FOLLOWS", "status");
     for key in [
-        Key::Data {
+        DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(IndexKey::Equality(EqualityIndexKey::new(
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
                 hash_property_name("$label"),
                 hash_property_value("User"),
             ))),
         }
         .to_bytes(),
-        Key::Data {
+        DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(IndexKey::Equality(EqualityIndexKey::new(
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
                 hash_property_name(&node_property),
                 hash_property_value("active"),
             ))),
         }
         .to_bytes(),
-        Key::Data {
+        DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(IndexKey::GlobalEdgeEquality(
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::GlobalEdgeEquality(
                 GlobalEdgeEqualityIndexKey::new(
                     hash_property_name(&edge_property),
                     hash_property_value("active"),

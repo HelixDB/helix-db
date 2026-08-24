@@ -1,60 +1,15 @@
+//! Deprecated V1 paths retained for migrations and compatibility checks.
+
+#![allow(deprecated, unused_imports)]
+
+#[deprecated(note = "use encoding::v2::keys::indexes")]
 pub mod indexes;
+#[deprecated(note = "use encoding::v2::keys")]
 pub mod keys;
+#[deprecated(note = "use encoding::v2::values::property")]
 pub mod property;
+#[deprecated(note = "use encoding::v2::values")]
 pub mod values;
 
-use crate::encoding::error::EncodingError;
-
-#[inline]
-pub(crate) fn read_u64(slice: &[u8], start: usize) -> Result<u64, EncodingError> {
-    let end =
-        start
-            .checked_add(core::mem::size_of::<u64>())
-            .ok_or(EncodingError::BufferTooShort {
-                expected: usize::MAX,
-                actual: slice.len(),
-            })?;
-    let bytes: [u8; core::mem::size_of::<u64>()] = slice
-        .get(start..end)
-        .ok_or(EncodingError::BufferTooShort {
-            expected: end,
-            actual: slice.len(),
-        })?
-        .try_into()
-        .expect("u64 slice is exactly 8 bytes");
-    Ok(u64::from_be_bytes(bytes))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_u64_decodes_big_endian_at_offset() {
-        let data = [0xAA, 0, 0, 0, 0, 0, 0, 0, 42, 0xBB];
-
-        assert_eq!(read_u64(&data, 1).unwrap(), 42);
-    }
-
-    #[test]
-    fn read_u64_reports_short_buffer() {
-        assert!(matches!(
-            read_u64(&[1, 2, 3], 1),
-            Err(EncodingError::BufferTooShort {
-                expected: 9,
-                actual: 3
-            })
-        ));
-    }
-
-    #[test]
-    fn read_u64_reports_offset_overflow() {
-        assert!(matches!(
-            read_u64(&[], usize::MAX),
-            Err(EncodingError::BufferTooShort {
-                expected: usize::MAX,
-                actual: 0
-            })
-        ));
-    }
-}
+#[deprecated(note = "use encoding::v2::keys::codec::read_u64")]
+pub(crate) use crate::encoding::v2::keys::codec::read_u64;

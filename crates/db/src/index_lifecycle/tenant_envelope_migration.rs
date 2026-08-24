@@ -9,9 +9,12 @@
 use bytes::{BufMut, Bytes};
 use slatedb::{Db, IsolationLevel};
 
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId, TENANT_ID_LEN, TENANT_KEY_PREFIX};
-use crate::encoding::v1::keys::DataKeyKind;
+use crate::encoding::v2::keys::scope::DataScope;
+#[cfg(test)]
+use crate::encoding::v2::keys::scope::{TenantId, TENANT_ID_LEN, TENANT_KEY_PREFIX};
+use crate::encoding::v2::keys::DataKeyKind;
 use crate::encoding::v2::keys::{GlobalKey, ScopedKey};
+use crate::encoding::v2::legacy::tenant_envelope::LegacyTenantEnvelope;
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_artifact, decode_build_delta, decode_corpus_statistics,
     decode_index_record, decode_manifest_page, decode_manifest_root, decode_operation_record,
@@ -190,23 +193,18 @@ fn migration_row(key: Bytes, value: Bytes) -> Result<Option<TenantKeyMigrationRo
     if current_key_is_typed(&key, &value)? {
         return Ok(None);
     }
-    if key.len() <= TENANT_ID_LEN {
-        return Ok(None);
-    }
-    let logical = &key[TENANT_ID_LEN..TENANT_ID_LEN + key.len() - TENANT_ID_LEN];
-    let Some(kind) = parse_logical_key(logical, &value)? else {
+    let Some(envelope) = LegacyTenantEnvelope::parse_candidate(&key) else {
         return Ok(None);
     };
-    let tenant = TenantId::from_u128(u128::from_be_bytes(
-        key[0..TENANT_ID_LEN]
-            .try_into()
-            .expect("validated legacy tenant ID is sixteen bytes"),
-    ));
+    let Some(kind) = parse_logical_key(envelope.logical_key(), &value)? else {
+        return Ok(None);
+    };
+    let tenant = envelope.tenant();
     let scope = DataScope::Tenant(tenant);
     let destination_value = migrate_legacy_value(scope, &kind, value)?;
     let mut destination_key = Vec::with_capacity(core::mem::size_of::<u8>() + key.len());
-    destination_key.put_u8(TENANT_KEY_PREFIX);
-    destination_key.put_slice(&key);
+    scope.encode_key_prefix(&mut destination_key);
+    destination_key.put_slice(envelope.logical_key());
     Ok(Some(TenantKeyMigrationRow {
         source_key: key,
         destination_key: Bytes::from(destination_key),
@@ -322,17 +320,15 @@ fn migrate_legacy_cursor(scope: DataScope, cursor: &IndexCursor) -> Result<Index
         return Err(corruption("legacy tenant cursor has an unscoped owner"));
     };
     let bytes = cursor.as_bytes();
-    if bytes.len() <= TENANT_ID_LEN
-        || bytes[0..TENANT_ID_LEN] != tenant.as_u128().to_be_bytes()
-        || !parse_logical_key_without_value(
-            &bytes[TENANT_ID_LEN..TENANT_ID_LEN + bytes.len() - TENANT_ID_LEN],
-        )
-    {
+    let Some(envelope) = LegacyTenantEnvelope::parse_candidate(bytes) else {
+        return Err(corruption("legacy tenant cursor is not a typed tenant key"));
+    };
+    if envelope.tenant() != tenant || !parse_logical_key_without_value(envelope.logical_key()) {
         return Err(corruption("legacy tenant cursor is not a typed tenant key"));
     }
     let mut migrated = Vec::with_capacity(core::mem::size_of::<u8>() + bytes.len());
-    migrated.put_u8(TENANT_KEY_PREFIX);
-    migrated.put_slice(bytes);
+    scope.encode_key_prefix(&mut migrated);
+    migrated.put_slice(envelope.logical_key());
     IndexCursor::try_new(Bytes::from(migrated)).map_err(|error| corruption(&error.to_string()))
 }
 
@@ -347,10 +343,7 @@ pub(super) fn legacy_data_key(scope: DataScope, kind: ScopedKey) -> Bytes {
     match scope {
         DataScope::LegacyUnscoped => Bytes::from(logical),
         DataScope::Tenant(tenant) => {
-            let mut bytes = Vec::with_capacity(TENANT_ID_LEN + logical.len());
-            bytes.put_u128(tenant.as_u128());
-            bytes.put_slice(&logical);
-            Bytes::from(bytes)
+            crate::encoding::v2::legacy::tenant_envelope::encode_for_contract(tenant, &logical)
         }
     }
 }
@@ -367,12 +360,12 @@ mod tests {
 
     use super::*;
     use crate::encoding::indexes::range::RangeIndexDirection;
-    use crate::encoding::v1::keys::{DataKeyKind, Key as GraphKey, NodePropertyKey};
     use crate::encoding::v2::keys::{
-        CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, IndexOperationKey, Key,
-        PartitionFingerprint, SecondaryEntryKey, SecondaryEntryLane, TextBuildArtifactKey,
-        TextEntityStateKey, TextManifestRootKey, VectorPartitionMappingKey,
+        CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, IndexOperationKey,
+        ManagedIndexKey, PartitionFingerprint, SecondaryEntryKey, SecondaryEntryLane,
+        TextBuildArtifactKey, TextEntityStateKey, TextManifestRootKey, VectorPartitionMappingKey,
     };
+    use crate::encoding::v2::keys::{DataKey as GraphKey, DataKeyKind, NodePropertyKey};
     use crate::encoding::v2::values::{encode_build_delta, encode_operation_record};
     use crate::index_lifecycle::work::CoalescedBuildDeltaValue;
     use crate::index_lifecycle::{
@@ -429,7 +422,7 @@ mod tests {
 
     fn migrated_cursor(scope: DataScope, kind: ScopedKey) -> (IndexCursor, Bytes) {
         let legacy = IndexCursor::try_new(legacy_data_key(scope, kind.clone())).unwrap();
-        let current = Key::Data { scope, kind }.to_bytes();
+        let current = ManagedIndexKey::Data { scope, kind }.to_bytes();
         (legacy, current)
     }
 
@@ -673,7 +666,7 @@ mod tests {
         assert_eq!(db.get(&old_operation).await.unwrap(), None);
         let migrated = db
             .get(
-                Key::Data {
+                ManagedIndexKey::Data {
                     scope,
                     kind: operation_kind,
                 }
@@ -743,11 +736,11 @@ mod tests {
 
     #[test]
     fn valid_unscoped_rows_win_over_a_coincidental_tenant_suffix() {
-        use crate::encoding::v1::keys::EdgePropertyPairKey;
+        use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey;
 
         let key = GraphKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::EdgePropertyPair(EdgePropertyPairKey::new(1, 0xFF)),
+            kind: DataKeyKind::EdgePropertyPair(LegacyEdgePropertyPairKey::new(1, 0xFF)),
         }
         .to_bytes();
         assert!(DataKeyKind::parse_from_slice(&key).is_ok());

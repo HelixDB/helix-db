@@ -125,56 +125,6 @@ fn access_pipeline_simplification_rule_keeps_data_producing_variable_pipelines()
 }
 
 #[test]
-fn access_pipeline_simplification_rule_merges_adjacent_filters_before_implementation() {
-    let rule = AccessPipelineSimplificationRule::default();
-    let implementation = AccessPipelineImplementationRule::default();
-    let storage = cost::StorageCostProfile::default();
-    let first = ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true)).unwrap();
-    let second = ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("tenant", "acme")).unwrap();
-    let expr = logical::LogicalExpr::AccessPipeline(
-        logical::AccessPipeline::new(
-            node_access_path(ir::NodeAccessPlan::AllScan),
-            ir::AtLeast::<_, 1>::from_one_and_rest(
-                logical::StreamPipelineOp::Filter { predicate: first },
-                vec![
-                    logical::StreamPipelineOp::Filter { predicate: second },
-                    logical::StreamPipelineOp::Order {
-                        ordering: order_keys(),
-                    },
-                ],
-            ),
-        )
-        .unwrap(),
-    );
-
-    let pipeline = logical_access_pipeline(rule.apply(optimizer::RuleInput {
-        expr: &expr,
-        storage: &storage,
-        indexes: empty_indexes(),
-        planner_limits: default_planner_limits(),
-        stats: default_stats(),
-    }));
-
-    assert!(matches!(
-        pipeline.ops(),
-        [
-            logical::StreamPipelineOp::Filter { predicate },
-            logical::StreamPipelineOp::Order { .. },
-        ] if matches!(predicate.as_ref(), helix_ast::expr::Predicate::And { predicates } if predicates.len() == 2)
-    ));
-    assert_eq!(
-        implementation.apply(optimizer::RuleInput {
-            expr: &expr,
-            storage: &storage,
-            indexes: empty_indexes(),
-            planner_limits: default_planner_limits(),
-            stats: default_stats(),
-        }),
-        optimizer::RuleResult::NotApplicable
-    );
-}
-
-#[test]
 fn access_pipeline_simplification_rule_removes_distinct_noops() {
     let rule = AccessPipelineSimplificationRule::default();
     let storage = cost::StorageCostProfile::default();

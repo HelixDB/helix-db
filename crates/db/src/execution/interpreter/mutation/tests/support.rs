@@ -20,6 +20,7 @@ pub(super) fn step(
         id: exec::ExecStepId::new(id).expect("positive step id"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,

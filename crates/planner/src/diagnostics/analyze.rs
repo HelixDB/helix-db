@@ -271,6 +271,13 @@ impl<'a> Analyzer<'a> {
                             .equality_index_lookups
                             .saturating_add(1);
                     }
+                    exec::ExecNodeAccessPlan::DynamicMembership { values, .. } => {
+                        self.statistics.node_accesses.equality_index_lookups = self
+                            .statistics
+                            .node_accesses
+                            .equality_index_lookups
+                            .saturating_add(values.max_values().get());
+                    }
                     exec::ExecNodeAccessPlan::RangeIndex { .. } => {
                         self.statistics.node_accesses.range_index_scans = self
                             .statistics
@@ -332,6 +339,13 @@ impl<'a> Analyzer<'a> {
                             .equality_index_lookups
                             .saturating_add(1);
                     }
+                    exec::ExecEdgeAccessPlan::DynamicMembership { values, .. } => {
+                        self.statistics.edge_accesses.equality_index_lookups = self
+                            .statistics
+                            .edge_accesses
+                            .equality_index_lookups
+                            .saturating_add(values.max_values().get());
+                    }
                     exec::ExecEdgeAccessPlan::RangeIndex { .. } => {
                         self.statistics.edge_accesses.range_index_scans = self
                             .statistics
@@ -386,6 +400,13 @@ impl<'a> Analyzer<'a> {
                     .equality_index_lookups
                     .saturating_add(1);
             }
+            exec::ExecNodeSecondarySetPlan::DynamicMembership { values, .. } => {
+                self.statistics.node_accesses.equality_index_lookups = self
+                    .statistics
+                    .node_accesses
+                    .equality_index_lookups
+                    .saturating_add(values.max_values().get());
+            }
             exec::ExecNodeSecondarySetPlan::Range(_) => {
                 self.statistics.node_accesses.range_index_scans = self
                     .statistics
@@ -436,6 +457,13 @@ impl<'a> Analyzer<'a> {
                     .edge_accesses
                     .equality_index_lookups
                     .saturating_add(1);
+            }
+            exec::ExecEdgeSecondarySetPlan::DynamicMembership { values, .. } => {
+                self.statistics.edge_accesses.equality_index_lookups = self
+                    .statistics
+                    .edge_accesses
+                    .equality_index_lookups
+                    .saturating_add(values.max_values().get());
             }
             exec::ExecEdgeSecondarySetPlan::Range(_) => {
                 self.statistics.edge_accesses.range_index_scans = self
@@ -868,6 +896,7 @@ fn unbounded_access_scope(access: &exec::ExecAccessPlan) -> Option<AccessScope> 
             | exec::ExecNodeAccessPlan::Unique { .. }
             | exec::ExecNodeAccessPlan::AuthoritativeScan { .. }
             | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
             | exec::ExecNodeAccessPlan::RangeIndex { .. }
             | exec::ExecNodeAccessPlan::SecondarySet { .. }
             | exec::ExecNodeAccessPlan::VectorSearch { .. }
@@ -880,6 +909,7 @@ fn unbounded_access_scope(access: &exec::ExecAccessPlan) -> Option<AccessScope> 
             | exec::ExecEdgeAccessPlan::Bitmap { .. }
             | exec::ExecEdgeAccessPlan::AuthoritativeScan { .. }
             | exec::ExecEdgeAccessPlan::DynamicEquality { .. }
+            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
             | exec::ExecEdgeAccessPlan::RangeIndex { .. }
             | exec::ExecEdgeAccessPlan::SecondarySet { .. }
             | exec::ExecEdgeAccessPlan::VectorSearch { .. }
@@ -917,6 +947,7 @@ fn scope_for_access(access: &exec::ExecAccessPlan) -> Option<AccessScope> {
             | exec::ExecNodeAccessPlan::Unique { .. }
             | exec::ExecNodeAccessPlan::AuthoritativeScan { .. }
             | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
             | exec::ExecNodeAccessPlan::RangeIndex { .. }
             | exec::ExecNodeAccessPlan::SecondarySet { .. },
         ) => Some(AccessScope {
@@ -929,6 +960,7 @@ fn scope_for_access(access: &exec::ExecAccessPlan) -> Option<AccessScope> {
             | exec::ExecEdgeAccessPlan::Bitmap { .. }
             | exec::ExecEdgeAccessPlan::AuthoritativeScan { .. }
             | exec::ExecEdgeAccessPlan::DynamicEquality { .. }
+            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
             | exec::ExecEdgeAccessPlan::RangeIndex { .. }
             | exec::ExecEdgeAccessPlan::SecondarySet { .. },
         ) => Some(AccessScope {
@@ -964,7 +996,8 @@ fn node_access_label(access: &exec::ExecAccessPlan) -> Option<&ir::NonEmptyStrin
             exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => Some(&key.label),
             exec::ExecNodeAuthoritativeScanPredicate::Predicate(_) => None,
         },
-        exec::ExecNodeAccessPlan::DynamicEquality { key, .. } => Some(&key.label),
+        exec::ExecNodeAccessPlan::DynamicEquality { key, .. }
+        | exec::ExecNodeAccessPlan::DynamicMembership { key, .. } => Some(&key.label),
         exec::ExecNodeAccessPlan::RangeIndex { key, .. } => Some(&key.label),
         exec::ExecNodeAccessPlan::SecondarySet { set } => node_secondary_set_label(set),
         exec::ExecNodeAccessPlan::Empty
@@ -987,7 +1020,8 @@ fn edge_access_label(access: &exec::ExecAccessPlan) -> Option<&ir::NonEmptyStrin
             exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => Some(&key.label),
             exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_) => None,
         },
-        exec::ExecEdgeAccessPlan::DynamicEquality { key, .. } => Some(&key.label),
+        exec::ExecEdgeAccessPlan::DynamicEquality { key, .. }
+        | exec::ExecEdgeAccessPlan::DynamicMembership { key, .. } => Some(&key.label),
         exec::ExecEdgeAccessPlan::RangeIndex { key, .. } => Some(&key.label),
         exec::ExecEdgeAccessPlan::SecondarySet { set } => edge_secondary_set_label(set),
         exec::ExecEdgeAccessPlan::Empty
@@ -1008,7 +1042,8 @@ fn node_secondary_set_label(set: &exec::ExecNodeSecondarySetPlan) -> Option<&ir:
             exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => Some(&key.label),
             exec::ExecNodeAuthoritativeScanPredicate::Predicate(_) => None,
         },
-        exec::ExecNodeSecondarySetPlan::DynamicEquality { key, .. } => Some(&key.label),
+        exec::ExecNodeSecondarySetPlan::DynamicEquality { key, .. }
+        | exec::ExecNodeSecondarySetPlan::DynamicMembership { key, .. } => Some(&key.label),
         exec::ExecNodeSecondarySetPlan::Range(range)
         | exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver: range, .. } => {
             Some(&range.key.label)
@@ -1032,7 +1067,8 @@ fn edge_secondary_set_label(set: &exec::ExecEdgeSecondarySetPlan) -> Option<&ir:
             exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => Some(&key.label),
             exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_) => None,
         },
-        exec::ExecEdgeSecondarySetPlan::DynamicEquality { key, .. } => Some(&key.label),
+        exec::ExecEdgeSecondarySetPlan::DynamicEquality { key, .. }
+        | exec::ExecEdgeSecondarySetPlan::DynamicMembership { key, .. } => Some(&key.label),
         exec::ExecEdgeSecondarySetPlan::Range(range)
         | exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver: range, .. } => {
             Some(&range.key.label)

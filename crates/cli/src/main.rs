@@ -311,18 +311,18 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         message: Option<String>,
     },
 
-    // --- Removed v2 commands -------------------------------------------------
+    // --- Removed legacy commands ---------------------------------------------
     // Hidden so they don't clutter `--help`, but caught explicitly to return a
     // helpful "this moved" message instead of clap's bare "unrecognized
     // subcommand". The trailing args make `helix compile path --flag` route here
     // (a friendly error) rather than failing on an unexpected-argument parse.
-    /// (removed) HelixDB v2 validates queries server-side; there is no compile step
+    /// (removed) HelixDB v3 validates queries server-side; there is no compile step
     #[command(hide = true)]
     Compile {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         args: Vec<String>,
     },
-    /// (removed) HelixDB v2 validates queries server-side; there is no check step
+    /// (removed) HelixDB v3 validates queries server-side; there is no check step
     #[command(hide = true)]
     Check {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
@@ -337,23 +337,24 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
 }
 
 /// Build the friendly error shown when an agent guesses a removed query
-/// command (`helix compile` / `helix check`). HelixDB v2 has no client-side
-/// compile step — queries are validated server-side when sent to a running
-/// instance.
+/// command (`helix compile` / `helix check`). HelixDB v3 has no client-side
+/// compile step — queries are validated server-side through `POST /v2/query`.
 fn removed_query_command_error(command: &str) -> eyre::Report {
-    errors::CliError::new(format!("`helix {command}` is not a command in HelixDB v2"))
-        .with_hint(
-            "HelixDB v2 validates queries server-side — there is no compile/check step. \
-             Send a query to a running instance with \
+    errors::CliError::new(format!(
+        "`helix {command}` is not a command in Helix CLI 3.x"
+    ))
+    .with_hint(
+        "HelixDB v3 validates queries server-side through `POST /v2/query` — \
+             there is no compile/check step. Send a query to a running instance with \
              `helix query <instance> --file <request.json>`.",
-        )
-        .into()
+    )
+    .into()
 }
 
 /// Build the friendly error shown when `helix deploy` is guessed instead of
 /// the real `helix push`.
 fn removed_deploy_command_error() -> eyre::Report {
-    errors::CliError::new("`helix deploy` is not a command in HelixDB v2")
+    errors::CliError::new("`helix deploy` is not a command in Helix CLI 3.x")
         .with_hint("Use `helix push <instance>` to deploy an Enterprise Cloud instance.")
         .into()
 }

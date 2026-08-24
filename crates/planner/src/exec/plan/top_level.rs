@@ -5,7 +5,8 @@ use crate::{cost, ir, logical, physical, trace};
 use crate::exec::validation::execution_order;
 use crate::exec::{
     selected, ExecCondition, ExecExecutionOrder, ExecPlanError, ExecStep, ExecStepId,
-    PlannerMetrics, SelectedExecutableBatchPlanRequest, SelectedExecutablePlanRequest,
+    ExecutableReturns, PlannerMetrics, SelectedExecutableBatchPlanRequest,
+    SelectedExecutablePlanRequest,
 };
 
 /// Interpreter-facing executable DAG plan.
@@ -16,6 +17,9 @@ pub struct ExecutablePlan {
     kind: ir::PlanKind,
     /// Returned variables.
     returns: ir::ReturnPlan,
+    /// Returned variables with executable output shapes.
+    #[serde(skip)]
+    executable_returns: ExecutableReturns,
     /// DAG steps.
     steps: ir::AtLeast<ExecStep, 1>,
     /// Root step.
@@ -41,9 +45,11 @@ impl ExecutablePlan {
         metrics: PlannerMetrics,
     ) -> Result<Self, ExecPlanError> {
         let execution_order = execution_order(&steps, root)?;
+        let executable_returns = ExecutableReturns::resolve(&returns, &steps)?;
         Ok(Self {
             kind,
             returns,
+            executable_returns,
             steps,
             root,
             execution_order,
@@ -126,6 +132,11 @@ impl ExecutablePlan {
     /// Returned variables.
     pub const fn returns(&self) -> &ir::ReturnPlan {
         &self.returns
+    }
+
+    /// Returned variables with planner-inferred output shapes.
+    pub const fn executable_returns(&self) -> &ExecutableReturns {
+        &self.executable_returns
     }
 
     /// DAG steps in stable ID order chosen by the planner.

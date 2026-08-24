@@ -109,7 +109,7 @@ fn coalesced_graph_and_document_projection_cover_absent_indexed_and_invalid_stat
         Property::string("$label", "Document"),
         Property::new(
             "body",
-            crate::encoding::v1::property::property_value::PropertyValue::I64(1),
+            crate::encoding::v2::values::property::property_value::PropertyValue::I64(1),
         ),
     ];
     assert!(matches!(

@@ -174,7 +174,9 @@ mod tests {
         let indexes = catalog::IndexCatalogSnapshot::default();
         let equality = AccessFilterIndexAtom::Equality {
             property: ir::NonEmptyString::new("age").unwrap(),
-            value: ir::IndexValue::Param(ir::NonEmptyString::new("age").unwrap()),
+            domain: super::super::super::atoms::AccessEqualityDomain::One(ir::IndexValue::Param(
+                ir::NonEmptyString::new("age").unwrap(),
+            )),
         };
         let range = AccessFilterIndexAtom::Range {
             property: ir::NonEmptyString::new("age").unwrap(),

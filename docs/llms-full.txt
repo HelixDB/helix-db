@@ -83,7 +83,7 @@ All this means is much lower costs for vastly more amounts of storage.
 ## Next steps
 
   <Card title="Get Started" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Start building">
-    Build and query a connected application with HelixDB.
+    Start a local instance and run the generated query.
   </Card>
   <Card title="Understand the data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model" cta="Explore the model">
     Learn how nodes, edges, properties, and indexes represent your data.
@@ -98,344 +98,143 @@ Page type: Tutorial
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-You will start a local HelixDB server, create two `User` nodes connected by a
-`FOLLOWS` edge, and read them back with one of the forthcoming v3 SDKs.
+This is the canonical local HelixDB quickstart. You will create a project, start
+the generated `dev` instance, run the generated JSON request, and stop the
+instance.
 
 ## Prerequisites
 
-- Docker or Podman
-- Rust, Node.js 20+, Go, Python 3.11+, or the `helix` CLI for raw JSON
+- Docker, or Podman configured as described below
+- A terminal on macOS or Linux, or PowerShell on Windows
 
   <Step title="Install the CLI">
+
+macOS and Linux:
 
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
 ```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+If the CLI is already installed, run [`helix update`](/cli/command-reference/update).
+
   </Step>
-  <Step title="Setup a local project">
+  <Step title="Create a local project">
+
+Create and enter an empty directory, then initialize it:
 
 ```bash
-helix init local # --lang {rs,ts,go,py}
+mkdir my-helix-app
+cd my-helix-app
+helix init local
 ```
 
-This creates the project structure, example query files, and installs dependencies.
+`helix init local` creates:
 
-  you can choose a language to use with the `--lang` flag. The default is TypeScript.
+- `helix.toml` with one local instance named `dev` on port `6969`.
+- `.helix/` for CLI-managed instance state.
+- `.gitignore` entries for `.helix/`, `.env`, `target/`, and `*.log`.
+- `AGENTS.md` with the current CLI workflow for coding agents.
+- `examples/request.json` with a runnable read request.
+
+It does not create a Rust, TypeScript, Go, or Python project. Choose an SDK
+after this CLI journey.
+
+If you use Podman, set `container_runtime = "podman"` under `[project]` in
+`helix.toml` before you start the generated instance. New projects otherwise
+default to Docker.
 
   </Step>
-  <Step title="Start the local database">
+  <Step title="Start the generated instance">
 
 ```bash
-helix start local
+helix start dev
 ```
 
-This starts the local database at `http://localhost:6969/`.
+The CLI starts the local container, publishes it at `http://localhost:6969`,
+and waits for the database health check before it returns.
+
+The default storage mode is in-memory. Stopping the instance removes its data.
+Use `helix start dev --disk` when you need local persistence.
 
   </Step>
-  <Step title="Create and query the graph">
+  <Step title="Run the generated query">
 
-In the generated after running `helix init local`, you will find a file called `queries.rs` (the file suffix will be different depending on the language you chose).
-For the language you chose, paste the following code into the file:
-
-```rust Rust [expandable]
-use helix_db::dsl::prelude::*;
-use helix_db::Client;
-
-#[query]
-fn write_users() -> WriteBatch {
-    write_batch()
-        .var_as("alice", g().add_n("User", vec![("name", "Alice")]))
-        .var_as("bob", g().add_n("User", vec![("name", "Bob")]))
-        .var_as(
-            "follow",
-            g()
-                .n(NodeRef::var("alice"))
-                .add_e(
-                    "FOLLOWS",
-                    NodeRef::var("bob"),
-                    vec![("since", "2026-07-24")],
-                ),
-        )
-        .var_as(
-            "friends",
-            g()
-                .n(NodeRef::var("alice"))
-                .out(Some("FOLLOWS"))
-                .value_map(Some(vec!["$id", "name"])),
-        )
-        .returning(["alice", "bob", "friends"])
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let result: serde_json::Value = Client::new(None)?
-        .query(write_users())
-        .send()
-        .await?;
-    println!("{result:?}");
-    Ok(())
-}
+```bash
+helix query dev --file examples/request.json
 ```
 
-```ts TypeScript [expandable]
-import { Client, NodeRef, g, writeBatch } from "@helix-db/helix-db";
+The generated request counts nodes with the `User` label. A new database
+returns a `node_count` of zero. Edit the JSON file and run the same command
+again to iterate.
 
-const query = writeBatch()
-  .varAs("alice", g().addN("User", { name: "Alice" }))
-  .varAs("bob", g().addN("User", { name: "Bob" }))
-  .varAs(
-    "follow",
-    g()
-      .n(NodeRef.var("alice"))
-      .addE("FOLLOWS", NodeRef.var("bob"), { since: "2026-07-24" }),
-  )
-  .varAs(
-    "friends",
-    g().n(NodeRef.var("alice")).out("FOLLOWS").valueMap(["$id", "name"]),
-  )
-  .returning(["alice", "bob", "friends"]);
+  </Step>
+  <Step title="Stop the instance">
 
-const client = Client.server("http://localhost:6969");
-const result = await client
-  .query(query.toQueryRequest({ queryName: "write_users" }))
-  .send();
-console.log(result);
+```bash
+helix stop dev
 ```
 
-```go Go [expandable]
-package main
+`helix stop` is idempotent, so it also exits successfully when the instance is
+already stopped.
 
-import (
-	"context"
-	"fmt"
-	"log"
+  </Step>
 
-	helix "github.com/helixdb/helix-db/sdks/go"
-)
+## Use an SDK
 
-func main() {
-	request := helix.WriteQuery("write_users").
-		VarAs("alice", helix.G().AddN(
-			"User",
-			helix.Props{helix.Prop("name", "Alice")},
-		)).
-		VarAs("bob", helix.G().AddN(
-			"User",
-			helix.Props{helix.Prop("name", "Bob")},
-		)).
-		VarAs(
-			"follow",
-			helix.G().
-				N(helix.NodeVar("alice")).
-				AddE(
-					"FOLLOWS",
-					helix.NodeVar("bob"),
-					helix.Props{helix.Prop("since", "2026-07-24")},
-				),
-		).
-		VarAs(
-			"friends",
-			helix.G().
-				N(helix.NodeVar("alice")).
-				Out("FOLLOWS").
-				ValueMap("$id", "name"),
-		).
-		Returning("alice", "bob", "friends")
+The SDKs build the same JSON operation tree that `helix query` sends to
+`POST /v2/query`. Initialize a normal language project and install one released
+SDK:
 
-	client, err := helix.NewClient("http://localhost:6969")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var result map[string]any
-	if err := client.Exec(context.Background(), request, &result); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(result)
-}
-```
-
-```python Python [expandable]
-from helixdb import Client, NodeRef, g, write_batch
-
-request = (
-    write_batch()
-    .var_as("alice", g().add_n("User", {"name": "Alice"}))
-    .var_as("bob", g().add_n("User", {"name": "Bob"}))
-    .var_as(
-        "follow",
-        g()
-        .n(NodeRef.var("alice"))
-        .add_e(
-            "FOLLOWS",
-            NodeRef.var("bob"),
-            {"since": "2026-07-24"},
-        ),
-    )
-    .var_as(
-        "friends",
-        g()
-        .n(NodeRef.var("alice"))
-        .out("FOLLOWS")
-        .value_map(["$id", "name"]),
-    )
-    .returning(["alice", "bob", "friends"])
-    .to_query_request(query_name="write_users")
-)
-
-result = Client("http://localhost:6969").query(request)
-print(result)
-```
-
-```json JSON [expandable]
-{
-  "request_type": "write",
-  "query_name": "write_users",
-  "query": {
-    "write": {
-      "entries": [
-        {
-          "query": {
-            "name": "alice",
-            "root": {
-              "add_n": {
-                "label": "User",
-                "properties": [
-                  ["name", { "value": { "string": "Alice" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "bob",
-            "root": {
-              "add_n": {
-                "label": "User",
-                "properties": [
-                  ["name", { "value": { "string": "Bob" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "follow",
-            "root": {
-              "add_e": {
-                "input": {
-                  "nodes": { "reference": { "var": "alice" } }
-                },
-                "label": "FOLLOWS",
-                "to": { "var": "bob" },
-                "properties": [
-                  ["since", { "value": { "string": "2026-07-24" } }]
-                ]
-              }
-            }
-          }
-        },
-        {
-          "query": {
-            "name": "friends",
-            "root": {
-              "value_map": {
-                "input": {
-                  "out": {
-                    "input": {
-                      "nodes": { "reference": { "var": "alice" } }
-                    },
-                    "label": "FOLLOWS"
-                  }
-                },
-                "properties": ["$id", "name"]
-              }
-            }
-          }
-        }
-      ],
-      "returns": ["alice", "bob", "friends"]
-    }
-  }
-}
-```
-
-{/* sdk-commands: no JSON representation */}
 ```bash Rust
-cargo run --bin queries
+cargo add helix-db@3.0.0 tokio serde_json
 ```
 
 ```bash TypeScript
-npm run queries
+npm install @helix-db/helix-db@3.0.4
 ```
 
 ```bash Go
-go run queries.go
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```bash Python
-python queries.py
+python -m pip install helix-db==0.3.4
 ```
 
-  you need to run this in the directory created by `helix init local`.
+Continue with the full setup guide for your language:
 
-Each SDK decodes the same JSON response. Your terminal's object formatting differs by
-language, but the response body is:
-
-```json
-{
-  "alice": [{ "$id": 0 }],
-  "bob": [{ "$id": 1 }],
-  "friends": [{ "$id": 1, "name": "Bob" }]
-}
-```
-
-  </Step>
-
-  <Step title="Open the dashboard">
-
-```bash
-helix dashboard
-```
-
-This opens the dashboard at `http://localhost:3000/`. You can explore the graph and query it with the UI.
-
-  </Step>
-
-## What just happened
-
-- `writeBatch()` made invalid read-only mutation states unrepresentable.
-- Each `varAs` added one named query entry.
-- `NodeRef.var("alice")` referred to the result of the first entry.
-- Each chained operation wrapped the preceding operation as `input`.
-- `returning(...)` selected the named values in the response.
-- The `follow` entry still ran even though it was not returned.
-
-The [query walkthrough](/database/helix-db/core-concepts/overview) takes this same query
-apart operation by operation and explains the request and response JSON.
-
-## Clean up
-
-```bash
-helix stop local
-```
+  <Card title="Rust SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/rust-project-setup">
+    Build and execute typed Rust queries.
+  </Card>
+  <Card title="TypeScript SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
+    Build and execute TypeScript queries.
+  </Card>
+  <Card title="Go SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/go-project-setup">
+    Build and execute Go queries.
+  </Card>
+  <Card title="Python SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/python-project-setup">
+    Build and execute synchronous or asynchronous Python queries.
+  </Card>
 
 ## Next steps
 
+  <Card title="Query walkthrough" icon="route" href="/database/helix-db/core-concepts/overview">
+    Learn how SDK builders become the JSON request sent to HelixDB.
+  </Card>
   <Card title="Data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model">
     Learn how nodes, edges, labels, and properties fit together.
   </Card>
   <Card title="Writing data" icon="pen" href="/database/helix-db/query-guides/writing-data">
     Add, update, and remove graph data.
   </Card>
-  <Card title="Reading data" icon="book-open" href="/database/helix-db/query-guides/reading-data">
-    Select data by ID, label, or indexed property.
-  </Card>
-  <Card title="Use another SDK" icon="code" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
-    Switch to Rust, Go, or Python with the same query model.
+  <Card title="CLI reference" icon="terminal" href="/cli/command-reference">
+    See every current CLI command and option.
   </Card>
 
 # Deployment options
@@ -511,9 +310,21 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 
 ## Start with the CLI
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+Then, in your shell:
+
+```bash
 mkdir my-helix-app
 cd my-helix-app
 helix init local --name dev # add --disk to make persistence the project default
@@ -896,13 +707,18 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 `helix-db` crate provides the query DSL, request types, async
+The published `helix-db` 3.0.0 crate provides the query DSL, request types, async
 HTTP client, native graph helpers, and a feature-gated embedded client.
 
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is published as `helix-db` and imported as `helix_db`.
 
 ## Install
+
+```bash
+cargo add helix-db@3.0.0
+```
+
+Or add the dependency directly:
 
 ```toml Cargo.toml
 [dependencies]
@@ -993,16 +809,15 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 TypeScript SDK targets Node.js 20 or newer and emits the same
-operation-tree AST as the v3 Rust, Go, and Python SDKs.
+The published `@helix-db/helix-db` 3.0.4 package targets Node.js 20 or newer and
+emits the same operation-tree AST as the Rust, Go, and Python SDKs.
 
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is ESM and requires Node.js 20 or newer.
 
 ## Install
 
 ```bash
-npm install @helix-db/helix-db
+npm install @helix-db/helix-db@3.0.4
 ```
 
 The package is ESM. Set `"type": "module"` or compile to ESM.
@@ -1088,16 +903,20 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 Go SDK builds the shared operation-tree AST and executes it through
-a typed client.
+The Go SDK builds the shared operation-tree AST and executes requests through a
+typed HTTP client.
 
-The v3 SDK packages have not been published yet. The Go SDK keeps the module path
-`github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3` suffix.
+Version `v0.3.1` ships the server query builder and HTTP client. It does not
+distribute the native bindings required by embedded execution or native graph
+algorithms.
+
+The module path remains `github.com/helixdb/helix-db/sdks/go`; it does not add a
+`/v3` suffix because the module itself has not reached major version 2.
 
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -1144,11 +963,11 @@ if err := client.Exec(ctx, FindUsers("acme", 25), &response); err != nil {
 Write requests can pass `helix.WriterOnly()` and `helix.AwaitDurability(true)` execution
 options. The client does not retry conflicts automatically.
 
-## Embedded runtime
+## Release scope
 
-Install the SDK with `go get github.com/helixdb/helix-db/sdks/go`. See
-[Embedded database](/database/helix-db/start-here/local-development/embedded-database)
-for storage, cache, and handle configuration.
+Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Embedded
+constructors and `Client.Graph` return native-binding-unavailable errors in a
+standard module installation.
 
 ## Verify
 
@@ -1172,9 +991,9 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The Python SDK is packaged as `helix-db` and imported as `helixdb`. Its builder
-methods use `snake_case` and produce the same operation-tree AST as the other v3
-SDKs.
+The Python SDK is published on PyPI as `helix-db` 0.3.4 and imported as `helixdb`.
+Its builder methods use `snake_case` and produce the same operation-tree AST as
+the other HelixDB v3 SDKs.
 
 `helix-db` includes the synchronous and asynchronous server clients. Install
 `helix-db-embedded` as well only when the application runs HelixDB in process.
@@ -1182,7 +1001,7 @@ SDKs.
 ## Install
 
 ```bash
-python -m pip install helix-db
+python -m pip install helix-db==0.3.4
 ```
 
 ## Define a query
@@ -1329,6 +1148,7 @@ Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+- **[Go SDK v0.3.1](/database/helix-db/start-here/sdk-setup/go-project-setup)** — operation-tree query construction, typed parameters, `/v2/query` execution, index lifecycle requests, and traversal-scoped vector and BM25 search. Upgrade from v0.3.0: this patch keeps unreleased embedded adapters out of public module discovery. Embedded execution and native graph bindings are not distributed in this release.
 - **[Python async client](/database/helix-db/start-here/sdk-setup/python-project-setup#async-execution)** — `helix-db` 0.3.3 adds reusable HTTPX connection pooling, concurrent requests, cancellation-safe response cleanup, and asynchronous embedded writer and reader clients.
 
 - **Open-source database** — the engine moved out of `helix-hyperscale` into the public, modular `helix-db` workspace.
@@ -2093,6 +1913,20 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `count()` | `1` |
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
+
+Populated values keep these existing shapes. Only a declared return with no
+value uses an inferred empty shape:
+
+| Semantic return | Populated | Empty or skipped |
+| --- | --- | --- |
+| At most one row, such as `limit(1)` | Existing one-element array | `null` |
+| Collection, many, or unknown cardinality | Existing array | `[]` |
+| `fold` or mutation | Existing array | `[]` |
+| Scalar terminal, such as `count()` or `exists()` | Existing scalar | No synthetic empty value |
+
+The planner infers this from the semantic output type and guaranteed
+multiplicity. It does not use the observed row count or optimizer estimates. An
+empty `returns` declaration returns `{}` because it declares no response keys.
 
 ## 9. Read it back in a later request
 
@@ -4077,6 +3911,153 @@ the request at runtime and send it to `POST /v2/query`.
     Apply parameters to indexed sources and filters.
   </Card>
 
+# HelixDB HTTP API and OpenAPI specification
+
+Page type: Reference
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
+same contract is available from a local server and a Helix Cloud gateway.
+
+## Machine-readable specification
+
+The canonical OpenAPI 3.1 document is published at both predictable URLs:
+
+- [https://www.helix-db.com/openapi.json](https://www.helix-db.com/openapi.json)
+- [https://docs.helix-db.com/openapi.json](https://docs.helix-db.com/openapi.json)
+
+Use the specification to discover request headers, response codes, health
+endpoints, query-envelope variants, and example read and write requests. Use the
+typed SDKs or `helix query` to build the nested operation tree.
+
+## Endpoint
+
+```http
+POST /v2/query
+Content-Type: application/json
+```
+
+Local development uses `http://localhost:6969/v2/query` by default. For Helix
+Cloud, use the gateway URL and database ID shown in the dashboard or written to
+`helix.toml` by [`helix sync`](/cli/command-reference/sync). The
+`cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
+shared query endpoint.
+
+The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
+local HelixDB server. The Helix Cloud gateway is advertised only for
+`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
+this specification.
+
+Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
+gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
+client must work against both environments.
+
+## Authentication
+
+Local servers do not require authentication by default. Helix Cloud requires a
+cluster API key and database ID:
+
+```http
+Authorization: Bearer <cluster-api-key>
+X-Helix-Database-Id: <database-id>
+```
+
+Create or rotate the cluster key in the Helix Cloud dashboard. Do not put keys
+in source control, agent instructions, `llms.txt`, or catalog manifests.
+
+The hosted HelixDB MCP server has a separate browser OAuth flow. See the
+[HelixDB MCP guide](/database/helix-cloud/connect/mcp) and the public
+[HelixDB authentication guide](https://www.helix-db.com/auth.md).
+
+## Request envelope
+
+`request_type` and the single `query` variant must agree: `read` with `read`, or
+`write` with `write`. `query_name` is optional diagnostic metadata. Parameters
+can be untyped, or every parameter can have a matching entry in
+`parameter_types`.
+
+For raw HTTP JSON, send floating-point values without `parameter_types`.
+The HTTP schema does not advertise typed `f32` or `f64` declarations because
+JSON Schema cannot distinguish an integral number token such as `5` from the
+integer representation that exact typed decoding rejects.
+
+```json
+{
+  "request_type": "read",
+  "query_name": "node_count",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "node_count",
+            "root": {
+              "count": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["node_count"]
+    }
+  }
+}
+```
+
+## Execution headers
+
+| Header | Applies to | Purpose |
+| --- | --- | --- |
+| `X-Helix-Warm` | Reads | Warm eligible execution state before normal traffic. |
+| `X-Helix-Require-Writer` | Reads and writes | Reject execution when the selected server is not a writer. |
+| `X-Helix-Await-Durable` | Writes | Flush the writer before returning success. |
+| `X-Helix-Database-Id` | Helix Cloud | Select the managed database behind a gateway. |
+
+Boolean execution headers accept `true`, `false`, `1`, or `0`. Warm writes and
+durability waits on reads are rejected with `400 Bad Request`.
+
+## Responses
+
+- `200` returns a JSON object keyed by the requested return variables.
+- `204` means Helix Cloud completed a cache-warming read without a body.
+- `400` reports invalid input or request options. On Helix Cloud, it also
+  reports a missing or malformed authentication header.
+- `401` reports an invalid Helix Cloud API key.
+- `402` reports that Helix Cloud query processing is disabled because credit is
+  exhausted.
+- `403` reports that the Helix Cloud API key lacks permission for the query.
+- `408` reports that a Helix Cloud query exceeded its wall-clock limit.
+- `409` reports a transaction conflict that can be retried.
+- `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
+  rejects it before query parsing.
+- `429` reports a Helix Cloud rate limit and can include `Retry-After`.
+- `500` reports an internal query or storage failure.
+- `503` reports that a required writer or ready database is unavailable.
+
+Local servers and Helix Cloud gateways return
+`{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
+`error` and treat `msg` as diagnostic text. An oversized Cloud request uses
+`payload_too_large` as its stable error code. See
+[Error handling](/database/helix-db/query-guides/error-handling) for local error
+codes and retry guidance.
+
+## Related resources
+
+- [`helix query`](/cli/command-reference/query) builds and sends requests from JSON or the TypeScript DSL.
+- [Build and run a query](/database/helix-db/core-concepts/overview) explains the operation tree.
+- [Parameters](/database/helix-db/query-guides/parameters) defines typed and untyped runtime values.
+
 # Handle query errors
 
 Page type: Reference
@@ -4448,8 +4429,8 @@ fails. If every target fails, the normal deterministic error response is returne
 
 Managed clusters target database pods that are ready, running, routable, and not
 quarantined. Add `X-Helix-Require-Writer: true` to target only the authoritative
-writer. Authentication, read rate limits, retries, and the normal query timeout still
-apply before and during fanout.
+writer. Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+retries, and the normal query timeout still apply before and during fanout.
 
 Warming populates the storage, vector, and text caches touched by the read; it does
 not create a separate result cache. `X-Helix-Warm: true` or `1` enables warming;
@@ -5174,7 +5155,9 @@ the request's tenant value to the text-search builder. See
 ## Considerations
 
 - **Noisy neighbors.** Tenants share compute and cache, so a high-volume tenant can affect others'
-  latency. Monitor per-tenant query volume and apply rate limiting on your infrastructure to mitigate.
+  latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+  is shared by the whole database. Monitor per-tenant query volume and apply a
+  separate application-side limiter when many application tenants use that database.
 - **Shared search semantics.** Secondary indexes remain shared. Tenant-scoped vector and text
   searches require an explicit tenant value for the configured tenant property, and the system
   remains shared infrastructure even when search indexes are partitioned by tenant.
@@ -5349,6 +5332,82 @@ Page type: Reference
 Current constraints and practical limits. These reflect the current implementation, not
 fundamental architectural boundaries.
 
+## Helix Cloud request rate limits
+
+Helix Cloud applies a distributed token bucket to `POST /v2/query`. The bucket is
+scoped to the authenticated Cloud database, so reads and writes from every API
+key, application instance, and gateway replica draw from the same allowance.
+
+| Plan | Sustained rate | Burst capacity |
+| --- | ---: | ---: |
+| Idea | 5 requests per second | 10 requests |
+| Startup | 10 requests per second | 20 requests |
+| Growth | 20 requests per second | 40 requests |
+
+Database-specific overrides can change the sustained rate and burst capacity.
+The values assigned to your database take precedence over its plan limits. Each
+admitted query request costs one token from one shared bucket per Cloud database.
+
+### Token-bucket behavior
+
+- A full bucket can admit requests up to its burst capacity. Tokens then refill
+  continuously at the plan's sustained rate, up to that capacity. This is not a
+  fixed one-second window.
+- One incoming request consumes one token whether it is a read, write, or cache
+  warming request. Warming fanout and gateway retries do not consume additional
+  tokens.
+- Requests rejected during authentication, gateway header validation, or outer
+  request JSON decoding do not consume a token. Query AST and planner validation
+  happen after admission, so those later validation failures consume one token.
+- The bucket is shared across API keys and gateway replicas. Rotating keys or
+  distributing calls across connections does not create more capacity.
+- Burst capacity controls short-term admission, not the number of queries that
+  can execute concurrently. Bound client concurrency separately.
+
+### Rate-limit responses
+
+When no token is available, the gateway rejects the request before database
+execution:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 1
+
+{"error":"rate_limited","msg":"rate limit exceeded"}
+```
+
+`Retry-After` is a whole number of seconds. Wait at least that long before
+retrying, and add jitter when many workers share the same database. The response
+does not currently include `RateLimit-*` or `X-RateLimit-*` limit, remaining, or
+reset headers.
+
+If the gateway cannot make a safe distributed rate-limit decision, it fails
+closed before database execution:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{"error":"rate_limit_unavailable","msg":"tenant rate limit is unavailable"}
+```
+
+Retry `rate_limit_unavailable` with bounded exponential backoff and jitter. A
+`402` `tenant_disabled` response is an account-credit gate, and a `408`
+`query_timeout` response is an execution deadline; neither means the request
+bucket was exhausted.
+
+### Application guidance
+
+1. Coordinate admission across workers that target the same Cloud database.
+2. Honor `Retry-After` on `rate_limited` instead of retrying immediately.
+3. Use bounded exponential backoff with jitter for transient `503` responses.
+4. Bound in-flight concurrency as well as request rate to avoid local queues and
+   latency spikes.
+5. Apply a separate per-user or per-workspace limiter when multiple application
+   tenants share one Cloud database; the Helix bucket does not distinguish those
+   application tenants.
+
 ## Data Model
 
 | Limit                  | Value                                                                                          |
@@ -5417,6 +5476,133 @@ fundamental architectural boundaries.
 | Packaging | Install the SDK and its embedded runtime package |
 | Cache configuration | Fixed when the handle opens |
 
+# Handle query errors
+
+Page type: Reference
+
+<div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Reference</Badge><Badge color="gray" size="sm">Helix Cloud</Badge></div>
+
+Helix Cloud query failures use one JSON envelope:
+
+```json
+{
+  "error": "query_timeout",
+  "msg": "query exceeded its wall-clock limit"
+}
+```
+
+- `error` is a stable, lower-snake-case code. Branch on this field.
+- `msg` is a human-readable diagnostic. Log it, but do not parse it or depend on
+  its exact text.
+- The HTTP status remains part of the contract. Use it with `error` when deciding
+  whether and how to retry.
+
+## Gateway error reference
+
+| HTTP | `error`                  | Typical `msg`                                                               | Meaning                                                                   | Retry guidance                                                           |
+| ---: | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+|  400 | `invalid_query_json`     | `parse error: <decoder diagnostic>`                                         | The request body is not valid query JSON.                                 | Fix the request.                                                         |
+|  400 | `invalid_request`        | A request-specific diagnostic                                               | A required header or request option is missing, malformed, or invalid.    | Fix the request.                                                         |
+|  400 | `tenant_id_required`     | `x-helix-tenant-id or x-helix-database-id is required in GA mode`           | A Cloud request did not identify its database.                            | Use the correct database-scoped Cloud endpoint and configuration.        |
+|  400 | `tenant_id_not_allowed`  | `x-helix-tenant-id and x-helix-database-id are not allowed in cluster mode` | A tenant/database header was sent to an endpoint that does not accept it. | Remove the header or use the correct endpoint.                           |
+|  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key.                                              |
+|  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
+|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
+|  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
+|  409 | `transaction_conflict`   | `request conflicted with a concurrent write; please retry`                  | A concurrent write prevented the transaction from committing.             | Retry the whole idempotent transaction with bounded backoff.             |
+|  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The query request exceeds the gateway body-size limit.                    | Reduce the request size.                                                 |
+|  429 | `rate_limited`           | `rate limit exceeded`                                                       | The database's request bucket has no token available.                     | Honor `Retry-After`; see [Limits](/database/helix-cloud/operate/limits). |
+|  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
+|  503 | `backend_unavailable`    | `Backend unavailable`                                                       | No eligible database backend is currently available.                      | Retry with bounded exponential backoff and jitter.                       |
+|  503 | `rate_limit_unavailable` | `tenant rate limit is unavailable`                                          | The gateway cannot make a safe rate-limit decision.                       | Retry with bounded exponential backoff and jitter.                       |
+
+The text in `msg` can include request-specific details. The `error` values and
+HTTP statuses above are the compatibility surface.
+
+## SDK access
+
+Official SDKs decode `error` and `msg` into separate stable-code and diagnostic
+fields. Non-JSON responses from older endpoints and intermediaries remain
+available as readable diagnostics. Rust and TypeScript also retain the raw
+response body separately.
+
+| SDK        | HTTP status                 | Stable code                 | Diagnostic                     | Raw response                      |
+| ---------- | --------------------------- | --------------------------- | ------------------------------ | --------------------------------- |
+| Rust       | `HelixError::status_code()` | `HelixError::remote_code()` | `HelixError::remote_message()` | `HelixError::raw_response_body()` |
+| TypeScript | `HelixError.statusCode`     | `HelixError.code`           | `HelixError.serverMessage`     | `HelixError.rawBody`              |
+| Python     | `HelixError.status_code`    | `HelixError.code`           | `HelixError.details`           | Not exposed separately            |
+| Go         | `HelixError.StatusCode`     | `HelixError.Code`           | `HelixError.Details`           | Not exposed separately            |
+
+Branch on the stable code while retaining the diagnostic:
+
+```rust Rust
+if let Err(error) = client.query::<MyResponse>(request).send().await {
+    if error.remote_code() == Some("query_timeout") {
+        eprintln!("{}", error.remote_message().unwrap_or("query timed out"));
+    }
+}
+```
+
+```ts TypeScript
+import { HelixError } from "@helix-db/helix-db";
+
+try {
+  await client.query(request).send();
+} catch (cause) {
+  if (cause instanceof HelixError && cause.code === "query_timeout") {
+    console.error(cause.serverMessage);
+  }
+  throw cause;
+}
+```
+
+```python Python
+try:
+    client.query(request)
+except HelixError as error:
+    if error.code == "query_timeout":
+        print(error.details)
+```
+
+```go Go
+err := client.Exec(ctx, request, &response)
+var helixErr *helix.HelixError
+if errors.As(err, &helixErr) &&
+	helixErr.Code == helix.QueryErrorCode("query_timeout") {
+	log.Print(helixErr.Details)
+}
+```
+
+```json JSON
+{
+  "error": "query_timeout",
+  "msg": "query exceeded its wall-clock limit"
+}
+```
+
+## Timed-out writes
+
+An HTTP `408` cancels the gateway's wait, but a write can race with durable
+commit. Treat the outcome as unknown. Reconcile using an application identity or
+idempotency key before submitting the write again.
+
+## Migration from the previous shape
+
+Some earlier responses used `error` for diagnostic text and `code` for the
+machine-readable value, while others returned only `error`. For Cloud gateway
+responses, migrate from this shape:
+
+```json
+{
+  "error": "query exceeded its wall-clock limit",
+  "code": "QUERY_TIMEOUT"
+}
+```
+
+to `error` as the lower-snake-case code and `msg` as diagnostic text. Keep a
+readable diagnostic fallback for intermediaries and older self-hosted endpoints
+that do not return the Cloud envelope.
+
 # Troubleshoot HelixDB
 
 Page type: Troubleshooting
@@ -5425,6 +5611,9 @@ Page type: Troubleshooting
 
 Start with the first error returned by the SDK or server. HelixDB rejects invalid
 requests and transactions instead of partially applying them.
+
+For the stable Cloud response envelope and gateway code reference, see
+[Error handling](/database/helix-cloud/operate/error-handling).
 
 ## Request uses the wrong AST shape
 
@@ -5489,6 +5678,29 @@ a multi-mutation request.
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
 
+## Request returns HTTP 429
+
+`rate_limited` means the shared request bucket for the Cloud database has no
+token available. The rejected query did not reach database execution.
+
+Wait for the response's `Retry-After` interval before retrying. Add jitter when
+many workers can wake together, and inspect aggregate traffic across every API
+key and application instance that uses the database. All of them share the same
+bucket.
+
+See [Helix Cloud request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+for the current plan limits and token-bucket behavior.
+
+## Request returns `rate_limit_unavailable`
+
+An HTTP `503` with `rate_limit_unavailable` means the gateway could not make a
+safe distributed admission decision. It fails closed, so the query did not
+reach database execution.
+
+Retry with bounded exponential backoff and jitter. If the response persists,
+check [HelixDB status](https://status.helix-db.com) and include the response code,
+timestamp, and database identifier when contacting support.
+
 ## Local server cannot reach storage
 
 For S3-compatible local storage:
@@ -5527,61 +5739,32 @@ If you are starting a new project inside a coding-agent environment, use `helix 
 helix chef
 ```
 
-`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches your coding agent (Claude Code, Codex, or OpenCode) to generate the app from your build intent.
+`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches the first supported agent it finds: Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
 
-For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by hand: `helix init local` → `helix start dev` → `helix query dev --file …` (see the Local quickstart below). This path never prompts and never logs in.
+For a fully scriptable setup with **no** Cloud auth, skip `chef` and follow the
+[canonical local quickstart](/database/helix-db/start-here/quickstart). This path
+never prompts and never logs in.
 
 ## Local quickstart
 
-```bash
-curl -sSL "https://install.helix-db.com" | bash
+Windows PowerShell installs the CLI with:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
+Use the [canonical local quickstart](/database/helix-db/start-here/quickstart)
+for the executable `helix init local` → `helix start dev` → `helix query dev`
+→ `helix stop dev` journey. It lists the exact generated files, instance name,
+and query file so this CLI guide does not maintain a second copy of the tutorial.
 
-```bash
-mkdir my-helix-app
-cd my-helix-app
-helix init
-```
+## Version names
 
-`helix init` scaffolds:
-
-- `helix.toml` with a single `[local.dev]` instance.
-- `.helix/` workspace state (added to `.gitignore`).
-- `examples/request.json` — a runnable read request you can send straight away.
-
-In a TTY, `helix init` prompts you to pick `local` or `enterprise`. Pass the subcommand directly to skip the prompt: `helix init local`.
-
-```bash
-helix start dev
-```
-
-`helix start` pulls `ghcr.io/helixdb/helixdb:v0.0.4`, starts a background container named `helix-<project>-dev`, publishes port `6969`, and waits for `GET /healthz` to report ready before returning.
-
-To stream logs in the foreground instead, use `helix start dev --foreground` and stop the container with Ctrl-C.
-
-For persistent local data, use `helix start dev --disk`. Disk mode starts a CLI-managed MinIO sidecar and keeps data across `helix stop`.
-
-The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
-
-```bash
-helix query dev --file examples/request.json
-```
-
-The example request runs a read query that counts `User` nodes. Pass `--compact`
-to print on a single line, or `--warm` to populate caches. A standalone local
-warm read prints its normal response; Helix Cloud fanout returns no body.
-
-```bash
-helix stop dev
-```
-
-`helix stop` is idempotent — it reports cleanly if the instance was not running.
-
-Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
+- **HelixDB v3** is the current product and SDK generation.
+- **Helix CLI 3.x** is the independently released command-line client. Run `helix --version` for the exact installed release.
+- **`POST /v2/query`** is the current HTTP wire endpoint. The endpoint version is independent of the product and CLI versions.
 
 ## Helix Cloud quickstart
 
@@ -5609,7 +5792,7 @@ helix add cloud --name production --cluster-id <cluster-id>
 
 ```bash
 helix sync production
-export HELIX_API_KEY="..."   # or whatever query_auth_env resolves to
+export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
 helix query production --file examples/request.json
 ```
 
@@ -5664,7 +5847,9 @@ Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.4` container a
 ## Prerequisites
 
 - **Docker** or **Podman** on `PATH`.
-- The Helix CLI: `curl -sSL "https://install.helix-db.com" | bash`.
+- The Helix CLI:
+  - macOS and Linux: `curl -sSL "https://install.helix-db.com" | bash`.
+  - Windows PowerShell: `irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex`.
 
 ## Initial setup
 
@@ -5869,11 +6054,11 @@ The CLI handles authentication, workspace/project/cluster selection, metadata sy
 
   <Step title="Send dynamic queries">
     ```bash
-    export HELIX_API_KEY="..."   # value for the configured query_auth_env
+    export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
     helix query production --file examples/request.json
     ```
 
-    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`).
+    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`). `query_auth_scheme = "bearer"` adds the `Bearer` prefix; `"raw"` sends the environment value unchanged.
   </Step>
 
   <Step title="Pull historical logs">
@@ -5895,6 +6080,7 @@ Each `[enterprise.<instance>]` block stores the auth contract used by `helix que
 |-------|---------|---------|
 | `query_auth_header` | `Authorization` | HTTP header name set on every query request. |
 | `query_auth_env` | `HELIX_API_KEY` | Environment variable the CLI reads to populate the header value. |
+| `query_auth_scheme` | inferred | `bearer` for `Authorization`; `raw` for other headers. |
 
 Override the variable name per-instance by setting `query_auth_env` under `[enterprise.<instance>]` and exporting whatever name you choose.
 
@@ -5990,6 +6176,7 @@ One block per Helix Cloud instance. Most fields here are populated automatically
 | `gateway_url` | URL | No (required at query time) | — | Runtime gateway base URL. Populated by `helix sync` when available. |
 | `query_auth_header` | String | No | `Authorization` | HTTP header name used for query auth. |
 | `query_auth_env` | String | No | `HELIX_API_KEY` | Environment variable read by [`helix query`](/cli/command-reference/query) for the auth header value. |
+| `query_auth_scheme` | `bearer` or `raw` | No | Inferred from the header | `bearer` adds the `Bearer` prefix; `raw` sends the environment value unchanged. Missing values infer `bearer` for `Authorization` and `raw` for other headers. |
 | `availability_mode` | String | No | — | Cluster availability mode, returned by `helix sync`. |
 | `gateway_node_type` | String | No | — | Gateway node type, returned by `helix sync`. |
 | `db_node_type` | String | No | — | DB node type, returned by `helix sync`. |
@@ -6026,7 +6213,7 @@ Remove with `helix auth logout`. Never commit this file.
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Per-cluster Helix Cloud API key sent in the configured auth header. The variable name is configurable per-instance via `query_auth_env`. |
+| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Raw per-cluster Helix Cloud API key. With `query_auth_scheme = "bearer"`, the CLI adds the `Bearer` prefix. The variable name is configurable per-instance via `query_auth_env`. |
 
 ## Troubleshooting
 
@@ -6050,25 +6237,34 @@ Page type: Troubleshooting
 
 <div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
 
-This guide helps you resolve common issues with the Helix CLI v3.
+This guide helps you resolve common issues with the Helix CLI 3.x release line.
 
 ## Installation issues
 
 ### `command not found: helix`
 
-The CLI installs to `~/.helix/bin/helix`. If your shell can't find it after running the installer:
+On macOS and Linux, the CLI installs to `~/.local/bin/helix`. If your shell can't
+find it after running the installer:
 
 ```bash
 # Bash
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # Zsh
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Verify the binary exists with `ls -la ~/.helix/bin/helix`.
+Verify the binary exists with `ls -la ~/.local/bin/helix`.
+
+On Windows, the PowerShell installer writes
+`%LOCALAPPDATA%\Helix\bin\helix.exe` and adds that directory to your user `PATH`.
+Restart PowerShell after the first install, then verify it with:
+
+```powershell
+& "$env:LOCALAPPDATA\Helix\bin\helix.exe" --version
+```
 
 ### Updating the CLI
 
@@ -6090,7 +6286,7 @@ export HELIX_NO_UPDATE_CHECK=1   # also accepts HELIX_DISABLE_UPDATE_CHECK
 
 ### `helix compile` / `helix check`
 
-These commands do **not** exist in Helix CLI v3. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
+These commands do **not** exist in the Helix CLI 3.x release line. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
 
 ```bash
 helix query dev --file examples/request.json
@@ -6236,6 +6432,10 @@ The auth env var named by `query_auth_env` is unset.
 export HELIX_API_KEY="..."
 ```
 
+Set the raw key only. With the default `Authorization` header, an omitted
+`query_auth_scheme` infers `bearer` and adds the `Bearer` prefix. Headers such
+as `x-api-key` infer `raw`.
+
 ### `--warm is only valid for read requests`
 
 `helix query --warm` is rejected for write requests before any backend executes.
@@ -6315,7 +6515,7 @@ Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-This page lists every command in Helix CLI v3. Click any command for full flag and example details.
+This page lists every command in the Helix CLI 3.x release line. Click any command for full flag and example details.
 
 ## Global Options
 
@@ -6469,7 +6669,7 @@ helix auth <SUBCOMMAND>
 |----------|-------------|
 | `CLUSTER` | Cluster ID to rotate. Find one with [`helix cluster list`](/cli/command-reference/cluster). |
 
-`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster — update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) before running [`helix query`](/cli/command-reference/query) again.
+`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster. Update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) with the raw key before running [`helix query`](/cli/command-reference/query) again. Bearer mode adds the prefix automatically.
 
 ## Examples
 
@@ -6515,7 +6715,7 @@ The first interactive run signs you in to Helix Cloud through a GitHub device-co
 1. Installs the Helix skills (`npx skills add HelixDB/skills`) and docs MCP.
 2. Initializes a local project (`helix init local`) with a `dev` instance on port `6969`, then starts it in-memory.
 3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default) and, for the default build, starter query files under `examples/` — then seeds the data.
-4. Detects an installed coding agent (Claude Code → Codex → OpenCode), asks for a permission mode, and launches it against the build prompt.
+4. Detects an installed coding agent (Claude Code → OpenAI Codex → OpenCode → Cursor Agent), asks for a permission mode, and launches it against the build prompt.
 5. Opens the generated app at `http://localhost:3000` once the agent's frontend is running.
 
 `helix chef` does **not** start a local dashboard — port `3000` is reserved for the Next.js app the agent builds.
@@ -7227,7 +7427,8 @@ query body. A managed cluster with no eligible warming target returns
 Warm writes are rejected with `400 Bad Request` before backend execution. At the
 HTTP/SDK layer, combine `X-Helix-Warm: true` with
 `X-Helix-Require-Writer: true` when only the authoritative writer should be warmed.
-Authentication, read rate limits, retries, and normal query timeouts still apply.
+Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+retries, and normal query timeouts still apply.
 
 ## TypeScript DSL input
 
@@ -7244,7 +7445,7 @@ helix query dev --ts-file queries/count_users.ts
 How it works:
 
 - The expression must evaluate to a `readBatch()` or `writeBatch()` builder. `g`, `readBatch`, `writeBatch`, `defineParams`, and `param` are auto-imported and already in scope — you write only the expression, no imports.
-- The CLI evaluates it locally with Node using the forthcoming v3 `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
+- The CLI evaluates it locally with Node using the published `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
 - `request_type` is inferred automatically from whether you used `readBatch()` or `writeBatch()`.
 
 Requirements:
@@ -7272,7 +7473,7 @@ If Node is missing, the CLI tells you to install Node 20+ or fall back to `--jso
 For a Helix Cloud instance, `helix query` reads `[enterprise.<instance>]` in `helix.toml` and:
 
 - Posts to `<gateway_url>/v2/query`.
-- Sends an auth header named by `query_auth_header` (default `Authorization`) with the value read from the environment variable `query_auth_env` (default `HELIX_API_KEY`). The value is read from your shell environment or from a `.env` file in the project root (whichever is set), so you can keep the key out of your shell history.
+- Sends an auth header named by `query_auth_header` (default `Authorization`) using `query_auth_scheme` (`bearer` or `raw`). Bearer mode adds `Bearer` to the raw key read from `query_auth_env` (default `HELIX_API_KEY`); raw mode sends the value unchanged. The value is read from your shell environment or from a `.env` file in the project root.
 
 If `gateway_url` is missing, the CLI returns:
 
@@ -7314,7 +7515,8 @@ helix query dev --json '{"request_type":"read","query_name":"ad_hoc_read","query
 # Build the request from a TypeScript DSL expression instead of JSON
 helix query dev -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
-# Target a Helix Cloud instance (requires HELIX_API_KEY in env and gateway_url in helix.toml)
+# Target Helix Cloud. Export the raw key; bearer mode adds the prefix.
+export HELIX_API_KEY="..."
 helix query production --file examples/request.json
 ```
 
@@ -7602,6 +7804,7 @@ For each matched Helix Cloud instance, `helix sync` overwrites these fields in `
 - `gateway_url`
 - `query_auth_header` (defaults to `Authorization`)
 - `query_auth_env` (defaults to `HELIX_API_KEY`)
+- `query_auth_scheme` (`bearer` or `raw`, inferred from the header when omitted)
 - `availability_mode`
 - `gateway_node_type`
 - `db_node_type`

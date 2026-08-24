@@ -13,10 +13,10 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, IsolationLevel};
 
 use super::*;
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorEntryCandidateNodeKey, VectorKey, VectorLayer0NeighborsKey, VectorSimHashKey,
 };
-use crate::encoding::v1::values::vectors::entry::encode_entry_candidate_layer;
+use crate::encoding::v2::values::indexes::vector::entry_candidate::encode_entry_candidate_layer;
 use crate::search::vector::distance::{Cosine, Distance};
 use crate::search::vector::mutation::VectorInsertContract;
 use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};

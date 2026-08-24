@@ -4,12 +4,14 @@ use bytes::Bytes;
 use roaring::RoaringTreemap;
 use slatedb::{MergeOperator, MergeOperatorError};
 
-use crate::encoding::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::{KEY_KIND_LAYER0_VEC_KS, VECTOR_HOT_KEYSPACE_PREFIX};
-use crate::encoding::v1::keys::{DataKeyKind, KeyPrefix};
-use crate::encoding::v1::values::{edges, vectors};
-use crate::encoding::v2::keys::{Key as V2Key, ScopedKey as V2ScopedKey};
+use crate::encoding::keys::scope::DataScope;
+use crate::encoding::v2::keys::indexes::vector::{
+    KEY_KIND_LAYER0_VEC_KS, VECTOR_HOT_KEYSPACE_PREFIX,
+};
+use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
+use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
 use crate::encoding::v2::values::SecondaryEqualityBitmapValue;
+use crate::encoding::v2::values::{adjacency as edges, indexes::vector as vectors};
 use crate::encoding::NodeId;
 
 const EDGE_DELTA_MIN_LEN: usize = core::mem::size_of::<u8>();
@@ -544,16 +546,16 @@ mod tests {
 
     use super::*;
     use crate::encoding::indexes::range::RangeIndexDirection;
-    use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-    use crate::encoding::v1::keys::{
-        AdjacencyKey, DataKeyKind, EdgePairIndexKey, Key, NodePropertyKey,
-    };
-    use crate::encoding::v1::property::equality_value::{
-        project_equality_value, EqualityValueProjection,
+    use crate::encoding::v2::keys::scope::{DataScope, TenantId};
+    use crate::encoding::v2::keys::{
+        AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey, NodePropertyKey,
     };
     use crate::encoding::v2::keys::{
         CanonicalSecondaryValue, PartitionFingerprint, SecondaryEntryKey, SecondaryEntryLane,
         SecondaryEqualityBitmapKey, TextManifestRootKey, VectorPartitionMappingKey,
+    };
+    use crate::encoding::v2::values::property::equality_index_value::{
+        project_equality_value, EqualityValueProjection,
     };
     use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
 
@@ -598,8 +600,8 @@ mod tests {
 
     #[test]
     fn edge_merge_batch_applies_oldest_to_newest() {
-        let key = Key::Data {
-            scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+        let key = DataKey::Data {
+            scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
             kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
         }
         .to_bytes();
@@ -621,7 +623,7 @@ mod tests {
 
     #[test]
     fn bitmap_merge_preserves_base_and_deduplicates_additions() {
-        let key = Key::Data {
+        let key = DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 3)),
         }
@@ -829,7 +831,7 @@ mod tests {
                 }),
             }
             .to_bytes(),
-            Key::Data {
+            DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(11)),
             }
@@ -910,7 +912,7 @@ mod tests {
 
     #[test]
     fn bitmap_add_operands_commute_for_every_existing_bitmap() {
-        let key = Key::Data {
+        let key = DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 3)),
         }

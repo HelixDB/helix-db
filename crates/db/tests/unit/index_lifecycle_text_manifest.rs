@@ -23,7 +23,7 @@ async fn prepared_ranges_and_observations_reject_every_stale_shape() {
     transaction.put(first.0.clone(), first.1.clone()).unwrap();
     transaction.put(second.0.clone(), second.1.clone()).unwrap();
 
-    let prefix = Key::data_prefix(
+    let prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::generation_prefix(
             index_keys::RecordKind::TextBuildArtifact,

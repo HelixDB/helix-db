@@ -229,6 +229,24 @@ fn node_secondary_set_cost(
             };
             (cost, rows)
         }
+        exec::ExecNodeSecondarySetPlan::DynamicMembership { index, values, .. } => {
+            let rows = match index.uniqueness {
+                catalog::IndexUniqueness::Unique => profile.unique_equality_rows(None),
+                catalog::IndexUniqueness::NonUnique => profile.equality_index_rows(None),
+            };
+            let lookup = match index.uniqueness {
+                catalog::IndexUniqueness::Unique => profile.unique_equality_lookup(rows),
+                catalog::IndexUniqueness::NonUnique => profile.bitmap_equality_lookup(rows),
+            };
+            let max_values = values.max_values().get() as u64;
+            let rows = cost::EstimatedRows::rows(rows.as_rows().saturating_mul(max_values));
+            (
+                lookup
+                    .saturating_mul(max_values)
+                    .serial(profile.null_equality_scan(profile.default_unknown_scan_rows)),
+                rows,
+            )
+        }
         exec::ExecNodeSecondarySetPlan::Range(_) => {
             let rows = profile.default_range_index_rows;
             (profile.secondary_range_lookup(rows), rows)
@@ -298,6 +316,18 @@ fn edge_secondary_set_cost(
         exec::ExecEdgeSecondarySetPlan::DynamicEquality { .. } => {
             let rows = profile.equality_index_rows(None);
             (profile.bitmap_equality_lookup(rows), rows)
+        }
+        exec::ExecEdgeSecondarySetPlan::DynamicMembership { values, .. } => {
+            let one = profile.equality_index_rows(None);
+            let max_values = values.max_values().get() as u64;
+            let rows = cost::EstimatedRows::rows(one.as_rows().saturating_mul(max_values));
+            (
+                profile
+                    .bitmap_equality_lookup(one)
+                    .saturating_mul(max_values)
+                    .serial(profile.null_equality_scan(profile.default_unknown_scan_rows)),
+                rows,
+            )
         }
         exec::ExecEdgeSecondarySetPlan::Range(_) => {
             let rows = profile.default_range_index_rows;

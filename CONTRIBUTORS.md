@@ -365,6 +365,6 @@ Format and lint before opening a PR: `cargo fmt` and `./clippy_check.sh`.
 5. Send a query: `helix query dev --file examples/request.json`
 
 ## License
-AGPL (Affero General Public License)
+[Apache License 2.0](LICENSE)
 
 For commercial support: founders@helix-db.com

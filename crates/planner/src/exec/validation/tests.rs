@@ -19,6 +19,7 @@ fn step(value: usize, dependencies: Vec<usize>) -> ExecStep {
         id: id(value),
         dependencies: dependencies.into_iter().map(id).collect(),
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: ExecCondition::Always,
         op: ExecOp::Noop,
         schedule: ExecSchedule::Pipeline,

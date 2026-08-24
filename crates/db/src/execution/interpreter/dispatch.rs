@@ -431,7 +431,7 @@ mod tests {
             crate::search::vector::distance::Cosine,
         >(
             crate::search::vector::VectorGenerationIdentity::try_new(
-                crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 901,
                 "dispatch-active-vector-flush-barrier".to_string(),
                 902,

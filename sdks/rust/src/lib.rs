@@ -180,6 +180,59 @@ impl fmt::Debug for Client {
 /// Backwards-compatible alias for [`Client`].
 pub type HelixDBClient = Client;
 
+/// Metadata returned when the server responds with a non-`200` HTTP status.
+#[derive(Debug)]
+pub struct RemoteError {
+    status_code: u16,
+    code: Option<String>,
+    message: String,
+    details: Option<serde_json::Value>,
+    raw_body: String,
+}
+
+impl RemoteError {
+    /// Return the numeric HTTP status code.
+    pub fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
+    /// Return the stable server error code, when present.
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    /// Return the server-provided message or fallback message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Return structured server details, when present.
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        self.details.as_ref()
+    }
+
+    /// Return the decoded response body before applying message fallbacks.
+    pub fn raw_body(&self) -> &str {
+        &self.raw_body
+    }
+
+    /// Return whether the status is HTTP 409 Conflict.
+    pub fn is_conflict(&self) -> bool {
+        self.status_code == StatusCode::CONFLICT.as_u16()
+    }
+
+    /// Return whether the status is HTTP 429 Too Many Requests.
+    pub fn is_rate_limited(&self) -> bool {
+        self.status_code == StatusCode::TOO_MANY_REQUESTS.as_u16()
+    }
+}
+
+impl fmt::Display for RemoteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 /// Errors returned while building or executing a query request.
 #[derive(Debug, Error)]
 pub enum HelixError {
@@ -187,16 +240,9 @@ pub enum HelixError {
     /// timeout, TLS error, …), surfaced from [`reqwest`].
     #[error("Error communicating with server: {0}")]
     ReqwestError(#[from] reqwest::Error),
-    /// The server responded with a non-`200` status. `details` carries the
-    /// response body, or the status' canonical reason phrase when no body is
-    /// available.
-    #[error("Got Error from server: {details}")]
-    RemoteError {
-        /// Static server code, including unknown future values.
-        code: Option<String>,
-        /// Server-provided error text, or a fallback description of the status.
-        details: String,
-    },
+    /// The server responded with a non-`200` status.
+    #[error("Got Error from server: {0}")]
+    RemoteError(Box<RemoteError>),
     /// Failed to (de)serialize a request body or response payload.
     #[error("Error serializing data: {0}")]
     SerializationError(#[from] sonic_rs::Error),
@@ -222,17 +268,120 @@ pub enum HelixError {
 }
 
 impl HelixError {
+    /// Return the HTTP status code for a remote error.
+    pub fn status_code(&self) -> Option<u16> {
+        let Self::RemoteError(error) = self else {
+            return None;
+        };
+        Some(error.status_code())
+    }
+
+    /// Return the stable server error code for a remote error.
+    pub fn remote_code(&self) -> Option<&str> {
+        let Self::RemoteError(error) = self else {
+            return None;
+        };
+        error.code()
+    }
+
+    /// Return the server-provided message or fallback message.
+    pub fn remote_message(&self) -> Option<&str> {
+        let Self::RemoteError(error) = self else {
+            return None;
+        };
+        Some(error.message())
+    }
+
+    /// Return structured server details for a remote error.
+    pub fn remote_details(&self) -> Option<&serde_json::Value> {
+        let Self::RemoteError(error) = self else {
+            return None;
+        };
+        error.details()
+    }
+
+    /// Return the decoded response body before applying message fallbacks.
+    pub fn raw_response_body(&self) -> Option<&str> {
+        let Self::RemoteError(error) = self else {
+            return None;
+        };
+        Some(error.raw_body())
+    }
+
+    /// Return whether the server reported an HTTP conflict.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::RemoteError(error) if error.is_conflict())
+    }
+
+    /// Return whether the server reported an HTTP rate limit.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::RemoteError(error) if error.is_rate_limited())
+    }
+
     /// Return the stable query error code when the failure has one.
     #[must_use]
     pub fn error_code(&self) -> Option<&str> {
         match self {
-            Self::RemoteError { code, .. } => code.as_deref(),
+            Self::RemoteError(error) => error.code(),
             Self::InvalidRequest { .. } => Some(QueryErrorCode::InvalidRequest.as_str()),
             #[cfg(feature = "embedded")]
             Self::EmbeddedError { code, .. } => Some(code),
             Self::ReqwestError(_) | Self::SerializationError(_) | Self::InvalidURL(_) => None,
         }
     }
+}
+
+fn remote_error(status: StatusCode, raw_body: String) -> HelixError {
+    let structured = serde_json::from_str::<serde_json::Value>(&raw_body).ok();
+    let object = structured.as_ref().and_then(serde_json::Value::as_object);
+    let error_field = object
+        .and_then(|body| body.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let msg_field = object
+        .and_then(|body| body.get("msg"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let code_field = object
+        .and_then(|body| body.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let message_field = object
+        .and_then(|body| body.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let current_envelope = error_field.zip(msg_field);
+    let legacy_envelope = error_field.zip(code_field);
+    let code = current_envelope
+        .map(|(code, _)| code)
+        .or_else(|| legacy_envelope.map(|(_, code)| code))
+        .or(code_field)
+        .map(str::to_string);
+    let message = current_envelope
+        .map(|(_, message)| message)
+        .or_else(|| legacy_envelope.map(|(message, _)| message))
+        .or(message_field)
+        .or(error_field)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if raw_body.is_empty() {
+                status.canonical_reason().map_or_else(
+                    || format!("unknown error with code: {status}"),
+                    str::to_string,
+                )
+            } else {
+                raw_body.clone()
+            }
+        });
+    let details = object.and_then(|body| body.get("details")).cloned();
+
+    HelixError::RemoteError(Box::new(RemoteError {
+        status_code: status.as_u16(),
+        code,
+        message,
+        details,
+        raw_body,
+    }))
 }
 
 impl Client {
@@ -430,31 +579,6 @@ fn embedded_error(error: db::error::HelixDbError) -> HelixError {
     }
 }
 
-#[derive(Deserialize)]
-struct QueryErrorEnvelope {
-    error: String,
-    msg: Option<String>,
-    code: Option<String>,
-}
-
-fn remote_error(response_body: String, fallback: String) -> HelixError {
-    let parsed = sonic_rs::from_str::<QueryErrorEnvelope>(&response_body);
-    let (code, details) = match parsed {
-        Ok(envelope) => match envelope.msg {
-            Some(msg) => (Some(envelope.error), msg),
-            None => (envelope.code, envelope.error),
-        },
-        Err(_) => (
-            None,
-            if response_body.is_empty() {
-                fallback
-            } else {
-                response_body
-            },
-        ),
-    };
-    HelixError::RemoteError { code, details }
-}
 
 fn validate_database_id(database_id: Option<&str>, required: bool) -> Result<(), HelixError> {
     if required && database_id.is_none() {
@@ -470,7 +594,7 @@ fn validate_database_id(database_id: Option<&str>, required: bool) -> Result<(),
     Ok(())
 }
 
-/// Fluent builder for a single request, produced by [`Client::query`].
+
 ///
 /// Optional server header toggles ([`writer_only`](Self::writer_only),
 /// [`warm_only`](Self::warm_only),
@@ -579,14 +703,10 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                         .await
                         .map(|bytes| bytes.to_vec())
                         .map_err(Into::into),
-                    status => {
-                        let fallback = status.canonical_reason().map_or_else(
-                            || format!("unknown error with code: {status}"),
-                            str::to_string,
-                        );
-                        let response_body = response.text().await.unwrap_or_default();
-                        Err(remote_error(response_body, fallback))
-                    }
+                    code => Err(remote_error(
+                        code,
+                        response.text().await.unwrap_or_default(),
+                    )),
                 }
             }
             #[cfg(feature = "embedded")]
@@ -1280,6 +1400,11 @@ mod client_tests {
                 "legacy message",
             ),
             (
+                r#"{"error":"legacy message","code":"index_not_found","message":"generic message"}"#,
+                Some("index_not_found"),
+                "legacy message",
+            ),
+            (
                 r#"{"error":"future_code","msg":"future message"}"#,
                 Some("future_code"),
                 "future message",
@@ -1294,12 +1419,9 @@ mod client_tests {
         ];
 
         for (body, expected_code, expected_details) in cases {
-            let error = remote_error(body.to_string(), "Bad Request".to_string());
+            let error = remote_error(StatusCode::BAD_REQUEST, body.to_string());
             assert_eq!(error.error_code(), expected_code);
-            let HelixError::RemoteError { details, .. } = error else {
-                panic!("remote parser always returns a remote error");
-            };
-            assert_eq!(details, expected_details);
+            assert_eq!(error.remote_message(), Some(expected_details));
         }
     }
 
@@ -1354,11 +1476,15 @@ mod client_tests {
     struct EmptyResp {}
 
     /// Spawn a one-shot HTTP server on a random port. Returns its base URL and a
-    /// handle that resolves to the first request received.
-    async fn spawn_capture_server() -> (String, tokio::task::JoinHandle<String>) {
+    /// handle that resolves to the raw captured request bytes as a String.
+    async fn spawn_capture_server(
+        status: u16,
+        body: &str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let body = body.to_string();
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = Vec::new();
@@ -1371,16 +1497,41 @@ mod client_tests {
                     break;
                 }
             }
-            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            let resp = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
             socket.write_all(resp.as_bytes()).await.unwrap();
             String::from_utf8_lossy(&buf).into_owned()
         });
         (base, handle)
     }
 
+    async fn request_remote_error(status: u16, body: &str) -> HelixError {
+        let (base, handle) = spawn_capture_server(status, body).await;
+        let client = Client::new(Some(&base)).unwrap();
+        let error = client
+            .query::<serde_json::Value>(sample_request())
+            .send()
+            .await
+            .expect_err("non-success response should return a remote error");
+        let captured = handle.await.unwrap();
+        // Extract `METHOD <target> HTTP/1.1` from the first line of the raw buffer.
+        let target = captured
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .to_string();
+        assert_eq!(target, "/v2/query");
+        error
+    }
+
     #[tokio::test]
     async fn query_posts_to_v2_query() {
-        let (base, handle) = spawn_capture_server().await;
+        let (base, handle) = spawn_capture_server(200, "{}").await;
         let client = Client::new(Some(&base)).unwrap();
         let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
         assert!(handle.await.unwrap().contains("POST /v2/query HTTP/1.1"));
@@ -1388,7 +1539,7 @@ mod client_tests {
 
     #[tokio::test]
     async fn managed_query_sends_database_id_header() {
-        let (base, handle) = spawn_capture_server().await;
+        let (base, handle) = spawn_capture_server(200, "{}").await;
         let client = Client::managed(Some(&base), "db_123")
             .unwrap()
             .with_api_key(Some("hx_secret"));
@@ -1403,6 +1554,76 @@ mod client_tests {
         let client = Client::new(Some("http://127.0.0.1:1")).unwrap().with_database_id(Some(" "));
         let error = client.query::<EmptyResp>(sample_request()).send().await.unwrap_err();
         assert!(matches!(error, HelixError::InvalidRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn remote_error_preserves_structured_response() {
+        let body =
+            r#"{"error":"write conflict","code":"write_conflict","details":{"retryable":true}}"#;
+        let error = request_remote_error(409, body).await;
+
+        assert_eq!(error.status_code(), Some(409));
+        assert_eq!(error.remote_code(), Some("write_conflict"));
+        assert_eq!(error.remote_message(), Some("write conflict"));
+        assert_eq!(
+            error.remote_details(),
+            Some(&serde_json::json!({"retryable": true}))
+        );
+        assert_eq!(error.raw_response_body(), Some(body));
+        assert!(error.is_conflict());
+        assert!(!error.is_rate_limited());
+    }
+
+    #[tokio::test]
+    async fn remote_error_preserves_status_matrix() {
+        for status in [400, 401, 403, 409, 429, 503] {
+            let body = format!(r#"{{"message":"status {status}","code":"test_error"}}"#);
+            let error = request_remote_error(status, &body).await;
+
+            assert_eq!(error.status_code(), Some(status));
+            assert_eq!(error.remote_code(), Some("test_error"));
+            assert_eq!(
+                error.remote_message(),
+                Some(format!("status {status}").as_str())
+            );
+            assert_eq!(error.raw_response_body(), Some(body.as_str()));
+            assert_eq!(error.is_conflict(), status == 409);
+            assert_eq!(error.is_rate_limited(), status == 429);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_error_keeps_unstructured_body() {
+        let error = request_remote_error(500, "upstream failed").await;
+
+        assert_eq!(error.status_code(), Some(500));
+        assert_eq!(error.remote_code(), None);
+        assert_eq!(error.remote_message(), Some("upstream failed"));
+        assert_eq!(error.remote_details(), None);
+        assert_eq!(error.raw_response_body(), Some("upstream failed"));
+    }
+
+    #[tokio::test]
+    async fn remote_error_keeps_valid_fields_from_partially_invalid_json() {
+        let body = r#"{"message":"","error":"write conflict","code":42,"details":null}"#;
+        let error = request_remote_error(409, body).await;
+
+        assert_eq!(error.remote_code(), None);
+        assert_eq!(error.remote_message(), Some("write conflict"));
+        assert_eq!(error.remote_details(), Some(&serde_json::Value::Null));
+        assert_eq!(error.raw_response_body(), Some(body));
+    }
+
+    #[tokio::test]
+    async fn remote_error_uses_status_reason_for_empty_body() {
+        let error = request_remote_error(503, "").await;
+
+        assert_eq!(error.remote_message(), Some("Service Unavailable"));
+        assert_eq!(error.raw_response_body(), Some(""));
+        assert_eq!(
+            error.to_string(),
+            "Got Error from server: Service Unavailable"
+        );
     }
 
     // ---- Embedded execution -------------------------------------------------

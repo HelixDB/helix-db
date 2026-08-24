@@ -191,7 +191,9 @@ the request's tenant value to the text-search builder. See
 ## Considerations
 
 - **Noisy neighbors.** Tenants share compute and cache, so a high-volume tenant can affect others'
-  latency. Monitor per-tenant query volume and apply rate limiting on your infrastructure to mitigate.
+  latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+  is shared by the whole database. Monitor per-tenant query volume and apply a
+  separate application-side limiter when many application tenants use that database.
 - **Shared search semantics.** Secondary indexes remain shared. Tenant-scoped vector and text
   searches require an explicit tenant value for the configured tenant property, and the system
   remains shared infrastructure even when search indexes are partitioned by tenant.

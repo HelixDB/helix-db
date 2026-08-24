@@ -9,6 +9,7 @@ on:
       - "crates/cli/**"
       - "crates/metrics/**"
       - "sdks/typescript/**"
+      - "docs/database/helix-db/start-here/quickstart.mdx"
   push:
     branches: [main]
     paths:
@@ -18,6 +19,7 @@ on:
       - "crates/cli/**"
       - "crates/metrics/**"
       - "sdks/typescript/**"
+      - "docs/database/helix-db/start-here/quickstart.mdx"
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:

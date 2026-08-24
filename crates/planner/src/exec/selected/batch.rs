@@ -3,6 +3,7 @@
 //! Initial and follow-up entries use different condition payload types so
 //! previous-result checks are statically impossible before a prior entry exists.
 
+use super::super::ReturnShape;
 use super::run::SelectedExecutableRunRoot;
 use crate::ir;
 
@@ -14,6 +15,8 @@ pub struct SelectedExecutableRunEntry<C> {
     pub root: SelectedExecutableRunRoot,
     /// Output binding behavior.
     pub output: ir::BatchOutputPlan,
+    /// Semantic return shape before optimizer rewrites.
+    pub return_shape: ReturnShape,
     /// Run condition.
     pub condition: ir::RunConditionPlan<C>,
 }

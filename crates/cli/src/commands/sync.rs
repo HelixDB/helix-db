@@ -3,7 +3,9 @@ use crate::commands::enterprise_deploy::{
     compile_enterprise_queries, deploy_enterprise_by_cluster_id, enterprise_queries_dir,
     should_descend_enterprise_source_dir, should_include_enterprise_source_file,
 };
-use crate::config::{HelixConfig, InstanceInfo, DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER};
+use crate::config::{
+    HelixConfig, InstanceInfo, QueryAuthScheme, DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
+};
 use crate::enterprise_cloud::{
     cloud_base_url, resolve_enterprise_cluster, ResolvedEnterpriseCluster,
 };
@@ -304,6 +306,12 @@ fn refresh_enterprise_metadata(
         .query_auth_env
         .clone()
         .unwrap_or_else(|| DEFAULT_QUERY_AUTH_ENV.to_string());
+    instance.query_auth_scheme = Some(
+        remote
+            .cluster
+            .query_auth_scheme
+            .unwrap_or_else(|| QueryAuthScheme::inferred_from_header(&instance.query_auth_header)),
+    );
     instance.availability_mode = remote
         .cluster
         .availability_mode

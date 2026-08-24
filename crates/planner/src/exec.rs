@@ -11,6 +11,7 @@ mod metrics;
 mod op;
 mod order;
 mod plan;
+mod returns;
 pub mod selected;
 mod validation;
 
@@ -39,6 +40,10 @@ pub use self::metrics::PlannerMetrics;
 pub use self::op::*;
 pub use self::order::*;
 pub use self::plan::{ExecutablePlan, ExecutableSubplan};
+pub(crate) use self::returns::return_shape_from_ast;
+pub use self::returns::{
+    ExecutableReturn, ExecutableReturnVariables, ExecutableReturns, ReturnShape,
+};
 #[cfg(test)]
 pub(in crate::exec) use self::selected::lowering::SelectedExecutableRejectionReason;
 pub use self::selected::*;

@@ -16,10 +16,10 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::IsolationLevel;
 
 use super::{scale_result_id, VectorIndex};
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorLayer0NeighborsKey,
 };
-use crate::encoding::v1::values::vectors::encode_layer0_neighbors;
+use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
 use crate::search::vector::distance::{Cosine, Distance};
 use crate::search::vector::item::Item;
 use crate::search::vector::simhash::{order_code_from_simhash_bits, SimHashCache};

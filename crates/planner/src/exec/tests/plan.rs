@@ -75,6 +75,7 @@ fn executable_plan_validates_previous_result_conditions() {
             id: id(1),
             dependencies: Vec::new(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: ExecCondition::PreviousStepNotEmpty { dependency: id(2) },
             op: ExecOp::KvRead(KvReadPlan::Get {
                 key: ElementKeyspace::NodeProperty.point_key(1),

@@ -1,6 +1,7 @@
 //! Equality-index atom extraction.
 
 use helix_ast::expr::{CompareOp, Expr, Predicate};
+use helix_ast::value::PropertyValue;
 
 use crate::error::PlannerError;
 use crate::ir::{
@@ -8,8 +9,19 @@ use crate::ir::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EqualityIndexDomain {
+    One(IndexValue),
+    Many(crate::ir::AtLeast<IndexValue, 2>),
+    RuntimeSet(NonEmptyString),
+    Empty,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EqualityIndexAtom {
-    Atom { property: String, value: IndexValue },
+    Atom {
+        property: String,
+        domain: EqualityIndexDomain,
+    },
     NotIndexable,
 }
 
@@ -21,6 +33,7 @@ pub(crate) fn equality_atom(predicate: &Predicate) -> Result<EqualityIndexAtom, 
             op: CompareOp::Eq,
             right,
         } => equality_from_operands(left, right),
+        Predicate::IsIn { value, values } => equality_set_from_operands(value, values),
         Predicate::Neq { .. }
         | Predicate::Gt { .. }
         | Predicate::Gte { .. }
@@ -33,7 +46,6 @@ pub(crate) fn equality_atom(predicate: &Predicate) -> Result<EqualityIndexAtom, 
         | Predicate::StartsWith { .. }
         | Predicate::EndsWith { .. }
         | Predicate::Contains { .. }
-        | Predicate::IsIn { .. }
         | Predicate::And { .. }
         | Predicate::Or { .. }
         | Predicate::Not { .. }
@@ -51,7 +63,7 @@ fn equality_from_operands(left: &Expr, right: &Expr) -> Result<EqualityIndexAtom
             match SecondaryIndexLiteral::new(value.clone()) {
                 Ok(value) => Ok(EqualityIndexAtom::Atom {
                     property: property.clone(),
-                    value: IndexValue::Literal(value),
+                    domain: EqualityIndexDomain::One(IndexValue::Literal(value)),
                 }),
                 Err(SecondaryIndexLiteralError::NestedValue) => Ok(EqualityIndexAtom::NotIndexable),
             }
@@ -60,7 +72,7 @@ fn equality_from_operands(left: &Expr, right: &Expr) -> Result<EqualityIndexAtom
         | (Expr::Param(name), Expr::Property(property)) => NonEmptyString::new(name.clone())
             .map(|name| EqualityIndexAtom::Atom {
                 property: property.clone(),
-                value: IndexValue::Param(name),
+                domain: EqualityIndexDomain::One(IndexValue::Param(name)),
             })
             .ok_or(PlannerError::InvalidEmptyName {
                 field: NameField::Param,
@@ -72,6 +84,109 @@ fn equality_from_operands(left: &Expr, right: &Expr) -> Result<EqualityIndexAtom
         }
         _ => Ok(EqualityIndexAtom::NotIndexable),
     }
+}
+
+fn equality_set_from_operands(
+    value: &Expr,
+    values: &Expr,
+) -> Result<EqualityIndexAtom, PlannerError> {
+    let Expr::Property(property) = value else {
+        return Ok(EqualityIndexAtom::NotIndexable);
+    };
+    let domain = match values {
+        Expr::Param(name) => EqualityIndexDomain::RuntimeSet(
+            NonEmptyString::new(name.clone()).ok_or(PlannerError::InvalidEmptyName {
+                field: NameField::Param,
+            })?,
+        ),
+        Expr::Constant(value) => {
+            let Some(domain) = literal_equality_set(value) else {
+                return Ok(EqualityIndexAtom::NotIndexable);
+            };
+            domain
+        }
+        expr @ (Expr::Property(_)
+        | Expr::Id
+        | Expr::Timestamp
+        | Expr::DateTimeNow
+        | Expr::Add { .. }
+        | Expr::Sub { .. }
+        | Expr::Mul { .. }
+        | Expr::Div { .. }
+        | Expr::Mod { .. }
+        | Expr::Neg { .. }
+        | Expr::Case { .. }) => {
+            return Err(PlannerError::NonLiteralIndexExpression {
+                expression: format!("{expr:?}"),
+            });
+        }
+    };
+    Ok(EqualityIndexAtom::Atom {
+        property: property.clone(),
+        domain,
+    })
+}
+
+fn literal_equality_set(value: &PropertyValue) -> Option<EqualityIndexDomain> {
+    let values = match value {
+        PropertyValue::I64Array(values) => values
+            .iter()
+            .copied()
+            .map(PropertyValue::I64)
+            .collect::<Vec<_>>(),
+        PropertyValue::F64Array(values) => values
+            .iter()
+            .copied()
+            .map(PropertyValue::F64)
+            .collect::<Vec<_>>(),
+        PropertyValue::F32Array(values) => values
+            .iter()
+            .copied()
+            .map(PropertyValue::F32)
+            .collect::<Vec<_>>(),
+        PropertyValue::StringArray(values) => values
+            .iter()
+            .cloned()
+            .map(PropertyValue::String)
+            .collect::<Vec<_>>(),
+        PropertyValue::Array(values) => values.clone(),
+        value @ (PropertyValue::Null
+        | PropertyValue::Bool(_)
+        | PropertyValue::I64(_)
+        | PropertyValue::DateTime(_)
+        | PropertyValue::F64(_)
+        | PropertyValue::F32(_)
+        | PropertyValue::String(_)
+        | PropertyValue::Bytes(_)
+        | PropertyValue::Object(_)) => vec![value.clone()],
+    };
+    let values = values
+        .into_iter()
+        .map(SecondaryIndexLiteral::new)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let mut values = values.into_iter().fold(Vec::new(), |mut unique, value| {
+        if value.semantics() != crate::ir::LiteralEqualityIndexValueSemantics::NonReflexive
+            && !unique.iter().any(|existing: &SecondaryIndexLiteral| {
+                existing.as_property_value() == value.as_property_value()
+            })
+        {
+            unique.push(value);
+        }
+        unique
+    });
+    Some(match values.len() {
+        0 => EqualityIndexDomain::Empty,
+        1 => EqualityIndexDomain::One(IndexValue::Literal(
+            values
+                .pop()
+                .expect("one-value equality domain contains one value"),
+        )),
+        _ => EqualityIndexDomain::Many(
+            crate::ir::AtLeast::try_from_vec(values.into_iter().map(IndexValue::Literal).collect())
+                .expect("multi-value equality domain contains at least two values"),
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -125,7 +240,9 @@ mod tests {
                 .unwrap(),
                 EqualityIndexAtom::Atom {
                     property: "deleted_at".to_owned(),
-                    value: ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap()),
+                    domain: EqualityIndexDomain::One(ir::IndexValue::Literal(
+                        ir::SecondaryIndexLiteral::new(value).unwrap(),
+                    )),
                 }
             );
         }
@@ -141,8 +258,58 @@ mod tests {
             .unwrap(),
             EqualityIndexAtom::Atom {
                 property: "age".to_owned(),
-                value: ir::IndexValue::Param(ir::NonEmptyString::new("age").unwrap()),
+                domain: EqualityIndexDomain::One(ir::IndexValue::Param(
+                    ir::NonEmptyString::new("age").unwrap(),
+                )),
             }
+        );
+    }
+
+    #[test]
+    fn membership_atoms_share_scalar_finite_and_runtime_equality_domains() {
+        assert!(matches!(
+            equality_atom(&Predicate::is_in("age", PropertyValue::I64(42))).unwrap(),
+            EqualityIndexAtom::Atom {
+                domain: EqualityIndexDomain::One(ir::IndexValue::Literal(_)),
+                ..
+            }
+        ));
+        assert!(matches!(
+            equality_atom(&Predicate::is_in(
+                "age",
+                PropertyValue::F64Array(vec![f64::NAN, 1.0, 1.0, 2.0]),
+            ))
+            .unwrap(),
+            EqualityIndexAtom::Atom {
+                domain: EqualityIndexDomain::Many(values),
+                ..
+            } if values.len() == 2
+        ));
+        assert!(matches!(
+            equality_atom(&Predicate::is_in_param("age", "ages")).unwrap(),
+            EqualityIndexAtom::Atom {
+                domain: EqualityIndexDomain::RuntimeSet(param),
+                ..
+            } if param.as_ref() == "ages"
+        ));
+        assert!(matches!(
+            equality_atom(&Predicate::is_in(
+                "age",
+                PropertyValue::F32Array(vec![f32::NAN]),
+            ))
+            .unwrap(),
+            EqualityIndexAtom::Atom {
+                domain: EqualityIndexDomain::Empty,
+                ..
+            }
+        ));
+        assert_eq!(
+            equality_atom(&Predicate::is_in(
+                "age",
+                PropertyValue::array([PropertyValue::object([("nested", 1)])]),
+            ))
+            .unwrap(),
+            EqualityIndexAtom::NotIndexable
         );
     }
 }

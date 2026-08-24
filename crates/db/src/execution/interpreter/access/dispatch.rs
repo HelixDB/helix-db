@@ -120,6 +120,16 @@ impl<'db> ExecutionContext<'db> {
                 let ids = limited_index_ids(read.await?, limit);
                 return self.verified_node_rows(ids);
             }
+            exec::ExecNodeAccessPlan::DynamicMembership { index, key, values } => {
+                super::super::count::validate_node_equality_index(&index.index_id, key)?;
+                let read = self.dynamic_membership_ids(
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    key,
+                    values,
+                );
+                let ids = limited_index_ids(read.await?, limit);
+                return self.verified_node_rows(ids);
+            }
             exec::ExecNodeAccessPlan::RangeIndex { key, range, .. } => {
                 let ids = self.node_range_index_ids(key, range, limit).await?;
                 return self.verified_node_rows(ids);
@@ -228,6 +238,16 @@ impl<'db> ExecutionContext<'db> {
                 let ids = limited_index_ids(read.await?, limit);
                 return self.verified_edge_rows(ids);
             }
+            exec::ExecEdgeAccessPlan::DynamicMembership { index, key, values } => {
+                super::super::count::validate_edge_equality_index(&index.index_id, key)?;
+                let read = self.dynamic_membership_ids(
+                    crate::index_lifecycle::IndexElementKind::Edge,
+                    key,
+                    values,
+                );
+                let ids = limited_index_ids(read.await?, limit);
+                return self.verified_edge_rows(ids);
+            }
             exec::ExecEdgeAccessPlan::RangeIndex { key, range, .. } => {
                 let ids = self.edge_range_index_ids(key, range, limit).await?;
                 return self.verified_edge_rows(ids);
@@ -327,16 +347,16 @@ pub(super) mod tests {
 
         let mut results = vec![
             crate::search::vector::TypedVectorSearchResult::from_physical(
-                crate::encoding::v1::values::vector_generation::VectorEntityKind::Node,
-                crate::encoding::v1::values::vector_generation::ActiveScoreSemantic::ManhattanF32V1,
+                crate::encoding::v2::values::indexes::vector::VectorEntityKind::Node,
+                crate::encoding::v2::values::indexes::vector::ActiveScoreSemantic::ManhattanF32V1,
                 crate::search::vector::SearchResult::new(
                     1,
                     crate::search::vector::DistanceScore::try_new(0.1).unwrap(),
                 ),
             ),
             crate::search::vector::TypedVectorSearchResult::from_physical(
-                crate::encoding::v1::values::vector_generation::VectorEntityKind::Node,
-                crate::encoding::v1::values::vector_generation::ActiveScoreSemantic::ManhattanF32V1,
+                crate::encoding::v2::values::indexes::vector::VectorEntityKind::Node,
+                crate::encoding::v2::values::indexes::vector::ActiveScoreSemantic::ManhattanF32V1,
                 crate::search::vector::SearchResult::new(
                     2,
                     crate::search::vector::DistanceScore::try_new(0.2).unwrap(),
@@ -938,10 +958,10 @@ pub(super) mod tests {
         corrupt_db
             .inner_db()
             .put(
-                crate::encoding::v1::keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                        crate::encoding::v1::keys::NodePropertyKey::new(node),
+                crate::encoding::v2::keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                    kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+                        crate::encoding::v2::keys::NodePropertyKey::new(node),
                     ),
                 }
                 .to_bytes(),
@@ -952,10 +972,10 @@ pub(super) mod tests {
         corrupt_db
             .inner_db()
             .put(
-                crate::encoding::v1::keys::Key::Data {
-                    scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
-                    kind: crate::encoding::v1::keys::DataKeyKind::EdgePropertyById(
-                        crate::encoding::v1::keys::EdgePropertyByIdKey::new(edge),
+                crate::encoding::v2::keys::DataKey::Data {
+                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                    kind: crate::encoding::v2::keys::DataKeyKind::EdgePropertyById(
+                        crate::encoding::v2::keys::EdgePropertyByIdKey::new(edge),
                     ),
                 }
                 .to_bytes(),

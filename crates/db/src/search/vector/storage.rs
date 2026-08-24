@@ -4,7 +4,7 @@
 //! tenant-scoped SlateDB bytes. A `VectorRowKeyspace` binds the complete physical
 //! name and request scope once and derives the stable index ID internally, so
 //! callers cannot pair a name with the wrong compact namespace. It delegates
-//! logical serialization to the existing `encoding::v1` key types and therefore
+//! logical serialization to the canonical `encoding::v2` key types and therefore
 //! does not change persisted key bytes or row codecs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -15,22 +15,24 @@ use bytes::Bytes;
 use slatedb::DbReadOps;
 
 use crate::encoding::error::EncodingError;
-use crate::encoding::keys::{tenant::DataScope, DataKeyKind, Key};
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::keys::{scope::DataScope, DataKey, DataKeyKind};
+use crate::encoding::v2::keys::indexes::vector::{
     VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorEntryCandidatePrefixKey,
     VectorIndexMetadataKey, VectorItemKey, VectorItemPrefixKey, VectorKey,
     VectorLayer0NeighborsKey, VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
     VectorSimHashDirectoryKey, VectorSimHashDirectoryPrefixKey, VectorSimHashKey,
     VectorStorageLane, VectorUpperNeighborsKey, VectorUpperVectorKey,
 };
-use crate::encoding::v1::values::vectors::{
+use crate::encoding::v2::legacy::vector::{
+    metadata::decode_legacy_metadata, transaction_guard::decode_active_txn_guard,
+};
+use crate::encoding::v2::values::indexes::vector::{
     decode_layer0_neighbors, encode_layer0_neighbors,
-    entry::{decode_entry_candidate_layer, encode_entry_candidate_layer},
+    entry_candidate::{decode_entry_candidate_layer, encode_entry_candidate_layer},
     markers::{
-        decode_active_txn_guard, decode_empty_marker, decode_simhash_directory_marker_v1,
-        encode_empty_marker, encode_simhash_directory_marker_v1,
+        decode_empty_marker, decode_simhash_directory_marker_v1, encode_empty_marker,
+        encode_simhash_directory_marker_v1,
     },
-    metadata::decode_legacy_metadata,
     neighbors::{decode_upper_neighbors, encode_upper_neighbors},
     simhash::decode_simhash,
 };
@@ -135,10 +137,10 @@ impl VectorRowKeyspace {
 
     /// Encodes one typed logical key in this keyspace's physical namespace.
     ///
-    /// Logical key serialization remains owned by `encoding::v1`; this method
+    /// Logical key serialization remains owned by `encoding::v2`; this method
     /// only applies the bound tenant scope at the final storage boundary.
     pub(crate) fn key(&self, key: VectorKey) -> Bytes {
-        Key::Data {
+        DataKey::Data {
             scope: self.scope,
             kind: DataKeyKind::Vector(key),
         }
@@ -829,7 +831,7 @@ where
 
     /// Validates one bounded page of a frozen pre-V2 physical lane.
     ///
-    /// This is intentionally read-only. It parses every key through `encoding/v1`,
+    /// This is intentionally read-only. It parses every key through `encoding/v2`,
     /// decodes every value through the owning vector codec, and performs terminal
     /// metadata and entry-point proofs without checking graph-wide neighbor links.
     pub(crate) async fn validate_legacy_physical<D: Distance>(
@@ -2556,9 +2558,9 @@ mod tests {
 
     use super::*;
     use crate::config::VectorIndexDefinition;
-    use crate::encoding::keys::tenant::TenantId;
-    use crate::encoding::v1::keys::vectors::VectorIndexMetadataKey;
-    use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+    use crate::encoding::keys::scope::TenantId;
+    use crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey;
+    use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
     use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
     use crate::search::vector::{distance, Item, VectorDistanceMetric};
 
@@ -2598,7 +2600,7 @@ mod tests {
         ));
         metadata.entry_point = entry_point;
         Bytes::copy_from_slice(
-            &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+            &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                 &metadata,
             ),
         )
@@ -2631,16 +2633,16 @@ mod tests {
             (
                 VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
             ),
             (
                 VectorKey::TxnGuard(
-                    crate::encoding::v1::keys::vectors::VectorTxnGuardKey::new(index_id),
+                    crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(index_id),
                 ),
-                crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
+                crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
             ),
             (
                 VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(index_id, 1)),
@@ -2748,7 +2750,7 @@ mod tests {
                     keyspace.index_id(),
                 ))),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
@@ -2757,9 +2759,11 @@ mod tests {
         transaction
             .put(
                 keyspace.key(VectorKey::TxnGuard(
-                    crate::encoding::v1::keys::vectors::VectorTxnGuardKey::new(keyspace.index_id()),
+                    crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(
+                        keyspace.index_id(),
+                    ),
                 )),
-                crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
+                crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
             )
             .unwrap();
         transaction.commit().await.unwrap();
@@ -2866,7 +2870,7 @@ mod tests {
                     keyspace.index_id(),
                 ))),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),

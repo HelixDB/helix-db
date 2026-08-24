@@ -42,6 +42,15 @@ pub enum ExecNodeAccessPlan {
         /// Genuinely late-bound parameter.
         param: ir::NonEmptyString,
     },
+    /// Bounded runtime equality-domain lookup with authoritative fallback.
+    DynamicMembership {
+        /// Logical index metadata used to validate indexed runtime branches.
+        index: catalog::NodeEqualityIndexMeta,
+        /// Indexed property key.
+        key: catalog::ScopedPropertyKey,
+        /// Genuinely late-bound equality domain and its index-union bound.
+        values: ir::RuntimeEqualitySet,
+    },
     /// Node range-index scan.
     RangeIndex {
         /// Index metadata.
@@ -104,6 +113,11 @@ pub(in crate::exec) enum ExecNodeEqualityAccessPlan {
         key: catalog::ScopedPropertyKey,
         param: ir::NonEmptyString,
     },
+    DynamicMembership {
+        index: catalog::NodeEqualityIndexMeta,
+        key: catalog::ScopedPropertyKey,
+        values: ir::RuntimeEqualitySet,
+    },
 }
 
 pub(in crate::exec) fn exact_node_equality(
@@ -149,6 +163,9 @@ pub(in crate::exec) fn exact_node_equality(
         ir::IndexValue::Param(param) => {
             ExecNodeEqualityAccessPlan::DynamicEquality { index, key, param }
         }
+        ir::IndexValue::ParamSet(values) => {
+            ExecNodeEqualityAccessPlan::DynamicMembership { index, key, values }
+        }
     }
 }
 
@@ -169,6 +186,9 @@ impl From<ExecNodeEqualityAccessPlan> for ExecNodeAccessPlan {
             }
             ExecNodeEqualityAccessPlan::DynamicEquality { index, key, param } => {
                 Self::DynamicEquality { index, key, param }
+            }
+            ExecNodeEqualityAccessPlan::DynamicMembership { index, key, values } => {
+                Self::DynamicMembership { index, key, values }
             }
         }
     }
@@ -214,6 +234,15 @@ pub enum ExecNodeSecondarySetPlan {
         key: catalog::ScopedPropertyKey,
         /// Genuinely late-bound parameter.
         param: ir::NonEmptyString,
+    },
+    /// Bounded runtime equality domain with authoritative fallback.
+    DynamicMembership {
+        /// Logical index metadata.
+        index: catalog::NodeEqualityIndexMeta,
+        /// Indexed property.
+        key: catalog::ScopedPropertyKey,
+        /// Runtime domain and index-union bound.
+        values: ir::RuntimeEqualitySet,
     },
     /// Generation-qualified range scan resolved by the database.
     Range(ExecNodeSecondaryRangePlan),
@@ -266,6 +295,9 @@ impl ExecNodeSecondarySetPlan {
                     }
                     ExecNodeEqualityAccessPlan::DynamicEquality { index, key, param } => {
                         Self::DynamicEquality { index, key, param }
+                    }
+                    ExecNodeEqualityAccessPlan::DynamicMembership { index, key, values } => {
+                        Self::DynamicMembership { index, key, values }
                     }
                 },
             )

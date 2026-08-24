@@ -3,7 +3,7 @@
 //! Every case uses the feature-gated controller to invoke the installed
 //! production drivers. Shape construction is exhaustive over currently
 //! supported secondary forms, vector metrics/partitioning, text analyzers,
-//! positions, and node/edge ownership. The fixtures persist only deployed V1
+//! positions, and node/edge ownership. The fixtures persist only deployed
 //! keys and values.
 
 use std::collections::BTreeSet;
@@ -24,9 +24,9 @@ use crate::config::{
 };
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{encode_properties, Property};
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-use crate::encoding::v1::keys::vectors::VectorStorageLane;
-use crate::encoding::v1::keys::{DataKeyKind, EdgePropertyByIdKey, Key, NodePropertyKey};
+use crate::encoding::v2::keys::indexes::vector::VectorStorageLane;
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
+use crate::encoding::v2::keys::{DataKey, DataKeyKind, EdgePropertyByIdKey, NodePropertyKey};
 use crate::encoding::v2::keys::{RecordKind, ScopedKey};
 use crate::error::HelixDbError;
 use crate::execution::interpreter::{
@@ -439,7 +439,7 @@ async fn assert_generation_rows_absent(
         RecordKind::TextStatisticsEntity,
         RecordKind::SecondaryEqualityBitmap,
     ] {
-        let prefix = crate::encoding::v2::keys::Key::data_prefix(
+        let prefix = crate::encoding::v2::keys::ManagedIndexKey::data_prefix(
             scope,
             ScopedKey::generation_prefix(kind, index_id, generation),
         );
@@ -466,7 +466,7 @@ async fn assert_vector_namespace_absent(
         .lifecycle_test_writer_db()
         .expect("vector cleanup assertion has writer storage");
     for lane in VectorStorageLane::ALL {
-        let prefix = Key::Data {
+        let prefix = DataKey::Data {
             scope,
             kind: DataKeyKind::Vector(lane.prefix_key(physical_index_id.get())),
         }
@@ -2264,7 +2264,7 @@ async fn assert_build_delta_count_at_least(
     .await
     .expect("delta count canonical row decodes")
     .expect("delta count canonical row exists");
-    let prefix = Key::data_prefix(
+    let prefix = DataKey::data_prefix(
         scope,
         ScopedKey::generation_prefix(
             RecordKind::BuildDelta,
@@ -2361,7 +2361,7 @@ async fn allocate_edge_ids(db: &HelixDB, count: u64) -> std::ops::Range<u64> {
 
 /// Returns one typed authoritative node-property key.
 fn source_key(scope: DataScope, entity_id: u64) -> bytes::Bytes {
-    Key::Data {
+    DataKey::Data {
         scope,
         kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
     }
@@ -2370,7 +2370,7 @@ fn source_key(scope: DataScope, entity_id: u64) -> bytes::Bytes {
 
 /// Returns one typed authoritative edge-property key.
 fn edge_source_key(scope: DataScope, entity_id: u64) -> bytes::Bytes {
-    Key::Data {
+    DataKey::Data {
         scope,
         kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(entity_id)),
     }
@@ -2538,7 +2538,7 @@ async fn assert_build_deltas_empty(
     .await
     .expect("delta canonical row decodes")
     .expect("delta canonical row exists");
-    let prefix = Key::data_prefix(
+    let prefix = DataKey::data_prefix(
         scope,
         ScopedKey::generation_prefix(
             RecordKind::BuildDelta,
@@ -3685,6 +3685,7 @@ fn public_step(id: usize, dependencies: Vec<exec::ExecStepId>, op: exec::ExecOp)
         id: exec::ExecStepId::new(id).expect("public lifecycle step IDs are positive"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,

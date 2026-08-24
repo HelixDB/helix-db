@@ -35,6 +35,8 @@ pub enum ExecPlanError {
     DuplicateStepId { id: ExecStepId },
     /// Root step was not present.
     MissingRoot { root: ExecStepId },
+    /// Requested return variable has no executable binding.
+    MissingReturnBinding { name: ir::NonEmptyString },
     /// Dependency step was not present.
     MissingDependency {
         step: ExecStepId,
@@ -119,6 +121,9 @@ impl std::fmt::Display for ExecPlanError {
             }
             Self::DuplicateStepId { id } => write!(f, "duplicate exec step id {}", id.get()),
             Self::MissingRoot { root } => write!(f, "missing root exec step {}", root.get()),
+            Self::MissingReturnBinding { name } => {
+                write!(f, "return variable `{name}` has no executable binding")
+            }
             Self::MissingDependency { step, dependency } => write!(
                 f,
                 "exec step {} depends on missing step {}",

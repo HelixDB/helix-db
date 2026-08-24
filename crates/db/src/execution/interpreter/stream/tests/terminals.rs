@@ -1,4 +1,4 @@
-use super::super::super::{ExecutionContext, FoldedStream};
+use super::super::super::{ExecutionContext, FoldedStream, ReturnedValue};
 use super::support::*;
 
 #[tokio::test]
@@ -97,7 +97,10 @@ async fn planner_emitted_terminal_chain_executes_through_db_facade() {
         .await
         .expect("planner-emitted terminal chain executes");
 
-    assert_eq!(result.returns.get(&output), Some(&ExecutionValue::Count(1)));
+    assert_eq!(
+        result.returns.get(&output),
+        Some(&ReturnedValue::Present(ExecutionValue::Count(1)))
+    );
 }
 
 #[tokio::test]

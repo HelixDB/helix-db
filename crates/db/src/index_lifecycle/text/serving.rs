@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use futures::{StreamExt, TryStreamExt};
 use slatedb::DbReadOps;
 
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::work;
@@ -240,14 +240,14 @@ pub(crate) async fn load_active_manifest_roots(
         authority.index_id(),
         authority.generation(),
     );
-    let prefix = Key::data_prefix(authority.scope(), logical_prefix);
+    let prefix = ManagedIndexKey::data_prefix(authority.scope(), logical_prefix);
     let mut rows = reader.scan_prefix(&prefix, ..).await?;
     let mut roots = Vec::new();
     while let Some(row) = rows.next().await? {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestRoot(key),
             ..
-        } = Key::parse_from_slice(authority.scope(), &row.key)?
+        } = ManagedIndexKey::parse_from_slice(authority.scope(), &row.key)?
         else {
             return Err(corruption(
                 "text manifest-root prefix yielded another typed key",
@@ -492,7 +492,7 @@ pub(crate) async fn load_active_entity_states(
 
 /// Encodes one typed V2 data key in its exact scope.
 fn scoped_key(scope: DataScope, key: index_keys::ScopedKey) -> bytes::Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 /// Classifies malformed or cross-owned persisted text rows consistently.
