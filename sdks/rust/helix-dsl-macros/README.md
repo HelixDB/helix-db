@@ -24,7 +24,10 @@ fn create_post(payload: ParamObject) -> WriteBatch {
         .create_node("Post", payload)
 }
 
-let request = find_user("alice".to_string())?;
+fn main() -> Result<(), QueryError> {
+    let request = find_user("alice".to_string())?;
+    Ok(())
+}
 ```
 
 The macro preserves the function's visibility and parameters, builds the query
