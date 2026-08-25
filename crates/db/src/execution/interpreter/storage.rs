@@ -126,7 +126,13 @@ impl<'db> ExecutionContext<'db> {
                 HelixStorage::Reader(reader) => reader.scan(start..end).await?,
                 HelixStorage::Writer(writer) => writer.scan(start..end).await?,
             };
-            collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control).await
+            collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await
         }
         #[cfg(not(test))]
         {
@@ -176,7 +182,13 @@ impl<'db> ExecutionContext<'db> {
                 HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
                 HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
             };
-            collect_limited(&mut iter, limit, self.tenant_scope, self.execution_control).await
+            collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+            )
+            .await
         }
         #[cfg(not(test))]
         {
