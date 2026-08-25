@@ -1,0 +1,864 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HelixDB HTTP API",
+    "version": "2.0.0",
+    "summary": "Execute operation-tree queries against HelixDB",
+    "description": "The HelixDB HTTP API exposes the same v2 query contract on local servers and Helix Cloud gateways. Typed SDKs build the nested operation tree; clients send the serialized QueryRequest to POST /v2/query.",
+    "termsOfService": "https://www.helix-db.com/terms",
+    "contact": {
+      "name": "HelixDB",
+      "url": "https://www.helix-db.com/developers"
+    },
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "externalDocs": {
+    "description": "HelixDB HTTP API documentation",
+    "url": "https://docs.helix-db.com/database/helix-db/query-guides/http-api"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:6969",
+      "description": "Default local HelixDB server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Queries",
+      "description": "Execute serialized HelixDB operation trees."
+    },
+    {
+      "name": "Health",
+      "description": "Inspect process liveness and database readiness."
+    }
+  ],
+  "paths": {
+    "/v2/query": {
+      "post": {
+        "operationId": "executeQuery",
+        "summary": "Execute a HelixDB query",
+        "description": "Executes one read or write batch. request_type must match the closed read or write variant under query. Local servers accept request bodies up to 16 MiB. Helix Cloud gateways accept request bodies up to 2 MiB.",
+        "x-helix-request-body-limits": {
+          "localBytes": 16777216,
+          "helixCloudBytes": 2097152
+        },
+        "servers": [
+          {
+            "url": "http://localhost:6969",
+            "description": "Default local HelixDB server"
+          },
+          {
+            "url": "https://{gatewayHost}",
+            "description": "Helix Cloud query gateway from the database connection details or helix sync output",
+            "variables": {
+              "gatewayHost": {
+                "default": "cluster.helix-db.com",
+                "description": "Placeholder only. Replace it with the managed gateway hostname shown in the Helix Cloud dashboard or written to helix.toml by helix sync."
+              }
+            }
+          }
+        ],
+        "tags": [
+          "Queries"
+        ],
+        "security": [
+          {},
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DatabaseId"
+          },
+          {
+            "$ref": "#/components/parameters/WarmOnly"
+          },
+          {
+            "$ref": "#/components/parameters/RequireWriter"
+          },
+          {
+            "$ref": "#/components/parameters/AwaitDurable"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Maximum encoded body size: 16 MiB on a local HelixDB server and 2 MiB on a Helix Cloud gateway.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              },
+              "examples": {
+                "read": {
+                  "summary": "Count User nodes",
+                  "value": {
+                    "request_type": "read",
+                    "query_name": "node_count",
+                    "query": {
+                      "read": {
+                        "entries": [
+                          {
+                            "query": {
+                              "name": "node_count",
+                              "root": {
+                                "count": {
+                                  "input": {
+                                    "nodes_where": {
+                                      "predicate": {
+                                        "eq": {
+                                          "left": {
+                                            "property": "$label"
+                                          },
+                                          "right": {
+                                            "constant": {
+                                              "string": "User"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "returns": [
+                          "node_count"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "write": {
+                  "summary": "Create one User node",
+                  "value": {
+                    "request_type": "write",
+                    "query_name": "create_user",
+                    "query": {
+                      "write": {
+                        "entries": [
+                          {
+                            "query": {
+                              "name": "user",
+                              "root": {
+                                "add_n": {
+                                  "label": "User",
+                                  "properties": [
+                                    [
+                                      "name",
+                                      {
+                                        "value": {
+                                          "string": "Alice"
+                                        }
+                                      }
+                                    ]
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "returns": [
+                          "user"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Query executed successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Helix Cloud completed a cache-warming read and intentionally omitted the response body."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "408": {
+            "$ref": "#/components/responses/RequestTimeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Get process health",
+        "description": "Reports process liveness and the current database and index-runtime state. Liveness returns 200 even when ready is false.",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The server process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Get database readiness",
+        "description": "Returns 200 only when the configured database handle and index runtime are ready to serve queries.",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The database is ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The process is alive, but the database is not ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Helix Cloud cluster API key. Local servers do not require this credential by default."
+      }
+    },
+    "parameters": {
+      "DatabaseId": {
+        "name": "X-Helix-Database-Id",
+        "in": "header",
+        "required": false,
+        "description": "Database identifier shown in Helix Cloud connection details. Required by the GA shared gateway, not needed by a standalone local server, and not allowed by a database-specific cluster-mode gateway. The legacy X-Helix-Tenant-Id alias is also accepted in GA mode.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "WarmOnly": {
+        "name": "X-Helix-Warm",
+        "in": "header",
+        "required": false,
+        "description": "Warm read execution state. Valid only for read requests.",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "RequireWriter": {
+        "name": "X-Helix-Require-Writer",
+        "in": "header",
+        "required": false,
+        "description": "Reject the request unless it reaches a writer-capable server.",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "AwaitDurable": {
+        "name": "X-Helix-Await-Durable",
+        "in": "header",
+        "required": false,
+        "description": "Flush the writer before acknowledging success. Valid only for write requests.",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid JSON, query plan, vector input, request option, or Helix Cloud authentication header.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "The Helix Cloud API key is invalid.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "PaymentRequired": {
+        "description": "Helix Cloud query processing is disabled because the tenant has exhausted its credit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The Helix Cloud API key does not have permission to execute the query.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "RequestTimeout": {
+        "description": "The Helix Cloud query exceeded its wall-clock limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The transaction conflicted with concurrent work and can be retried.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "The Helix Cloud gateway rejected a request body larger than 2 MiB before query parsing.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            },
+            "example": {
+              "error": "payload_too_large",
+              "msg": "request body exceeds the maximum allowed size"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "The Helix Cloud gateway rate limit was exceeded.",
+        "headers": {
+          "Retry-After": {
+            "description": "Delay before retrying, when supplied by the gateway.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "An internal query, storage, or serialization failure occurred.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "A required writer or ready database is unavailable.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "QueryRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ReadQueryRequest"
+          },
+          {
+            "$ref": "#/components/schemas/WriteQueryRequest"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "request_type",
+          "mapping": {
+            "read": "#/components/schemas/ReadQueryRequest",
+            "write": "#/components/schemas/WriteQueryRequest"
+          }
+        }
+      },
+      "ReadQueryRequest": {
+        "type": "object",
+        "required": [
+          "request_type",
+          "query"
+        ],
+        "properties": {
+          "request_type": {
+            "const": "read"
+          },
+          "query_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional diagnostic name. It does not create a stored endpoint."
+          },
+          "query": {
+            "$ref": "#/components/schemas/ReadBatchQuery"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/QueryParameters"
+          },
+          "parameter_types": {
+            "$ref": "#/components/schemas/QueryParameterTypes"
+          }
+        },
+        "dependentRequired": {
+          "parameter_types": [
+            "parameters"
+          ]
+        },
+        "additionalProperties": false
+      },
+      "WriteQueryRequest": {
+        "type": "object",
+        "required": [
+          "request_type",
+          "query"
+        ],
+        "properties": {
+          "request_type": {
+            "const": "write"
+          },
+          "query_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional diagnostic name. It does not create a stored endpoint."
+          },
+          "query": {
+            "$ref": "#/components/schemas/WriteBatchQuery"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/QueryParameters"
+          },
+          "parameter_types": {
+            "$ref": "#/components/schemas/QueryParameterTypes"
+          }
+        },
+        "dependentRequired": {
+          "parameter_types": [
+            "parameters"
+          ]
+        },
+        "additionalProperties": false
+      },
+      "ReadBatchQuery": {
+        "type": "object",
+        "required": [
+          "read"
+        ],
+        "properties": {
+          "read": {
+            "$ref": "#/components/schemas/Batch"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WriteBatchQuery": {
+        "type": "object",
+        "required": [
+          "write"
+        ],
+        "properties": {
+          "write": {
+            "$ref": "#/components/schemas/Batch"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Batch": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchEntry"
+            }
+          },
+          "returns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "BatchEntry": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "$ref": "#/components/schemas/NamedQuery"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "for_each"
+            ],
+            "properties": {
+              "for_each": {
+                "type": "object",
+                "required": [
+                  "param",
+                  "body"
+                ],
+                "properties": {
+                  "param": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "body": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/BatchEntry"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "NamedQuery": {
+        "type": "object",
+        "required": [
+          "root"
+        ],
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root": {
+            "$ref": "#/components/schemas/OperationTree"
+          },
+          "condition": {
+            "$ref": "#/components/schemas/BatchCondition"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BatchCondition": {
+        "description": "Externally tagged condition for a conditional batch entry.",
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "prev_not_empty"
+          },
+          {
+            "type": "object",
+            "required": [
+              "var_not_empty"
+            ],
+            "properties": {
+              "var_not_empty": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "var_empty"
+            ],
+            "properties": {
+              "var_empty": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "var_min_size"
+            ],
+            "properties": {
+              "var_min_size": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "OperationTree": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "description": "One externally tagged, snake_case HelixDB AstNode operation. Source operations start a traversal; subsequent operations contain their predecessor under input. Use a typed HelixDB SDK or the query documentation to construct this recursive tree.",
+        "additionalProperties": true,
+        "examples": [
+          {
+            "nodes": {
+              "reference": "all"
+            }
+          },
+          {
+            "count": {
+              "input": {
+                "nodes": {
+                  "reference": "all"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "QueryParameters": {
+        "type": "object",
+        "propertyNames": {
+          "minLength": 1
+        },
+        "additionalProperties": {
+          "$ref": "#/components/schemas/QueryParameterValue"
+        }
+      },
+      "QueryParameterValue": {
+        "description": "JSON-compatible runtime parameter. Datetimes are RFC 3339 strings when declared as date_time. Raw bytes cannot be represented on the JSON route. Send floating-point JSON numbers without parameter_types because JSON Schema cannot distinguish an integral number token from the integer representation used by the exact typed decoder.",
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer",
+            "format": "int64"
+          },
+          {
+            "type": "number",
+            "format": "double"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryParameterValue"
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/QueryParameterValue"
+            }
+          }
+        ]
+      },
+      "QueryParameterTypes": {
+        "type": "object",
+        "description": "When present, keys must exactly match parameters. Typed and untyped parameters cannot be mixed. The HTTP contract deliberately omits f32 and f64 declarations because JSON Schema cannot express the lexical distinction required by exact typed decoding; send floating-point JSON numbers without parameter_types.",
+        "propertyNames": {
+          "minLength": 1
+        },
+        "additionalProperties": {
+          "$ref": "#/components/schemas/QueryParameterType"
+        }
+      },
+      "QueryParameterType": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "bool",
+              "i64",
+              "string",
+              "date_time",
+              "value",
+              "object"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "array"
+            ],
+            "properties": {
+              "array": {
+                "$ref": "#/components/schemas/QueryParameterType"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "QueryResponse": {
+        "type": "object",
+        "description": "Returned variables keyed by the names listed in the batch returns array.",
+        "additionalProperties": true,
+        "example": {
+          "node_count": [
+            42
+          ]
+        }
+      },
+      "QueryError": {
+        "type": "object",
+        "description": "Stable error envelope returned by local servers and Helix Cloud gateways.",
+        "required": [
+          "error",
+          "msg"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Stable snake_case error code."
+          },
+          "msg": {
+            "type": "string",
+            "description": "Human-readable diagnostic message."
+          }
+        },
+        "additionalProperties": false,
+        "example": {
+          "error": "invalid_query_json",
+          "msg": "invalid query JSON: expected value"
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "ready",
+          "mode",
+          "index_runtime"
+        ],
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Configured database mode."
+          },
+          "index_runtime": {
+            "type": "string",
+            "description": "Stable index-runtime readiness code."
+          }
+        },
+        "additionalProperties": false,
+        "example": {
+          "ready": true,
+          "mode": "writer",
+          "index_runtime": "ready"
+        }
+      }
+    }
+  }
+}

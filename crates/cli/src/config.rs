@@ -399,6 +399,46 @@ impl LocalInstanceConfig {
     }
 }
 
+/// How the CLI turns an environment value into a query authentication header.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryAuthScheme {
+    /// Add the `Bearer` authorization scheme to the configured key.
+    Bearer,
+    /// Send the configured value without adding a scheme.
+    Raw,
+}
+
+impl QueryAuthScheme {
+    pub(crate) fn inferred_from_header(header: &str) -> Self {
+        if header.eq_ignore_ascii_case(DEFAULT_QUERY_AUTH_HEADER) {
+            Self::Bearer
+        } else {
+            Self::Raw
+        }
+    }
+
+    pub(crate) fn format_header_value(self, value: &str) -> Option<String> {
+        if value.trim().is_empty() || value.chars().any(char::is_control) {
+            return None;
+        }
+        match self {
+            Self::Raw => Some(value.to_string()),
+            Self::Bearer => {
+                let trimmed = value.trim();
+                let mut parts = trimmed.splitn(2, char::is_whitespace);
+                let prefix = parts.next().unwrap_or_default();
+                if prefix.eq_ignore_ascii_case("bearer") {
+                    let token = parts.next().unwrap_or_default().trim();
+                    (!token.is_empty()).then(|| format!("Bearer {token}"))
+                } else {
+                    Some(format!("Bearer {trimmed}"))
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnterpriseInstanceConfig {
     pub cluster_id: String,
@@ -412,6 +452,9 @@ pub struct EnterpriseInstanceConfig {
     pub query_auth_header: String,
     #[serde(default = "default_query_auth_env")]
     pub query_auth_env: String,
+    /// Explicit query authentication scheme. Legacy configs infer it from the header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_auth_scheme: Option<QueryAuthScheme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +467,13 @@ pub struct EnterpriseInstanceConfig {
     pub max_instances: u64,
     #[serde(flatten)]
     pub db_config: DbConfig,
+}
+
+impl EnterpriseInstanceConfig {
+    pub(crate) fn resolved_query_auth_scheme(&self) -> QueryAuthScheme {
+        self.query_auth_scheme
+            .unwrap_or_else(|| QueryAuthScheme::inferred_from_header(&self.query_auth_header))
+    }
 }
 
 fn default_min_instances() -> u64 {
@@ -663,6 +713,87 @@ max_instances = 4
         assert_eq!(enterprise.min_instances, 2);
         assert_eq!(enterprise.max_instances, 4);
         assert_eq!(enterprise.db_config.vector_config.db_max_size_gb, 20);
+        assert_eq!(
+            enterprise.resolved_query_auth_scheme(),
+            QueryAuthScheme::Bearer
+        );
+    }
+
+    #[test]
+    fn query_auth_scheme_supports_legacy_and_explicit_configs() {
+        let legacy_raw: HelixConfig = toml::from_str(
+            r#"
+[project]
+name = "demo"
+
+[enterprise.production]
+cluster_id = "cluster-123"
+query_auth_header = "x-api-key"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_raw
+                .enterprise
+                .get("production")
+                .unwrap()
+                .resolved_query_auth_scheme(),
+            QueryAuthScheme::Raw
+        );
+
+        let explicit: HelixConfig = toml::from_str(
+            r#"
+[project]
+name = "demo"
+
+[enterprise.production]
+cluster_id = "cluster-123"
+query_auth_header = "Authorization"
+query_auth_scheme = "bearer"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit
+                .enterprise
+                .get("production")
+                .unwrap()
+                .query_auth_scheme,
+            Some(QueryAuthScheme::Bearer)
+        );
+
+        let invalid = toml::from_str::<HelixConfig>(
+            r#"
+[project]
+name = "demo"
+
+[enterprise.production]
+cluster_id = "cluster-123"
+query_auth_scheme = "token"
+"#,
+        );
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn query_auth_scheme_formats_header_values() {
+        assert_eq!(
+            QueryAuthScheme::Bearer.format_header_value("secret"),
+            Some("Bearer secret".to_string())
+        );
+        assert_eq!(
+            QueryAuthScheme::Bearer.format_header_value("bearer secret"),
+            Some("Bearer secret".to_string())
+        );
+        assert_eq!(
+            QueryAuthScheme::Raw.format_header_value("secret"),
+            Some("secret".to_string())
+        );
+        assert_eq!(QueryAuthScheme::Bearer.format_header_value("  "), None);
+        assert_eq!(
+            QueryAuthScheme::Bearer.format_header_value("Bearer\r\nsecret"),
+            None
+        );
     }
 
     #[test]

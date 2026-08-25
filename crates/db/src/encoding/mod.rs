@@ -1,10 +1,10 @@
 //! Graph data types and encoding
 
 pub mod error;
+#[deprecated(note = "use encoding::v2")]
 pub mod v1;
-pub(crate) mod v2;
+pub mod v2;
 
-pub use v1::keys::EdgeId;
-pub use v1::keys::NodeId;
-
-pub use v1::{indexes, keys, property};
+pub use v2::keys::{self, indexes};
+pub use v2::keys::{EdgeId, NodeId};
+pub use v2::values::{self, property};

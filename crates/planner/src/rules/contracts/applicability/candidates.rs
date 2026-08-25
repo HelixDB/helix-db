@@ -73,6 +73,11 @@ pub(crate) fn access_filter_has_index_candidate(filter: &logical::AccessFilter) 
     else {
         return false;
     };
+    if access::label_domain_has_candidate(&predicate)
+        && !access_filter_has_simplification_candidate(filter)
+    {
+        return true;
+    }
     access_filter_has_usable_label(filter.access().common_label(), &label)
         && analysis::predicate_has_index_atom_candidate(&predicate)
 }

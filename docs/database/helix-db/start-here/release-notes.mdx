@@ -13,10 +13,11 @@ pageType: "Reference"
 <Update
   label="August 2026"
   rss={{
-    title: "Asynchronous Python SDK client",
-    description: "Reusable asynchronous server and embedded clients in helix-db 0.3.3"
+    title: "Go SDK v0.3.1 and asynchronous Python SDK client",
+    description: "The Go server SDK and reusable asynchronous Python clients"
   }}
 >
+- **[Go SDK v0.3.1](/database/helix-db/start-here/sdk-setup/go-project-setup)** — operation-tree query construction, typed parameters, `/v2/query` execution, index lifecycle requests, and traversal-scoped vector and BM25 search. Upgrade from v0.3.0: this patch keeps unreleased embedded adapters out of public module discovery. Embedded execution and native graph bindings are not distributed in this release.
 - **[Python async client](/database/helix-db/start-here/sdk-setup/python-project-setup#async-execution)** — `helix-db` 0.3.3 adds reusable HTTPX connection pooling, concurrent requests, cancellation-safe response cleanup, and asynchronous embedded writer and reader clients.
 </Update>
 

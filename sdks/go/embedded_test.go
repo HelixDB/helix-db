@@ -14,6 +14,14 @@ type fakeNativeDB struct {
 	err      error
 }
 
+type fakeQueryError struct {
+	code QueryErrorCode
+	msg  string
+}
+
+func (e *fakeQueryError) Error() string                        { return e.msg }
+func (e *fakeQueryError) QueryError() (QueryErrorCode, string) { return e.code, e.msg }
+
 func (f *fakeNativeDB) QueryJson(request []byte) ([]byte, error) {
 	f.requests = append(f.requests, append([]byte(nil), request...))
 	if f.err != nil {
@@ -76,5 +84,22 @@ func TestEmbeddedCloseCallsNativeClose(t *testing.T) {
 	}
 	if !native.closed {
 		t.Fatal("expected native close to be called")
+	}
+}
+
+func TestEmbeddedExecPreservesNativeErrorCodeAndMessage(t *testing.T) {
+	native := &fakeNativeDB{err: &fakeQueryError{
+		code: QueryErrorCode("index_not_found"),
+		msg:  "missing text index",
+	}}
+	client := &Client{embedded: native}
+
+	err := client.Exec(context.Background(), findUsers("acme", 1), nil)
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) {
+		t.Fatalf("expected HelixError, got %T", err)
+	}
+	if helixErr.Code != QueryErrorCode("index_not_found") || helixErr.Details != "missing text index" {
+		t.Fatalf("unexpected embedded error: code=%q details=%q", helixErr.Code, helixErr.Details)
 	}
 }

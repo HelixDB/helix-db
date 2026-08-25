@@ -1272,6 +1272,7 @@ dependencies = [
  "helix-db-testkit",
  "helix-metrics",
  "helix-planner",
+ "helix-value-semantics",
  "insta",
  "libc",
  "memmap2",
@@ -1535,9 +1536,9 @@ dependencies = [
 
 [[package]]
 name = "fail-parallel"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f4a147ba57fcd64323c54c8f69fd4e045456a99574163010ccf5eea3168aaa"
+checksum = "c29b33a0187823f1fa88b36980227dc96c7504ede2288e7d2a77d9d6d88b260c"
 dependencies = [
  "log",
  "once_cell",
@@ -2089,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "3.0.8"
+version = "3.1.2"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -2204,10 +2205,16 @@ version = "0.1.0"
 dependencies = [
  "criterion 0.8.2",
  "helix-ast",
+ "helix-value-semantics",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
 ]
+
+[[package]]
+name = "helix-value-semantics"
+version = "0.1.0"
 
 [[package]]
 name = "helixdb-uniffi"
@@ -4789,8 +4796,8 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.14.1"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e#dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e"
+version = "0.15.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -4834,8 +4841,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.14.1"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e#dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e"
+version = "0.15.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
 dependencies = [
  "chrono",
  "log",
@@ -4849,8 +4856,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.14.1"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e#dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e"
+version = "0.15.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=30d9f28cfeb93cf95652aac2b7724811c5c49630#30d9f28cfeb93cf95652aac2b7724811c5c49630"
 dependencies = [
  "async-trait",
  "bytes",

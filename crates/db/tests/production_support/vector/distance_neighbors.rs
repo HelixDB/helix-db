@@ -9,7 +9,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use super::*;
-use crate::encoding::v1::values::vector_generation::{
+use crate::encoding::v2::values::indexes::vector::{
     ActiveScoreSemantic, CosineNormPolicyId, MetricKind, VectorCodecKind,
 };
 
@@ -303,17 +303,19 @@ pub(crate) fn run() {
     );
 
     let deployed_upper =
-        crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors(next.as_slice())
-            .unwrap();
+        crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors(
+            next.as_slice(),
+        )
+        .unwrap();
     assert_eq!(
         deployed_upper,
-        crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors(&[2, 3, 4])
+        crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors(&[2, 3, 4])
             .unwrap()
     );
     let deployed_layer0 =
-        crate::encoding::v1::values::vectors::encode_layer0_neighbors(next.as_slice());
+        crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors(next.as_slice());
     assert_eq!(
         deployed_layer0,
-        crate::encoding::v1::values::vectors::encode_layer0_neighbors(&[2, 3, 4])
+        crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors(&[2, 3, 4])
     );
 }

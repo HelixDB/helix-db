@@ -8,15 +8,20 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 `helix-db` crate provides the query DSL, request types, async
+The published `helix-db` 3.0.0 crate provides the query DSL, request types, async
 HTTP client, native graph helpers, and a feature-gated embedded client.
 
 <Note>
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is published as `helix-db` and imported as `helix_db`.
 </Note>
 
 ## Install
+
+```bash
+cargo add helix-db@3.0.0
+```
+
+Or add the dependency directly:
 
 ```toml Cargo.toml
 [dependencies]

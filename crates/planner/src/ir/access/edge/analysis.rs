@@ -38,6 +38,25 @@ pub(super) fn common_label(source: &EdgeAccessPlan) -> Option<&ir::NonEmptyStrin
     }
 }
 
+pub(super) fn secondary_set_eligible(source: &EdgeAccessPlan) -> bool {
+    match source {
+        EdgeAccessPlan::Empty
+        | EdgeAccessPlan::EqualityIndex { .. }
+        | EdgeAccessPlan::RangeIndex { .. } => true,
+        EdgeAccessPlan::Intersect(children) | EdgeAccessPlan::Union(children) => children
+            .iter()
+            .all(|child| secondary_set_eligible(child.as_ref())),
+        EdgeAccessPlan::PointIds { .. }
+        | EdgeAccessPlan::FromParam { .. }
+        | EdgeAccessPlan::FromVar { .. }
+        | EdgeAccessPlan::AllScan
+        | EdgeAccessPlan::LabelScan { .. }
+        | EdgeAccessPlan::VectorSearch { .. }
+        | EdgeAccessPlan::TextSearch { .. }
+        | EdgeAccessPlan::ScanThenFilter { .. } => false,
+    }
+}
+
 pub(super) fn set_canonicalization_candidate(source: &EdgeAccessPlan) -> bool {
     match source {
         EdgeAccessPlan::Union(sources) => {

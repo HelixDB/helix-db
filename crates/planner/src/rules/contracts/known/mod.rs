@@ -105,6 +105,8 @@ pub enum KnownRuleId {
     SeedRootRepeat,
     /// Implement reserved stream terminals.
     SeedStreamReserved,
+    /// Implement logical cardinality as an exact physical count program.
+    SeedStreamCardinality,
     /// Implement projection stream terminals.
     SeedStreamProject,
     /// Implement aggregate stream terminals.

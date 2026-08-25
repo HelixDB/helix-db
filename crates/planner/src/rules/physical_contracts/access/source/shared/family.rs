@@ -11,8 +11,11 @@ pub(in crate::rules) enum AccessSourceParts<'a, Plan> {
         label: &'a ir::NonEmptyString,
     },
     EqualityIndex {
+        access: crate::physical::PhysicalAccess,
+        index_id: &'a ir::NonEmptyString,
         key: &'a catalog::ScopedPropertyKey,
         kind: EqualityIndexKind,
+        semantics: ir::EqualityIndexValueSemantics,
     },
     RangeIndex {
         key: &'a catalog::ScopedPropertyDirectionKey,

@@ -82,6 +82,13 @@ class FakeNativeHandle:
         self.closed = True
 
 
+class FakeNativeError(Exception):
+    def __init__(self, error: str, msg: str) -> None:
+        super().__init__(msg)
+        self.error = error
+        self.msg = msg
+
+
 class FakeNativeDB:
     opened: list[object] = []
     opened_readers: list[object] = []
@@ -269,6 +276,74 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "Remote")
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.details, "conflict")
+        self.assertIsNone(ctx.exception.code)
+
+    def test_warm_no_content_is_success(self) -> None:
+        request = QueryRequest.read(read_batch())
+        calls = []
+
+        def fake_urlopen(req):
+            calls.append(req)
+            return FakeResponse(body=b"", status=204, reason="No Content")
+
+        with patch("helixdb.client.urlopen", fake_urlopen):
+            result = Client("http://127.0.0.1:6969").execute(request, warm_only=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(calls[0].headers["X-helix-warm"], "true")
+
+    def test_remote_error_parses_new_legacy_future_missing_and_malformed_bodies(self) -> None:
+        request = QueryRequest.read(read_batch())
+        cases = [
+            (
+                b'{"error":"index_not_found","msg":"missing index"}',
+                "index_not_found",
+                "missing index",
+            ),
+            (
+                b'{"error":"legacy message","code":"index_not_found"}',
+                "index_not_found",
+                "legacy message",
+            ),
+            (b'{"error":"future_code","msg":"future message"}', "future_code", "future message"),
+            (b'{"error":"message without code"}', None, "message without code"),
+            (b"not JSON", None, "not JSON"),
+        ]
+
+        for body, expected_code, expected_details in cases:
+            with self.subTest(body=body):
+
+                def fake_urlopen(req, response_body=body):
+                    raise HTTPError(
+                        req.full_url,
+                        500,
+                        "Internal Server Error",
+                        hdrs={},
+                        fp=BytesIO(response_body),
+                    )
+
+                with patch("helixdb.client.urlopen", fake_urlopen):
+                    with self.assertRaises(HelixError) as ctx:
+                        Client("http://127.0.0.1:6969").query(request)
+
+                self.assertEqual(ctx.exception.code, expected_code)
+                self.assertEqual(ctx.exception.details, expected_details)
+
+    def test_embedded_error_preserves_uniffi_code_and_message_fields(self) -> None:
+        request = QueryRequest.read(read_batch())
+
+        with patch.dict(sys.modules, {"helixdb_uniffi": fake_native_module()}):
+            client = Client.embedded(InMemory("py-sdk-embedded-error"))
+            FakeNativeDB.handle.error = FakeNativeError(
+                "index_not_found",
+                "missing text index",
+            )
+            with self.assertRaises(HelixError) as ctx:
+                client.query(request)
+
+        self.assertEqual(ctx.exception.kind, "Embedded")
+        self.assertEqual(ctx.exception.code, "index_not_found")
+        self.assertEqual(ctx.exception.details, "missing text index")
 
     def test_embedded_client_query_uses_native_handle(self) -> None:
         request = QueryRequest.read(

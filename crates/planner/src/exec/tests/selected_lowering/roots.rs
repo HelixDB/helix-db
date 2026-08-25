@@ -1,5 +1,97 @@
 use super::super::*;
 
+fn exact_access_alternative(
+    element: properties::ElementKind,
+    access: physical::PhysicalAccess,
+) -> physical::PhysicalAlternative {
+    physical::PhysicalAlternative::new(
+        physical::PhysicalExpr::Access { element, access },
+        properties::DeliveredProperties {
+            element: Some(element),
+            ..properties::DeliveredProperties::default()
+        },
+        cost::CostVector::ZERO,
+    )
+}
+
+#[test]
+fn selected_exact_access_payloads_are_copied_without_reclassification() {
+    let node_equality = |property: &str, value: &str| ir::NodeAccessPlan::EqualityIndex {
+        index: catalog::NodeEqualityIndexMeta::try_new(format!("node_eq:User:{property}")).unwrap(),
+        key: catalog::ScopedPropertyKey::try_new("User", property).unwrap(),
+        value: index_value(value),
+    };
+    let node_plan = ir::NodeAccessPlan::Union(ir::AtLeast::from_pair(
+        node_source(node_equality("status", "active")),
+        node_source(node_equality("role", "admin")),
+    ));
+    let node_exact = ExecNodeAccessPlan::SecondarySet {
+        set: node_secondary_set(&node_plan).unwrap(),
+    };
+    let node_subplan = ExecutableSubplan::from_selected_executable_alternative(
+        &node_access_expr(node_plan),
+        &exact_access_alternative(
+            properties::ElementKind::Node,
+            physical::PhysicalAccess::NodeExact(Box::new(node_exact.clone())),
+        ),
+        &cost::StorageCostProfile::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &node_subplan.steps()[0].op,
+        ExecOp::Access { plan }
+            if plan.as_ref() == &ExecAccessPlan::Node(node_exact)
+    ));
+
+    let edge_plan = ir::EdgeAccessPlan::EqualityIndex {
+        index: catalog::EdgeEqualityIndexMeta::try_new("edge_eq:FOLLOWS:status").unwrap(),
+        key: catalog::ScopedPropertyKey::try_new("FOLLOWS", "status").unwrap(),
+        value: index_value("active"),
+    };
+    let ir::EdgeAccessPlan::EqualityIndex { index, key, value } = &edge_plan else {
+        unreachable!()
+    };
+    let edge_exact = ExecEdgeAccessPlan::exact_equality(index.clone(), key.clone(), value.clone());
+    let edge_subplan = ExecutableSubplan::from_selected_executable_alternative(
+        &edge_access_expr(edge_plan),
+        &exact_access_alternative(
+            properties::ElementKind::Edge,
+            physical::PhysicalAccess::EdgeExact(Box::new(edge_exact.clone())),
+        ),
+        &cost::StorageCostProfile::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &edge_subplan.steps()[0].op,
+        ExecOp::Access { plan }
+            if plan.as_ref() == &ExecAccessPlan::Edge(edge_exact)
+    ));
+}
+
+#[test]
+fn selected_exact_access_rejects_a_payload_for_another_logical_equality() {
+    let index = catalog::NodeEqualityIndexMeta::try_new("node_eq:User:status").unwrap();
+    let key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+    let source = node_access_expr(ir::NodeAccessPlan::EqualityIndex {
+        index: index.clone(),
+        key: key.clone(),
+        value: index_value("active"),
+    });
+    let mismatched = ExecNodeAccessPlan::exact_equality(index, key, index_value("paused"));
+
+    assert!(matches!(
+        ExecutableSubplan::from_selected_executable_alternative(
+            &source,
+            &exact_access_alternative(
+                properties::ElementKind::Node,
+                physical::PhysicalAccess::NodeExact(Box::new(mismatched)),
+            ),
+            &cost::StorageCostProfile::default(),
+        ),
+        Err(ExecPlanError::UnsupportedSelectedExecutableAlternative { .. })
+    ));
+}
+
 #[test]
 fn selected_executable_alternative_rejects_incompatible_source_contracts() {
     let source = node_access_expr(ir::NodeAccessPlan::AllScan);
@@ -215,6 +307,7 @@ fn selected_root_pipeline_lowers_variable_source_stream_to_native_dag() {
                     ops,
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("selected")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),
@@ -395,7 +488,7 @@ fn selected_root_control_flow_direct_alternatives_require_selected_wrappers() {
 
     let terminal_source = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         logical::RootStream::VariableSource(logical::VariableSource::new(name("seed"))),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
     let terminal_alternative = physical::PhysicalAlternative::new(
         physical::PhysicalExpr::Pipeline(physical::PhysicalPipeline::new(
@@ -507,7 +600,7 @@ fn selected_stream_project_lowers_variable_source_terminal_to_native_dag() {
             input: SelectedRootStreamInput::VariableSource(logical::VariableSource::new(name(
                 "seed",
             ))),
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         },
         ir::BatchOutputPlan::Bind(name("count")),
         &profile,
@@ -523,7 +616,7 @@ fn selected_stream_project_lowers_variable_source_terminal_to_native_dag() {
     assert!(matches!(
         &plan.steps()[1].op,
         ExecOp::Project {
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         }
     ));
     assert_eq!(plan.steps()[1].dependencies, vec![plan.steps()[0].id]);

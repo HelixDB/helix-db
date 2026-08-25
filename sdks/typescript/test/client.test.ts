@@ -66,6 +66,20 @@ function sampleRequest(): QueryRequest {
   );
 }
 
+async function remoteError(status: number, body: string): Promise<HelixError> {
+  const server = await spawnCaptureServer({ status, body });
+  const client = new Client(server.base);
+  try {
+    await client.query(sampleRequest()).send();
+    assert.fail("non-success response should return a remote error");
+  } catch (error) {
+    assert.ok(error instanceof HelixError);
+    return error;
+  } finally {
+    await server.close();
+  }
+}
+
 async function withFakeNativeModule<T>(run: (moduleUrl: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "helixdb-ts-native-"));
   const modulePath = join(dir, "native.mjs");
@@ -75,7 +89,11 @@ async function withFakeNativeModule<T>(run: (moduleUrl: string) => Promise<T>): 
 export const calls = [];
 export const queryBodies = [];
 let closed = false;
+let queryError;
 export const wasClosed = () => closed;
+export const setQueryError = (error, msg) => {
+  queryError = { error, msg };
+};
 
 export const HelixDbSource = {
   InMemory: (database) => ({ variant: "InMemory", database }),
@@ -107,6 +125,7 @@ function handle() {
   return {
     async query_json(request) {
       queryBodies.push(new TextDecoder().decode(request));
+      if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
       return new TextEncoder().encode('{"users":0}');
     },
     async close() {
@@ -204,14 +223,130 @@ assert.throws(
   assert.deepEqual(result, { ok: true });
 }
 
-// ---- Non-200 response surfaces a remote error -------------------------------
+// ---- Cloud warm 204 is a successful empty response -------------------------
 
 {
-  const server = await spawnCaptureServer({ status: 500, body: "boom" });
+  const server = await spawnCaptureServer({ status: 204, body: "" });
+  const client = new Client(server.base);
+  const result = await client.requestBuilder<void>().warmOnly().query(sampleRequest()).send();
+
+  const req = await server.captured;
+  await server.close();
+
+  assert.equal(req.headers["x-helix-warm"], "true");
+  assert.equal(result, undefined);
+}
+
+// ---- Empty HTTP 200 still fails response deserialization -------------------
+
+{
+  const server = await spawnCaptureServer({ status: 200, body: "" });
+  const client = new Client(server.base);
+
+  await assert.rejects(
+    client.query(sampleRequest()).send(),
+    (error: unknown) => error instanceof HelixError && error.kind === "Serialization",
+  );
+  await server.close();
+}
+
+// ---- Other non-success responses surface a remote error --------------------
+
+{
+  const body = '{"error":"write conflict","code":"write_conflict","details":{"retryable":true}}';
+  const error = await remoteError(409, body);
+
+  assert.equal(error.kind, "Remote");
+  assert.equal(error.statusCode, 409);
+  assert.equal(error.code, "write_conflict");
+  assert.equal(error.serverMessage, "write conflict");
+  assert.deepEqual(error.serverDetails, { retryable: true });
+  assert.equal(error.rawBody, body);
+  assert.equal(error.details, "write conflict");
+  assert.equal(error.isConflict(), true);
+  assert.equal(error.isRateLimited(), false);
+}
+
+for (const status of [400, 401, 403, 409, 429, 503]) {
+  const body = JSON.stringify({ message: `status ${status}`, code: "test_error" });
+  const error = await remoteError(status, body);
+
+  assert.equal(error.statusCode, status);
+  assert.equal(error.code, "test_error");
+  assert.equal(error.serverMessage, `status ${status}`);
+  assert.equal(error.rawBody, body);
+  assert.equal(error.isConflict(), status === 409);
+  assert.equal(error.isRateLimited(), status === 429);
+}
+
+{
+  const error = await remoteError(500, "upstream failed");
+
+  assert.equal(error.statusCode, 500);
+  assert.equal(error.code, undefined);
+  assert.equal(error.serverMessage, "upstream failed");
+  assert.equal(error.serverDetails, undefined);
+  assert.equal(error.rawBody, "upstream failed");
+  assert.equal(error.details, "upstream failed");
+}
+
+{
+  const body = '{"message":"write conflict","code":42,"details":null}';
+  const error = await remoteError(409, body);
+
+  assert.equal(error.code, undefined);
+  assert.equal(error.serverMessage, "write conflict");
+  assert.equal(error.serverDetails, null);
+  assert.equal(error.rawBody, body);
+}
+
+{
+  const error = await remoteError(503, "");
+
+  assert.equal(error.serverMessage, "Service Unavailable");
+  assert.equal(error.rawBody, "");
+  assert.equal(error.details, "Service Unavailable");
+}
+
+{
+  const error = HelixError.remote("legacy remote error", "legacy_code");
+
+  assert.equal(error.kind, "Remote");
+  assert.equal(error.details, "legacy remote error");
+  assert.equal(error.code, "legacy_code");
+  assert.equal(error.statusCode, undefined);
+}
+
+for (const testCase of [
+  {
+    body: '{"error":"index_not_found","msg":"missing index"}',
+    code: "index_not_found",
+    details: "missing index",
+  },
+  {
+    body: '{"error":"legacy message","code":"index_not_found"}',
+    code: "index_not_found",
+    details: "legacy message",
+  },
+  {
+    body: '{"error":"legacy message","code":"index_not_found","message":"generic message"}',
+    code: "index_not_found",
+    details: "legacy message",
+  },
+  {
+    body: '{"error":"future_code","msg":"future message"}',
+    code: "future_code",
+    details: "future message",
+  },
+  { body: '{"error":"message without code"}', code: undefined, details: "message without code" },
+  { body: "not JSON", code: undefined, details: "not JSON" },
+]) {
+  const server = await spawnCaptureServer({ status: 500, body: testCase.body });
   const client = new Client(server.base);
   await assert.rejects(
     client.query(sampleRequest()).send(),
-    (error: unknown) => error instanceof HelixError && error.kind === "Remote" && error.details === "boom",
+    (error: unknown) =>
+      error instanceof HelixError && error.kind === "Remote" && error.code === testCase.code && error.details === testCase.details,
   );
   await server.close();
 }
@@ -248,6 +383,21 @@ await withFakeNativeModule(async (moduleUrl) => {
   assert.deepEqual(native.calls[0], ["open", { variant: "InMemory", database: "ts-sdk-embedded" }]);
   assert.equal(JSON.parse(native.queryBodies[0]).request_type, "read");
   assert.equal(native.wasClosed(), true);
+});
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const client = await Client.embedded({ kind: "inMemory", database: "ts-sdk-embedded-error" });
+  const native = (await import(moduleUrl)) as { setQueryError: (error: string, msg: string) => void };
+  native.setQueryError("index_not_found", "missing text index");
+
+  await assert.rejects(
+    client.query(sampleRequest()).send(),
+    (error: unknown) =>
+      error instanceof HelixError &&
+      error.kind === "Embedded" &&
+      error.code === "index_not_found" &&
+      error.details === "missing text index",
+  );
 });
 
 await withFakeNativeModule(async (moduleUrl) => {

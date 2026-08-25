@@ -1,177 +1,100 @@
-//! Version-1 database value construction and parsing boundaries.
-//!
-//! Persisted values are encoded here so storage and search call sites do not
-//! assemble byte layouts independently. Existing physical codecs preserve
-//! deployed bytes; canonical V2 lifecycle codecs are added here in Phase 2.
+//! Deprecated stored-value paths.
 
-use crate::encoding::error::EncodingError;
+#![allow(deprecated, unused_imports)]
 
-pub(crate) mod edge_endpoints;
-pub mod edges;
-pub(crate) mod id_allocation;
-pub(crate) mod secondary;
+#[deprecated(note = "use encoding::v2::values::edge_endpoints")]
+pub(crate) mod edge_endpoints {
+    #[deprecated(note = "use encoding::v2::values::edge_endpoints")]
+    pub(crate) use crate::encoding::v2::values::edge_endpoints::*;
+}
+
+#[deprecated(note = "use encoding::v2::values::adjacency")]
+pub mod edges {
+    #[deprecated(note = "use encoding::v2::values::adjacency")]
+    pub use crate::encoding::v2::values::adjacency::*;
+}
+
+#[deprecated(note = "use encoding::v2::values::id_allocation")]
+pub(crate) mod id_allocation {
+    #[deprecated(note = "use encoding::v2::values::id_allocation")]
+    pub(crate) use crate::encoding::v2::values::id_allocation::*;
+}
+
+#[deprecated(note = "use encoding::v2::values::indexes::equality")]
+pub(crate) mod secondary {
+    #[deprecated(note = "use encoding::v2::values::indexes::equality")]
+    pub(crate) use crate::encoding::v2::values::indexes::SecondaryEqualityValue;
+}
+
 #[cfg(any(test, feature = "fuzzing", feature = "production-coverage"))]
-pub(crate) mod text_index;
-pub(crate) mod vector_generation;
-pub mod vectors;
+#[deprecated(note = "use encoding::v2::values::indexes::text")]
+pub(crate) mod text_index {
+    #[deprecated(note = "use encoding::v2::legacy::text")]
+    pub(crate) use crate::encoding::v2::legacy::text::{
+        live_state::decode as decode_live_state, manifest::decode as decode_manifest,
+        version_counter::decode as decode_version_counter,
+    };
+    #[cfg(any(test, feature = "production-coverage"))]
+    #[deprecated(note = "use encoding::v2::legacy::text")]
+    pub(crate) use crate::encoding::v2::legacy::text::{
+        live_state::encode_for_retained_api as encode_live_state,
+        manifest::encode_for_contract as encode_manifest,
+        version_counter::encode_for_contract as encode_version_counter,
+    };
+}
 
-const ENCODING_TYPE_LEN: usize = core::mem::size_of::<u8>();
-const U32_LEN: usize = core::mem::size_of::<u32>();
-const U64_LEN: usize = core::mem::size_of::<u64>();
+#[deprecated(note = "use encoding::v2::values::indexes::vector::generation")]
+pub(crate) mod vector_generation {
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::generation")]
+    pub(crate) use crate::encoding::v2::values::indexes::vector::*;
+}
 
-#[inline]
-fn ensure_min_len(data: &[u8], expected: usize) -> Result<(), EncodingError> {
-    if data.len() < expected {
-        return Err(EncodingError::BufferTooShort {
-            expected,
-            actual: data.len(),
-        });
+#[deprecated(note = "use encoding::v2::values::indexes::vector")]
+pub mod vectors {
+    #[deprecated(note = "use encoding::v2::values::indexes::vector")]
+    pub use crate::encoding::v2::values::indexes::vector::{
+        decode_layer0_neighbors, decode_layer0_neighbors_and_simhash, encode_layer0_neighbors,
+        encode_layer0_record, ENCODING_TYPE_LAYER0_NEIGHBORS, ENCODING_TYPE_LAYER0_RECORD,
+    };
+
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::entry_candidate")]
+    pub mod entry {
+        #[deprecated(note = "use encoding::v2::values::indexes::vector::entry_candidate")]
+        pub use crate::encoding::v2::values::indexes::vector::entry_candidate::*;
     }
-
-    Ok(())
-}
-
-#[inline]
-fn ensure_exact_len(data: &[u8], expected: usize) -> Result<(), EncodingError> {
-    if data.len() != expected {
-        return Err(EncodingError::BufferTooShort {
-            expected,
-            actual: data.len(),
-        });
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::item")]
+    pub(crate) mod item {
+        #[deprecated(note = "use encoding::v2::values::indexes::vector::item")]
+        pub(crate) use crate::encoding::v2::values::indexes::vector::item::*;
     }
-
-    Ok(())
-}
-
-#[inline]
-fn checked_len_with_element_count(
-    prefix_len: usize,
-    count: usize,
-    element_len: usize,
-    overflow_message: &str,
-) -> Result<usize, EncodingError> {
-    let payload_len = count
-        .checked_mul(element_len)
-        .ok_or_else(|| EncodingError::Custom(overflow_message.to_string()))?;
-    prefix_len
-        .checked_add(payload_len)
-        .ok_or_else(|| EncodingError::Custom(overflow_message.to_string()))?;
-    Ok(payload_len + prefix_len)
-}
-
-#[inline]
-fn take_slice<'a>(
-    data: &'a [u8],
-    offset: &mut usize,
-    len: usize,
-) -> Result<&'a [u8], EncodingError> {
-    let start = *offset;
-    let end = start
-        .checked_add(len)
-        .ok_or(EncodingError::BufferTooShort {
-            expected: usize::MAX,
-            actual: data.len(),
-        })?;
-    let slice = data.get(start..end).ok_or(EncodingError::BufferTooShort {
-        expected: end,
-        actual: data.len(),
-    })?;
-    *offset = end;
-    Ok(slice)
-}
-
-#[inline]
-fn take_u8(data: &[u8], offset: &mut usize) -> Result<u8, EncodingError> {
-    Ok(take_slice(data, offset, ENCODING_TYPE_LEN)?[0])
-}
-
-#[inline]
-fn take_u32_le(data: &[u8], offset: &mut usize) -> Result<usize, EncodingError> {
-    let bytes = take_slice(data, offset, U32_LEN)?;
-    Ok(u32::from_le_bytes(bytes.try_into().expect("u32 field is 4 bytes")) as usize)
-}
-
-#[inline]
-fn take_u32_be(data: &[u8], offset: &mut usize) -> Result<usize, EncodingError> {
-    let bytes = take_slice(data, offset, U32_LEN)?;
-    Ok(u32::from_be_bytes(bytes.try_into().expect("u32 field is 4 bytes")) as usize)
-}
-
-#[inline]
-fn take_u64_le(data: &[u8], offset: &mut usize) -> Result<u64, EncodingError> {
-    let bytes = take_slice(data, offset, U64_LEN)?;
-    Ok(u64::from_le_bytes(
-        bytes.try_into().expect("u64 field is 8 bytes"),
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ensure_len_helpers_report_exact_contracts() {
-        assert!(ensure_min_len(&[1, 2], 2).is_ok());
-        assert!(matches!(
-            ensure_min_len(&[1], 2),
-            Err(EncodingError::BufferTooShort {
-                expected: 2,
-                actual: 1
-            })
-        ));
-        assert!(ensure_exact_len(&[1, 2], 2).is_ok());
-        assert!(matches!(
-            ensure_exact_len(&[1, 2, 3], 2),
-            Err(EncodingError::BufferTooShort {
-                expected: 2,
-                actual: 3
-            })
-        ));
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::markers")]
+    pub(crate) mod markers {
+        #[deprecated(note = "use encoding::v2::legacy::vector::transaction_guard")]
+        pub(crate) use crate::encoding::v2::legacy::vector::transaction_guard::decode_active_txn_guard;
+        #[cfg(any(test, feature = "fuzzing", feature = "production-coverage"))]
+        #[deprecated(note = "use encoding::v2::legacy::vector::transaction_guard")]
+        pub(crate) use crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard;
+        #[deprecated(note = "use encoding::v2::values::indexes::vector::markers")]
+        pub(crate) use crate::encoding::v2::values::indexes::vector::markers::*;
     }
-
-    #[test]
-    fn checked_len_reports_multiplication_and_addition_overflow() {
-        assert_eq!(
-            checked_len_with_element_count(2, 3, 4, "overflow").unwrap(),
-            14
-        );
-        assert!(matches!(
-            checked_len_with_element_count(0, usize::MAX, 2, "overflow"),
-            Err(EncodingError::Custom(message)) if message == "overflow"
-        ));
-        assert!(matches!(
-            checked_len_with_element_count(usize::MAX, 1, 1, "overflow"),
-            Err(EncodingError::Custom(message)) if message == "overflow"
-        ));
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::metadata")]
+    pub(crate) mod metadata {
+        #[deprecated(note = "use encoding::v2::legacy::vector::metadata")]
+        pub(crate) use crate::encoding::v2::legacy::vector::metadata::decode_legacy_metadata;
+        #[cfg(any(test, feature = "production-coverage"))]
+        #[deprecated(note = "use encoding::v2::legacy::vector::metadata")]
+        pub(crate) use crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract;
+        #[deprecated(note = "use encoding::v2::values::indexes::vector::metadata")]
+        pub(crate) use crate::encoding::v2::values::indexes::vector::metadata::*;
     }
-
-    #[test]
-    fn take_helpers_advance_offsets_and_report_bounds() {
-        let data = [0xAB, 1, 2, 3, 4, 8, 7, 6, 5, 4, 3, 2, 1];
-        let mut offset = 0;
-
-        assert_eq!(take_u8(&data, &mut offset).unwrap(), 0xAB);
-        assert_eq!(offset, 1);
-        assert_eq!(take_u32_be(&data, &mut offset).unwrap(), 0x0102_0304);
-        assert_eq!(take_u32_le(&data, &mut offset).unwrap(), 0x0506_0708);
-        assert_eq!(take_slice(&data, &mut offset, 2).unwrap(), &[4, 3]);
-
-        let mut overflow_offset = usize::MAX;
-        assert!(matches!(
-            take_slice(&data, &mut overflow_offset, 1),
-            Err(EncodingError::BufferTooShort {
-                expected: usize::MAX,
-                actual: 13
-            })
-        ));
-
-        let mut short_offset = data.len();
-        assert!(matches!(
-            take_u64_le(&data, &mut short_offset),
-            Err(EncodingError::BufferTooShort {
-                expected: 21,
-                actual: 13
-            })
-        ));
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::neighbors")]
+    pub mod neighbors {
+        #[deprecated(note = "use encoding::v2::values::indexes::vector::neighbors")]
+        pub use crate::encoding::v2::values::indexes::vector::neighbors::*;
+    }
+    #[deprecated(note = "use encoding::v2::values::indexes::vector::simhash")]
+    pub(crate) mod simhash {
+        #[deprecated(note = "use encoding::v2::values::indexes::vector::simhash")]
+        pub(crate) use crate::encoding::v2::values::indexes::vector::simhash::*;
     }
 }

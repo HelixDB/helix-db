@@ -11,27 +11,20 @@ fn executable_entrypoint_lowers_nested_terminal_chains_without_compatibility_fal
         PlannerContext::default(),
     );
 
-    assert_eq!(executable.steps().len(), 3);
+    assert_eq!(executable.steps().len(), 2);
     assert!(matches!(
         &executable.steps()[0].op,
-        crate::exec::ExecOp::KvRead(crate::exec::KvReadPlan::RangeScan { keyspace, .. })
-            if *keyspace == crate::exec::ElementKeyspace::NodeProperty
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::NodeFullScan { .. })
     ));
     assert!(matches!(
         &executable.steps()[1].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
-    ));
-    assert!(matches!(
-        &executable.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputScalars { .. })
     ));
     assert_eq!(
-        executable.steps()[2].dependencies,
-        vec![crate::exec::ExecStepId::new(2).unwrap()]
+        executable.steps()[1].dependencies,
+        vec![crate::exec::ExecStepId::new(1).unwrap()]
     );
 }
 
@@ -60,9 +53,8 @@ fn executable_entrypoint_lowers_nested_aggregate_and_state_write_terminals() {
     );
     assert!(matches!(
         &aggregate.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputScalars { .. })
     ));
 
     let state_write = executable_ast(
@@ -92,9 +84,8 @@ fn executable_entrypoint_lowers_nested_aggregate_and_state_write_terminals() {
     );
     assert!(matches!(
         &state_write.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
 }
 
@@ -109,20 +100,19 @@ fn executable_entrypoint_lowers_pipeline_after_terminal_stream_input() {
         PlannerContext::default(),
     );
 
-    assert_eq!(executable.steps().len(), 3);
+    assert_eq!(executable.steps().len(), 2);
     assert!(matches!(
-        &executable.steps()[1].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        &executable.steps()[0].op,
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::NodeFullScan { .. })
     ));
     assert!(matches!(
-        &executable.steps()[2].op,
+        &executable.steps()[1].op,
         crate::exec::ExecOp::Distinct
     ));
     assert_eq!(
-        executable.steps()[2].dependencies,
-        vec![crate::exec::ExecStepId::new(2).unwrap()]
+        executable.steps()[1].dependencies,
+        vec![crate::exec::ExecStepId::new(1).unwrap()]
     );
 }
 
@@ -149,9 +139,8 @@ fn executable_entrypoint_lowers_mutation_stream_shapes_without_compatibility_fal
     ));
     assert!(matches!(
         &projected.steps()[1].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
     assert_eq!(
         projected.steps()[1].dependencies,
@@ -238,9 +227,8 @@ fn executable_entrypoint_lowers_input_mutation_stream_shapes_without_compatibili
     );
     assert!(matches!(
         &projected.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
     assert_eq!(
         projected.steps()[2].dependencies,

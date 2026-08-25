@@ -14,4 +14,6 @@ pub use self::barrier::{RootBranch, RootIndexDdl, RootMutation, RootRepeat};
 pub use self::pipeline::RootPipeline;
 pub use self::shortest_path::RootShortestPath;
 pub use self::stream::RootStream;
-pub use self::terminal::{StreamAggregate, StreamProject, StreamReserved, StreamVariableWrite};
+pub use self::terminal::{
+    StreamAggregate, StreamCardinality, StreamProject, StreamReserved, StreamVariableWrite,
+};

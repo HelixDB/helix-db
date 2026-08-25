@@ -12,7 +12,7 @@ use crate::config::SearchIndexBatchLimits;
 use crate::encoding::v1::keys::tenant::DataScope;
 #[cfg(test)]
 use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{GlobalKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::{
     decode_index_record, decode_metadata_value, decode_operation_record, encode_index_record,
@@ -1869,7 +1869,7 @@ mod tests {
             .build()
             .await
             .expect("raw startup fixture opens");
-        crate::index_lifecycle::repository::bootstrap_writer(&raw)
+        crate::migrations::startup::bootstrap_writer(&raw)
             .await
             .expect("V2 repository bootstraps");
         let fixture = seed_active_legacy::<vector::distance::Cosine>(

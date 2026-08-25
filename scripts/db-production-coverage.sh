@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/private/tmp}/helix-proper-db-production-coverage.XXXXXX")"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/helix-proper-db-production-coverage.XXXXXX")"
 REPORT_PATH="$TEMP_ROOT/coverage.json"
 EXCLUSIONS_PATH="$ROOT/scripts/db-production-coverage-exclusions.json"
 DISPOSITIONS_PATH="$ROOT/scripts/db-production-coverage-dispositions.json"
@@ -139,8 +139,9 @@ UNCOVERED_NON_VECTOR_LINES="$(jq -r '
             and (
                 (
                     (.filename | contains("/crates/db/src/search/vector/"))
-                    or (.filename | contains("/crates/db/src/encoding/v1/keys/vectors.rs"))
-                    or (.filename | contains("/crates/db/src/encoding/v1/values/vectors/"))
+                    or (.filename | contains("/crates/db/src/encoding/v2/legacy/vector/"))
+                    or (.filename | contains("/crates/db/src/encoding/v2/keys/indexes/vector/"))
+                    or (.filename | contains("/crates/db/src/encoding/v2/values/indexes/vector/"))
                 )
                 | not
             )

@@ -5,6 +5,8 @@ fn seed_rule_set_implements_explored_filter_pushdown_pipeline() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -41,6 +43,8 @@ fn seed_rule_set_simplifies_pure_pipeline_before_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),
@@ -81,6 +85,8 @@ fn seed_rule_set_composes_static_stream_windows_before_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();
     let config = optimizer::OptimizerConfig {
+        params: Default::default(),
+        late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
         stats: crate::context::StatsSnapshot::default(),

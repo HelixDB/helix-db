@@ -1,0 +1,137 @@
+---
+title: "Handle query errors"
+description: "Use stable Helix Cloud error codes, HTTP statuses, and SDK error metadata"
+sidebarTitle: "Error handling"
+pageType: "Reference"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Reference</Badge><Badge color="gray" size="sm">Helix Cloud</Badge></div>
+
+Helix Cloud query failures use one JSON envelope:
+
+```json
+{
+  "error": "query_timeout",
+  "msg": "query exceeded its wall-clock limit"
+}
+```
+
+- `error` is a stable, lower-snake-case code. Branch on this field.
+- `msg` is a human-readable diagnostic. Log it, but do not parse it or depend on
+  its exact text.
+- The HTTP status remains part of the contract. Use it with `error` when deciding
+  whether and how to retry.
+
+## Gateway error reference
+
+| HTTP | `error`                  | Typical `msg`                                                               | Meaning                                                                   | Retry guidance                                                           |
+| ---: | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+|  400 | `invalid_query_json`     | `parse error: <decoder diagnostic>`                                         | The request body is not valid query JSON.                                 | Fix the request.                                                         |
+|  400 | `invalid_request`        | A request-specific diagnostic                                               | A required header or request option is missing, malformed, or invalid.    | Fix the request.                                                         |
+|  400 | `tenant_id_required`     | `x-helix-tenant-id or x-helix-database-id is required in GA mode`           | A Cloud request did not identify its database.                            | Use the correct database-scoped Cloud endpoint and configuration.        |
+|  400 | `tenant_id_not_allowed`  | `x-helix-tenant-id and x-helix-database-id are not allowed in cluster mode` | A tenant/database header was sent to an endpoint that does not accept it. | Remove the header or use the correct endpoint.                           |
+|  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key.                                              |
+|  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
+|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
+|  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
+|  409 | `transaction_conflict`   | `request conflicted with a concurrent write; please retry`                  | A concurrent write prevented the transaction from committing.             | Retry the whole idempotent transaction with bounded backoff.             |
+|  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The query request exceeds the gateway body-size limit.                    | Reduce the request size.                                                 |
+|  429 | `rate_limited`           | `rate limit exceeded`                                                       | The database's request bucket has no token available.                     | Honor `Retry-After`; see [Limits](/database/helix-cloud/operate/limits). |
+|  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
+|  503 | `backend_unavailable`    | `Backend unavailable`                                                       | No eligible database backend is currently available.                      | Retry with bounded exponential backoff and jitter.                       |
+|  503 | `rate_limit_unavailable` | `tenant rate limit is unavailable`                                          | The gateway cannot make a safe rate-limit decision.                       | Retry with bounded exponential backoff and jitter.                       |
+
+The text in `msg` can include request-specific details. The `error` values and
+HTTP statuses above are the compatibility surface.
+
+## SDK access
+
+Official SDKs decode `error` and `msg` into separate stable-code and diagnostic
+fields. Non-JSON responses from older endpoints and intermediaries remain
+available as readable diagnostics. Rust and TypeScript also retain the raw
+response body separately.
+
+| SDK        | HTTP status                 | Stable code                 | Diagnostic                     | Raw response                      |
+| ---------- | --------------------------- | --------------------------- | ------------------------------ | --------------------------------- |
+| Rust       | `HelixError::status_code()` | `HelixError::remote_code()` | `HelixError::remote_message()` | `HelixError::raw_response_body()` |
+| TypeScript | `HelixError.statusCode`     | `HelixError.code`           | `HelixError.serverMessage`     | `HelixError.rawBody`              |
+| Python     | `HelixError.status_code`    | `HelixError.code`           | `HelixError.details`           | Not exposed separately            |
+| Go         | `HelixError.StatusCode`     | `HelixError.Code`           | `HelixError.Details`           | Not exposed separately            |
+
+The current SDK error objects do not expose response headers, including
+`Retry-After`. Use direct HTTP or an application transport that retains headers
+when the exact Cloud rate-limit delay is required.
+
+Branch on the stable code while retaining the diagnostic:
+
+<CodeGroup>
+
+```rust Rust
+if let Err(error) = client.query::<MyResponse>(request).send().await {
+    if error.remote_code() == Some("query_timeout") {
+        eprintln!("{}", error.remote_message().unwrap_or("query timed out"));
+    }
+}
+```
+
+```ts TypeScript
+import { HelixError } from "@helix-db/helix-db";
+
+try {
+  await client.query(request).send();
+} catch (cause) {
+  if (cause instanceof HelixError && cause.code === "query_timeout") {
+    console.error(cause.serverMessage);
+  }
+  throw cause;
+}
+```
+
+```python Python
+try:
+    client.query(request)
+except HelixError as error:
+    if error.code == "query_timeout":
+        print(error.details)
+```
+
+```go Go
+err := client.Exec(ctx, request, &response)
+var helixErr *helix.HelixError
+if errors.As(err, &helixErr) &&
+	helixErr.Code == helix.QueryErrorCode("query_timeout") {
+	log.Print(helixErr.Details)
+}
+```
+
+```json JSON
+{
+  "error": "query_timeout",
+  "msg": "query exceeded its wall-clock limit"
+}
+```
+
+</CodeGroup>
+
+## Timed-out writes
+
+An HTTP `408` cancels the gateway's wait, but a write can race with durable
+commit. Treat the outcome as unknown. Reconcile using an application identity or
+idempotency key before submitting the write again.
+
+## Migration from the previous shape
+
+Some earlier responses used `error` for diagnostic text and `code` for the
+machine-readable value, while others returned only `error`. For Cloud gateway
+responses, migrate from this shape:
+
+```json
+{
+  "error": "query exceeded its wall-clock limit",
+  "code": "QUERY_TIMEOUT"
+}
+```
+
+to `error` as the lower-snake-case code and `msg` as diagnostic text. Keep a
+readable diagnostic fallback for intermediaries and older self-hosted endpoints
+that do not return the Cloud envelope.

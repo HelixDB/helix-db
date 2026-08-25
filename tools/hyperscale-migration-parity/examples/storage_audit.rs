@@ -62,6 +62,8 @@ async fn main() -> Result<()> {
                 compactions_options: Some(directory),
                 detach_options: None,
                 metric_level: None,
+                boundary_files_enabled: true,
+                object_store_max_retries: None,
             })
             .await?;
     }

@@ -1,20 +1,33 @@
-//! Physical keys owned by lifecycle-managed index families.
+//! Canonical property, text, vector, and lifecycle-managed index keys.
 
 use bytes::Bytes;
 
 use crate::encoding::error::EncodingError;
-use crate::encoding::indexes::range::RangeIndexDirection;
-use crate::encoding::v1::property::equality_value::CanonicalEqualityValue;
-use crate::encoding::v1::property::range_value::CanonicalRangeValue;
+use crate::encoding::v2::values::property::equality_index_value::CanonicalEqualityValue;
+use crate::encoding::v2::values::property::range_index_value::CanonicalRangeValue;
 use crate::index_lifecycle::{IndexEntityId, IndexGenerationId, IndexId};
 
+pub(crate) mod direction;
 pub(crate) mod equality;
+pub(crate) mod label;
+pub(crate) mod prefix;
+pub(crate) mod property;
 pub(crate) mod range;
+pub(crate) mod secondary;
 pub(crate) mod text;
 pub(crate) mod vector;
 
-pub(crate) use equality::{SecondaryEqualityBitmapKey, SecondaryEqualityEntryKey};
-pub(crate) use range::SecondaryRangeEntryKey;
+pub(crate) use direction::EdgeDirection;
+pub(crate) use prefix::IndexPrefix;
+pub(crate) use property::{
+    hash_property_name, hash_property_value, PropertyIndexKey, INDEX_PREFIX_LEN, NODE_ID_MAX_LEN,
+    PROPERTY_HASH_MAX_LEN, VALUE_HASH_MAX_LEN,
+};
+pub use property::{PropertyHash, ValueHash};
+use range::RangeIndexDirection;
+pub(crate) use secondary::{
+    SecondaryEqualityBitmapKey, SecondaryEqualityEntryKey, SecondaryRangeEntryKey,
+};
 
 /// Frozen generation-qualified V3 secondary lanes.
 #[repr(u8)]
@@ -85,8 +98,8 @@ impl CanonicalSecondaryValue {
 
     #[cfg(test)]
     pub(crate) fn equality_string(value: &str) -> Self {
-        let crate::encoding::v1::property::equality_value::EqualityValueProjection::Indexed(value) =
-            crate::encoding::v1::property::equality_value::project_equality_value(
+        let crate::encoding::v2::values::property::equality_index_value::EqualityValueProjection::Indexed(value) =
+            crate::encoding::v2::values::property::equality_index_value::project_equality_value(
                 &crate::encoding::property::property_value::PropertyValue::String(
                     value.to_string(),
                 ),
@@ -103,13 +116,12 @@ impl CanonicalSecondaryValue {
 
     #[cfg(test)]
     pub(crate) fn range_string(direction: RangeIndexDirection, value: &str) -> Self {
-        let crate::encoding::v1::property::range_value::RangeValueProjection::Indexed(value) =
-            crate::encoding::v1::property::range_value::project_range_value(
-                &crate::encoding::property::property_value::PropertyValue::String(
-                    value.to_string(),
-                ),
-                direction,
-            )
+        let crate::encoding::v2::values::property::range_index_value::RangeValueProjection::Indexed(
+            value,
+        ) = crate::encoding::v2::values::property::range_index_value::project_range_value(
+            &crate::encoding::property::property_value::PropertyValue::String(value.to_string()),
+            direction,
+        )
         else {
             panic!("string range fixtures are always indexable");
         };

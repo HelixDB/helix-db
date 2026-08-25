@@ -30,9 +30,10 @@ pub(crate) use crate::error::{
     SearchTenantValueExpected,
 };
 pub(crate) use crate::exec::{
-    ElementKeyspace, ExecAccessPlan, ExecBranchPlan, ExecCondition, ExecEdgeAccessPlan,
-    ExecMergeMode, ExecMutationPlan, ExecNodeAccessPlan, ExecOp, ExecVariableOp, ExecutablePlan,
-    KvReadPlan,
+    ElementKeyspace, ExecAccessPlan, ExecBranchPlan, ExecCondition, ExecCountPlan,
+    ExecEdgeAccessPlan, ExecMergeMode, ExecMutationPlan, ExecNodeAccessPlan, ExecOp,
+    ExecRuntimeInputPlan, ExecVariableOp, ExecutablePlan, ExecutableReturns, KvReadPlan,
+    ReturnShape,
 };
 pub(crate) use crate::ir::{
     AggregatePlan, AtLeast, BatchConditionPlan, BatchOutputPlan, BatchVariableConditionPlan,
@@ -212,6 +213,84 @@ pub(crate) fn unwrapped_first_exec_access(plan: &ExecutablePlan) -> &ExecAccessP
         ExecAccessPlan::Limited(limited) => limited.source(),
         access @ (ExecAccessPlan::Node(_) | ExecAccessPlan::Edge(_)) => access,
     }
+}
+
+pub(crate) fn assert_batched_node_equality_set(
+    plan: &ExecutablePlan,
+    label: &str,
+    property: &str,
+    value_count: usize,
+) {
+    assert!(matches!(
+        unwrapped_first_exec_access(plan),
+        ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet {
+            set: crate::exec::ExecNodeSecondarySetPlan::Bitmap(
+                crate::exec::ExecNodeBitmapExpr::BatchedUnionRead { key, values, .. }
+            )
+        }) if key.label == label && key.property == property && values.len() == value_count
+    ));
+}
+
+pub(crate) fn assert_batched_edge_equality_set(
+    plan: &ExecutablePlan,
+    label: &str,
+    property: &str,
+    value_count: usize,
+) {
+    assert!(matches!(
+        unwrapped_first_exec_access(plan),
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet {
+            set: crate::exec::ExecEdgeSecondarySetPlan::Bitmap(
+                crate::exec::ExecEdgeBitmapExpr::BatchedUnionRead { key, values, .. }
+            )
+        }) if key.label == label && key.property == property && values.len() == value_count
+    ));
+}
+
+pub(crate) fn assert_ordered_edge_secondary_intersection(
+    plan: &ExecutablePlan,
+    label: &str,
+    range_property: &str,
+    equality_property: &str,
+) {
+    assert!(matches!(
+        unwrapped_first_exec_access(plan),
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet {
+            set: crate::exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters }
+        }) if driver.key.label == label
+            && driver.key.property == range_property
+            && filters.iter().any(|filter| matches!(
+                filter,
+                crate::exec::ExecEdgeSecondarySetPlan::Bitmap(
+                    crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. }
+                    | crate::exec::ExecEdgeBitmapExpr::BatchedUnionRead { key, .. }
+                )
+                    if key.label == label && key.property == equality_property
+            ))
+    ));
+}
+
+pub(crate) fn assert_ordered_node_secondary_intersection(
+    plan: &ExecutablePlan,
+    label: &str,
+    range_property: &str,
+    equality_property: &str,
+) {
+    assert!(matches!(
+        unwrapped_first_exec_access(plan),
+        ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet {
+            set: crate::exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters }
+        }) if driver.key.label == label
+            && driver.key.property == range_property
+            && filters.iter().any(|filter| matches!(
+                filter,
+                crate::exec::ExecNodeSecondarySetPlan::Bitmap(
+                    crate::exec::ExecNodeBitmapExpr::PointRead { key, .. }
+                    | crate::exec::ExecNodeBitmapExpr::BatchedUnionRead { key, .. }
+                )
+                    if key.label == label && key.property == equality_property
+            ))
+    ));
 }
 
 pub(crate) fn literal_exec_search_k(plan: &ExecutablePlan) -> usize {

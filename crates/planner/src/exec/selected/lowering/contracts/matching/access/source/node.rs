@@ -1,6 +1,6 @@
 //! Selected node access-source matching.
 
-use crate::{ir, physical};
+use crate::{exec, ir, physical};
 
 use super::{SelectedAccessShapeMatch, SelectedAccessShapeMismatch};
 
@@ -16,18 +16,46 @@ pub(super) fn selected_node_access_match(
     access: &physical::PhysicalAccess,
 ) -> SelectedAccessShapeMatch {
     match (plan, access) {
+        (
+            ir::NodeAccessPlan::EqualityIndex { index, key, value },
+            physical::PhysicalAccess::NodeExact(exact),
+        ) if exact.as_ref()
+            == &exec::ExecNodeAccessPlan::exact_equality(
+                index.clone(),
+                key.clone(),
+                value.clone(),
+            ) =>
+        {
+            SelectedAccessShapeMatch::Matched
+        }
+        (
+            ir::NodeAccessPlan::Union(_) | ir::NodeAccessPlan::Intersect(_),
+            physical::PhysicalAccess::NodeExact(exact),
+        ) if exec::node_secondary_set(plan).is_some_and(|set| {
+            exact.as_ref() == &exec::ExecNodeAccessPlan::SecondarySet { set }
+        }) =>
+        {
+            SelectedAccessShapeMatch::Matched
+        }
         (ir::NodeAccessPlan::Empty, physical::PhysicalAccess::Empty)
         | (
             ir::NodeAccessPlan::FromParam { .. } | ir::NodeAccessPlan::FromVar { .. },
             physical::PhysicalAccess::RuntimeInput,
         )
         | (ir::NodeAccessPlan::LabelScan { .. }, physical::PhysicalAccess::LabelScan)
-        | (ir::NodeAccessPlan::EqualityIndex { .. }, physical::PhysicalAccess::EqualityIndex)
         | (ir::NodeAccessPlan::RangeIndex { .. }, physical::PhysicalAccess::RangeIndex)
         | (ir::NodeAccessPlan::VectorSearch { .. }, physical::PhysicalAccess::VectorSearch)
-        | (ir::NodeAccessPlan::TextSearch { .. }, physical::PhysicalAccess::TextSearch)
-        | (ir::NodeAccessPlan::Intersect(_), physical::PhysicalAccess::SetIntersection)
-        | (ir::NodeAccessPlan::Union(_), physical::PhysicalAccess::SetUnion) => {
+        | (ir::NodeAccessPlan::TextSearch { .. }, physical::PhysicalAccess::TextSearch) => {
+            SelectedAccessShapeMatch::Matched
+        }
+        (ir::NodeAccessPlan::Intersect(_), physical::PhysicalAccess::SetIntersection)
+            if exec::node_secondary_set(plan).is_none() =>
+        {
+            SelectedAccessShapeMatch::Matched
+        }
+        (ir::NodeAccessPlan::Union(_), physical::PhysicalAccess::SetUnion)
+            if exec::node_secondary_set(plan).is_none() =>
+        {
             SelectedAccessShapeMatch::Matched
         }
         (

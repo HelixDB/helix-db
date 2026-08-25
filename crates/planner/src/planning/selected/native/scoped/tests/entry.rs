@@ -61,7 +61,7 @@ fn scoped_roots_dispatch_context_sensitive_families_directly() {
     .expect_selectable("scoped context terminal is selectable");
     assert!(matches!(
         terminal.expr(),
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(
                 project.input(),
                 logical::RootStream::VariableSource(source)

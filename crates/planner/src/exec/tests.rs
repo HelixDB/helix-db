@@ -70,6 +70,7 @@ fn step(value: usize, dependencies: Vec<ExecStepId>, schedule: ExecSchedule) -> 
         id: id(value),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: ExecCondition::Always,
         op: ExecOp::Noop,
         schedule,
@@ -83,6 +84,7 @@ fn run_step(value: usize, dependencies: Vec<ExecStepId>, condition: ExecConditio
         id: id(value),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition,
         op: ExecOp::Noop,
         schedule: ExecSchedule::Pipeline,
@@ -248,6 +250,7 @@ fn selected_run_root_plan(
             Box::new(SelectedExecutableRunEntry {
                 root,
                 output,
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),

@@ -19,14 +19,14 @@ pub(super) use self::{
     },
     pipeline::physical_pipeline_contract,
     root_stream::{
-        root_pipeline_physical_contract, stream_aggregate_pipeline_contract,
-        stream_project_pipeline_contract, stream_reserved_pipeline_contract,
-        stream_variable_write_pipeline_contract,
+        root_pipeline_physical_contract, root_stream_delivered_properties,
+        stream_aggregate_pipeline_contract, stream_project_pipeline_contract,
+        stream_reserved_pipeline_contract, stream_variable_write_pipeline_contract,
     },
     stream::{stream_physical_contract, StreamPhysicalContract},
     support::{
-        access_delivered, barrier_delivered, element_keyspace, empty_delivered, filtered_delivered,
-        ordered_delivered,
+        access_delivered, barrier_delivered, cardinality_output_delivered, element_keyspace,
+        empty_delivered, filtered_delivered, ordered_delivered,
     },
 };
 

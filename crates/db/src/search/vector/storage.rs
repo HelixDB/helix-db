@@ -4,7 +4,7 @@
 //! tenant-scoped SlateDB bytes. A `VectorRowKeyspace` binds the complete physical
 //! name and request scope once and derives the stable index ID internally, so
 //! callers cannot pair a name with the wrong compact namespace. It delegates
-//! logical serialization to the existing `encoding::v1` key types and therefore
+//! logical serialization to the canonical `encoding::v2` key types and therefore
 //! does not change persisted key bytes or row codecs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -15,22 +15,24 @@ use bytes::Bytes;
 use slatedb::DbReadOps;
 
 use crate::encoding::error::EncodingError;
-use crate::encoding::keys::{tenant::DataScope, DataKeyKind, Key};
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::keys::{scope::DataScope, DataKey, DataKeyKind};
+use crate::encoding::v2::keys::indexes::vector::{
     VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorEntryCandidatePrefixKey,
     VectorIndexMetadataKey, VectorItemKey, VectorItemPrefixKey, VectorKey,
     VectorLayer0NeighborsKey, VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
     VectorSimHashDirectoryKey, VectorSimHashDirectoryPrefixKey, VectorSimHashKey,
     VectorStorageLane, VectorUpperNeighborsKey, VectorUpperVectorKey,
 };
-use crate::encoding::v1::values::vectors::{
+use crate::encoding::v2::legacy::vector::{
+    metadata::decode_legacy_metadata, transaction_guard::decode_active_txn_guard,
+};
+use crate::encoding::v2::values::indexes::vector::{
     decode_layer0_neighbors, encode_layer0_neighbors,
-    entry::{decode_entry_candidate_layer, encode_entry_candidate_layer},
+    entry_candidate::{decode_entry_candidate_layer, encode_entry_candidate_layer},
     markers::{
-        decode_active_txn_guard, decode_empty_marker, decode_simhash_directory_marker_v1,
-        encode_empty_marker, encode_simhash_directory_marker_v1,
+        decode_empty_marker, decode_simhash_directory_marker_v1, encode_empty_marker,
+        encode_simhash_directory_marker_v1,
     },
-    metadata::decode_legacy_metadata,
     neighbors::{decode_upper_neighbors, encode_upper_neighbors},
     simhash::decode_simhash,
 };
@@ -135,10 +137,10 @@ impl VectorRowKeyspace {
 
     /// Encodes one typed logical key in this keyspace's physical namespace.
     ///
-    /// Logical key serialization remains owned by `encoding::v1`; this method
+    /// Logical key serialization remains owned by `encoding::v2`; this method
     /// only applies the bound tenant scope at the final storage boundary.
     pub(crate) fn key(&self, key: VectorKey) -> Bytes {
-        Key::Data {
+        DataKey::Data {
             scope: self.scope,
             kind: DataKeyKind::Vector(key),
         }
@@ -829,7 +831,7 @@ where
 
     /// Validates one bounded page of a frozen pre-V2 physical lane.
     ///
-    /// This is intentionally read-only. It parses every key through `encoding/v1`,
+    /// This is intentionally read-only. It parses every key through `encoding/v2`,
     /// decodes every value through the owning vector codec, and performs terminal
     /// metadata and entry-point proofs without checking graph-wide neighbor links.
     pub(crate) async fn validate_legacy_physical<D: Distance>(
@@ -1688,7 +1690,7 @@ where
     ///
     /// Absence still charges the complete typed lookup key. The operation is
     /// read-only and does not decode or rewrite the stored value.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) async fn metadata_input_bytes(&self) -> Result<u64, HelixDbError> {
         let key = self
             .keyspace
@@ -2543,7 +2545,7 @@ impl<'a, 'txn> VectorWriteRows<'a, 'txn> {
     }
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/storage.rs"]
 pub(crate) mod production_contracts;
 
@@ -2556,9 +2558,9 @@ mod tests {
 
     use super::*;
     use crate::config::VectorIndexDefinition;
-    use crate::encoding::keys::tenant::TenantId;
-    use crate::encoding::v1::keys::vectors::VectorIndexMetadataKey;
-    use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+    use crate::encoding::keys::scope::TenantId;
+    use crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey;
+    use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
     use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
     use crate::search::vector::{distance, Item, VectorDistanceMetric};
 
@@ -2578,6 +2580,45 @@ mod tests {
         definition
     }
 
+    async fn database(label: &str) -> slatedb::Db {
+        slatedb::Db::open(
+            format!("vector-storage-{label}-{}", uuid::Uuid::new_v4()),
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .expect("vector storage test database opens")
+    }
+
+    fn legacy_metadata_bytes(
+        definition: &ValidatedVectorIndexDefinition,
+        physical_name: &str,
+        entry_point: Option<NodeId>,
+    ) -> Bytes {
+        let mut metadata = VectorIndexMetadata::new(VectorIndexConfig::from_v2_definition(
+            definition,
+            physical_name,
+        ));
+        metadata.entry_point = entry_point;
+        Bytes::copy_from_slice(
+            &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
+                &metadata,
+            ),
+        )
+    }
+
+    fn current_metadata_bytes(
+        definition: &ValidatedVectorIndexDefinition,
+        physical_name: &str,
+        entry_point: Option<NodeId>,
+    ) -> Bytes {
+        let mut metadata = VectorIndexMetadata::new(VectorIndexConfig::from_v2_definition(
+            definition,
+            physical_name,
+        ));
+        metadata.entry_point = entry_point;
+        Bytes::copy_from_slice(&encode_metadata(&metadata))
+    }
+
     #[test]
     fn legacy_validation_dispatches_every_physical_value_codec() {
         let physical_name = "legacy-validation-codecs";
@@ -2592,16 +2633,16 @@ mod tests {
             (
                 VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
             ),
             (
                 VectorKey::TxnGuard(
-                    crate::encoding::v1::keys::vectors::VectorTxnGuardKey::new(index_id),
+                    crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(index_id),
                 ),
-                crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
+                crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
             ),
             (
                 VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(index_id, 1)),
@@ -2709,7 +2750,7 @@ mod tests {
                     keyspace.index_id(),
                 ))),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
@@ -2718,9 +2759,11 @@ mod tests {
         transaction
             .put(
                 keyspace.key(VectorKey::TxnGuard(
-                    crate::encoding::v1::keys::vectors::VectorTxnGuardKey::new(keyspace.index_id()),
+                    crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(
+                        keyspace.index_id(),
+                    ),
                 )),
-                crate::encoding::v1::values::vectors::markers::encode_active_txn_guard(),
+                crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard(),
             )
             .unwrap();
         transaction.commit().await.unwrap();
@@ -2827,7 +2870,7 @@ mod tests {
                     keyspace.index_id(),
                 ))),
                 Bytes::copy_from_slice(
-                    &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                    &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                         &metadata,
                     ),
                 ),
@@ -3034,5 +3077,400 @@ mod tests {
             Some(Bytes::from_static(b"item-payload"))
         );
         txn.rollback();
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_read_classifies_every_persisted_row_state() {
+        let db = database("migration-read").await;
+        let physical_name = "legacy-migration-read";
+        let definition = legacy_definition();
+        let keyspace =
+            VectorRowKeyspace::from_legacy_name(physical_name.into(), DataScope::LegacyUnscoped);
+        let rows = VectorRows::new(&db, &keyspace);
+        let metadata_key = keyspace.key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
+            keyspace.index_id(),
+        )));
+
+        assert!(matches!(
+            rows.legacy_vector_for_migration::<distance::Cosine>(1, &definition)
+                .await
+                .unwrap(),
+            LegacyVectorMigrationRead::Absent { input_bytes } if input_bytes > 0
+        ));
+        db.put(
+            &metadata_key,
+            legacy_metadata_bytes(&definition, physical_name, None),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rows.legacy_vector_for_migration::<distance::Cosine>(1, &definition)
+                .await
+                .unwrap(),
+            LegacyVectorMigrationRead::Absent { input_bytes } if input_bytes > 0
+        ));
+
+        let orphan_layer0 = keyspace.key(VectorKey::Layer0Neighbors(
+            VectorLayer0NeighborsKey::new(keyspace.index_id(), 2),
+        ));
+        db.put(&orphan_layer0, encode_layer0_neighbors(&[]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.legacy_vector_for_migration::<distance::Cosine>(2, &definition)
+                .await,
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+
+        let simhash_bits = 17;
+        for entity_id in [3, 4] {
+            db.put(
+                keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+                    keyspace.index_id(),
+                    entity_id,
+                ))),
+                encode_simhash(simhash_bits),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(matches!(
+            rows.legacy_vector_for_migration::<distance::Cosine>(3, &definition)
+                .await
+                .unwrap(),
+            LegacyVectorMigrationRead::Absent { input_bytes } if input_bytes > 0
+        ));
+
+        let vector = vec![1.0, 0.0, 0.0];
+        db.put(
+            keyspace.key(VectorKey::Vector(VectorItemKey::new(
+                keyspace.index_id(),
+                super::super::simhash::order_code_from_simhash_bits(simhash_bits),
+                4,
+            ))),
+            crate::search::vector::encode_item(&Item::<distance::Cosine>::new(vector.clone())),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rows.legacy_vector_for_migration::<distance::Cosine>(4, &definition)
+                .await
+                .unwrap(),
+            LegacyVectorMigrationRead::Present { vector: observed, input_bytes }
+                if observed == vector && input_bytes > 0
+        ));
+
+        db.put(
+            keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+                keyspace.index_id(),
+                5,
+            ))),
+            Bytes::from_static(b"malformed"),
+        )
+        .await
+        .unwrap();
+        assert!(rows
+            .legacy_vector_for_migration::<distance::Cosine>(5, &definition)
+            .await
+            .is_err());
+
+        db.put(
+            &metadata_key,
+            legacy_metadata_bytes(&definition, "different-physical-name", None),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rows.legacy_vector_for_migration::<distance::Cosine>(1, &definition)
+                .await,
+            Err(HelixDbError::IndexCatalogCorruption(_))
+        ));
+        db.put(&metadata_key, Bytes::from_static(b"malformed"))
+            .await
+            .unwrap();
+        assert!(rows
+            .legacy_vector_for_migration::<distance::Cosine>(1, &definition)
+            .await
+            .is_err());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn simhash_directory_validation_covers_preflight_and_terminal_proofs() {
+        let db = database("directory-validation").await;
+        let physical_name = "directory-validation";
+        let definition = legacy_definition();
+        let keyspace =
+            VectorRowKeyspace::from_legacy_name(physical_name.into(), DataScope::LegacyUnscoped);
+        let rows = VectorRows::new(&db, &keyspace);
+        let entity_id = 7;
+        let simhash_bits = 17;
+        let order_code = super::super::simhash::order_code_from_simhash_bits(simhash_bits);
+        let marker_key = keyspace.key(VectorKey::SimHashDirectory(VectorSimHashDirectoryKey::new(
+            keyspace.index_id(),
+            order_code,
+            entity_id,
+        )));
+        let canonical_key = keyspace.key(VectorKey::Vector(VectorItemKey::new(
+            keyspace.index_id(),
+            order_code,
+            entity_id,
+        )));
+        let metadata_key = keyspace.key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
+            keyspace.index_id(),
+        )));
+        let simhash_key = keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+            keyspace.index_id(),
+            entity_id,
+        )));
+        let valid_marker = encode_simhash_directory_marker_v1();
+        let valid_vector =
+            crate::search::vector::encode_item(&Item::<distance::Cosine>::new(vec![1.0, 0.0, 0.0]));
+
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Valid {
+                markers: 0,
+                exhausted: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                Some(b"foreign-cursor"),
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+
+        db.put(&marker_key, valid_marker).await.unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&canonical_key, &valid_vector).await.unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                usize::MAX,
+                1,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Oversized { limit: 1, .. }
+        ));
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                1,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Valid {
+                markers: 1,
+                exhausted: false,
+                ..
+            }
+        ));
+        db.put(&canonical_key, Bytes::from_static(b"malformed"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&canonical_key, valid_vector).await.unwrap();
+        db.put(&marker_key, Bytes::from_static(b"malformed"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::PreflightCanonicalCorrespondence,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&marker_key, encode_simhash_directory_marker_v1())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&metadata_key, Bytes::from_static(b"malformed"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(
+            &metadata_key,
+            legacy_metadata_bytes(&definition, physical_name, Some(entity_id)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&simhash_key, Bytes::from_static(b"malformed"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&simhash_key, encode_simhash(simhash_bits))
+            .await
+            .unwrap();
+        db.delete(&marker_key).await.unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&marker_key, Bytes::from_static(b"malformed"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Invalid { .. }
+        ));
+        db.put(&marker_key, encode_simhash_directory_marker_v1())
+            .await
+            .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalLegacyWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Valid {
+                markers: 1,
+                exhausted: true,
+                ..
+            }
+        ));
+
+        db.put(
+            &metadata_key,
+            current_metadata_bytes(&definition, physical_name, Some(entity_id)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rows.validate_simhash_directory::<distance::Cosine>(
+                None,
+                &definition,
+                SimHashDirectoryValidationMode::FinalCurrentWithEntryPoint,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap(),
+            SimHashDirectoryValidationOutcome::Valid {
+                markers: 1,
+                exhausted: true,
+                ..
+            }
+        ));
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn production_storage_contract_matrix_runs_in_workspace_tests() {
+        production_contracts::run().await;
     }
 }

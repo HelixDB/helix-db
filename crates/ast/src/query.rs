@@ -4,6 +4,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::batch::{BatchQuery, ReadBatch, WriteBatch};
+use crate::value::PropertyValue;
 /// Declared query parameter shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +61,28 @@ pub enum QueryValue {
     Array(Vec<QueryValue>),
     /// Object.
     Object(BTreeMap<String, QueryValue>),
+}
+
+impl From<&QueryValue> for PropertyValue {
+    fn from(value: &QueryValue) -> Self {
+        match value {
+            QueryValue::Null => Self::Null,
+            QueryValue::Bool(value) => Self::Bool(*value),
+            QueryValue::I64(value) => Self::I64(*value),
+            QueryValue::F64(value) => Self::F64(*value),
+            QueryValue::F32(value) => Self::F32(*value),
+            QueryValue::String(value) => Self::String(value.clone()),
+            QueryValue::Array(values) => {
+                Self::Array(values.iter().map(PropertyValue::from).collect())
+            }
+            QueryValue::Object(values) => Self::Object(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), PropertyValue::from(value)))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Query serialization errors.
@@ -624,6 +647,34 @@ mod tests {
         QueryRequest::read(read_batch()).with_typed_parameter("value", ty, value)
     }
 
+    #[test]
+    fn query_values_convert_losslessly_to_property_values() {
+        let value = QueryValue::Object(BTreeMap::from([
+            (
+                "array".to_owned(),
+                QueryValue::Array(vec![QueryValue::Null, QueryValue::Bool(true)]),
+            ),
+            ("f32".to_owned(), QueryValue::F32(1.25)),
+            ("f64".to_owned(), QueryValue::F64(2.5)),
+            ("i64".to_owned(), QueryValue::I64(3)),
+            ("string".to_owned(), QueryValue::String("value".to_owned())),
+        ]));
+
+        assert_eq!(
+            PropertyValue::from(&value),
+            PropertyValue::object([
+                (
+                    "array",
+                    PropertyValue::array([PropertyValue::Null, PropertyValue::Bool(true)]),
+                ),
+                ("f32", PropertyValue::F32(1.25)),
+                ("f64", PropertyValue::F64(2.5)),
+                ("i64", PropertyValue::I64(3)),
+                ("string", PropertyValue::String("value".to_owned())),
+            ])
+        );
+    }
+
     fn read_wire(parameters: &str, parameter_types: Option<&str>) -> String {
         let parameter_types = parameter_types
             .map(|types| format!(r#","parameter_types":{types}"#))
@@ -655,6 +706,26 @@ mod tests {
             read.replacen(r#""request_type":"read""#, r#""request_type":"write""#, 1);
         assert!(sonic_rs::from_str::<QueryRequest>(&read_tagged_write).is_err());
         assert!(sonic_rs::from_str::<QueryRequest>(&write_tagged_read).is_err());
+    }
+
+    #[test]
+    fn published_openapi_examples_are_valid_query_requests() {
+        let specification =
+            sonic_rs::from_str::<sonic_rs::Value>(include_str!("../../../docs/openapi.json"))
+                .expect("published OpenAPI document is valid JSON");
+        let examples = &specification["paths"]["/v2/query"]["post"]["requestBody"]["content"]
+            ["application/json"]["examples"];
+
+        for (name, expected_type) in [
+            ("read", QueryRequestType::Read),
+            ("write", QueryRequestType::Write),
+        ] {
+            let example = sonic_rs::to_string(&examples[name]["value"])
+                .expect("OpenAPI query example is serializable");
+            let request = sonic_rs::from_str::<QueryRequest>(&example)
+                .unwrap_or_else(|error| panic!("OpenAPI {name} example is invalid: {error}"));
+            assert_eq!(request.request_type(), expected_type);
+        }
     }
 
     #[test]

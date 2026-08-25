@@ -34,7 +34,7 @@ impl WindowReadBound {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(in crate::exec::selected::lowering) enum WindowLimitPushdown {
     Applied(physical::PhysicalAccess),
     Skipped(WindowLimitPushdownSkip),

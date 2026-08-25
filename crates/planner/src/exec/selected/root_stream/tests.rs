@@ -144,7 +144,7 @@ fn root_terminal_constructor_preserves_parent_local_prefix() {
                     ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::AllScan).unwrap(),
                 )),
             )),
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         },
     )
     .unwrap();
@@ -207,7 +207,7 @@ fn root_terminal_constructor_rejects_invalid_physical_suffix() {
         input: SelectedRootStreamInput::VariableSource(logical::VariableSource::new(
             ir::NonEmptyString::from_static("seed"),
         )),
-        projection: ir::ProjectionPlan::Count,
+        projection: ir::ProjectionPlan::Exists,
     };
 
     assert_eq!(
@@ -271,7 +271,7 @@ fn root_terminal_constructor_rejects_recursive_input_with_parent_prefix() {
             test_selected_root_provenance(),
             SelectedRootTerminal::Project {
                 input: SelectedRootStreamInput::Pipeline(Box::new(child)),
-                projection: ir::ProjectionPlan::Count,
+                projection: ir::ProjectionPlan::Exists,
             },
         ),
         Err(SelectedRootConstructionError::RecursiveRootStreamInputNonLocalizedPrefix)

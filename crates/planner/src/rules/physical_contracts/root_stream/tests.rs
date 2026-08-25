@@ -234,7 +234,7 @@ fn localized_root_streams_contribute_delivered_properties_without_prefix_ops() {
 fn terminal_contracts_append_required_tails_and_preserve_output_shape() {
     let storage = cost::StorageCostProfile::default();
     let stats = context::StatsSnapshot::default();
-    let project = logical::StreamProject::new(node_access_stream(), ir::ProjectionPlan::Count);
+    let project = logical::StreamProject::new(node_access_stream(), ir::ProjectionPlan::Exists);
 
     let (physical, delivered, plan_cost) =
         contract::stream_project_pipeline_contract(&project, &storage, &stats);

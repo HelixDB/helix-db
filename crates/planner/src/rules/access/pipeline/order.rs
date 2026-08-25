@@ -1,7 +1,8 @@
 //! Ordering rewrites for access-rooted pipelines.
 
 use super::super::order::{
-    access_satisfies_order, rewrite_access_order_range_direction, AccessOrderRangeDirectionRewrite,
+    access_order_satisfaction, rewrite_access_order_range_direction,
+    AccessOrderRangeDirectionRewrite, AccessOrderSatisfaction,
 };
 use super::support;
 use crate::{logical, optimizer, rules};
@@ -56,10 +57,10 @@ impl optimizer::OptimizerRule for AccessPipelineOrderRule {
             ops.extend(rest);
             return support::access_pipeline_result(access, ops);
         }
-        if access_satisfies_order(&order) {
+        if let AccessOrderSatisfaction::Satisfied(access) = access_order_satisfaction(&order) {
             let mut ops = prefix;
             ops.extend(rest);
-            return support::access_pipeline_result(pipeline.access().clone(), ops);
+            return support::access_pipeline_result(access, ops);
         }
         optimizer::RuleResult::NotApplicable
     }

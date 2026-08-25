@@ -30,7 +30,7 @@ helix auth <SUBCOMMAND>
 |----------|-------------|
 | `CLUSTER` | Cluster ID to rotate. Find one with [`helix cluster list`](/cli/command-reference/cluster). |
 
-`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster — update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) before running [`helix query`](/cli/command-reference/query) again.
+`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster. Update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) with the raw key before running [`helix query`](/cli/command-reference/query) again. Bearer mode adds the prefix automatically.
 
 ## Examples
 

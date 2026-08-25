@@ -1,6 +1,6 @@
 ---
 title: "Get Started"
-description: "Start HelixDB locally, write data, and follow an edge in ten minutes"
+description: "Initialize HelixDB, start a local instance, run the generated query, and stop it"
 sidebarTitle: "Get Started"
 icon: "rocket"
 pageType: "Tutorial"
@@ -19,9 +19,19 @@ You will start a local HelixDB server, create two `User` nodes connected by a
 <Steps>
   <Step title="Install the CLI">
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
 ```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+If the CLI is already installed, run [`helix update`](/cli/command-reference/update).
 
   </Step>
   <Step title="Create a project">
@@ -44,7 +54,7 @@ helix init local
 </Note>
 
   </Step>
-  <Step title="Start the local database">
+  <Step title="Start the generated instance">
 
 ```bash
 helix start dev
@@ -154,6 +164,9 @@ helix stop dev
 ## Next steps
 
 <CardGroup cols={2}>
+  <Card title="Query walkthrough" icon="route" href="/database/helix-db/core-concepts/overview">
+    Learn how SDK builders become the JSON request sent to HelixDB.
+  </Card>
   <Card title="Data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model">
     Learn how nodes, edges, labels, and properties fit together.
   </Card>

@@ -9,8 +9,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use db::query_service::{QueryMode, QueryResponse, QueryServiceError};
+use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
-use serde_json::Value as JsonValue;
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -86,6 +87,7 @@ async fn execute_query(
         Err(error) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
+                error_code::QueryErrorCode::InvalidQueryJson,
                 format!("invalid query JSON: {error}"),
             );
         }
@@ -119,6 +121,7 @@ async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
     to_bytes(body, MAX_QUERY_BODY_BYTES).await.map_err(|error| {
         Box::new(error_response(
             StatusCode::BAD_REQUEST,
+            error_code::QueryErrorCode::InvalidRequestBody,
             format!("failed to read request body: {error}"),
         ))
     })
@@ -155,29 +158,44 @@ pub(super) fn service_error_response(error: QueryServiceError) -> Response {
             }
         }
     };
+    let code = error.error_code();
     let message = error.to_string();
-    match error.index_error_code() {
-        Some(code) => json_response(
-            status,
-            &serde_json::json!({ "error": message, "code": code }),
-        ),
-        None => error_response(status, message),
-    }
+    error_response(status, code, message)
 }
 
-fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
-    json_response(status, &serde_json::json!({ "error": message.into() }))
+#[derive(Serialize)]
+struct QueryErrorEnvelope<'a> {
+    error: error_code::QueryErrorCode,
+    msg: &'a str,
 }
 
-fn json_response(status: StatusCode, body: &JsonValue) -> Response {
+fn error_response(
+    status: StatusCode,
+    code: error_code::QueryErrorCode,
+    message: impl Into<String>,
+) -> Response {
+    let message = message.into();
+    json_response(
+        status,
+        &QueryErrorEnvelope {
+            error: code,
+            msg: &message,
+        },
+    )
+}
+
+fn json_response(status: StatusCode, body: &(impl Serialize + ?Sized)) -> Response {
     match serde_json::to_vec(body) {
         Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [(header::CONTENT_TYPE, "application/json")],
-            format!(r#"{{"error":"failed to serialize response: {error}"}}"#),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize HTTP JSON response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"error":"response_serialization_error","msg":"failed to serialize response"}"#,
+            )
+                .into_response()
+        }
     }
 }
 
@@ -210,18 +228,21 @@ impl RequestOptions {
         if self.warm_only && request_type != QueryRequestType::Read {
             return Err(HttpError::new(
                 StatusCode::BAD_REQUEST,
+                error_code::QueryErrorCode::InvalidRequestOption,
                 "x-helix-warm is only valid for read requests",
             ));
         }
         if self.await_durable == Some(true) && request_type != QueryRequestType::Write {
             return Err(HttpError::new(
                 StatusCode::BAD_REQUEST,
+                error_code::QueryErrorCode::InvalidRequestOption,
                 "x-helix-await-durable is only valid for write requests",
             ));
         }
         if self.require_writer && db_mode != db::HelixDbMode::Writer {
             return Err(HttpError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
+                error_code::QueryErrorCode::InvalidRequestOption,
                 "request requires a writer but this server is read-only",
             ));
         }
@@ -251,6 +272,7 @@ fn parse_optional_bool_header(
     let value = value.to_str().map_err(|_| {
         HttpError::new(
             StatusCode::BAD_REQUEST,
+            error_code::QueryErrorCode::InvalidRequestOption,
             format!("{name} must be a UTF-8 boolean header"),
         )
     })?;
@@ -259,6 +281,7 @@ fn parse_optional_bool_header(
         "false" | "0" => Ok(Some(false)),
         _ => Err(HttpError::new(
             StatusCode::BAD_REQUEST,
+            error_code::QueryErrorCode::InvalidRequestOption,
             format!("{name} must be true or false"),
         )),
     }
@@ -267,19 +290,25 @@ fn parse_optional_bool_header(
 #[derive(Debug)]
 struct HttpError {
     status: StatusCode,
+    code: error_code::QueryErrorCode,
     message: String,
 }
 
 impl HttpError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    fn new(
+        status: StatusCode,
+        code: error_code::QueryErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             status,
+            code,
             message: message.into(),
         }
     }
 
     fn into_response(self) -> Response {
-        error_response(self.status, self.message)
+        error_response(self.status, self.code, self.message)
     }
 }
 
@@ -325,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_errors_include_the_stable_machine_code() {
+    async fn query_errors_use_the_static_code_and_human_message_envelope() {
         let response = service_error_response(QueryServiceError::Db(
             db::error::HelixDbError::IndexOperationNotFound {
                 operation_id: "018f0c58-6bc7-7c56-8d3d-9c5f18a0f001".to_string(),
@@ -334,12 +363,13 @@ mod tests {
         let body = to_bytes(response.into_body(), 4_096)
             .await
             .expect("lifecycle error body is bounded");
-        let json: JsonValue = serde_json::from_slice(&body).expect("error body is JSON");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
 
-        assert_eq!(json["code"], "index_operation_not_found");
-        assert!(json["error"]
+        assert_eq!(json["error"], "index_operation_not_found");
+        assert!(json["msg"]
             .as_str()
             .expect("error message is a string")
             .contains("Index operation not found"));
+        assert_eq!(json.get("code"), None);
     }
 }

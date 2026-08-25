@@ -289,14 +289,14 @@ pub(super) async fn run_limited_node_access_with_params(
         .expect("project step returns a value")
 }
 
-pub(super) fn search_index(index_name: &str) -> ir::SearchIndexPlan {
+pub(in crate::execution::interpreter) fn search_index(index_name: &str) -> ir::SearchIndexPlan {
     ir::SearchIndexPlan {
         index_id: test_support::name(index_name),
         tenant: ir::SearchTenantPlan::Unscoped,
     }
 }
 
-pub(super) fn literal_search_limit(value: usize) -> ir::SearchLimitPlan {
+pub(in crate::execution::interpreter) fn literal_search_limit(value: usize) -> ir::SearchLimitPlan {
     ir::SearchLimitPlan::Literal(NonZeroUsize::new(value).expect("positive search limit"))
 }
 
@@ -328,7 +328,7 @@ pub(super) fn parameterized_i64_between(
     )
 }
 
-pub(super) async fn seed_vector_index<D: search::vector::Distance>(
+pub(in crate::execution::interpreter) async fn seed_vector_index<D: search::vector::Distance>(
     db: &HelixDB,
     definition: &config::VectorIndexDefinition,
     vectors: &[(u64, Vec<f32>)],
@@ -368,7 +368,7 @@ pub(super) async fn seed_vector_index<D: search::vector::Distance>(
     .transition(crate::index_lifecycle::IndexStateTransition::Activate)
     .expect("test vector generation activates");
     let active = crate::index_lifecycle::ActiveIndexHandle::try_from_record(
-        crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+        crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
         &record,
     )
     .expect("active test vector record projects a handle");
@@ -394,8 +394,8 @@ pub(super) async fn seed_vector_index<D: search::vector::Distance>(
             .await
             .expect("vector inserts");
     }
-    let key = crate::encoding::v2::keys::Key::Data {
-        scope: crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped,
+    let key = crate::encoding::v2::keys::ManagedIndexKey::Data {
+        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
         kind: crate::encoding::v2::keys::ScopedKey::index_record(record.identity().clone()),
     }
     .to_bytes();
@@ -438,7 +438,7 @@ pub(super) async fn seed_text_manifest(
     txn.commit().await.expect("manifest commits");
 }
 
-pub(super) async fn seed_managed_text_index(
+pub(in crate::execution::interpreter) async fn seed_managed_text_index(
     db: &HelixDB,
     definition: &config::TextIndexDefinition,
     documents: &[search::text::TextDocumentInput],
@@ -498,10 +498,10 @@ pub(super) async fn seed_managed_text_index(
     .expect("managed text fixture starts building")
     .transition(crate::index_lifecycle::IndexStateTransition::Activate)
     .expect("managed text fixture activates");
-    let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+    let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
     transaction
         .put(
-            crate::encoding::v2::keys::Key::Data {
+            crate::encoding::v2::keys::ManagedIndexKey::Data {
                 scope,
                 kind: crate::encoding::v2::keys::ScopedKey::index_record(record.identity().clone()),
             }
@@ -518,7 +518,7 @@ pub(super) async fn seed_managed_text_index(
     let split_count = u64::try_from(splits.len()).expect("fixture split count fits u64");
     transaction
         .put(
-            crate::encoding::v2::keys::Key::Data {
+            crate::encoding::v2::keys::ManagedIndexKey::Data {
                 scope,
                 kind: crate::encoding::v2::keys::ScopedKey::TextManifestRoot(root),
             }
@@ -539,7 +539,7 @@ pub(super) async fn seed_managed_text_index(
         .expect("managed text root stages");
     transaction
         .put(
-            crate::encoding::v2::keys::Key::Data {
+            crate::encoding::v2::keys::ManagedIndexKey::Data {
                 scope,
                 kind: crate::encoding::v2::keys::ScopedKey::TextManifestPage(
                     crate::encoding::v2::keys::TextManifestPageKey { root, page: 0 },
@@ -591,7 +591,7 @@ pub(super) async fn seed_managed_text_index(
             .expect("managed text fixture statistics compose");
         transaction
             .put(
-                crate::encoding::v2::keys::Key::Data {
+                crate::encoding::v2::keys::ManagedIndexKey::Data {
                     scope,
                     kind: crate::encoding::v2::keys::ScopedKey::TextEntityState(
                         crate::encoding::v2::keys::TextEntityStateKey { root, entity },

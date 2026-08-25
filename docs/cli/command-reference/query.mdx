@@ -102,7 +102,8 @@ query body. A managed cluster with no eligible warming target returns
 Warm writes are rejected with `400 Bad Request` before backend execution. At the
 HTTP/SDK layer, combine `X-Helix-Warm: true` with
 `X-Helix-Require-Writer: true` when only the authoritative writer should be warmed.
-Authentication, read rate limits, retries, and normal query timeouts still apply.
+Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+retries, and normal query timeouts still apply.
 
 ## TypeScript DSL input
 
@@ -119,7 +120,7 @@ helix query dev --ts-file queries/count_users.ts
 How it works:
 
 - The expression must evaluate to a `readBatch()` or `writeBatch()` builder. `g`, `readBatch`, `writeBatch`, `defineParams`, and `param` are auto-imported and already in scope — you write only the expression, no imports.
-- The CLI evaluates it locally with Node using the forthcoming v3 `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
+- The CLI evaluates it locally with Node using the published `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
 - `request_type` is inferred automatically from whether you used `readBatch()` or `writeBatch()`.
 
 Requirements:
@@ -147,7 +148,7 @@ If Node is missing, the CLI tells you to install Node 20+ or fall back to `--jso
 For a Helix Cloud instance, `helix query` reads `[enterprise.<instance>]` in `helix.toml` and:
 
 - Posts to `<gateway_url>/v2/query`.
-- Sends an auth header named by `query_auth_header` (default `Authorization`) with the value read from the environment variable `query_auth_env` (default `HELIX_API_KEY`). The value is read from your shell environment or from a `.env` file in the project root (whichever is set), so you can keep the key out of your shell history.
+- Sends an auth header named by `query_auth_header` (default `Authorization`) using `query_auth_scheme` (`bearer` or `raw`). Bearer mode adds `Bearer` to the raw key read from `query_auth_env` (default `HELIX_API_KEY`); raw mode sends the value unchanged. The value is read from your shell environment or from a `.env` file in the project root.
 
 If `gateway_url` is missing, the CLI returns:
 
@@ -189,7 +190,8 @@ helix query dev --json '{"request_type":"read","query_name":"ad_hoc_read","query
 # Build the request from a TypeScript DSL expression instead of JSON
 helix query dev -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
-# Target a Helix Cloud instance (requires HELIX_API_KEY in env and gateway_url in helix.toml)
+# Target Helix Cloud. Export the raw key; bearer mode adds the prefix.
+export HELIX_API_KEY="..."
 helix query production --file examples/request.json
 ```
 

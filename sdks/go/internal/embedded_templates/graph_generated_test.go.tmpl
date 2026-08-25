@@ -1,0 +1,122 @@
+//go:build helixdb_uniffi
+
+// Copied into the temporary SDK only when generated native bindings are present.
+package helix
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+
+	native "github.com/helixdb/helix-db/sdks/go/internal/uniffi/helixdb"
+)
+
+func TestGeneratedNativeGraphBindingsExecuteRustAlgorithms(t *testing.T) {
+	prefix := graphPrivatePrefix
+	response, err := json.Marshal(map[string]any{
+		"nodes": []map[string]any{
+			{prefix + "node_id": "n1", prefix + "external_id": "a", prefix + "node_label": "File"},
+			{prefix + "node_id": "n2", prefix + "external_id": "b", prefix + "node_label": "File"},
+			{prefix + "node_id": "n3", prefix + "external_id": "c", prefix + "node_label": "File"},
+		},
+		"edges": []map[string]any{
+			{prefix + "edge_id": "e1", prefix + "edge_source": "n1", prefix + "edge_target": "n2", prefix + "edge_label": "REL"},
+			{prefix + "edge_id": "e2", prefix + "edge_source": "n2", prefix + "edge_target": "n3", prefix + "edge_label": "REL"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := graphFromQueryResponse(graphLoadSpec{
+		Direction:        GraphDirected,
+		ExternalIdentity: true,
+	}, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := &NativeGraph{backend: backend}
+	scores, err := graph.BetweennessCentrality(BetweennessOptions{Mode: BetweennessExact})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scores) != 3 || scores[1].NodeID != "b" || scores[1].Score != 1 {
+		t.Fatalf("unexpected centrality: %+v", scores)
+	}
+	path, err := graph.ShortestPath("a", "c", TraversalOut, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path.Kind != PathFound {
+		t.Fatalf("unexpected path: %+v", path)
+	}
+}
+
+func TestGeneratedNativeGraphIdentityAdaptersPreserveCanonicalForms(t *testing.T) {
+	for _, fixture := range []struct {
+		value    string
+		external bool
+	}{
+		{value: "customer-42", external: true},
+		{value: "42", external: false},
+	} {
+		encoded, err := nativeExternalID(fixture.value, fixture.external)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := externalID(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded != fixture.value {
+			t.Fatalf("identity round trip returned %q, want %q", decoded, fixture.value)
+		}
+	}
+	if _, err := nativeExternalID("042", false); err == nil {
+		t.Fatal("non-canonical internal IDs must fail closed")
+	}
+
+	original, err := nativeEdgeID("edge-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := edgeID(original); err != nil || decoded != "edge-1" {
+		t.Fatalf("original edge identity did not round trip: %q, %v", decoded, err)
+	}
+	reversedBytes, err := json.Marshal(edgeIdentity{StoredID: "edge-1", ReverseGeneration: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversed := native.NativeEdgeId{Encoded: reversedBytes}
+	structural, err := edgeID(reversed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := nativeEdgeID(structural)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(roundTrip.Encoded, reversed.Encoded) {
+		t.Fatalf("reversed edge identity changed: %s != %s", roundTrip.Encoded, reversed.Encoded)
+	}
+}
+
+func TestGeneratedNativeGraphSpecMapsTopologyAndIdentity(t *testing.T) {
+	spec := nativeGraphSpec(graphLoadSpec{
+		Direction:       GraphDirected,
+		GraphifyEdgeKey: true,
+	})
+	if spec.Kind != native.NativeGraphKindMultiDiGraph || spec.NodeIdentity != native.NativeIdentityEncodingScalar {
+		t.Fatalf("unexpected native graph spec: %+v", spec)
+	}
+	if spec.EdgeKeyIdentity == nil || *spec.EdgeKeyIdentity != native.NativeIdentityEncodingScalar {
+		t.Fatalf("graph key identity was not preserved: %+v", spec)
+	}
+}
+
+func TestGeneratedNativeGraphComposeRejectsMixedIdentityContracts(t *testing.T) {
+	left := &uniffiGraph{externalIdentity: true}
+	right := &uniffiGraph{externalIdentity: false}
+	if _, err := left.Compose(right); err == nil {
+		t.Fatal("mixed node identity contracts must fail before native composition")
+	}
+}

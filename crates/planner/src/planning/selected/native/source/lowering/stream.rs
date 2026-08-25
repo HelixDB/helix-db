@@ -1,7 +1,7 @@
 //! Validated native source stream construction.
 
 use super::super::ast::NativeSourceAst;
-use crate::planning::selected::native::{access, stream};
+use crate::planning::selected::native::{access, parameter_specialization, stream};
 use crate::{analysis, context, error, ir, planning};
 
 enum SourcePredicatePlan {
@@ -15,19 +15,25 @@ enum SourcePredicatePlan {
 }
 
 impl SourcePredicatePlan {
-    fn new(predicate: &helix_ast::expr::Predicate) -> Result<Self, error::PlannerError> {
+    fn new(
+        ctx: &context::PlannerContext,
+        predicate: &helix_ast::expr::Predicate,
+    ) -> Result<Self, error::PlannerError> {
+        let _ = ir::PredicatePlan::new(predicate.clone())?;
+        let predicate = parameter_specialization::predicate(ctx, predicate)?;
         Ok(
-            match analysis::prune_statically_impossible_branches(predicate)? {
+            match analysis::prune_statically_impossible_branches(&predicate)? {
                 analysis::PrunedPredicate::Impossible => Self::Empty,
                 analysis::PrunedPredicate::Tautology => Self::Unfiltered,
                 analysis::PrunedPredicate::Feasible { predicate, label } => match label {
                     analysis::FeasibleLabelScope::Scoped(label) => Self::Label {
-                        residual: residual_after_label_scope(&predicate, &label)?,
+                        residual: residual_after_label_scope(&predicate, &label),
                         label,
                     },
-                    analysis::FeasibleLabelScope::Unscoped => {
-                        Self::Residual(ir::PredicatePlan::new(predicate)?)
-                    }
+                    analysis::FeasibleLabelScope::Unscoped => Self::Residual(
+                        ir::PredicatePlan::new(predicate)
+                            .expect("predicate pruning preserves validated predicate names"),
+                    ),
                 },
             },
         )
@@ -37,9 +43,9 @@ impl SourcePredicatePlan {
 fn residual_after_label_scope(
     predicate: &helix_ast::expr::Predicate,
     label: &ir::NonEmptyString,
-) -> Result<Option<ir::PredicatePlan>, error::PlannerError> {
+) -> Option<ir::PredicatePlan> {
     if analysis::predicate_is_tautological_for_label(predicate, label) {
-        return Ok(None);
+        return None;
     }
     let residual = match predicate {
         helix_ast::expr::Predicate::And { predicates } => {
@@ -58,10 +64,10 @@ fn residual_after_label_scope(
         }
         _ => Some(predicate.clone()),
     };
-    residual
-        .map(ir::PredicatePlan::new)
-        .transpose()
-        .map_err(error::PlannerError::from)
+    residual.map(|predicate| {
+        ir::PredicatePlan::new(predicate)
+            .expect("removing a label conjunct preserves validated predicate names")
+    })
 }
 
 impl<'a> NativeSourceAst<'a> {
@@ -77,8 +83,8 @@ impl<'a> NativeSourceAst<'a> {
             Self::Edges(reference) => {
                 stream::NativeAccessStream::new(access::NativeAccessPath::edges(reference)?)
             }
-            Self::NodesWhere(predicate) => node_predicate_stream(predicate)?,
-            Self::EdgesWhere(predicate) => edge_predicate_stream(predicate)?,
+            Self::NodesWhere(predicate) => node_predicate_stream(ctx, predicate)?,
+            Self::EdgesWhere(predicate) => edge_predicate_stream(ctx, predicate)?,
             Self::NodeVectorSearch {
                 label,
                 property,
@@ -152,9 +158,10 @@ impl<'a> NativeSourceAst<'a> {
 }
 
 fn node_predicate_stream(
+    ctx: &context::PlannerContext,
     predicate: &helix_ast::expr::Predicate,
 ) -> Result<stream::NativeAccessStream, error::PlannerError> {
-    Ok(match SourcePredicatePlan::new(predicate)? {
+    Ok(match SourcePredicatePlan::new(ctx, predicate)? {
         SourcePredicatePlan::Empty => stream::NativeAccessStream::new(
             access::NativeAccessPath::node_plan(ir::NodeAccessPlan::Empty),
         ),
@@ -178,9 +185,10 @@ fn node_predicate_stream(
 }
 
 fn edge_predicate_stream(
+    ctx: &context::PlannerContext,
     predicate: &helix_ast::expr::Predicate,
 ) -> Result<stream::NativeAccessStream, error::PlannerError> {
-    Ok(match SourcePredicatePlan::new(predicate)? {
+    Ok(match SourcePredicatePlan::new(ctx, predicate)? {
         SourcePredicatePlan::Empty => stream::NativeAccessStream::new(
             access::NativeAccessPath::edge_plan(ir::EdgeAccessPlan::Empty),
         ),

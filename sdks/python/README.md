@@ -5,6 +5,11 @@ asynchronous clients for sending HelixDB queries to `POST /v2/query` or
 executing them against an embedded database. The async client uses HTTPX; the
 sync API remains unchanged.
 
+## License
+
+The HelixDB Python SDK is licensed under the Apache License 2.0. See
+[`LICENSE`](LICENSE) for the complete terms.
+
 ```python
 from helixdb import Client, Predicate, g, read_batch
 
@@ -59,6 +64,11 @@ closed and the client remains reusable. For embedded operations, use
 `AsyncBaseTransport` instances can be injected for custom networking or tests;
 the client owns and closes an injected transport. Calling `await client.close()`
 more than once is safe.
+
+`HelixError.code` preserves the static server or embedded code separately from
+the readable `details`. See the canonical
+[query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx)
+for the complete catalog and migration contract.
 
 Warm a read with `client.execute(request, warm_only=True)`. Helix Cloud fans the
 ordinary read out to every eligible backend, discards the results, and returns

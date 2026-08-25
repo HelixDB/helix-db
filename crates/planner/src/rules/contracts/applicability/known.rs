@@ -93,6 +93,7 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
                 Kind::RootPipeline,
                 vec![
                     Kind::StreamReserved,
+                    Kind::StreamCardinality,
                     Kind::StreamProject,
                     Kind::StreamAggregate,
                     Kind::StreamVariableWrite,
@@ -102,6 +103,7 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
         KnownRuleId::SeedRootBranch => RuleApplicability::root_branch_implementation_candidate(),
         KnownRuleId::SeedRootRepeat => RuleApplicability::root_repeat_implementation_candidate(),
         KnownRuleId::SeedStreamReserved => RuleApplicability::only(Kind::StreamReserved),
+        KnownRuleId::SeedStreamCardinality => RuleApplicability::only(Kind::StreamCardinality),
         KnownRuleId::SeedStreamProject => RuleApplicability::only(Kind::StreamProject),
         KnownRuleId::SeedStreamAggregate => RuleApplicability::only(Kind::StreamAggregate),
         KnownRuleId::SeedStreamVariableWrite => RuleApplicability::only(Kind::StreamVariableWrite),

@@ -27,7 +27,7 @@ use super::memory_store::{
     VectorMemoryStore,
 };
 use super::{ValidatedVectorCleanupAuthority, ValidatedVectorGenerationHandle};
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 
 /// Complete canonical-record identity for one vector cache generation.
 ///
@@ -981,7 +981,7 @@ mod tests {
         let same = VectorCacheIdentity::from_validated(&validated(1));
         let successor = VectorCacheIdentity::from_validated(&validated(2));
         let another_scope = VectorCacheIdentity::from_validated(&validated_exact(
-            DataScope::Tenant(crate::encoding::keys::tenant::TenantId::from_u128(1)),
+            DataScope::Tenant(crate::encoding::keys::scope::TenantId::from_u128(1)),
             7,
             1,
             70,

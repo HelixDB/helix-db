@@ -83,7 +83,7 @@ All this means is much lower costs for vastly more amounts of storage.
 ## Next steps
 
   <Card title="Get Started" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Start building">
-    Build and query a connected application with HelixDB.
+    Start a local instance and run the generated query.
   </Card>
   <Card title="Understand the data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model" cta="Explore the model">
     Learn how nodes, edges, properties, and indexes represent your data.
@@ -108,6 +108,8 @@ You will start a local HelixDB server, create two `User` nodes connected by a
 
   <Step title="Install the CLI">
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
 ```
@@ -131,7 +133,9 @@ helix init local
   instead of raw JSON requests, see [SDK setup](/database/helix-db/start-here/sdk-setup/typescript-project-setup).
 
   </Step>
-  <Step title="Start the local database">
+  <Step title="Create a local project">
+
+Create and enter an empty directory, then initialize it:
 
 ```bash
 helix start dev
@@ -238,6 +242,9 @@ helix stop dev
 
 ## Next steps
 
+  <Card title="Query walkthrough" icon="route" href="/database/helix-db/core-concepts/overview">
+    Learn how SDK builders become the JSON request sent to HelixDB.
+  </Card>
   <Card title="Data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model">
     Learn how nodes, edges, labels, and properties fit together.
   </Card>
@@ -324,9 +331,21 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 
 ## Start with the CLI
 
+macOS and Linux:
+
 ```bash
 curl -sSL "https://install.helix-db.com" | bash
+```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
+```
+
+Then, in your shell:
+
+```bash
 mkdir my-helix-app
 cd my-helix-app
 helix init local --name dev # add --disk to make persistence the project default
@@ -709,13 +728,18 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 `helix-db` crate provides the query DSL, request types, async
+The published `helix-db` 3.0.0 crate provides the query DSL, request types, async
 HTTP client, native graph helpers, and a feature-gated embedded client.
 
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is published as `helix-db` and imported as `helix_db`.
 
 ## Install
+
+```bash
+cargo add helix-db@3.0.0
+```
+
+Or add the dependency directly:
 
 ```toml Cargo.toml
 [dependencies]
@@ -806,16 +830,15 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 TypeScript SDK targets Node.js 20 or newer and emits the same
-operation-tree AST as the v3 Rust, Go, and Python SDKs.
+The published `@helix-db/helix-db` 3.0.4 package targets Node.js 20 or newer and
+emits the same operation-tree AST as the Rust, Go, and Python SDKs.
 
-The v3 SDK packages have not been published yet. The package names and installation
-commands on this page describe the upcoming v3 release.
+The package is ESM and requires Node.js 20 or newer.
 
 ## Install
 
 ```bash
-npm install @helix-db/helix-db
+npm install @helix-db/helix-db@3.0.4
 ```
 
 The package is ESM. Set `"type": "module"` or compile to ESM.
@@ -901,16 +924,20 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 Go SDK builds the shared operation-tree AST and executes it through
-a typed client.
+The Go SDK builds the shared operation-tree AST and executes requests through a
+typed HTTP client.
 
-The v3 SDK packages have not been published yet. The Go SDK keeps the module path
-`github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3` suffix.
+Version `v0.3.1` ships the server query builder and HTTP client. It does not
+distribute the native bindings required by embedded execution or native graph
+algorithms.
+
+The module path remains `github.com/helixdb/helix-db/sdks/go`; it does not add a
+`/v3` suffix because the module itself has not reached major version 2.
 
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -957,11 +984,11 @@ if err := client.Exec(ctx, FindUsers("acme", 25), &response); err != nil {
 Write requests can pass `helix.WriterOnly()` and `helix.AwaitDurability(true)` execution
 options. The client does not retry conflicts automatically.
 
-## Embedded runtime
+## Release scope
 
-Install the SDK with `go get github.com/helixdb/helix-db/sdks/go`. See
-[Embedded database](/database/helix-db/start-here/local-development/embedded-database)
-for storage, cache, and handle configuration.
+Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Embedded
+constructors and `Client.Graph` return native-binding-unavailable errors in a
+standard module installation.
 
 ## Verify
 
@@ -985,9 +1012,9 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The Python SDK is packaged as `helix-db` and imported as `helixdb`. Its builder
-methods use `snake_case` and produce the same operation-tree AST as the other v3
-SDKs.
+The Python SDK is published on PyPI as `helix-db` 0.3.4 and imported as `helixdb`.
+Its builder methods use `snake_case` and produce the same operation-tree AST as
+the other HelixDB v3 SDKs.
 
 `helix-db` includes the synchronous and asynchronous server clients. Install
 `helix-db-embedded` as well only when the application runs HelixDB in process.
@@ -995,7 +1022,7 @@ SDKs.
 ## Install
 
 ```bash
-python -m pip install helix-db
+python -m pip install helix-db==0.3.4
 ```
 
 ## Define a query
@@ -1142,6 +1169,7 @@ Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+- **[Go SDK v0.3.1](/database/helix-db/start-here/sdk-setup/go-project-setup)** — operation-tree query construction, typed parameters, `/v2/query` execution, index lifecycle requests, and traversal-scoped vector and BM25 search. Upgrade from v0.3.0: this patch keeps unreleased embedded adapters out of public module discovery. Embedded execution and native graph bindings are not distributed in this release.
 - **[Python async client](/database/helix-db/start-here/sdk-setup/python-project-setup#async-execution)** — `helix-db` 0.3.3 adds reusable HTTPX connection pooling, concurrent requests, cancellation-safe response cleanup, and asynchronous embedded writer and reader clients.
 
 - **Open-source database** — the engine moved out of `helix-hyperscale` into the public, modular `helix-db` workspace.
@@ -1906,6 +1934,20 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `count()` | `1` |
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
+
+Populated values keep these existing shapes. Only a declared return with no
+value uses an inferred empty shape:
+
+| Semantic return | Populated | Empty or skipped |
+| --- | --- | --- |
+| At most one row, such as `limit(1)` | Existing one-element array | `null` |
+| Collection, many, or unknown cardinality | Existing array | `[]` |
+| `fold` or mutation | Existing array | `[]` |
+| Scalar terminal, such as `count()` or `exists()` | Existing scalar | No synthetic empty value |
+
+The planner infers this from the semantic output type and guaranteed
+multiplicity. It does not use the observed row count or optimizer estimates. An
+empty `returns` declaration returns `{}` because it declares no response keys.
 
 ## 9. Read it back in a later request
 
@@ -3890,6 +3932,428 @@ the request at runtime and send it to `POST /v2/query`.
     Apply parameters to indexed sources and filters.
   </Card>
 
+# HelixDB HTTP API and OpenAPI specification
+
+Page type: Reference
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
+same contract is available from a local server and a Helix Cloud gateway.
+
+## Machine-readable specification
+
+The canonical OpenAPI 3.1 document is published at both predictable URLs:
+
+- [https://www.helix-db.com/openapi.json](https://www.helix-db.com/openapi.json)
+- [https://docs.helix-db.com/openapi.json](https://docs.helix-db.com/openapi.json)
+
+Use the specification to discover request headers, response codes, health
+endpoints, query-envelope variants, and example read and write requests. Use the
+typed SDKs or `helix query` to build the nested operation tree.
+
+## Endpoint
+
+```http
+POST /v2/query
+Content-Type: application/json
+```
+
+Local development uses `http://localhost:6969/v2/query` by default. For Helix
+Cloud, use the gateway URL and database ID shown in the dashboard or written to
+`helix.toml` by [`helix sync`](/cli/command-reference/sync). The
+`cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
+shared query endpoint.
+
+The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
+local HelixDB server. The Helix Cloud gateway is advertised only for
+`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
+this specification.
+
+Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
+gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
+client must work against both environments.
+
+## Authentication
+
+Local servers do not require authentication by default. A Helix Cloud GA shared
+gateway requires a cluster API key and database ID:
+
+```http
+Authorization: Bearer <cluster-api-key>
+X-Helix-Database-Id: <database-id>
+```
+
+`X-Helix-Tenant-Id` remains a legacy alias in GA mode. Database-specific
+cluster-mode gateway URLs require the API key but reject both database and
+tenant selection headers. Use the endpoint mode shown in the dashboard or
+written by `helix sync`; do not copy headers between the two modes.
+
+The current public SDK request builders set bearer authentication and execution
+headers but do not expose the GA database-selection header. Use them with a
+database-specific cluster gateway URL, or use direct HTTP for a GA shared
+gateway.
+
+Create or rotate the cluster key in the Helix Cloud dashboard. Do not put keys
+in source control, agent instructions, `llms.txt`, or catalog manifests.
+
+The hosted HelixDB MCP server has a separate browser OAuth flow. See the
+[HelixDB MCP guide](/database/helix-cloud/connect/mcp) and the public
+[HelixDB authentication guide](https://www.helix-db.com/auth.md).
+
+## Request envelope
+
+`request_type` and the single `query` variant must agree: `read` with `read`, or
+`write` with `write`. `query_name` is optional diagnostic metadata. Parameters
+can be untyped, or every parameter can have a matching entry in
+`parameter_types`.
+
+For raw HTTP JSON, send floating-point values without `parameter_types`.
+The HTTP schema does not advertise typed `f32` or `f64` declarations because
+JSON Schema cannot distinguish an integral number token such as `5` from the
+integer representation that exact typed decoding rejects.
+
+```json
+{
+  "request_type": "read",
+  "query_name": "node_count",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "node_count",
+            "root": {
+              "count": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["node_count"]
+    }
+  }
+}
+```
+
+## Execution headers
+
+| Header | Applies to | Purpose |
+| --- | --- | --- |
+| `X-Helix-Warm` | Reads | Warm eligible execution state before normal traffic. |
+| `X-Helix-Require-Writer` | Reads and writes | Reject execution when the selected server is not a writer. |
+| `X-Helix-Await-Durable` | Writes | Flush the writer before returning success. |
+| `X-Helix-Database-Id` | Helix Cloud | Select the managed database behind a gateway. |
+
+Boolean execution headers accept `true`, `false`, `1`, or `0`. Warm writes and
+durability waits on reads are rejected with `400 Bad Request`.
+
+## Responses
+
+- `200` returns a JSON object keyed by the requested return variables.
+- `204` means Helix Cloud completed a cache-warming read without a body.
+- `400` reports invalid input or request options. On Helix Cloud, it also
+  reports a missing or malformed authentication header.
+- `401` reports an invalid Helix Cloud API key.
+- `402` reports that Helix Cloud query processing is disabled because credit is
+  exhausted.
+- `403` reports that the Helix Cloud API key lacks permission for the query.
+- `408` reports that a Helix Cloud query exceeded its wall-clock limit.
+- `409` reports a transaction conflict. Retry the whole transaction only when
+  it is idempotent or protected by an application idempotency key.
+- `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
+  rejects it before query parsing.
+- `429` reports a Helix Cloud rate limit and can include `Retry-After`.
+- `500` reports an internal query or storage failure.
+- `503` reports that a required writer or ready database is unavailable.
+
+Local servers and Helix Cloud gateways return
+`{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
+`error` and treat `msg` as diagnostic text. An oversized Cloud request uses
+`payload_too_large` as its stable error code. See
+[Error handling](/database/helix-db/query-guides/error-handling) for local error
+codes and retry guidance.
+
+## Related resources
+
+- [`helix query`](/cli/command-reference/query) builds and sends requests from JSON or the TypeScript DSL.
+- [Build and run a query](/database/helix-db/core-concepts/overview) explains the operation tree.
+- [Parameters](/database/helix-db/query-guides/parameters) defines typed and untyped runtime values.
+
+# Handle query errors
+
+Page type: Reference
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Reference</Badge></div>
+
+Helix query failures expose a stable machine-readable code separately from the
+human-readable diagnostic. Branch on the code; log or display the message.
+Messages can gain context over time and are not a compatibility contract.
+
+## HTTP error envelope
+
+Every non-success response from `POST /v2/query` uses `error` for the static
+code and `msg` for the readable message:
+
+```json
+{
+  "error": "index_not_found",
+  "msg": "planner error: missing text index for `Document.body`"
+}
+```
+
+The response never adds a separate `code` field. HTTP status classifications
+are unchanged, so use both the status and static code when deciding whether to
+retry. A non-JSON response from an older proxy or intermediary is still exposed
+by each SDK as readable details with no code.
+
+## Access the code in an SDK
+
+```rust Rust
+match client.query::<serde_json::Value>(request).send().await {
+    Err(error) if error.error_code() == Some("index_not_found") => {
+        // Create the index, wait for it to become active, then retry.
+    }
+    Err(error) => return Err(error),
+    Ok(response) => println!("{response}"),
+}
+```
+
+```ts TypeScript
+try {
+  await client.query(request).send();
+} catch (cause) {
+  if (cause instanceof HelixError && cause.code === "index_not_found") {
+    // Create the index, wait for it to become active, then retry.
+  } else {
+    throw cause;
+  }
+}
+```
+
+```go Go
+if err := client.Exec(ctx, request, &response); err != nil {
+	var helixErr *helix.HelixError
+	if errors.As(err, &helixErr) && helixErr.Code == helix.QueryErrorCode("index_not_found") {
+		// Create the index, wait for it to become active, then retry.
+	} else {
+		return err
+	}
+}
+```
+
+```python Python
+try:
+    response = client.query(request)
+except HelixError as error:
+    if error.code == "index_not_found":
+        # Create the index, wait for it to become active, then retry.
+        pass
+    else:
+        raise
+```
+
+```json JSON
+{
+  "error": "index_not_found",
+  "msg": "planner error: missing text index for `Document.body`"
+}
+```
+
+Known Rust codes can also be parsed as `QueryErrorCode`. SDK wire fields remain
+open strings so a newer server's unknown future code is preserved rather than
+being collapsed or rejected.
+
+## Other query boundaries
+
+For gRPC, the status message remains human-readable and the same static code is
+attached as ASCII metadata under `helix-error-code`. gRPC status classes are
+unchanged.
+
+Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
+fields named `error` and `msg`; generated Python, Node, and Go bindings pass
+that pair into their SDK error objects. Embedded callers never need to infer a
+code from exception text.
+
+## Stability and retry rules
+
+- Existing code strings are frozen compatibility identifiers. New codes may be
+  added, so applications must preserve and safely handle unknown values.
+- A code describes the failure, not whether replaying a particular mutation is
+  safe. Retry only idempotent work or work protected by an application-level
+  idempotency key.
+- `transaction_conflict` is the only HTTP conflict classification and is
+  normally retryable with bounded backoff.
+- Availability and lifecycle failures should be retried only after the named
+  condition changes. Validation and planning failures require a corrected
+  request or schema/index configuration.
+- `internal_*`, `storage_error`, and `response_serialization_error` are opaque
+  by design. Retain the `msg` and server logs when escalating them.
+
+## Error-code reference
+
+“Correctable” means whether a caller can change its request or deployment state
+to address the failure. Statuses list the current HTTP behavior; `400/503` and
+`400/500` indicate that the same code can arise at more than one boundary.
+
+### Request validation
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `invalid_request` | The request is incompatible with the selected query mode. | 400 | After fixing the request | Yes |
+| `invalid_query_json` | The query body cannot be decoded as query JSON. | 400 | After fixing the body | Yes |
+| `invalid_request_body` | The transport cannot read the body or it exceeds the body limit. | 400 | After fixing the body | Yes |
+| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400/503 | After fixing the option or routing | Yes |
+| `invalid_query` | An embedded or encoded query payload is invalid. | 500 | After fixing the query | Yes |
+
+### Planning
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `invalid_index_operation_id` | An index lifecycle operation ID is invalid. | 400 | After fixing the ID | Yes |
+| `unsupported_edge_all_target` | An all-edges reference was used as a finite mutation target. | 400 | After changing the traversal | Yes |
+| `non_literal_index_expression` | An index operation expression is not a literal or parameter. | 400 | After changing the expression | Yes |
+| `missing_planning_equality_parameter` | A parameter needed to plan an equality lookup is not bound. | 400 | After binding the parameter | Yes |
+| `unsupported_planning_equality_parameter` | An equality parameter cannot be represented by the selected index. | 400 | After changing the parameter value | Yes |
+| `invalid_search_tenant` | A tenant was supplied for an unscoped search index. | 400 | After fixing tenant usage | Yes |
+| `invalid_search_tenant_value` | A search tenant value has the wrong shape. | 400 | After fixing the value | Yes |
+| `invalid_search_result_count` | A search result count is zero. | 400 | After using a positive count | Yes |
+| `invalid_search_result_count_expression` | A search result-count expression has the wrong shape. | 400 | After fixing the expression | Yes |
+| `invalid_search_input` | A text or vector search input has the wrong shape. | 400 | After fixing the input | Yes |
+| `invalid_batch_condition_min_size` | A batch condition has a zero minimum size. | 400 | After fixing the condition | Yes |
+| `invalid_initial_batch_condition` | The first batch entry depends on a previous result. | 400 | After reordering the batch | Yes |
+| `duplicate_property_assignment` | A mutation assigns the same property more than once. | 400 | After removing the duplicate | Yes |
+| `duplicate_property_selection` | A projection selects the same property more than once. | 400 | After removing the duplicate | Yes |
+| `duplicate_projection_alias` | A projection emits the same alias more than once. | 400 | After renaming an alias | Yes |
+| `duplicate_return_variable` | A batch returns the same variable more than once. | 400 | After removing the duplicate | Yes |
+| `duplicate_element_id` | A point lookup contains the same element ID more than once. | 400 | After deduplicating IDs | Yes |
+| `duplicate_order_key` | A sort contains the same property more than once. | 400 | After deduplicating keys | Yes |
+| `unbound_context` | A sub-traversal is missing its parent input. | 400 | After binding the context | Yes |
+| `invalid_sub_traversal_operation` | An operation is invalid inside a branch or repeat sub-traversal. | 400 | After changing the traversal | Yes |
+| `invalid_after_bind_operation` | An operation is invalid after a row-local bind. | 400 | After changing the traversal | Yes |
+| `read_only_traversal_in_write_batch` | A write batch contains a read-only traversal. | 400 | After moving the read | Yes |
+| `invalid_branch_arity` | A branch has too few traversals. | 400 | After adding a branch | Yes |
+| `invalid_batch_arity` | A batch has too few entries. | 400 | After adding an entry | Yes |
+| `invalid_repeat_emit` | A repeat emit predicate conflicts with its emit mode. | 400 | After fixing repeat options | Yes |
+| `invalid_repeat_count` | A repeat count or depth is zero. | 400 | After using a positive count | Yes |
+| `invalid_shortest_path_count` | A shortest-path count or depth is zero. | 400 | After using a positive count | Yes |
+| `invalid_order_keys` | An order operation has no sort keys. | 400 | After adding a key | Yes |
+| `invalid_projection_arity` | A projection has too few fields. | 400 | After adding a field | Yes |
+| `invalid_stream_range` | A stream range is statically inverted. | 400 | After fixing the range | Yes |
+| `invalid_stream_bound_expression` | A stream-bound expression has the wrong shape. | 400 | After fixing the expression | Yes |
+| `invalid_empty_name` | A required query name is empty. | 400 | After supplying a name | Yes |
+| `invalid_predicate_arity` | A predicate set has too few children. | 400 | After adding a predicate | Yes |
+
+### Execution
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
+| `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
+| `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
+| `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |
+| `invalid_vector_configuration` | Vector index configuration is invalid. | 500 | After fixing configuration | Yes |
+| `unique_constraint_violation` | A unique index already owns the requested value. | 500 | After choosing a unique value | Yes |
+| `unsupported_unique_index_value_type` | A unique index does not support the value type. | 500 | After changing the value | Yes |
+| `invalid_vector_dimension` | A vector has the wrong dimension. | 400 | After fixing the vector | Yes |
+| `invalid_vector_component` | A vector contains a non-finite component. | 400 | After fixing the vector | Yes |
+| `vector_component_magnitude_exceeded` | A component exceeds the score-safe magnitude. | 400 | After normalizing the vector | Yes |
+| `zero_norm_cosine_vector` | A cosine vector has zero norm. | 400 | After supplying a nonzero vector | Yes |
+
+### Index lifecycle
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
+| `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
+| `active_text_mutation_limit_exceeded` | An active text mutation exceeded an admission limit. | 500 | With a smaller mutation | Yes |
+| `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
+| `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
+| `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
+| `identifier_exhausted` | A bounded non-index-specific identifier namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_id_exhausted` | The logical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
+| `vector_physical_id_exhausted` | The vector physical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_generation_exhausted` | The index generation namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_revision_exhausted` | The index revision namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_operation_revision_exhausted` | The index-operation revision namespace is exhausted. | 500 | No immediate retry | Operational |
+| `index_already_exists` | An index with the requested identity already exists. | 500 | After using idempotent creation or a new name | Yes |
+| `index_definition_conflict` | An existing index has a conflicting definition. | 500 | After reconciling definitions | Yes |
+| `index_busy` | The index is already changing lifecycle state. | 500 | After the active operation completes | Yes |
+| `index_operation_not_found` | The requested index operation does not exist. | 500 | After fixing the operation ID | Yes |
+| `index_operation_not_abortable` | The requested operation can no longer be aborted. | 500 | No | No |
+| `index_not_found` | The required logical or physical index does not exist. | 400/500 | After creating or selecting the index | Yes |
+
+### Retryable conflicts
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
+| `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
+| `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
+| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
+
+### Availability and migration
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `database_closed` | The database handle is closed. | 500 | After reopening | Operational |
+| `invalid_configuration` | Database configuration is invalid. | 500 | After fixing configuration | Operational |
+| `migration_required` | Existing storage requires an explicit migration. | 500 | After migration | Operational |
+| `writer_migration_required` | A writer must open and migrate existing storage. | 500 | After writer migration | Operational |
+| `unsupported_index_storage_version` | Stored index data is newer than this binary supports. | 500 | After upgrading the binary | Operational |
+| `writer_mode_required` | The operation requires a writer handle. | 503 | On a writer | Operational |
+| `reader_mode_required` | The operation requires a standalone reader handle. | 500 | On a reader | Operational |
+
+### Internal failures
+
+| Code | Meaning | HTTP | Retry | Correctable |
+| --- | --- | --- | --- | --- |
+| `storage_error` | Storage failed outside a classified transaction conflict. | 500 | According to storage health | Operational |
+| `internal_planner_error` | An internal planner contract failed. | 400 | No automatic retry | No |
+| `response_serialization_error` | A successful result could not be serialized. | 500 | No automatic retry | No |
+| `internal_error` | An invariant, persisted-data contract, or opaque internal operation failed. | 500 | No automatic retry | No |
+
+## Migrate direct HTTP consumers
+
+The field names changed while their roles stayed the same:
+
+| Before | Now | Meaning |
+| --- | --- | --- |
+| `code` | `error` | Stable machine-readable code |
+| `error` | `msg` | Human-readable diagnostic |
+
+Old response:
+
+```json
+{
+  "error": "planner error: missing text index for `Document.body`",
+  "code": "index_not_found"
+}
+```
+
+New response:
+
+```json
+{
+  "error": "index_not_found",
+  "msg": "planner error: missing text index for `Document.body`"
+}
+```
+
+Current SDKs read both shapes during migration. Direct HTTP consumers must move
+their code branch from `code` to `error` and their diagnostic read from `error`
+to `msg`.
+
 # Connect to Helix Cloud
 
 Page type: Guide
@@ -3940,6 +4404,13 @@ client = Client(
     api_key="hx_your_api_key",
 )
 ```
+
+These SDK examples target a database-specific cluster-mode gateway URL. Such an
+endpoint authenticates the API key but rejects `X-Helix-Database-Id` and
+`X-Helix-Tenant-Id`. A GA shared gateway instead requires
+`X-Helix-Database-Id`; the current public SDK request builders do not expose
+that selection header, so use the direct HTTP contract for GA shared-gateway
+requests.
 
 Each client sends the same operation-tree request body:
 
@@ -3997,8 +4468,8 @@ fails. If every target fails, the normal deterministic error response is returne
 
 Managed clusters target database pods that are ready, running, routable, and not
 quarantined. Add `X-Helix-Require-Writer: true` to target only the authoritative
-writer. Authentication, read rate limits, retries, and the normal query timeout still
-apply before and during fanout.
+writer. Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+retries, and the normal query timeout still apply before and during fanout.
 
 Warming populates the storage, vector, and text caches touched by the read; it does
 not create a separate result cache. `X-Helix-Warm: true` or `1` enables warming;
@@ -4077,7 +4548,7 @@ export HELIX_API_KEY="<api-key>"
 curl --fail-with-body \
   "$HELIX_ENDPOINT/v2/query" \
   --header "Authorization: Bearer $HELIX_API_KEY" \
-  --header "x-helix-tenant-id: $HELIX_DATABASE_ID" \
+  --header "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
   --header "Content-Type: application/json" \
   --data '{
     "request_type": "read",
@@ -4225,9 +4696,8 @@ regardless of cache state; caching affects latency, not correctness.
 # HelixDB Model Context Protocol (MCP)
 
 Page type: Tutorial
-Status: Preview
 
-<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge><Badge color="orange" size="sm">Preview</Badge></div>
+<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
 export const CursorLogo = () => (
   <svg viewBox="0 0 452 516" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -4262,15 +4732,12 @@ active indexes, usage, and dedicated-cluster health.
 - It works with MCP clients that support remote Streamable HTTP servers and OAuth.
 - It cannot execute queries or change database or Cloud resources.
 
-  The preview endpoint uses the Helix development environment. Use test
-  resources only until the production endpoint is announced.
-
 ## Quick start
 
-  <Card title="Cursor" icon={<CursorLogo />} href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5kZXYuaGVsaXgtZGIuY29tL21jcCJ9">
+  <Card title="Cursor" icon={<CursorLogo />} href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5oZWxpeC1kYi5jb20vbWNwIn0=">
     One-click install
   </Card>
-  <Card title="VS Code" icon={<VSCodeLogo />} href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.dev.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
+  <Card title="VS Code" icon={<VSCodeLogo />} href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
     One-click install
   </Card>
   <Card title="Codex" icon={<CodexLogo />} href="#codex-cli">
@@ -4290,10 +4757,14 @@ current workspace, project, cluster, and tenant membership on every tool call.
 Removing a user's Helix access removes the corresponding MCP access without a
 separate resource grant.
 
+If your browser already has an active Helix session, WorkOS can reuse that
+account during authorization. Confirm the email address on the consent screen
+before you approve access.
+
 **Server URL:**
 
 ```text
-https://mcp.dev.helix-db.com/mcp
+https://mcp.helix-db.com/mcp
 ```
 
 ## Security boundary
@@ -4317,7 +4788,7 @@ names, and recommendation bodies are not written to logs.
 
 ### Cursor
 
-<Card title="Install HelixDB in Cursor" icon={<CursorLogo />} horizontal href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5kZXYuaGVsaXgtZGIuY29tL21jcCJ9">
+<Card title="Install HelixDB in Cursor" icon={<CursorLogo />} horizontal href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5oZWxpeC1kYi5jb20vbWNwIn0=">
   Add the hosted MCP server, then complete OAuth in your browser.
 
 For manual installation, add this configuration to `.cursor/mcp.json`:
@@ -4326,7 +4797,7 @@ For manual installation, add this configuration to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "helix-db": {
-      "url": "https://mcp.dev.helix-db.com/mcp"
+      "url": "https://mcp.helix-db.com/mcp"
     }
   }
 }
@@ -4337,7 +4808,7 @@ Helix sign-in flow. Restart Cursor if the server does not appear.
 
 ### VS Code
 
-<Card title="Install HelixDB in VS Code" icon={<VSCodeLogo />} horizontal href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.dev.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
+<Card title="Install HelixDB in VS Code" icon={<VSCodeLogo />} horizontal href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
   Add the hosted MCP server, then complete OAuth in your browser.
 
 For manual installation:
@@ -4345,7 +4816,7 @@ For manual installation:
 1. Open the Command Palette.
 2. Run **MCP: Add Server**.
 3. Choose **HTTP**.
-4. Enter `https://mcp.dev.helix-db.com/mcp` and name it `HelixDB`.
+4. Enter `https://mcp.helix-db.com/mcp` and name it `HelixDB`.
 5. Start the server and approve the browser authentication prompt.
 
 ### Codex CLI
@@ -4354,7 +4825,7 @@ Add the server, then authenticate if Codex does not open the browser flow
 automatically:
 
 ```bash
-codex mcp add helix-db --url https://mcp.dev.helix-db.com/mcp
+codex mcp add helix-db --url https://mcp.helix-db.com/mcp
 codex mcp login helix-db
 codex mcp list
 ```
@@ -4373,7 +4844,7 @@ is enabled and authenticated.
 Add the remote HTTP server:
 
 ```bash
-claude mcp add --transport http helix-db https://mcp.dev.helix-db.com/mcp
+claude mcp add --transport http helix-db https://mcp.helix-db.com/mcp
 ```
 
 Start Claude Code, run `/mcp`, select `helix-db`, and complete authentication in
@@ -4389,7 +4860,7 @@ Add the server to `~/.config/opencode/opencode.json`:
   "mcp": {
     "helix-db": {
       "type": "remote",
-      "url": "https://mcp.dev.helix-db.com/mcp"
+      "url": "https://mcp.helix-db.com/mcp"
     }
   }
 }
@@ -4410,7 +4881,7 @@ Create a custom remote MCP connection with this URL and choose OAuth when the
 client asks for an authentication method:
 
 ```text
-https://mcp.dev.helix-db.com/mcp
+https://mcp.helix-db.com/mcp
 ```
 
 The client must support Streamable HTTP, OAuth protected-resource discovery,
@@ -4497,13 +4968,28 @@ Remove any manually configured OAuth resource, remove and re-add the MCP
 server, then authenticate again. For Codex, use only:
 
 ```bash
-codex mcp add helix-db --url https://mcp.dev.helix-db.com/mcp
+codex mcp add helix-db --url https://mcp.helix-db.com/mcp
+codex mcp login helix-db
+```
+
+### WorkOS used the wrong account
+
+WorkOS can reuse the Helix account that is already active in your browser. If
+the consent screen shows the wrong email address, do not approve access. Sign
+out of Helix Cloud in that browser, then start authentication again and sign in
+with the account that has access to the required workspace. Use a separate
+browser profile or private window if you need to keep both accounts signed in.
+
+For Codex, clear the existing MCP authorization before you authenticate again:
+
+```bash
+codex mcp logout helix-db
 codex mcp login helix-db
 ```
 
 ### The server cannot connect
 
-Confirm the URL ends in exactly `/mcp`. Older preview paths are not supported.
+Confirm the URL ends in exactly `/mcp`. Older paths are not supported.
 Restart the client after changing its MCP configuration.
 
 ### A database is missing
@@ -4708,7 +5194,9 @@ the request's tenant value to the text-search builder. See
 ## Considerations
 
 - **Noisy neighbors.** Tenants share compute and cache, so a high-volume tenant can affect others'
-  latency. Monitor per-tenant query volume and apply rate limiting on your infrastructure to mitigate.
+  latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+  is shared by the whole database. Monitor per-tenant query volume and apply a
+  separate application-side limiter when many application tenants use that database.
 - **Shared search semantics.** Secondary indexes remain shared. Tenant-scoped vector and text
   searches require an explicit tenant value for the configured tenant property, and the system
   remains shared infrastructure even when search indexes are partitioned by tenant.
@@ -4883,6 +5371,87 @@ Page type: Reference
 Current constraints and practical limits. These reflect the current implementation, not
 fundamental architectural boundaries.
 
+## Helix Cloud request rate limits
+
+Helix Cloud applies a distributed token bucket to `POST /v2/query`. The bucket is
+scoped to the authenticated Cloud database, so reads and writes from every API
+key, application instance, and gateway replica draw from the same allowance.
+
+| Plan | Sustained rate | Burst capacity |
+| --- | ---: | ---: |
+| Idea | 5 requests per second | 10 requests |
+| Startup | 10 requests per second | 20 requests |
+| Growth | 20 requests per second | 40 requests |
+
+Database-specific overrides can change the sustained rate and burst capacity.
+The values assigned to your database take precedence over its plan limits. Each
+admitted query request costs one token from one shared bucket per Cloud database.
+
+### Token-bucket behavior
+
+- A full bucket can admit requests up to its burst capacity. Tokens then refill
+  continuously at the plan's sustained rate, up to that capacity. This is not a
+  fixed one-second window.
+- One incoming request consumes one token whether it is a read, write, or cache
+  warming request. Warming fanout and gateway retries do not consume additional
+  tokens.
+- Requests rejected during authentication, gateway header validation, or outer
+  request JSON decoding do not consume a token. Query AST and planner validation
+  happen after admission, so those later validation failures consume one token.
+- The bucket is shared across API keys and gateway replicas. Rotating keys or
+  distributing calls across connections does not create more capacity.
+- Burst capacity controls short-term admission, not the number of queries that
+  can execute concurrently. Bound client concurrency separately.
+
+### Rate-limit responses
+
+When no token is available, the gateway rejects the request before database
+execution:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 1
+
+{"error":"rate_limited","msg":"rate limit exceeded"}
+```
+
+`Retry-After` is a whole number of seconds. Wait at least that long before
+retrying, and add jitter when many workers share the same database. The response
+does not currently include `RateLimit-*` or `X-RateLimit-*` limit, remaining, or
+reset headers.
+
+Current official SDK error objects expose the HTTP status, stable code, and
+diagnostic, but not response headers. Use direct HTTP or an application
+transport that retains headers when the exact `Retry-After` value is required;
+otherwise use a configured, bounded status/code-aware delay with jitter.
+
+If the gateway cannot make a safe distributed rate-limit decision, it fails
+closed before database execution:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{"error":"rate_limit_unavailable","msg":"tenant rate limit is unavailable"}
+```
+
+Retry `rate_limit_unavailable` with bounded exponential backoff and jitter. A
+`402` `tenant_disabled` response is an account-credit gate, and a `408`
+`query_timeout` response is an execution deadline; neither means the request
+bucket was exhausted.
+
+### Application guidance
+
+1. Coordinate admission across workers that target the same Cloud database.
+2. Honor `Retry-After` on `rate_limited` instead of retrying immediately.
+3. Use bounded exponential backoff with jitter for transient `503` responses.
+4. Bound in-flight concurrency as well as request rate to avoid local queues and
+   latency spikes.
+5. Apply a separate per-user or per-workspace limiter when multiple application
+   tenants share one Cloud database; the Helix bucket does not distinguish those
+   application tenants.
+
 ## Data Model
 
 | Limit                  | Value                                                                                          |
@@ -4951,6 +5520,137 @@ fundamental architectural boundaries.
 | Packaging | Install the SDK and its embedded runtime package |
 | Cache configuration | Fixed when the handle opens |
 
+# Handle query errors
+
+Page type: Reference
+
+<div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Reference</Badge><Badge color="gray" size="sm">Helix Cloud</Badge></div>
+
+Helix Cloud query failures use one JSON envelope:
+
+```json
+{
+  "error": "query_timeout",
+  "msg": "query exceeded its wall-clock limit"
+}
+```
+
+- `error` is a stable, lower-snake-case code. Branch on this field.
+- `msg` is a human-readable diagnostic. Log it, but do not parse it or depend on
+  its exact text.
+- The HTTP status remains part of the contract. Use it with `error` when deciding
+  whether and how to retry.
+
+## Gateway error reference
+
+| HTTP | `error`                  | Typical `msg`                                                               | Meaning                                                                   | Retry guidance                                                           |
+| ---: | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+|  400 | `invalid_query_json`     | `parse error: <decoder diagnostic>`                                         | The request body is not valid query JSON.                                 | Fix the request.                                                         |
+|  400 | `invalid_request`        | A request-specific diagnostic                                               | A required header or request option is missing, malformed, or invalid.    | Fix the request.                                                         |
+|  400 | `tenant_id_required`     | `x-helix-tenant-id or x-helix-database-id is required in GA mode`           | A Cloud request did not identify its database.                            | Use the correct database-scoped Cloud endpoint and configuration.        |
+|  400 | `tenant_id_not_allowed`  | `x-helix-tenant-id and x-helix-database-id are not allowed in cluster mode` | A tenant/database header was sent to an endpoint that does not accept it. | Remove the header or use the correct endpoint.                           |
+|  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key.                                              |
+|  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
+|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
+|  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
+|  409 | `transaction_conflict`   | `request conflicted with a concurrent write; please retry`                  | A concurrent write prevented the transaction from committing.             | Retry the whole idempotent transaction with bounded backoff.             |
+|  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The query request exceeds the gateway body-size limit.                    | Reduce the request size.                                                 |
+|  429 | `rate_limited`           | `rate limit exceeded`                                                       | The database's request bucket has no token available.                     | Honor `Retry-After`; see [Limits](/database/helix-cloud/operate/limits). |
+|  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
+|  503 | `backend_unavailable`    | `Backend unavailable`                                                       | No eligible database backend is currently available.                      | Retry with bounded exponential backoff and jitter.                       |
+|  503 | `rate_limit_unavailable` | `tenant rate limit is unavailable`                                          | The gateway cannot make a safe rate-limit decision.                       | Retry with bounded exponential backoff and jitter.                       |
+
+The text in `msg` can include request-specific details. The `error` values and
+HTTP statuses above are the compatibility surface.
+
+## SDK access
+
+Official SDKs decode `error` and `msg` into separate stable-code and diagnostic
+fields. Non-JSON responses from older endpoints and intermediaries remain
+available as readable diagnostics. Rust and TypeScript also retain the raw
+response body separately.
+
+| SDK        | HTTP status                 | Stable code                 | Diagnostic                     | Raw response                      |
+| ---------- | --------------------------- | --------------------------- | ------------------------------ | --------------------------------- |
+| Rust       | `HelixError::status_code()` | `HelixError::remote_code()` | `HelixError::remote_message()` | `HelixError::raw_response_body()` |
+| TypeScript | `HelixError.statusCode`     | `HelixError.code`           | `HelixError.serverMessage`     | `HelixError.rawBody`              |
+| Python     | `HelixError.status_code`    | `HelixError.code`           | `HelixError.details`           | Not exposed separately            |
+| Go         | `HelixError.StatusCode`     | `HelixError.Code`           | `HelixError.Details`           | Not exposed separately            |
+
+The current SDK error objects do not expose response headers, including
+`Retry-After`. Use direct HTTP or an application transport that retains headers
+when the exact Cloud rate-limit delay is required.
+
+Branch on the stable code while retaining the diagnostic:
+
+```rust Rust
+if let Err(error) = client.query::<MyResponse>(request).send().await {
+    if error.remote_code() == Some("query_timeout") {
+        eprintln!("{}", error.remote_message().unwrap_or("query timed out"));
+    }
+}
+```
+
+```ts TypeScript
+import { HelixError } from "@helix-db/helix-db";
+
+try {
+  await client.query(request).send();
+} catch (cause) {
+  if (cause instanceof HelixError && cause.code === "query_timeout") {
+    console.error(cause.serverMessage);
+  }
+  throw cause;
+}
+```
+
+```python Python
+try:
+    client.query(request)
+except HelixError as error:
+    if error.code == "query_timeout":
+        print(error.details)
+```
+
+```go Go
+err := client.Exec(ctx, request, &response)
+var helixErr *helix.HelixError
+if errors.As(err, &helixErr) &&
+	helixErr.Code == helix.QueryErrorCode("query_timeout") {
+	log.Print(helixErr.Details)
+}
+```
+
+```json JSON
+{
+  "error": "query_timeout",
+  "msg": "query exceeded its wall-clock limit"
+}
+```
+
+## Timed-out writes
+
+An HTTP `408` cancels the gateway's wait, but a write can race with durable
+commit. Treat the outcome as unknown. Reconcile using an application identity or
+idempotency key before submitting the write again.
+
+## Migration from the previous shape
+
+Some earlier responses used `error` for diagnostic text and `code` for the
+machine-readable value, while others returned only `error`. For Cloud gateway
+responses, migrate from this shape:
+
+```json
+{
+  "error": "query exceeded its wall-clock limit",
+  "code": "QUERY_TIMEOUT"
+}
+```
+
+to `error` as the lower-snake-case code and `msg` as diagnostic text. Keep a
+readable diagnostic fallback for intermediaries and older self-hosted endpoints
+that do not return the Cloud envelope.
+
 # Troubleshoot HelixDB
 
 Page type: Troubleshooting
@@ -4959,6 +5659,9 @@ Page type: Troubleshooting
 
 Start with the first error returned by the SDK or server. HelixDB rejects invalid
 requests and transactions instead of partially applying them.
+
+For the stable Cloud response envelope and gateway code reference, see
+[Error handling](/database/helix-cloud/operate/error-handling).
 
 ## Request uses the wrong AST shape
 
@@ -5023,6 +5726,29 @@ a multi-mutation request.
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
 
+## Request returns HTTP 429
+
+`rate_limited` means the shared request bucket for the Cloud database has no
+token available. The rejected query did not reach database execution.
+
+Wait for the response's `Retry-After` interval before retrying. Add jitter when
+many workers can wake together, and inspect aggregate traffic across every API
+key and application instance that uses the database. All of them share the same
+bucket.
+
+See [Helix Cloud request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+for the current plan limits and token-bucket behavior.
+
+## Request returns `rate_limit_unavailable`
+
+An HTTP `503` with `rate_limit_unavailable` means the gateway could not make a
+safe distributed admission decision. It fails closed, so the query did not
+reach database execution.
+
+Retry with bounded exponential backoff and jitter. If the response persists,
+check [HelixDB status](https://status.helix-db.com) and include the response code,
+timestamp, and database identifier when contacting support.
+
 ## Local server cannot reach storage
 
 For S3-compatible local storage:
@@ -5061,61 +5787,32 @@ If you are starting a new project inside a coding-agent environment, use `helix 
 helix chef
 ```
 
-`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches your coding agent (Claude Code, Codex, or OpenCode) to generate the app from your build intent.
+`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches the first supported agent it finds: Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
 
-For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by hand: `helix init local` → `helix start dev` → `helix query dev --file …` (see the Local quickstart below). This path never prompts and never logs in.
+For a fully scriptable setup with **no** Cloud auth, skip `chef` and follow the
+[canonical local quickstart](/database/helix-db/start-here/quickstart). This path
+never prompts and never logs in.
 
 ## Local quickstart
 
-```bash
-curl -sSL "https://install.helix-db.com" | bash
+Windows PowerShell installs the CLI with:
+
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
+Use the [canonical local quickstart](/database/helix-db/start-here/quickstart)
+for the executable `helix init local` → `helix start dev` → `helix query dev`
+→ `helix stop dev` journey. It lists the exact generated files, instance name,
+and query file so this CLI guide does not maintain a second copy of the tutorial.
 
-```bash
-mkdir my-helix-app
-cd my-helix-app
-helix init
-```
+## Version names
 
-`helix init` scaffolds:
-
-- `helix.toml` with a single `[local.dev]` instance.
-- `.helix/` workspace state (added to `.gitignore`).
-- `examples/request.json` — a runnable read request you can send straight away.
-
-In a TTY, `helix init` prompts you to pick `local` or `enterprise`. Pass the subcommand directly to skip the prompt: `helix init local`.
-
-```bash
-helix start dev
-```
-
-`helix start` pulls `ghcr.io/helixdb/helixdb:v0.0.4`, starts a background container named `helix-<project>-dev`, publishes port `6969`, and waits for `GET /healthz` to report ready before returning.
-
-To stream logs in the foreground instead, use `helix start dev --foreground` and stop the container with Ctrl-C.
-
-For persistent local data, use `helix start dev --disk`. Disk mode starts a CLI-managed MinIO sidecar and keeps data across `helix stop`.
-
-The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
-
-```bash
-helix query dev --file examples/request.json
-```
-
-The example request runs a read query that counts `User` nodes. Pass `--compact`
-to print on a single line, or `--warm` to populate caches. A standalone local
-warm read prints its normal response; Helix Cloud fanout returns no body.
-
-```bash
-helix stop dev
-```
-
-`helix stop` is idempotent — it reports cleanly if the instance was not running.
-
-Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
+- **HelixDB v3** is the current product and SDK generation.
+- **Helix CLI 3.x** is the independently released command-line client. Run `helix --version` for the exact installed release.
+- **`POST /v2/query`** is the current HTTP wire endpoint. The endpoint version is independent of the product and CLI versions.
 
 ## Helix Cloud quickstart
 
@@ -5143,7 +5840,7 @@ helix add cloud --name production --cluster-id <cluster-id>
 
 ```bash
 helix sync production
-export HELIX_API_KEY="..."   # or whatever query_auth_env resolves to
+export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
 helix query production --file examples/request.json
 ```
 
@@ -5198,7 +5895,9 @@ Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.4` container a
 ## Prerequisites
 
 - **Docker** or **Podman** on `PATH`.
-- The Helix CLI: `curl -sSL "https://install.helix-db.com" | bash`.
+- The Helix CLI:
+  - macOS and Linux: `curl -sSL "https://install.helix-db.com" | bash`.
+  - Windows PowerShell: `irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex`.
 
 ## Initial setup
 
@@ -5396,18 +6095,18 @@ The CLI handles authentication, workspace/project/cluster selection, metadata sy
     helix sync production
     ```
 
-    `helix sync` writes the latest `gateway_url`, `query_auth_header`, `query_auth_env`, and node-type values from the cloud into `[enterprise.production]` in `helix.toml`. Re-run after any cluster change.
+    `helix sync` writes the latest `gateway_url`, `query_auth_header`, `query_auth_env`, `query_auth_scheme`, and node-type values from the cloud into `[enterprise.production]` in `helix.toml`. Re-run after any cluster change.
 
     If the cluster has not published a `gateway_url` yet, the CLI prints a warning. Set `gateway_url` manually under `[enterprise.production]` once you know it, or re-run `helix sync` later.
   </Step>
 
   <Step title="Send dynamic queries">
     ```bash
-    export HELIX_API_KEY="..."   # value for the configured query_auth_env
+    export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
     helix query production --file examples/request.json
     ```
 
-    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`).
+    `helix query` posts to `<gateway_url>/v2/query` with the header named by `query_auth_header` (default `Authorization`). `query_auth_scheme = "bearer"` adds the `Bearer` prefix; `"raw"` sends the environment value unchanged.
   </Step>
 
   <Step title="Pull historical logs">
@@ -5429,6 +6128,7 @@ Each `[enterprise.<instance>]` block stores the auth contract used by `helix que
 |-------|---------|---------|
 | `query_auth_header` | `Authorization` | HTTP header name set on every query request. |
 | `query_auth_env` | `HELIX_API_KEY` | Environment variable the CLI reads to populate the header value. |
+| `query_auth_scheme` | inferred | `bearer` for `Authorization`; `raw` for other headers. |
 
 Override the variable name per-instance by setting `query_auth_env` under `[enterprise.<instance>]` and exporting whatever name you choose.
 
@@ -5524,6 +6224,7 @@ One block per Helix Cloud instance. Most fields here are populated automatically
 | `gateway_url` | URL | No (required at query time) | — | Runtime gateway base URL. Populated by `helix sync` when available. |
 | `query_auth_header` | String | No | `Authorization` | HTTP header name used for query auth. |
 | `query_auth_env` | String | No | `HELIX_API_KEY` | Environment variable read by [`helix query`](/cli/command-reference/query) for the auth header value. |
+| `query_auth_scheme` | `bearer` or `raw` | No | Inferred from the header | `bearer` adds the `Bearer` prefix; `raw` sends the environment value unchanged. Missing values infer `bearer` for `Authorization` and `raw` for other headers. |
 | `availability_mode` | String | No | — | Cluster availability mode, returned by `helix sync`. |
 | `gateway_node_type` | String | No | — | Gateway node type, returned by `helix sync`. |
 | `db_node_type` | String | No | — | DB node type, returned by `helix sync`. |
@@ -5560,7 +6261,7 @@ Remove with `helix auth logout`. Never commit this file.
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Per-cluster Helix Cloud API key sent in the configured auth header. The variable name is configurable per-instance via `query_auth_env`. |
+| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Raw per-cluster Helix Cloud API key. With `query_auth_scheme = "bearer"`, the CLI adds the `Bearer` prefix. The variable name is configurable per-instance via `query_auth_env`. |
 
 ## Troubleshooting
 
@@ -5584,25 +6285,34 @@ Page type: Troubleshooting
 
 <div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
 
-This guide helps you resolve common issues with the Helix CLI v3.
+This guide helps you resolve common issues with the Helix CLI 3.x release line.
 
 ## Installation issues
 
 ### `command not found: helix`
 
-The CLI installs to `~/.helix/bin/helix`. If your shell can't find it after running the installer:
+On macOS and Linux, the CLI installs to `~/.local/bin/helix`. If your shell can't
+find it after running the installer:
 
 ```bash
 # Bash
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # Zsh
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Verify the binary exists with `ls -la ~/.helix/bin/helix`.
+Verify the binary exists with `ls -la ~/.local/bin/helix`.
+
+On Windows, the PowerShell installer writes
+`%LOCALAPPDATA%\Helix\bin\helix.exe` and adds that directory to your user `PATH`.
+Restart PowerShell after the first install, then verify it with:
+
+```powershell
+& "$env:LOCALAPPDATA\Helix\bin\helix.exe" --version
+```
 
 ### Updating the CLI
 
@@ -5624,7 +6334,7 @@ export HELIX_NO_UPDATE_CHECK=1   # also accepts HELIX_DISABLE_UPDATE_CHECK
 
 ### `helix compile` / `helix check`
 
-These commands do **not** exist in Helix CLI v3. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
+These commands do **not** exist in the Helix CLI 3.x release line. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
 
 ```bash
 helix query dev --file examples/request.json
@@ -5770,6 +6480,10 @@ The auth env var named by `query_auth_env` is unset.
 export HELIX_API_KEY="..."
 ```
 
+Set the raw key only. With the default `Authorization` header, an omitted
+`query_auth_scheme` infers `bearer` and adds the `Bearer` prefix. Headers such
+as `x-api-key` infer `raw`.
+
 ### `--warm is only valid for read requests`
 
 `helix query --warm` is rejected for write requests before any backend executes.
@@ -5849,7 +6563,7 @@ Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-This page lists every command in Helix CLI v3. Click any command for full flag and example details.
+This page lists every command in the Helix CLI 3.x release line. Click any command for full flag and example details.
 
 ## Global Options
 
@@ -6003,7 +6717,7 @@ helix auth <SUBCOMMAND>
 |----------|-------------|
 | `CLUSTER` | Cluster ID to rotate. Find one with [`helix cluster list`](/cli/command-reference/cluster). |
 
-`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster — update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) before running [`helix query`](/cli/command-reference/query) again.
+`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster. Update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) with the raw key before running [`helix query`](/cli/command-reference/query) again. Bearer mode adds the prefix automatically.
 
 ## Examples
 
@@ -6049,7 +6763,7 @@ The first interactive run signs you in to Helix Cloud through a GitHub device-co
 1. Installs the Helix skills (`npx skills add HelixDB/skills`) and docs MCP.
 2. Initializes a local project (`helix init local`) with a `dev` instance on port `6969`, then starts it in-memory.
 3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default) and, for the default build, starter query files under `examples/` — then seeds the data.
-4. Detects an installed coding agent (Claude Code → Codex → OpenCode), asks for a permission mode, and launches it against the build prompt.
+4. Detects an installed coding agent (Claude Code → OpenAI Codex → OpenCode → Cursor Agent), asks for a permission mode, and launches it against the build prompt.
 5. Opens the generated app at `http://localhost:3000` once the agent's frontend is running.
 
 `helix chef` does **not** start a local dashboard — port `3000` is reserved for the Next.js app the agent builds.
@@ -6761,7 +7475,8 @@ query body. A managed cluster with no eligible warming target returns
 Warm writes are rejected with `400 Bad Request` before backend execution. At the
 HTTP/SDK layer, combine `X-Helix-Warm: true` with
 `X-Helix-Require-Writer: true` when only the authoritative writer should be warmed.
-Authentication, read rate limits, retries, and normal query timeouts still apply.
+Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+retries, and normal query timeouts still apply.
 
 ## TypeScript DSL input
 
@@ -6778,7 +7493,7 @@ helix query dev --ts-file queries/count_users.ts
 How it works:
 
 - The expression must evaluate to a `readBatch()` or `writeBatch()` builder. `g`, `readBatch`, `writeBatch`, `defineParams`, and `param` are auto-imported and already in scope — you write only the expression, no imports.
-- The CLI evaluates it locally with Node using the forthcoming v3 `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
+- The CLI evaluates it locally with Node using the published `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
 - `request_type` is inferred automatically from whether you used `readBatch()` or `writeBatch()`.
 
 Requirements:
@@ -6806,7 +7521,7 @@ If Node is missing, the CLI tells you to install Node 20+ or fall back to `--jso
 For a Helix Cloud instance, `helix query` reads `[enterprise.<instance>]` in `helix.toml` and:
 
 - Posts to `<gateway_url>/v2/query`.
-- Sends an auth header named by `query_auth_header` (default `Authorization`) with the value read from the environment variable `query_auth_env` (default `HELIX_API_KEY`). The value is read from your shell environment or from a `.env` file in the project root (whichever is set), so you can keep the key out of your shell history.
+- Sends an auth header named by `query_auth_header` (default `Authorization`) using `query_auth_scheme` (`bearer` or `raw`). Bearer mode adds `Bearer` to the raw key read from `query_auth_env` (default `HELIX_API_KEY`); raw mode sends the value unchanged. The value is read from your shell environment or from a `.env` file in the project root.
 
 If `gateway_url` is missing, the CLI returns:
 
@@ -6848,7 +7563,8 @@ helix query dev --json '{"request_type":"read","query_name":"ad_hoc_read","query
 # Build the request from a TypeScript DSL expression instead of JSON
 helix query dev -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
-# Target a Helix Cloud instance (requires HELIX_API_KEY in env and gateway_url in helix.toml)
+# Target Helix Cloud. Export the raw key; bearer mode adds the prefix.
+export HELIX_API_KEY="..."
 helix query production --file examples/request.json
 ```
 
@@ -7136,6 +7852,7 @@ For each matched Helix Cloud instance, `helix sync` overwrites these fields in `
 - `gateway_url`
 - `query_auth_header` (defaults to `Authorization`)
 - `query_auth_env` (defaults to `HELIX_API_KEY`)
+- `query_auth_scheme` (`bearer` or `raw`, inferred from the header when omitted)
 - `availability_mode`
 - `gateway_node_type`
 - `db_node_type`

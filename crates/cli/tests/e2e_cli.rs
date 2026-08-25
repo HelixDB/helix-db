@@ -6,7 +6,7 @@ use std::fs;
 use toml::Value as TomlValue;
 
 use support::{free_port, CliFixture};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn stdout(assert: Assert) -> String {
@@ -127,6 +127,118 @@ fn init_and_add_generate_expected_project_files() {
         Some(qa_port.into())
     );
     assert_eq!(config["local"]["qa"]["storage"].as_str(), Some("disk"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn documented_quickstart_runs_against_an_isolated_fixture() {
+    const QUICKSTART: &str =
+        include_str!("../../../docs/database/helix-db/start-here/quickstart.mdx");
+    let documented_commands: Vec<&str> = QUICKSTART
+        .lines()
+        .filter(|line| line.starts_with("helix "))
+        .collect();
+    assert_eq!(
+        documented_commands,
+        [
+            "helix init local",
+            "helix start dev",
+            "helix query dev --file examples/request.json",
+            "helix stop dev",
+        ]
+    );
+    assert!(QUICKSTART.contains("- A terminal on macOS or Linux, or PowerShell on Windows"));
+    assert!(QUICKSTART.contains(
+        "irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex"
+    ));
+    assert!(QUICKSTART.contains("container_runtime = \"podman\""));
+    for obsolete_claim in [
+        "--lang",
+        "helix start local",
+        "queries.rs",
+        "helix dashboard",
+    ] {
+        assert!(!QUICKSTART.contains(obsolete_claim), "{obsolete_claim}");
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("quickstart-project");
+    fs::create_dir_all(&project).unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["init", "local"])
+        .assert()
+        .success();
+
+    for generated_path in [
+        "helix.toml",
+        ".helix",
+        ".gitignore",
+        "AGENTS.md",
+        "examples/request.json",
+    ] {
+        assert!(project.join(generated_path).exists(), "{generated_path}");
+    }
+
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("[local.dev]"));
+    assert!(config.contains("port = 6969"));
+    fs::write(
+        &config_path,
+        config.replacen(
+            "port = 6969",
+            &format!("port = {}", server.address().port()),
+            1,
+        ),
+    )
+    .unwrap();
+
+    let request: JsonValue =
+        serde_json::from_str(&fs::read_to_string(project.join("examples/request.json")).unwrap())
+            .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/v2/query"))
+        .and(body_json(&request))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "node_count": 0
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["start", "dev"])
+        .assert()
+        .success();
+
+    let query = stdout(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["query", "dev", "--file", "examples/request.json"])
+            .assert()
+            .success(),
+    );
+    assert!(query.contains("\"node_count\": 0"), "{query}");
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["stop", "dev"])
+        .env("HELIX_TEST_RUNTIME_RESOURCES_EXIST", "1")
+        .assert()
+        .success();
 }
 
 #[test]

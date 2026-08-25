@@ -52,6 +52,7 @@ pub(super) fn selected_group(root: &exec::SelectedExecutableRunRoot) -> usize {
         }
         exec::SelectedExecutableRunRoot::Pipeline(root) => root.provenance().optimizer().group(),
         exec::SelectedExecutableRunRoot::Terminal(root) => root.provenance().optimizer().group(),
+        exec::SelectedExecutableRunRoot::Count(root) => root.provenance().optimizer().group(),
     }
     .get()
 }

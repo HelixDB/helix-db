@@ -37,6 +37,8 @@ pub(in crate::planning::selected::native) enum NativeTerminalRoot<'a> {
 /// Validated terminal payload family.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::planning::selected::native) enum NativeTerminalPayload {
+    /// Cardinality terminal.
+    Cardinality,
     /// Projection terminal.
     Project(ir::ProjectionPlan),
     /// Aggregate terminal.

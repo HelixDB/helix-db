@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::{PhysicalAccess, PhysicalControlOp, PhysicalPipeline, PhysicalStreamOp};
+use super::{
+    PhysicalAccess, PhysicalControlOp, PhysicalCountPlan, PhysicalPipeline, PhysicalStreamOp,
+};
 use crate::properties;
 
 /// Physical expression phase.
@@ -13,6 +15,8 @@ pub enum PhysicalExpr {
     Empty,
     /// Non-empty physical pipeline.
     Pipeline(PhysicalPipeline),
+    /// Exact physical cardinality program.
+    Cardinality(Box<PhysicalCountPlan>),
     /// Access path.
     Access {
         /// Element kind.

@@ -23,12 +23,12 @@ use slatedb::object_store::{
 use slatedb::IsolationLevel;
 
 use super::*;
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorLayer0NeighborsKey,
     VectorSimHashDirectoryKey, VectorSimHashKey,
 };
-use crate::encoding::v1::values::vectors::encode_layer0_neighbors;
-use crate::encoding::v1::values::vectors::markers::encode_simhash_directory_marker_v1;
+use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
+use crate::encoding::v2::values::indexes::vector::markers::encode_simhash_directory_marker_v1;
 use crate::search::vector::distance::{Cosine, Euclidean, Manhattan};
 use crate::search::vector::simhash::{order_code_from_simhash_bits, SimHashCache};
 use crate::search::vector::{encode_item, encode_metadata, VectorIndexConfig, VectorIndexMetadata};

@@ -1,6 +1,7 @@
 use helix_ast::value::PropertyValue;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::num::NonZeroUsize;
 
 use crate::ir::NonEmptyString;
 
@@ -9,6 +10,37 @@ use crate::ir::NonEmptyString;
 pub enum SecondaryIndexLiteralError {
     /// Secondary indexes do not store nested array/object values.
     NestedValue,
+}
+
+/// Storage behavior proven for an equality-index lookup value.
+///
+/// This classification deliberately contains no physical key information.
+/// The database remains responsible for encoding an indexed value and for
+/// resolving authoritative null and runtime-dependent behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EqualityIndexValueSemantics {
+    /// Value has one canonical secondary-equality encoding.
+    Indexed,
+    /// Null is served by an authoritative graph scan because it is not stored.
+    AuthoritativeNull,
+    /// Equality is non-reflexive and is therefore statically empty.
+    NonReflexive,
+    /// Runtime parameter must be classified after binding.
+    RuntimeDependent,
+}
+
+/// Storage behavior proven for a validated literal equality value.
+///
+/// Unlike [`EqualityIndexValueSemantics`], this type cannot represent runtime
+/// dispatch: a [`SecondaryIndexLiteral`] has already ruled parameters out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiteralEqualityIndexValueSemantics {
+    /// Value has one canonical secondary-equality encoding.
+    Indexed,
+    /// Null is served by an authoritative graph scan because it is not stored.
+    AuthoritativeNull,
+    /// Equality is non-reflexive and is therefore statically empty.
+    NonReflexive,
 }
 
 /// Literal value that can be looked up in a secondary equality index.
@@ -63,6 +95,49 @@ impl SecondaryIndexLiteral {
     pub fn as_property_value(&self) -> &PropertyValue {
         &self.value
     }
+
+    /// Return the storage behavior implied by this validated literal.
+    ///
+    /// ```
+    /// use helix_ast::value::PropertyValue;
+    /// use helix_planner::ir::{LiteralEqualityIndexValueSemantics, SecondaryIndexLiteral};
+    ///
+    /// let nan = SecondaryIndexLiteral::new(PropertyValue::F64(f64::NAN)).unwrap();
+    /// let null = SecondaryIndexLiteral::new(PropertyValue::Null).unwrap();
+    /// assert_eq!(nan.semantics(), LiteralEqualityIndexValueSemantics::NonReflexive);
+    /// assert_eq!(null.semantics(), LiteralEqualityIndexValueSemantics::AuthoritativeNull);
+    /// ```
+    pub fn semantics(&self) -> LiteralEqualityIndexValueSemantics {
+        match &self.value {
+            PropertyValue::Null => LiteralEqualityIndexValueSemantics::AuthoritativeNull,
+            PropertyValue::F64(value) if value.is_nan() => {
+                LiteralEqualityIndexValueSemantics::NonReflexive
+            }
+            PropertyValue::F32(value) if value.is_nan() => {
+                LiteralEqualityIndexValueSemantics::NonReflexive
+            }
+            PropertyValue::F64Array(values) if values.iter().any(|value| value.is_nan()) => {
+                LiteralEqualityIndexValueSemantics::NonReflexive
+            }
+            PropertyValue::F32Array(values) if values.iter().any(|value| value.is_nan()) => {
+                LiteralEqualityIndexValueSemantics::NonReflexive
+            }
+            PropertyValue::Bool(_)
+            | PropertyValue::I64(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::F64(_)
+            | PropertyValue::F32(_)
+            | PropertyValue::String(_)
+            | PropertyValue::Bytes(_)
+            | PropertyValue::I64Array(_)
+            | PropertyValue::F64Array(_)
+            | PropertyValue::F32Array(_)
+            | PropertyValue::StringArray(_) => LiteralEqualityIndexValueSemantics::Indexed,
+            PropertyValue::Array(_) | PropertyValue::Object(_) => {
+                unreachable!("secondary-index literals reject nested values")
+            }
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for SecondaryIndexLiteral {
@@ -83,4 +158,62 @@ pub enum IndexValue {
     Literal(SecondaryIndexLiteral),
     /// Runtime parameter value.
     Param(NonEmptyString),
+    /// Runtime parameter interpreted as a bounded equality domain.
+    ParamSet(RuntimeEqualitySet),
+}
+
+impl IndexValue {
+    /// Return the statically known storage behavior for this lookup value.
+    pub fn semantics(&self) -> EqualityIndexValueSemantics {
+        match self {
+            Self::Literal(value) => match value.semantics() {
+                LiteralEqualityIndexValueSemantics::Indexed => EqualityIndexValueSemantics::Indexed,
+                LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
+                    EqualityIndexValueSemantics::AuthoritativeNull
+                }
+                LiteralEqualityIndexValueSemantics::NonReflexive => {
+                    EqualityIndexValueSemantics::NonReflexive
+                }
+            },
+            Self::Param(_) | Self::ParamSet(_) => EqualityIndexValueSemantics::RuntimeDependent,
+        }
+    }
+}
+
+/// Genuinely late-bound, bounded equality-domain parameter.
+///
+/// The positive limit makes an unbounded runtime index union unrepresentable.
+///
+/// ```
+/// use helix_planner::ir::{NonEmptyString, RuntimeEqualitySet};
+/// use std::num::NonZeroUsize;
+///
+/// let values = RuntimeEqualitySet::new(
+///     NonEmptyString::new("orbit_ids").unwrap(),
+///     NonZeroUsize::new(64).unwrap(),
+/// );
+/// assert_eq!(values.param().as_ref(), "orbit_ids");
+/// assert_eq!(values.max_values().get(), 64);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeEqualitySet {
+    param: NonEmptyString,
+    max_values: NonZeroUsize,
+}
+
+impl RuntimeEqualitySet {
+    /// Build a bounded runtime equality domain.
+    pub const fn new(param: NonEmptyString, max_values: NonZeroUsize) -> Self {
+        Self { param, max_values }
+    }
+
+    /// Runtime parameter name.
+    pub const fn param(&self) -> &NonEmptyString {
+        &self.param
+    }
+
+    /// Maximum distinct equality values eligible for the index path.
+    pub const fn max_values(&self) -> NonZeroUsize {
+        self.max_values
+    }
 }

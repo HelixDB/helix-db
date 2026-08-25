@@ -340,6 +340,20 @@ pub enum ExecutionValue {
     IndexOperationStatus(crate::index_lifecycle::IndexOperationStatus),
 }
 
+/// Normalized value for one declared query return.
+///
+/// Empty collection and object results are distinct variants so response
+/// serialization cannot lose the planner-inferred shape.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReturnedValue {
+    /// Preserve the existing serialization for a present value.
+    Present(ExecutionValue),
+    /// Serialize an empty collection as `[]`.
+    EmptyList,
+    /// Serialize an absent at-most-one value as `null`.
+    EmptyObject,
+}
+
 /// Runtime ownership for a value retained by interpreter state.
 ///
 /// Linear pipelines stay uniquely owned. A value becomes shared only when two
@@ -539,7 +553,7 @@ pub struct ExecutionResult {
     /// Values bound by batch outputs and variable operations.
     pub variables: BTreeMap<ir::NonEmptyString, ExecutionValue>,
     /// Requested return values, keyed by the planner return list.
-    pub returns: BTreeMap<ir::NonEmptyString, ExecutionValue>,
+    pub returns: BTreeMap<ir::NonEmptyString, ReturnedValue>,
 }
 
 #[cfg(test)]

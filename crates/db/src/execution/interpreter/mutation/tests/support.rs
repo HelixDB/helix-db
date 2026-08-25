@@ -20,6 +20,7 @@ pub(super) fn step(
         id: exec::ExecStepId::new(id).expect("positive step id"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -185,8 +186,10 @@ pub(super) fn access_label_count_plan(label: &str) -> exec::ExecutablePlan {
             step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
         ],

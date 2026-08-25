@@ -184,6 +184,7 @@ fn selected_root_family(root: &exec::SelectedExecutableRunRoot) -> &'static str 
         exec::SelectedExecutableRunRoot::ShortestPath(_) => "shortest_path",
         exec::SelectedExecutableRunRoot::Pipeline(_) => "pipeline",
         exec::SelectedExecutableRunRoot::Terminal(_) => "terminal",
+        exec::SelectedExecutableRunRoot::Count(_) => "count",
     }
 }
 
@@ -199,5 +200,6 @@ fn selected_root_provenance(
         exec::SelectedExecutableRunRoot::ShortestPath(root) => root.provenance(),
         exec::SelectedExecutableRunRoot::Pipeline(root) => root.provenance(),
         exec::SelectedExecutableRunRoot::Terminal(root) => root.provenance(),
+        exec::SelectedExecutableRunRoot::Count(root) => root.provenance(),
     }
 }

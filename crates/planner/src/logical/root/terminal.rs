@@ -4,11 +4,78 @@
 //! never has to infer semantics from generic physical stream operators.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
-use super::RootStream;
-use crate::ir;
-use crate::logical::StreamVariableWriteOp;
+use super::{RootPipeline, RootStream};
+use crate::logical::{AccessStream, StreamVariableWriteOp};
 use crate::properties;
+use crate::{context, ir};
+
+/// Cardinality terminal over a supported root stream.
+///
+/// This is distinct from projection because cardinality has its own logical,
+/// physical, and executable optimization families.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamCardinality {
+    input: RootStream,
+    params: context::ParamBindings,
+    late_bound_params: BTreeSet<ir::NonEmptyString>,
+}
+
+impl StreamCardinality {
+    /// Build a cardinality terminal.
+    pub fn new(input: RootStream) -> Self {
+        let input = match input {
+            RootStream::Access(AccessStream::Pipeline(pipeline))
+                if pipeline.effect() == properties::EffectKind::Barrier =>
+            {
+                let input = RootStream::Access(AccessStream::Path(pipeline.access().clone()));
+                RootStream::Pipeline(Box::new(
+                    RootPipeline::new(input, pipeline.ops_at_least().clone())
+                        .expect("a validated access pipeline is a valid root pipeline"),
+                ))
+            }
+            input => input,
+        };
+        Self {
+            input,
+            params: context::ParamBindings::default(),
+            late_bound_params: BTreeSet::new(),
+        }
+    }
+
+    /// Record runtime scopes whose object fields can replace immutable request
+    /// bindings while this cardinality terminal executes.
+    pub fn with_planning_bindings(
+        mut self,
+        params: context::ParamBindings,
+        late_bound_params: BTreeSet<ir::NonEmptyString>,
+    ) -> Self {
+        self.params = params;
+        self.late_bound_params = late_bound_params;
+        self
+    }
+
+    /// Root stream consumed by the terminal.
+    pub const fn input(&self) -> &RootStream {
+        &self.input
+    }
+
+    /// Immutable request bindings available for planning-time specialization.
+    pub const fn params(&self) -> &context::ParamBindings {
+        &self.params
+    }
+
+    /// Active runtime parameter scopes visible at this terminal.
+    pub const fn late_bound_params(&self) -> &BTreeSet<ir::NonEmptyString> {
+        &self.late_bound_params
+    }
+
+    /// Effect inherited from the input.
+    pub fn effect(&self) -> properties::EffectKind {
+        self.input.effect()
+    }
+}
 
 /// Reserved terminal over a supported root stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

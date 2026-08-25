@@ -166,7 +166,7 @@ fn empty_access_pipeline_expr(kind: logical::StreamPipelineOpKind) -> logical::L
     )
 }
 
-fn adjacent_filter_pipeline_expr() -> logical::LogicalExpr {
+fn canonical_filter_pipeline_expr() -> logical::LogicalExpr {
     let access = logical::AccessPath::Node(logical::NodeAccessPath::new(
         ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::AllScan),
     ));
@@ -992,8 +992,8 @@ fn rule_schedule_routes_access_pipeline_local_simplification_candidates() {
         ["any", "local_simplification", "pipeline_broad"]
     );
     assert_eq!(
-        rule_ids(schedule.rules_for_expr(&adjacent_filter_pipeline_expr())),
-        ["any", "local_simplification", "pipeline_broad"]
+        rule_ids(schedule.rules_for_expr(&canonical_filter_pipeline_expr())),
+        ["any", "pipeline_broad"]
     );
     assert_eq!(
         rule_ids(schedule.rules_for_expr(&access_pipeline_expr(

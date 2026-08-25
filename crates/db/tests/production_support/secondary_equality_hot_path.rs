@@ -16,8 +16,8 @@ use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
 use serde::Serialize;
 
 use crate::config::SecondaryIndexDefinition;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v2::keys::{Key, RecordKind, ScopedKey};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::{ManagedIndexKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::SecondaryEqualityBitmapValue;
 use crate::execution::interpreter::{ExecutionScalar, ExecutionValue};
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
@@ -93,6 +93,7 @@ pub struct SecondaryEqualityReadSample {
     pub median_latency_nanos: u64,
     pub p95_latency_nanos: u64,
     pub point_reads: u64,
+    pub multi_get_calls: u64,
     pub scans: u64,
     pub graph_reads: u64,
     pub allocations: u64,
@@ -125,6 +126,7 @@ pub struct SecondaryEqualityLookupInspection {
     pub lookups: usize,
     pub result_count: usize,
     pub point_reads: u64,
+    pub multi_get_calls: u64,
     pub scans: u64,
     pub graph_reads: u64,
 }
@@ -231,7 +233,7 @@ impl SecondaryEqualityHotPathFixture {
         let HelixStorage::Writer(writer) = self.db.storage() else {
             unreachable!("hot-path benchmark opens a writer")
         };
-        let v3_prefix = Key::data_prefix(
+        let v3_prefix = ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
             ScopedKey::logical_prefix(RecordKind::SecondaryEntry),
         );
@@ -245,7 +247,7 @@ impl SecondaryEqualityHotPathFixture {
             );
         }
 
-        let v4_prefix = Key::data_prefix(
+        let v4_prefix = ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
             ScopedKey::logical_prefix(RecordKind::SecondaryEqualityBitmap),
         );
@@ -288,7 +290,7 @@ impl SecondaryEqualityHotPathFixture {
         let HelixStorage::Writer(writer) = self.db.storage() else {
             unreachable!("hot-path correctness fixture opens a writer")
         };
-        let prefix = Key::data_prefix(
+        let prefix = ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
             ScopedKey::logical_prefix(RecordKind::SecondaryEqualityBitmap),
         );
@@ -324,6 +326,7 @@ impl SecondaryEqualityHotPathFixture {
             lookups: self.lookup_plans.len(),
             result_count: expected.len(),
             point_reads: metrics.point_reads,
+            multi_get_calls: metrics.multi_get_calls,
             scans: metrics.scans,
             graph_reads: metrics.graph_reads,
         })
@@ -400,6 +403,7 @@ impl SecondaryEqualityHotPathFixture {
             median_latency_nanos: percentile(&latencies, 50),
             p95_latency_nanos: percentile(&latencies, 95),
             point_reads: metrics.point_reads,
+            multi_get_calls: metrics.multi_get_calls,
             scans: metrics.scans,
             graph_reads: metrics.graph_reads,
             allocations: 0,
@@ -626,6 +630,7 @@ fn step(id: usize, dependencies: Vec<exec::ExecStepId>, op: exec::ExecOp) -> exe
         id: exec::ExecStepId::new(id).expect("hot-path step ids are positive"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -645,20 +650,20 @@ fn equality_search_plan(ordinal: usize) -> exec::ExecutablePlan {
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{}",
                                 property_name(ordinal)
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, property_name(ordinal))
+                            catalog::ScopedPropertyKey::try_new(LABEL, property_name(ordinal))
                                 .expect("hot-path equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(PlannerPropertyValue::String(
                                     SHARED_VALUE.to_string(),
                                 ))
                                 .expect("hot-path equality value is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),

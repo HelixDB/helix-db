@@ -75,6 +75,7 @@ fn executable_plan_validates_previous_result_conditions() {
             id: id(1),
             dependencies: Vec::new(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: ExecCondition::PreviousStepNotEmpty { dependency: id(2) },
             op: ExecOp::KvRead(KvReadPlan::Get {
                 key: ElementKeyspace::NodeProperty.point_key(1),
@@ -89,6 +90,28 @@ fn executable_plan_validates_previous_result_conditions() {
         native_missing_dependency,
         Err(ExecPlanError::PreviousConditionMissingDependency { .. })
     ));
+}
+
+#[test]
+fn executable_plan_deserialization_revalidates_count_input_arity() {
+    let source = step(1, Vec::new(), ExecSchedule::Pipeline);
+    let mut count = step(2, vec![id(1)], ExecSchedule::Barrier);
+    count.op = ExecOp::Count {
+        plan: Box::new(ExecCountPlan::InputRows {
+            window: ExecCountWindowPlan::identity(),
+        }),
+    };
+    let valid = executable(
+        ir::AtLeast::<_, 1>::from_one_and_rest(source, vec![count]),
+        id(2),
+    )
+    .unwrap();
+
+    let mut serialized = serde_json::to_value(valid).unwrap();
+    serialized["steps"][1]["dependencies"] = serde_json::json!([]);
+    let error = serde_json::from_value::<ExecutablePlan>(serialized).unwrap_err();
+
+    assert!(error.to_string().contains("Rows input"));
 }
 
 #[test]

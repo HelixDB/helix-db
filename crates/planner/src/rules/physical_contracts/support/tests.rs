@@ -49,7 +49,7 @@ fn delivered_helpers_preserve_barriers_and_terminal_shapes() {
     assert_eq!(
         project_output_delivered(
             access_delivered(properties::ElementKind::Node),
-            &ir::ProjectionPlan::Count,
+            &ir::ProjectionPlan::Exists,
         )
         .cardinality,
         properties::CardinalityBounds::exact(1)

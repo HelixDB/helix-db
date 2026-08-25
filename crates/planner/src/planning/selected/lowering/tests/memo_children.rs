@@ -34,7 +34,7 @@ fn selected_logical_run_root_reconstructs_nested_terminal_from_memo_child_plan()
     let ctx = context::PlannerContext::default();
     let mut planner = support::selected_planner(&ctx);
     let project =
-        logical::StreamProject::new(support::variable_stream(), ir::ProjectionPlan::Count);
+        logical::StreamProject::new(support::variable_stream(), ir::ProjectionPlan::Exists);
     let aggregate = logical::LogicalExpr::StreamAggregate(logical::StreamAggregate::new(
         logical::RootStream::Project(Box::new(project)),
         ir::AggregatePlan::Group(support::name("kind")),

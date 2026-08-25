@@ -19,11 +19,11 @@ use super::storage::{
 use super::unaligned_vector::UnalignedVector;
 use super::*;
 use crate::config::VectorIndexDefinition;
-use crate::encoding::keys::tenant::DataScope;
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::keys::scope::DataScope;
+use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey, VectorStorageLane,
 };
-use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::index_lifecycle::{ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition};
 
 const DIMENSION: usize = 2;
@@ -651,7 +651,7 @@ async fn exercise_legacy_rejection<D: Distance>(
                 keyspace.index_id(),
             ))),
             Bytes::copy_from_slice(
-                &crate::encoding::v1::values::vectors::metadata::encode_legacy_metadata_for_contract(
+                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
                     &metadata,
                 ),
             ),

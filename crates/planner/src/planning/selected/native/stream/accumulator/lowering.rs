@@ -12,7 +12,7 @@ enum NativeAccessStreamOps {
 
 impl NativeAccessStreamOps {
     fn from_vec(ops: Vec<logical::StreamPipelineOp>) -> Self {
-        let mut ops = ops.into_iter();
+        let mut ops = logical::canonicalize_stream_pipeline_ops(ops).into_iter();
         match ops.next() {
             None => Self::Empty,
             Some(first) => {

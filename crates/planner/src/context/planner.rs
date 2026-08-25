@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use crate::{catalog, cost, feedback};
 
@@ -13,6 +14,11 @@ use super::{OptimizerLimits, ParamBindings, PlannerLimits, StatsSnapshot};
 pub struct PlannerContext {
     /// Runtime parameters available during planning.
     pub params: ParamBindings,
+    /// Active runtime parameter scopes, such as enclosing `foreach` containers.
+    /// A non-empty set means object fields may shadow parameter names in the
+    /// enclosed query and therefore cannot be specialized.
+    #[serde(default)]
+    pub late_bound_params: BTreeSet<crate::ir::NonEmptyString>,
     /// Available indexes, pre-keyed for O(1) planner lookups.
     pub indexes: catalog::IndexCatalogSnapshot,
     /// Optional statistics used by deterministic heuristics.

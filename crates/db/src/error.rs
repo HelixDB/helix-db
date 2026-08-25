@@ -5,6 +5,7 @@ use crate::encoding::error::EncodingError;
 use crate::search::vector::{
     VectorConfigError, VectorDistanceMetric, VectorItemDecodeError, VectorValidationError,
 };
+use helix_ast::error_code;
 use slatedb::ErrorKind;
 
 /// Index family whose canonical lifecycle authority is unavailable.
@@ -218,6 +219,10 @@ pub enum HelixDbError {
     #[error("Explicit secondary lifecycle stepping requires Disabled worker mode")]
     SecondaryLifecycleSteppingRequiresDisabledMode,
 
+    /// Explicit migration stepping is only valid under Disabled scheduling.
+    #[error("Explicit migration stepping requires Disabled worker mode")]
+    MigrationSteppingRequiresDisabledMode,
+
     /// A request-owned Active text mutation exceeded exact serialized admission.
     #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}")]
     ActiveTextMutationLimitExceeded {
@@ -316,6 +321,10 @@ pub enum HelixDbError {
     /// Query/traversal error
     #[error("Query error: {0}")]
     Query(String),
+
+    /// Query JSON could not be decoded at the embedded boundary.
+    #[error("Query error: invalid query JSON: {0}")]
+    InvalidQueryJson(String),
 
     /// Operation requires a writer handle.
     #[error("writer mode required, current mode is {actual}")]
@@ -469,78 +478,136 @@ impl From<ConfigError> for HelixDbError {
 }
 
 impl HelixDbError {
-    /// Stable public compatibility code when this error belongs to the index
-    /// lifecycle API.
-    pub fn index_error_code(&self) -> Option<&'static str> {
+    /// Stable machine-readable code for this database failure.
+    pub fn error_code(&self) -> error_code::QueryErrorCode {
         match self {
-            Self::IndexLifecycleUnavailable { .. } => Some("index_lifecycle_unavailable"),
+            Self::Storage(error) if error.kind() == ErrorKind::Transaction => {
+                error_code::QueryErrorCode::TransactionConflict
+            }
+            Self::Storage(_) | Self::ObjectStore(_) => error_code::QueryErrorCode::StorageError,
+            Self::Encoding(_)
+            | Self::InvalidVectorItem(_)
+            | Self::IdentifierAllocationFailed { .. }
+            | Self::IndexCatalogCorruption(_)
+            | Self::LegacyZeroNormCosineVector { .. }
+            | Self::InvariantViolation(_) => error_code::QueryErrorCode::InternalError,
+            Self::TransactionConflict(_) => error_code::QueryErrorCode::TransactionConflict,
+            Self::RequestReadViewChanged => error_code::QueryErrorCode::RequestReadViewChanged,
+            Self::QueryDeadlineExceeded => error_code::QueryErrorCode::QueryDeadlineExceeded,
+            Self::InvalidNodeId(_) => error_code::QueryErrorCode::InvalidNodeId,
+            Self::NodeNotFound(_) => error_code::QueryErrorCode::NodeNotFound,
+            Self::EdgeNotFound { .. } => error_code::QueryErrorCode::EdgeNotFound,
+            Self::DatabaseClosed => error_code::QueryErrorCode::DatabaseClosed,
+            Self::Config(_) => error_code::QueryErrorCode::InvalidConfiguration,
+            Self::IndexLifecycleUnavailable { .. } => {
+                error_code::QueryErrorCode::IndexLifecycleUnavailable
+            }
             Self::SecondaryLifecycleSteppingRequiresDisabledMode => {
-                Some("secondary_lifecycle_stepping_requires_disabled_mode")
+                error_code::QueryErrorCode::SecondaryLifecycleSteppingRequiresDisabledMode
+            }
+            Self::MigrationSteppingRequiresDisabledMode => {
+                error_code::QueryErrorCode::MigrationSteppingRequiresDisabledMode
             }
             Self::ActiveTextMutationLimitExceeded { .. } => {
-                Some("active_text_mutation_limit_exceeded")
+                error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
             }
-            Self::InvalidIndexSourceData { .. } => Some("invalid_index_source_data"),
-            Self::IndexAlreadyExists(_) => Some("index_already_exists"),
-            Self::IndexDefinitionConflict { .. } => Some("index_definition_conflict"),
-            Self::IndexBusy { .. } => Some("index_busy"),
-            Self::IndexNotFound(_) => Some("index_not_found"),
-            Self::IndexOperationNotFound { .. } => Some("index_operation_not_found"),
-            Self::IndexOperationNotAbortable { .. } => Some("index_operation_not_abortable"),
-            Self::IdentifierExhausted("logical index ID") => Some("index_id_exhausted"),
-            Self::IdentifierExhausted("vector physical index ID") => {
-                Some("vector_physical_id_exhausted")
+            Self::InvalidIndexSourceData { .. } => {
+                error_code::QueryErrorCode::InvalidIndexSourceData
             }
             Self::InvalidIndexV2Model(
                 crate::index_lifecycle::IndexV2ModelError::IdentifierExhausted {
                     kind: "index generation ID",
                 },
-            ) => Some("index_generation_exhausted"),
+            ) => error_code::QueryErrorCode::IndexGenerationExhausted,
             Self::InvalidIndexV2Model(
                 crate::index_lifecycle::IndexV2ModelError::IdentifierExhausted {
                     kind: "index revision",
                 },
-            ) => Some("index_revision_exhausted"),
+            ) => error_code::QueryErrorCode::IndexRevisionExhausted,
             Self::InvalidIndexV2Model(
                 crate::index_lifecycle::IndexV2ModelError::IdentifierExhausted {
                     kind: "index operation revision",
                 },
-            ) => Some("index_operation_revision_exhausted"),
-            Self::StaleIndexGeneration { .. } => Some("stale_index_generation"),
-            Self::WriterFencedCommitOutcomeUnknown => Some("writer_fenced_commit_outcome_unknown"),
-            Self::Storage(_)
-            | Self::Encoding(_)
-            | Self::TransactionConflict(_)
-            | Self::RequestReadViewChanged
-            | Self::InvalidNodeId(_)
-            | Self::NodeNotFound(_)
-            | Self::EdgeNotFound { .. }
-            | Self::DatabaseClosed
-            | Self::Config(_)
-            | Self::InvalidIndexV2Model(_)
-            | Self::SecondaryIndexValue(_)
-            | Self::MigrationRequired { .. }
-            | Self::WriterMigrationRequired { .. }
-            | Self::UnsupportedIndexStorageVersion { .. }
-            | Self::IdentifierExhausted(_)
-            | Self::IdentifierAllocationFailed { .. }
-            | Self::IndexCatalogCorruption(_)
-            | Self::InvalidVectorConfig(_)
-            | Self::InvalidVectorItem(_)
-            | Self::ObjectStore(_)
-            | Self::Query(_)
-            | Self::QueryDeadlineExceeded
-            | Self::WriterModeRequired { .. }
-            | Self::ReaderModeRequired { .. }
-            | Self::UniqueConstraintViolation { .. }
-            | Self::UnsupportedUniqueIndexValueType { .. }
-            | Self::InvalidDimension { .. }
-            | Self::InvalidVectorComponent { .. }
-            | Self::VectorComponentMagnitudeExceeded { .. }
-            | Self::ZeroNormCosineVector
-            | Self::LegacyZeroNormCosineVector { .. }
-            | Self::InvariantViolation(_) => None,
+            ) => error_code::QueryErrorCode::IndexOperationRevisionExhausted,
+            Self::InvalidIndexV2Model(_) => error_code::QueryErrorCode::InvalidIndexModel,
+            Self::SecondaryIndexValue(_) => error_code::QueryErrorCode::InvalidSecondaryIndexValue,
+            Self::MigrationRequired { .. } => error_code::QueryErrorCode::MigrationRequired,
+            Self::WriterMigrationRequired { .. } => {
+                error_code::QueryErrorCode::WriterMigrationRequired
+            }
+            Self::UnsupportedIndexStorageVersion { .. } => {
+                error_code::QueryErrorCode::UnsupportedIndexStorageVersion
+            }
+            Self::IdentifierExhausted("logical index ID") => {
+                error_code::QueryErrorCode::IndexIdExhausted
+            }
+            Self::IdentifierExhausted("vector physical index ID") => {
+                error_code::QueryErrorCode::VectorPhysicalIdExhausted
+            }
+            Self::IdentifierExhausted(_) => error_code::QueryErrorCode::IdentifierExhausted,
+            Self::StaleIndexGeneration { .. } => error_code::QueryErrorCode::StaleIndexGeneration,
+            Self::WriterFencedCommitOutcomeUnknown => {
+                error_code::QueryErrorCode::WriterFencedCommitOutcomeUnknown
+            }
+            Self::InvalidVectorConfig(_) => error_code::QueryErrorCode::InvalidVectorConfiguration,
+            Self::Query(_) => error_code::QueryErrorCode::InvalidQuery,
+            Self::InvalidQueryJson(_) => error_code::QueryErrorCode::InvalidQueryJson,
+            Self::WriterModeRequired { .. } => error_code::QueryErrorCode::WriterModeRequired,
+            Self::ReaderModeRequired { .. } => error_code::QueryErrorCode::ReaderModeRequired,
+            Self::IndexAlreadyExists(_) => error_code::QueryErrorCode::IndexAlreadyExists,
+            Self::IndexDefinitionConflict { .. } => {
+                error_code::QueryErrorCode::IndexDefinitionConflict
+            }
+            Self::IndexBusy { .. } => error_code::QueryErrorCode::IndexBusy,
+            Self::IndexOperationNotFound { .. } => {
+                error_code::QueryErrorCode::IndexOperationNotFound
+            }
+            Self::IndexOperationNotAbortable { .. } => {
+                error_code::QueryErrorCode::IndexOperationNotAbortable
+            }
+            Self::IndexNotFound(_) => error_code::QueryErrorCode::IndexNotFound,
+            Self::UniqueConstraintViolation { .. } => {
+                error_code::QueryErrorCode::UniqueConstraintViolation
+            }
+            Self::UnsupportedUniqueIndexValueType { .. } => {
+                error_code::QueryErrorCode::UnsupportedUniqueIndexValueType
+            }
+            Self::InvalidDimension { .. } => error_code::QueryErrorCode::InvalidVectorDimension,
+            Self::InvalidVectorComponent { .. } => {
+                error_code::QueryErrorCode::InvalidVectorComponent
+            }
+            Self::VectorComponentMagnitudeExceeded { .. } => {
+                error_code::QueryErrorCode::VectorComponentMagnitudeExceeded
+            }
+            Self::ZeroNormCosineVector => error_code::QueryErrorCode::ZeroNormCosineVector,
         }
+    }
+
+    /// Stable public compatibility code when this error belongs to the index
+    /// lifecycle API.
+    pub fn index_error_code(&self) -> Option<&'static str> {
+        let code = self.error_code();
+        matches!(
+            code,
+            error_code::QueryErrorCode::IndexLifecycleUnavailable
+                | error_code::QueryErrorCode::SecondaryLifecycleSteppingRequiresDisabledMode
+                | error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
+                | error_code::QueryErrorCode::InvalidIndexSourceData
+                | error_code::QueryErrorCode::IndexAlreadyExists
+                | error_code::QueryErrorCode::IndexDefinitionConflict
+                | error_code::QueryErrorCode::IndexBusy
+                | error_code::QueryErrorCode::IndexNotFound
+                | error_code::QueryErrorCode::IndexOperationNotFound
+                | error_code::QueryErrorCode::IndexOperationNotAbortable
+                | error_code::QueryErrorCode::IndexIdExhausted
+                | error_code::QueryErrorCode::VectorPhysicalIdExhausted
+                | error_code::QueryErrorCode::IndexGenerationExhausted
+                | error_code::QueryErrorCode::IndexRevisionExhausted
+                | error_code::QueryErrorCode::IndexOperationRevisionExhausted
+                | error_code::QueryErrorCode::StaleIndexGeneration
+                | error_code::QueryErrorCode::WriterFencedCommitOutcomeUnknown
+        )
+        .then_some(code.as_str())
     }
 
     /// Returns true when the error represents a retryable transaction conflict.
@@ -607,6 +674,7 @@ pub type Result<T> = std::result::Result<T, HelixDbError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helix_ast::error_code::QueryErrorCode as Code;
 
     #[test]
     fn config_errors_convert_to_database_errors_with_display_context() {
@@ -665,6 +733,257 @@ mod tests {
             !HelixDbError::InvariantViolation("stored row is corrupt".to_string())
                 .is_invalid_vector_input()
         );
+    }
+
+    #[test]
+    fn database_error_variants_have_stable_semantic_codes() {
+        let cases = vec![
+            (
+                HelixDbError::Storage(slatedb::Error::invalid("storage".to_string())),
+                Code::StorageError,
+            ),
+            (
+                HelixDbError::Storage(slatedb::Error::transaction("retry".to_string())),
+                Code::TransactionConflict,
+            ),
+            (
+                HelixDbError::ObjectStore(slatedb::object_store::Error::Generic {
+                    store: "test",
+                    source: Box::new(std::io::Error::other("object store")),
+                }),
+                Code::StorageError,
+            ),
+            (
+                HelixDbError::Encoding(EncodingError::Custom("encoding".to_string())),
+                Code::InternalError,
+            ),
+            (
+                HelixDbError::TransactionConflict("retry".to_string()),
+                Code::TransactionConflict,
+            ),
+            (
+                HelixDbError::RequestReadViewChanged,
+                Code::RequestReadViewChanged,
+            ),
+            (
+                HelixDbError::QueryDeadlineExceeded,
+                Code::QueryDeadlineExceeded,
+            ),
+            (HelixDbError::InvalidNodeId(0), Code::InvalidNodeId),
+            (HelixDbError::NodeNotFound(1), Code::NodeNotFound),
+            (
+                HelixDbError::EdgeNotFound { from: 1, to: 2 },
+                Code::EdgeNotFound,
+            ),
+            (HelixDbError::DatabaseClosed, Code::DatabaseClosed),
+            (
+                HelixDbError::Config("invalid".to_string()),
+                Code::InvalidConfiguration,
+            ),
+            (
+                HelixDbError::IndexLifecycleUnavailable {
+                    family: IndexFamily::Vector,
+                    reason: IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
+                },
+                Code::IndexLifecycleUnavailable,
+            ),
+            (
+                HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode,
+                Code::SecondaryLifecycleSteppingRequiresDisabledMode,
+            ),
+            (
+                HelixDbError::MigrationSteppingRequiresDisabledMode,
+                Code::MigrationSteppingRequiresDisabledMode,
+            ),
+            (
+                HelixDbError::ActiveTextMutationLimitExceeded {
+                    resource: ActiveTextMutationResource::Entities,
+                    observed: 2,
+                    limit: 1,
+                },
+                Code::ActiveTextMutationLimitExceeded,
+            ),
+            (
+                HelixDbError::InvalidIndexSourceData {
+                    reason: "invalid".to_string(),
+                },
+                Code::InvalidIndexSourceData,
+            ),
+            (
+                HelixDbError::InvalidIndexV2Model(
+                    crate::index_lifecycle::IndexV2ModelError::EmptyComponent { kind: "label" },
+                ),
+                Code::InvalidIndexModel,
+            ),
+            (
+                HelixDbError::SecondaryIndexValue(SecondaryIndexValueError::NaNRangeValue),
+                Code::InvalidSecondaryIndexValue,
+            ),
+            (
+                HelixDbError::MigrationRequired {
+                    reason: "legacy".to_string(),
+                },
+                Code::MigrationRequired,
+            ),
+            (
+                HelixDbError::WriterMigrationRequired {
+                    requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+                },
+                Code::WriterMigrationRequired,
+            ),
+            (
+                HelixDbError::UnsupportedIndexStorageVersion {
+                    found: 3,
+                    supported: 2,
+                },
+                Code::UnsupportedIndexStorageVersion,
+            ),
+            (
+                HelixDbError::IdentifierExhausted("other"),
+                Code::IdentifierExhausted,
+            ),
+            (
+                HelixDbError::IdentifierExhausted("logical index ID"),
+                Code::IndexIdExhausted,
+            ),
+            (
+                HelixDbError::IdentifierExhausted("vector physical index ID"),
+                Code::VectorPhysicalIdExhausted,
+            ),
+            (
+                HelixDbError::IdentifierAllocationFailed {
+                    kind: "operation",
+                    attempts: 1,
+                },
+                Code::InternalError,
+            ),
+            (
+                HelixDbError::IndexCatalogCorruption("corrupt".to_string()),
+                Code::InternalError,
+            ),
+            (
+                HelixDbError::StaleIndexGeneration {
+                    index_id: 1,
+                    generation: 2,
+                    record_revision: 3,
+                },
+                Code::StaleIndexGeneration,
+            ),
+            (
+                HelixDbError::WriterFencedCommitOutcomeUnknown,
+                Code::WriterFencedCommitOutcomeUnknown,
+            ),
+            (
+                HelixDbError::InvalidVectorConfig(VectorConfigError::EmptyIndexName),
+                Code::InvalidVectorConfiguration,
+            ),
+            (
+                HelixDbError::InvalidVectorItem(VectorItemDecodeError::HeaderMismatch),
+                Code::InternalError,
+            ),
+            (
+                HelixDbError::Query("invalid".to_string()),
+                Code::InvalidQuery,
+            ),
+            (
+                HelixDbError::InvalidQueryJson("invalid".to_string()),
+                Code::InvalidQueryJson,
+            ),
+            (
+                HelixDbError::WriterModeRequired { actual: "reader" },
+                Code::WriterModeRequired,
+            ),
+            (
+                HelixDbError::ReaderModeRequired { actual: "writer" },
+                Code::ReaderModeRequired,
+            ),
+            (
+                HelixDbError::IndexAlreadyExists("index".to_string()),
+                Code::IndexAlreadyExists,
+            ),
+            (
+                HelixDbError::IndexBusy { state: "building" },
+                Code::IndexBusy,
+            ),
+            (
+                HelixDbError::IndexOperationNotFound {
+                    operation_id: "operation".to_string(),
+                },
+                Code::IndexOperationNotFound,
+            ),
+            (
+                HelixDbError::IndexOperationNotAbortable {
+                    operation_id: "operation".to_string(),
+                    reason: "complete",
+                },
+                Code::IndexOperationNotAbortable,
+            ),
+            (
+                HelixDbError::IndexNotFound("index".to_string()),
+                Code::IndexNotFound,
+            ),
+            (
+                HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    value: "value".to_string(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                },
+                Code::UniqueConstraintViolation,
+            ),
+            (
+                HelixDbError::UnsupportedUniqueIndexValueType {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    node_id: 1,
+                    value_type: "array".to_string(),
+                },
+                Code::UnsupportedUniqueIndexValueType,
+            ),
+            (
+                HelixDbError::InvalidDimension {
+                    expected: 3,
+                    got: 2,
+                },
+                Code::InvalidVectorDimension,
+            ),
+            (
+                HelixDbError::InvalidVectorComponent { index: 0 },
+                Code::InvalidVectorComponent,
+            ),
+            (
+                HelixDbError::VectorComponentMagnitudeExceeded {
+                    metric: VectorDistanceMetric::Euclidean,
+                    dimension: 1,
+                    component_index: 0,
+                    observed_magnitude: 2.0,
+                    inclusive_maximum: 1.0,
+                },
+                Code::VectorComponentMagnitudeExceeded,
+            ),
+            (
+                HelixDbError::ZeroNormCosineVector,
+                Code::ZeroNormCosineVector,
+            ),
+            (
+                HelixDbError::LegacyZeroNormCosineVector {
+                    element_kind: crate::index_lifecycle::IndexElementKind::Node,
+                    label: "Document".to_string(),
+                    property: "embedding".to_string(),
+                    entity_id: 1,
+                },
+                Code::InternalError,
+            ),
+            (
+                HelixDbError::InvariantViolation("invariant".to_string()),
+                Code::InternalError,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.error_code(), expected, "{error}");
+        }
     }
 
     #[test]

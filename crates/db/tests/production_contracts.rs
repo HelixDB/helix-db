@@ -8,8 +8,10 @@
 use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use db::config::{self, VectorIndexDefinition};
-use db::encoding::v1::values::vectors::{decode_layer0_neighbors, encode_layer0_neighbors};
-use db::execution::interpreter::{ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue};
+use db::encoding::v2::values::indexes::vector::{decode_layer0_neighbors, encode_layer0_neighbors};
+use db::execution::interpreter::{
+    ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue,
+};
 use db::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
 use db::search::vector::unaligned_vector::{SimHashError, UnalignedVector};
 use db::search::vector::{
@@ -41,6 +43,19 @@ fn current_layer0_neighbor_bytes_are_stable_through_the_public_codec() {
         ]
     );
     assert_eq!(decode_layer0_neighbors(&encoded).unwrap(), vec![2, 9]);
+}
+
+#[test]
+#[allow(deprecated)]
+fn root_tenant_compatibility_path_reexports_v2_scope_types() {
+    use db::encoding::keys::tenant::{DataScope, TenantId};
+
+    let tenant = TenantId::from_ulid_str("00000000000000000000000001")
+        .expect("compatibility path decodes tenant IDs");
+    let compatibility_scope = DataScope::Tenant(tenant);
+    let canonical_scope: db::encoding::v2::keys::scope::DataScope = compatibility_scope;
+
+    assert_eq!(canonical_scope, DataScope::Tenant(tenant));
 }
 
 #[test]
@@ -151,7 +166,7 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
             )]),
             returns: BTreeMap::from([(
                 helix_planner::ir::NonEmptyString::from_static("count"),
-                ExecutionValue::Count(0),
+                ReturnedValue::Present(ExecutionValue::Count(0)),
             )]),
         },
         helix_planner::diagnostics::PlannerDiagnostics {
@@ -251,6 +266,7 @@ async fn public_shared_runtime_keeps_search_families_available() {
                 id: root_id,
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(access),
@@ -1399,6 +1415,7 @@ async fn public_query_boundary_covers_branch_partition_edges() {
         id: step_id(id),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -1421,8 +1438,8 @@ async fn public_query_boundary_covers_branch_partition_edges() {
         })
     };
     let scalar_subplan = || {
-        subplan(exec::ExecOp::Project {
-            projection: ir::ProjectionPlan::Count,
+        subplan(exec::ExecOp::Count {
+            plan: Box::new(exec::ExecCountPlan::Constant(0)),
         })
     };
     let branch_plan = |plan| {
@@ -1875,6 +1892,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: edge_access,
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Edge(
@@ -1889,6 +1907,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: fold,
                 dependencies: vec![edge_access],
                 output: ir::BatchOutputPlan::Bind(folded_edges.clone()),
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Reserved {
                     op: ir::ReservedOp::Fold,
@@ -1901,6 +1920,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: folded_access,
                 dependencies: vec![fold],
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Edge(
@@ -1917,6 +1937,7 @@ async fn public_query_boundary_covers_variable_id_source_shapes() {
                 id: exec::ExecStepId::new(4).expect("step ID is positive"),
                 dependencies: vec![folded_access],
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Project {
                     projection: ir::ProjectionPlan::Id,
@@ -2371,6 +2392,7 @@ async fn public_query_boundary_covers_active_range_index_access_and_mutation() {
         id: step_id(id),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -2941,7 +2963,7 @@ async fn public_query_boundary_restricts_node_and_edge_text_search_to_the_curren
         .as_array()
         .unwrap()
         .iter()
-        .filter(|id| matches!(id.as_u64(), Some(1 | 2 | 3)))
+        .filter(|id| matches!(id.as_u64(), Some(1..=3)))
         .take(2)
         .cloned()
         .collect::<Vec<_>>();
@@ -2950,7 +2972,7 @@ async fn public_query_boundary_restricts_node_and_edge_text_search_to_the_curren
         serde_json::Value::Array(expected_nodes)
     );
     assert_eq!(response["single_node"], serde_json::json!([2]));
-    assert_eq!(response["empty_nodes"], serde_json::json!([]));
+    assert_eq!(response["empty_nodes"], serde_json::Value::Null);
     assert!(response["node_sacks"]
         .as_array()
         .unwrap()
@@ -4845,6 +4867,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 vec![
                     ("category", PropertyInput::from("group")),
                     ("code", PropertyInput::from("A")),
+                    ("rank", PropertyInput::from(1_i64)),
                 ],
             ),
         )
@@ -4855,6 +4878,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 vec![
                     ("category", PropertyInput::from("group")),
                     ("code", PropertyInput::from("B")),
+                    ("rank", PropertyInput::from(2_i64)),
                 ],
             ),
         )
@@ -4865,6 +4889,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 vec![
                     ("category", PropertyInput::from("other")),
                     ("code", PropertyInput::from("C")),
+                    ("rank", PropertyInput::from(3_i64)),
                 ],
             ),
         )
@@ -4875,6 +4900,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 NodeRef::var("second"),
                 vec![
                     ("kind", PropertyInput::from("primary")),
+                    ("status", PropertyInput::from("active")),
                     ("weight", PropertyInput::from(1_i64)),
                 ],
             ),
@@ -4886,6 +4912,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 NodeRef::var("third"),
                 vec![
                     ("kind", PropertyInput::from("primary")),
+                    ("status", PropertyInput::from("inactive")),
                     ("weight", PropertyInput::from(2_i64)),
                 ],
             ),
@@ -4897,6 +4924,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 NodeRef::var("third"),
                 vec![
                     ("kind", PropertyInput::from("secondary")),
+                    ("status", PropertyInput::from("active")),
                     ("weight", PropertyInput::from(3_i64)),
                 ],
             ),
@@ -4914,8 +4942,16 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             "unique node equality index",
         ),
         (
+            index::IndexSpec::node_range("Document", "rank"),
+            "ascending node range index",
+        ),
+        (
             index::IndexSpec::edge_equality("LINK", "kind"),
             "edge equality index",
+        ),
+        (
+            index::IndexSpec::edge_equality("LINK", "status"),
+            "second edge equality index",
         ),
         (
             index::IndexSpec::edge_range_desc("LINK", "weight"),
@@ -4943,6 +4979,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             id: receipt_id,
             dependencies: Vec::new(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: exec::ExecOp::IndexDdl {
                 plan: ir::IndexDdlPlan::Create {
@@ -4964,6 +5001,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
                 id: empty_id,
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty)),
@@ -4981,6 +5019,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             id: root_id,
             dependencies,
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: consumer,
             schedule: exec::ExecSchedule::Pipeline,
@@ -4999,10 +5038,12 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
     };
     for (consumer, expected) in [
         (
-            exec::ExecOp::Project {
-                projection: ir::ProjectionPlan::Count,
+            exec::ExecOp::Count {
+                plan: Box::new(exec::ExecCountPlan::InputRows {
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
             },
-            "Query error: project cannot consume an index lifecycle value",
+            "Query error: count cannot consume an index lifecycle value",
         ),
         (
             exec::ExecOp::Aggregate {
@@ -5121,6 +5162,230 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             "primary": [0, 1],
             "heavy": [2, 1],
         })
+    );
+
+    let secondary_id_plan = |access: exec::ExecAccessPlan| {
+        let access_id = exec::ExecStepId::new(1).expect("access step ID is positive");
+        let project_id = exec::ExecStepId::new(2).expect("project step ID is positive");
+        exec::ExecutablePlan::new(
+            ir::PlanKind::Read,
+            ir::ReturnPlan::None,
+            ir::AtLeast::try_from_vec(vec![
+                exec::ExecStep {
+                    id: access_id,
+                    dependencies: Vec::new(),
+                    output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
+                    condition: exec::ExecCondition::Always,
+                    op: exec::ExecOp::Access {
+                        plan: Box::new(access),
+                    },
+                    schedule: exec::ExecSchedule::Pipeline,
+                    delivered: properties::DeliveredProperties::default(),
+                    cost: cost::CostVector::ZERO,
+                },
+                exec::ExecStep {
+                    id: project_id,
+                    dependencies: vec![access_id],
+                    output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
+                    condition: exec::ExecCondition::Always,
+                    op: exec::ExecOp::Project {
+                        projection: ir::ProjectionPlan::Id,
+                    },
+                    schedule: exec::ExecSchedule::Pipeline,
+                    delivered: properties::DeliveredProperties::default(),
+                    cost: cost::CostVector::ZERO,
+                },
+            ])
+            .expect("secondary-set execution plan has two steps"),
+            project_id,
+            trace::PlanningTrace::default(),
+            exec::PlannerMetrics::default(),
+        )
+        .expect("secondary-set execution plan validates")
+    };
+    let node_equality = |property: &str, values: &[&str]| {
+        let index = catalog::NodeEqualityIndexMeta::try_new(format!("node_eq:Document:{property}"))
+            .expect("logical node equality index name is non-empty")
+            .with_uniqueness(if property == "code" {
+                catalog::IndexUniqueness::Unique
+            } else {
+                catalog::IndexUniqueness::NonUnique
+            });
+        exec::ExecNodeSecondarySetPlan::exact_equalities(
+            index,
+            catalog::ScopedPropertyKey::try_new("Document", property)
+                .expect("logical node equality key validates"),
+            ir::AtLeast::try_from_vec(
+                values
+                    .iter()
+                    .map(|value| {
+                        ir::IndexValue::Literal(
+                            ir::SecondaryIndexLiteral::new(PropertyValue::from(*value))
+                                .expect("string equality value is index-compatible"),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("node equality set has at least one value"),
+        )
+    };
+    let edge_equality = |property: &str, values: &[&str]| {
+        exec::ExecEdgeSecondarySetPlan::exact_equalities(
+            catalog::EdgeEqualityIndexMeta::try_new(format!("edge_eq:LINK:{property}"))
+                .expect("logical edge equality index name is non-empty"),
+            catalog::ScopedPropertyKey::try_new("LINK", property)
+                .expect("logical edge equality key validates"),
+            ir::AtLeast::try_from_vec(
+                values
+                    .iter()
+                    .map(|value| {
+                        ir::IndexValue::Literal(
+                            ir::SecondaryIndexLiteral::new(PropertyValue::from(*value))
+                                .expect("string equality value is index-compatible"),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("edge equality set has at least one value"),
+        )
+    };
+    let node_range = || exec::ExecNodeSecondaryRangePlan {
+        index: catalog::NodeRangeIndexMeta::try_new("node_range:Document:rank:asc")
+            .expect("logical node range index name is non-empty"),
+        key: catalog::ScopedPropertyDirectionKey::try_new(
+            "Document",
+            "rank",
+            index::RangeIndexDirection::Asc,
+        )
+        .expect("logical node range key validates"),
+        range: ir::IndexRange::All,
+    };
+    let edge_range = || exec::ExecEdgeSecondaryRangePlan {
+        index: catalog::EdgeRangeIndexMeta::try_new("edge_range:LINK:weight:desc")
+            .expect("logical edge range index name is non-empty"),
+        key: catalog::ScopedPropertyDirectionKey::try_new(
+            "LINK",
+            "weight",
+            index::RangeIndexDirection::Desc,
+        )
+        .expect("logical edge range key validates"),
+        range: ir::IndexRange::All,
+    };
+    let node_ids = |ids: &[u64]| {
+        ExecutionValue::Scalars(ids.iter().copied().map(ExecutionScalar::NodeId).collect())
+    };
+    let edge_ids = |ids: &[u64]| {
+        ExecutionValue::Scalars(ids.iter().copied().map(ExecutionScalar::EdgeId).collect())
+    };
+
+    for (set, expected) in [
+        (
+            node_equality("category", &["group", "other"]),
+            node_ids(&[0, 1, 2]),
+        ),
+        (
+            exec::ExecNodeSecondarySetPlan::Union {
+                driver: Box::new(node_equality("category", &["other"])),
+                rest: ir::AtLeast::from_one(node_equality("code", &["B"])),
+            },
+            node_ids(&[1, 2]),
+        ),
+        (
+            exec::ExecNodeSecondarySetPlan::Intersect {
+                driver: Box::new(node_equality("category", &["group"])),
+                rest: ir::AtLeast::from_one(node_equality("code", &["B"])),
+            },
+            node_ids(&[1]),
+        ),
+        (
+            exec::ExecNodeSecondarySetPlan::Range(node_range()),
+            node_ids(&[0, 1, 2]),
+        ),
+        (exec::ExecNodeSecondarySetPlan::Empty, node_ids(&[])),
+    ] {
+        let result = db
+            .execute(
+                &secondary_id_plan(exec::ExecAccessPlan::Node(
+                    exec::ExecNodeAccessPlan::SecondarySet { set },
+                )),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("node secondary-set execution succeeds");
+        assert_eq!(result.last, Some(expected));
+    }
+    let ordered_nodes = exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet {
+        set: exec::ExecNodeSecondarySetPlan::OrderedIntersect {
+            driver: node_range(),
+            filters: ir::AtLeast::from_one(node_equality("category", &["group"])),
+        },
+    })
+    .limited(properties::PositiveUsize::new(1).expect("ordered node limit is positive"));
+    assert_eq!(
+        db.execute(
+            &secondary_id_plan(ordered_nodes),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("ordered node secondary intersection succeeds")
+        .last,
+        Some(node_ids(&[0]))
+    );
+
+    for (set, expected) in [
+        (
+            edge_equality("kind", &["primary", "secondary"]),
+            edge_ids(&[0, 1, 2]),
+        ),
+        (
+            exec::ExecEdgeSecondarySetPlan::Union {
+                driver: Box::new(edge_equality("kind", &["primary"])),
+                rest: ir::AtLeast::from_one(edge_equality("status", &["active"])),
+            },
+            edge_ids(&[0, 1, 2]),
+        ),
+        (
+            exec::ExecEdgeSecondarySetPlan::Intersect {
+                driver: Box::new(edge_equality("kind", &["primary"])),
+                rest: ir::AtLeast::from_one(edge_equality("status", &["active"])),
+            },
+            edge_ids(&[0]),
+        ),
+        (
+            exec::ExecEdgeSecondarySetPlan::Range(edge_range()),
+            edge_ids(&[2, 1, 0]),
+        ),
+        (exec::ExecEdgeSecondarySetPlan::Empty, edge_ids(&[])),
+    ] {
+        let result = db
+            .execute(
+                &secondary_id_plan(exec::ExecAccessPlan::Edge(
+                    exec::ExecEdgeAccessPlan::SecondarySet { set },
+                )),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("edge secondary-set execution succeeds");
+        assert_eq!(result.last, Some(expected));
+    }
+    let ordered_edges = exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::SecondarySet {
+        set: exec::ExecEdgeSecondarySetPlan::OrderedIntersect {
+            driver: edge_range(),
+            filters: ir::AtLeast::from_one(edge_equality("status", &["active"])),
+        },
+    })
+    .limited(properties::PositiveUsize::new(2).expect("ordered edge limit is positive"));
+    assert_eq!(
+        db.execute(
+            &secondary_id_plan(ordered_edges),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("ordered edge secondary intersection succeeds")
+        .last,
+        Some(edge_ids(&[2, 0]))
     );
 
     let edge_range_bounds = QueryRequest::read(
@@ -5299,6 +5564,274 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
             "heavy": [0, 2, 1],
         })
     );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-ordered-multi-range-intersections".to_owned(),
+    })
+    .await
+    .expect("ordered multi-range fixture opens");
+    let fixture = batch::write_batch()
+        .var_as(
+            "first",
+            traversal::g().add_n(
+                "Metric",
+                vec![
+                    ("age", PropertyInput::from(1_i64)),
+                    ("score", PropertyInput::from(30_i64)),
+                ],
+            ),
+        )
+        .var_as(
+            "second",
+            traversal::g().add_n(
+                "Metric",
+                vec![
+                    ("age", PropertyInput::from(2_i64)),
+                    ("score", PropertyInput::from(10_i64)),
+                ],
+            ),
+        )
+        .var_as(
+            "third",
+            traversal::g().add_n(
+                "Metric",
+                vec![
+                    ("age", PropertyInput::from(3_i64)),
+                    ("score", PropertyInput::from(20_i64)),
+                ],
+            ),
+        )
+        .var_as(
+            "first_edge",
+            traversal::g().n(NodeRef::var("first")).add_e(
+                "MEASURED",
+                NodeRef::var("second"),
+                vec![
+                    ("age", PropertyInput::from(30_i64)),
+                    ("score", PropertyInput::from(1_i64)),
+                ],
+            ),
+        )
+        .var_as(
+            "second_edge",
+            traversal::g().n(NodeRef::var("second")).add_e(
+                "MEASURED",
+                NodeRef::var("third"),
+                vec![
+                    ("age", PropertyInput::from(20_i64)),
+                    ("score", PropertyInput::from(2_i64)),
+                ],
+            ),
+        )
+        .var_as(
+            "third_edge",
+            traversal::g().n(NodeRef::var("first")).add_e(
+                "MEASURED",
+                NodeRef::var("third"),
+                vec![
+                    ("age", PropertyInput::from(10_i64)),
+                    ("score", PropertyInput::from(3_i64)),
+                ],
+            ),
+        )
+        .returning(Vec::<String>::new());
+    db.query(QueryRequest::write(fixture)).await.unwrap();
+
+    for (spec, description) in [
+        (
+            index::IndexSpec::node_range("Metric", "age"),
+            "ascending node age range index",
+        ),
+        (
+            index::IndexSpec::node_range("Metric", "score"),
+            "ascending node score range index",
+        ),
+        (
+            index::IndexSpec::edge_range_desc("MEASURED", "age"),
+            "descending edge age range index",
+        ),
+        (
+            index::IndexSpec::edge_range_desc("MEASURED", "score"),
+            "descending edge score range index",
+        ),
+    ] {
+        let receipt = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .unwrap();
+        let operation_id = receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted range-index operation has an ID");
+        await_index_operation_success(&db, operation_id, description).await;
+    }
+
+    let node_batch = batch::read_batch()
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where(
+                    "Metric",
+                    Predicate::and(vec![
+                        Predicate::gte("age", 0_i64),
+                        Predicate::gte("score", 0_i64),
+                    ]),
+                )
+                .order_by("score", traversal::Order::Asc)
+                .limit(2_usize),
+        )
+        .returning(["result"]);
+    let edge_batch = batch::read_batch()
+        .var_as(
+            "result",
+            traversal::g()
+                .e_with_label_where(
+                    "MEASURED",
+                    Predicate::and(vec![
+                        Predicate::lte("age", 100_i64),
+                        Predicate::lte("score", 100_i64),
+                    ]),
+                )
+                .order_by("score", traversal::Order::Desc)
+                .limit(2_usize),
+        )
+        .returning(["result"]);
+    let mut indexed_context = db.planner_context(context::ParamBindings::default());
+    indexed_context.stats = context::StatsSnapshot::default()
+        .with_node_range_cardinality(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "Metric",
+                "age",
+                index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+            1,
+        )
+        .with_node_range_cardinality(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "Metric",
+                "score",
+                index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+            20,
+        )
+        .with_edge_range_cardinality(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "MEASURED",
+                "age",
+                index::RangeIndexDirection::Desc,
+            )
+            .unwrap(),
+            2,
+        )
+        .with_edge_range_cardinality(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "MEASURED",
+                "score",
+                index::RangeIndexDirection::Desc,
+            )
+            .unwrap(),
+            20,
+        );
+
+    for (read, expected_driver, expected) in [
+        (
+            &node_batch,
+            properties::ElementKind::Node,
+            vec![ElementRef::Node(1), ElementRef::Node(2)],
+        ),
+        (
+            &edge_batch,
+            properties::ElementKind::Edge,
+            vec![ElementRef::Edge(2), ElementRef::Edge(1)],
+        ),
+    ] {
+        let indexed = planning::plan_read_batch(read, &indexed_context)
+            .expect("indexed ordered multi-range query plans");
+        let scan = planning::plan_read_batch(read, &context::PlannerContext::default())
+            .expect("full-scan ordered multi-range query plans");
+        let indexed_access = indexed
+            .steps()
+            .iter()
+            .find_map(|step| match &step.op {
+                exec::ExecOp::Access { plan } => Some(match plan.as_ref() {
+                    exec::ExecAccessPlan::Limited(limited) => limited.source(),
+                    access => access,
+                }),
+                _ => None,
+            })
+            .expect("indexed plan has an access step");
+        match (expected_driver, indexed_access) {
+            (
+                properties::ElementKind::Node,
+                exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet {
+                    set: exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, .. },
+                }),
+            ) => assert_eq!(
+                driver.key.property.as_ref(),
+                "score",
+                "unexpected indexed node plan: {:?}; trace: {:?}",
+                indexed.steps(),
+                indexed.trace()
+            ),
+            (
+                properties::ElementKind::Edge,
+                exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::SecondarySet {
+                    set: exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, .. },
+                }),
+            ) => assert_eq!(
+                driver.key.property.as_ref(),
+                "score",
+                "unexpected indexed edge plan: {:?}; trace: {:?}",
+                indexed.steps(),
+                indexed.trace()
+            ),
+            (_, access) => panic!("expected ordered secondary intersection, got {access:?}"),
+        }
+        assert!(
+            indexed
+                .steps()
+                .iter()
+                .all(|step| !matches!(step.op, exec::ExecOp::Order { .. })),
+            "indexed plan should elide explicit sorting: {:?}",
+            indexed.steps()
+        );
+        assert!(
+            scan.steps()
+                .iter()
+                .any(|step| matches!(step.op, exec::ExecOp::Order { .. })),
+            "full-scan reference should sort explicitly: {:?}",
+            scan.steps()
+        );
+
+        let indexed_result = db
+            .execute(&indexed, context::ParamBindings::default())
+            .await
+            .expect("indexed ordered multi-range query executes");
+        let scan_result = db
+            .execute(&scan, context::ParamBindings::default())
+            .await
+            .expect("full-scan ordered multi-range query executes");
+        assert_eq!(indexed_result.last, scan_result.last);
+        assert_eq!(indexed_result.returns, scan_result.returns);
+        let Some(ExecutionValue::Stream(rows)) = indexed_result.last else {
+            panic!("ordered multi-range query should return a stream");
+        };
+        let actual = rows
+            .into_iter()
+            .map(|row| row.current.expect("result row has a current element"))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
     db.close().await.unwrap();
 }
 
@@ -6030,6 +6563,7 @@ async fn public_reader_executes_parallel_stage_with_stable_output_order() {
         id: first_id,
         dependencies: Vec::new(),
         output: ir::BatchOutputPlan::Bind(seen.clone()),
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op: exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty)),
@@ -6042,6 +6576,7 @@ async fn public_reader_executes_parallel_stage_with_stable_output_order() {
         id: second_id,
         dependencies: Vec::new(),
         output: ir::BatchOutputPlan::Bind(seen.clone()),
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op: exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
@@ -6056,6 +6591,7 @@ async fn public_reader_executes_parallel_stage_with_stable_output_order() {
         id: root_id,
         dependencies: vec![first_id, second_id],
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op: exec::ExecOp::Variable {
             op: exec::ExecVariableOp::SourceInject {
@@ -6226,6 +6762,7 @@ async fn public_executable_plan_boundary_covers_typed_kv_read_modes() {
                     id: root_id,
                     dependencies: Vec::new(),
                     output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
                     condition: exec::ExecCondition::Always,
                     op: exec::ExecOp::KvRead(read),
                     schedule: exec::ExecSchedule::Pipeline,
@@ -6294,6 +6831,16 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
         )),
     };
     let project = |projection| exec::ExecOp::Project { projection };
+    let count_rows = || exec::ExecOp::Count {
+        plan: Box::new(exec::ExecCountPlan::InputRows {
+            window: exec::ExecCountWindowPlan::identity(),
+        }),
+    };
+    let count_scalars = || exec::ExecOp::Count {
+        plan: Box::new(exec::ExecCountPlan::InputScalars {
+            window: exec::ExecCountWindowPlan::identity(),
+        }),
+    };
     let linear_plan = |operations: Vec<exec::ExecOp>| {
         let root = operations.len();
         let steps = operations
@@ -6319,6 +6866,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
                         .into_iter()
                         .collect(),
                     output: ir::BatchOutputPlan::Discard,
+                    semantic_return_shape: None,
                     condition: exec::ExecCondition::Always,
                     op,
                     schedule,
@@ -6357,7 +6905,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::Empty)),
                 },
-                project(ir::ProjectionPlan::Count),
+                count_rows(),
             ],
             ExecutionValue::Count(0),
         ),
@@ -6408,24 +6956,20 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
         (
             vec![
                 access(),
-                project(ir::ProjectionPlan::Count),
+                count_rows(),
                 exec::ExecOp::Distinct,
-                project(ir::ProjectionPlan::Count),
+                count_scalars(),
             ],
             ExecutionValue::Count(1),
         ),
         (
-            vec![
-                access(),
-                project(ir::ProjectionPlan::Id),
-                project(ir::ProjectionPlan::Count),
-            ],
+            vec![access(), project(ir::ProjectionPlan::Id), count_scalars()],
             ExecutionValue::Count(2),
         ),
         (
             vec![
                 access(),
-                project(ir::ProjectionPlan::Count),
+                count_rows(),
                 exec::ExecOp::Aggregate {
                     aggregate: ir::AggregatePlan::AggregateBy {
                         function: traversal::AggregateFunction::Count,
@@ -6447,11 +6991,11 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
         (
             vec![
                 access(),
-                project(ir::ProjectionPlan::Count),
+                count_rows(),
                 exec::ExecOp::Limit {
                     count: ir::StreamBoundPlan::Literal(1),
                 },
-                project(ir::ProjectionPlan::Count),
+                count_scalars(),
             ],
             ExecutionValue::Count(1),
         ),
@@ -6462,7 +7006,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
                 exec::ExecOp::Limit {
                     count: ir::StreamBoundPlan::Literal(1),
                 },
-                project(ir::ProjectionPlan::Count),
+                count_scalars(),
             ],
             ExecutionValue::Count(1),
         ),
@@ -6475,11 +7019,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
             ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(0), ExecutionScalar::NodeId(1)]),
         ),
         (
-            vec![
-                access(),
-                project(ir::ProjectionPlan::Count),
-                project(ir::ProjectionPlan::Id),
-            ],
+            vec![access(), count_rows(), project(ir::ProjectionPlan::Id)],
             ExecutionValue::Scalars(Vec::new()),
         ),
         (
@@ -6502,7 +7042,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
                 exec::ExecOp::Reserved {
                     op: ir::ReservedOp::Unfold,
                 },
-                project(ir::ProjectionPlan::Count),
+                count_rows(),
             ],
             ExecutionValue::Count(2),
         ),
@@ -6560,7 +7100,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
 
     let invalid_unfold = linear_plan(vec![
         access(),
-        project(ir::ProjectionPlan::Count),
+        count_rows(),
         exec::ExecOp::Reserved {
             op: ir::ReservedOp::Unfold,
         },
@@ -6576,7 +7116,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
 
     let scalar_group = linear_plan(vec![
         access(),
-        project(ir::ProjectionPlan::Count),
+        count_rows(),
         exec::ExecOp::Aggregate {
             aggregate: ir::AggregatePlan::Group(
                 ir::NonEmptyString::new("unused").expect("group property is non-empty"),
@@ -6656,6 +7196,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 id: exec::ExecStepId::new(index + 1).expect("access step ID is positive"),
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op: exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
@@ -6673,6 +7214,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 .map(|id| exec::ExecStepId::new(id).expect("dependency ID is positive"))
                 .collect(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: exec::ExecOp::Merge { mode },
             schedule: exec::ExecSchedule::Pipeline,
@@ -6751,6 +7293,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 id: exec::ExecStepId::new(index + 1).expect("dependency step ID is positive"),
                 dependencies: Vec::new(),
                 output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
                 condition: exec::ExecCondition::Always,
                 op,
                 schedule,
@@ -6764,6 +7307,7 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
                 .map(|id| exec::ExecStepId::new(id).expect("dependency ID is positive"))
                 .collect(),
             output: ir::BatchOutputPlan::Discard,
+            semantic_return_shape: None,
             condition: exec::ExecCondition::Always,
             op: exec::ExecOp::Noop,
             schedule: exec::ExecSchedule::Pipeline,
@@ -6782,8 +7326,8 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
     };
     let scalar_plan = dependency_plan(vec![
         (
-            exec::ExecOp::Project {
-                projection: ir::ProjectionPlan::Count,
+            exec::ExecOp::Count {
+                plan: Box::new(exec::ExecCountPlan::Constant(0)),
             },
             exec::ExecSchedule::Pipeline,
         ),
@@ -6826,8 +7370,8 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
             exec::ExecSchedule::Pipeline,
         ),
         (
-            exec::ExecOp::Project {
-                projection: ir::ProjectionPlan::Count,
+            exec::ExecOp::Count {
+                plan: Box::new(exec::ExecCountPlan::Constant(0)),
             },
             exec::ExecSchedule::Pipeline,
         ),

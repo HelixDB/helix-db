@@ -17,7 +17,10 @@ fn name(value: &str) -> ir::NonEmptyString {
 #[test]
 fn native_access_stream_lowers_to_specific_single_op_contracts() {
     let filter = nodes()
-        .filter(&Predicate::eq("age", 42))
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("age", 42),
+        )
         .unwrap()
         .into_logical_expr()
         .unwrap();
@@ -39,7 +42,10 @@ fn native_access_stream_lowers_to_specific_single_op_contracts() {
 #[test]
 fn native_access_stream_lowers_composed_ops_to_pipeline_contract() {
     let pipeline = nodes()
-        .filter(&Predicate::eq("active", true))
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("active", true),
+        )
         .unwrap()
         .limit(&StreamBound::expr(Expr::param("limit")))
         .unwrap()
@@ -54,6 +60,33 @@ fn native_access_stream_lowers_composed_ops_to_pipeline_contract() {
                 logical::StreamPipelineOp::Limit { count: ir::StreamBoundPlan::Expr(_) },
                 logical::StreamPipelineOp::Distinct
             ])
+    ));
+}
+
+#[test]
+fn native_access_stream_canonicalizes_filters_before_shape_selection() {
+    let predicate = Predicate::and(vec![
+        Predicate::eq("active", true),
+        Predicate::eq("verified", true),
+    ]);
+    let filtered = nodes()
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("active", true),
+        )
+        .unwrap()
+        .filter(
+            &crate::context::PlannerContext::default(),
+            &Predicate::eq("verified", true),
+        )
+        .unwrap()
+        .into_logical_expr()
+        .unwrap();
+
+    assert!(matches!(
+        filtered,
+        logical::LogicalExpr::AccessFilter(filter)
+            if filter.predicate().as_ref() == &predicate
     ));
 }
 
@@ -128,5 +161,28 @@ fn native_access_stream_validates_stream_bounds() {
     assert!(matches!(
         invalid_range,
         Err(error::PlannerError::InvalidStreamRange { start: 8, end: 2 })
+    ));
+}
+
+#[test]
+fn native_access_stream_filter_validates_predicates_and_defers_missing_bindings() {
+    let ctx = crate::context::PlannerContext::default();
+    for predicate in [Predicate::eq("", 1), Predicate::eq("$label", "")] {
+        assert!(nodes().filter(&ctx, &predicate).is_err());
+    }
+
+    let predicate = Predicate::and(vec![
+        Predicate::eq_param("status", "missing_status"),
+        Predicate::is_in_param("group", "missing_groups"),
+    ]);
+    let filtered = nodes()
+        .filter(&ctx, &predicate)
+        .unwrap()
+        .into_logical_expr()
+        .unwrap();
+    assert!(matches!(
+        filtered,
+        logical::LogicalExpr::AccessFilter(filter)
+            if filter.predicate() == &ir::PredicatePlan::new(predicate).unwrap()
     ));
 }

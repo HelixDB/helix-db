@@ -6,6 +6,7 @@
 
 mod access;
 mod control;
+mod count;
 mod ddl;
 mod dependencies;
 mod dispatch;
@@ -20,7 +21,8 @@ mod state;
 mod storage;
 mod stream;
 mod subplan;
-#[cfg(test)]
+#[cfg(any(test, feature = "production-coverage"))]
+#[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
 mod test_support;
 mod types;
 
@@ -30,7 +32,7 @@ pub mod production_contracts;
 
 pub use types::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue, FoldedStream,
-    RowPath, RowSack, RowVirtualProperties,
+    ReturnedValue, RowPath, RowSack, RowVirtualProperties,
 };
 use types::{ExecutionValueSlot, ExecutionValueStore};
 
@@ -39,13 +41,19 @@ use helix_planner::{context, exec, ir};
 
 use self::runtime_context::ExecutionContext;
 use crate::encoding::keys;
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::decode_properties;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::encoding::property::Property;
-use crate::encoding::v1::values;
+use crate::encoding::v2::values;
 use crate::error::{HelixDbError, Result};
 use crate::HelixDB;
+
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) async fn run_cardinality_production_contracts() {
+    access::run_production_contracts().await;
+    count::run_production_contracts().await;
+}
 
 /// Step-by-step executor for planner executable IR.
 pub struct Interpreter<'db> {
@@ -160,7 +168,7 @@ impl<'db> Interpreter<'db> {
         {
             return Err(error);
         }
-        let result = self.ctx.finish(plan.root(), plan.returns());
+        let result = self.ctx.finish(plan.root(), plan.executable_returns());
         if result.is_ok()
             && matches!(
                 request_mode,
@@ -244,6 +252,7 @@ impl RequestSideEffects {
             exec::ExecOp::Repeat { plan } => Self::subplan(&plan.body),
             exec::ExecOp::ForEach { body, .. } => Self::subplan(body),
             exec::ExecOp::Access { .. }
+            | exec::ExecOp::Count { .. }
             | exec::ExecOp::KvRead(_)
             | exec::ExecOp::Expand { .. }
             | exec::ExecOp::VectorSearch { .. }
@@ -446,7 +455,7 @@ mod cancellation_tests {
             .expect_err("expired write must not execute");
         assert!(matches!(error, HelixDbError::QueryDeadlineExceeded));
 
-        let node_key = keys::Key::Data {
+        let node_key = keys::DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(0)),
         }
@@ -475,7 +484,7 @@ mod cutover_tests {
         )
         .expect("validated vector definition");
         let source_upper_bound = crate::index_lifecycle::IndexCursor::try_new(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(0)),
             }
@@ -524,7 +533,7 @@ mod cutover_tests {
             .await
             .expect("graph mutation and vector delta commit together");
 
-        let delta_key = crate::encoding::v2::keys::Key::Data {
+        let delta_key = crate::encoding::v2::keys::ManagedIndexKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: crate::encoding::v2::keys::ScopedKey::BuildDelta(
                 crate::encoding::v2::keys::IndexEntityStateKey {
@@ -540,7 +549,7 @@ mod cutover_tests {
         .to_bytes();
         assert!(db.inner_db().get(delta_key).await.unwrap().is_some());
 
-        let allocator_key = keys::Key::Global {
+        let allocator_key = keys::DataKey::Global {
             kind: keys::GlobalKeyKind::Metadata(keys::metadata::MetadataKey::next_node_id_key()),
         }
         .to_bytes();
@@ -555,7 +564,7 @@ mod cutover_tests {
         )
         .expect("validated text definition");
         let source_upper_bound = crate::index_lifecycle::IndexCursor::try_new(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(0)),
             }
@@ -604,7 +613,7 @@ mod cutover_tests {
             .await
             .expect("graph mutation and text delta commit together");
 
-        let delta_key = crate::encoding::v2::keys::Key::Data {
+        let delta_key = crate::encoding::v2::keys::ManagedIndexKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: crate::encoding::v2::keys::ScopedKey::BuildDelta(
                 crate::encoding::v2::keys::IndexEntityStateKey {

@@ -30,7 +30,10 @@ impl ExecutableDagBuilder<'_> {
             SelectedInitialExecutableBatchEntry::Run(entry) => {
                 let entry = *entry;
                 let condition = initial_exec_condition(entry.condition);
-                self.push_selected_run_root(entry.root, Vec::new(), entry.output, condition)?
+                let root =
+                    self.push_selected_run_root(entry.root, Vec::new(), entry.output, condition)?;
+                self.capture_bound_return_shape(root, entry.return_shape);
+                root
             }
             SelectedInitialExecutableBatchEntry::ForEach(batch) => {
                 let (param, body) = batch.into_parts();
@@ -52,7 +55,14 @@ impl ExecutableDagBuilder<'_> {
             SelectedFollowupExecutableBatchEntry::Run(entry) => {
                 let entry = *entry;
                 let condition = followup_exec_condition(entry.condition, previous);
-                self.push_selected_run_root(entry.root, vec![previous], entry.output, condition)?
+                let root = self.push_selected_run_root(
+                    entry.root,
+                    vec![previous],
+                    entry.output,
+                    condition,
+                )?;
+                self.capture_bound_return_shape(root, entry.return_shape);
+                root
             }
             SelectedFollowupExecutableBatchEntry::ForEach(batch) => {
                 let (param, body) = batch.into_parts();

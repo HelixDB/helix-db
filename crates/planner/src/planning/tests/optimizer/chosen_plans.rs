@@ -12,10 +12,10 @@ fn cascades_chosen_access_matrix_proves_index_family_and_trace() {
     assert_selected_rule(&node_equality, KnownRuleId::SeedAccessPath);
     assert!(matches!(
         unwrapped_first_exec_access(&node_equality),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, value, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, value, .. } })
             if key.label == "User"
                 && key.property == "username"
-                && matches!(value, IndexValue::Literal(_))
+                && value.literal().as_property_value().as_str() == Some("alice")
     ));
     assert_no_exec_op_family(&node_equality, ExecOpFamily::Filter);
     assert_no_exec_op_family(&node_equality, ExecOpFamily::Order);
@@ -29,10 +29,9 @@ fn cascades_chosen_access_matrix_proves_index_family_and_trace() {
     assert_selected_rule(&node_unique, KnownRuleId::SeedAccessPath);
     assert!(matches!(
         unwrapped_first_exec_access(&node_unique),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, index, .. })
-            if key.label == "User"
-                && key.property == "email"
-                && index.uniqueness == IndexUniqueness::Unique
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Unique { lookup, .. })
+            if lookup.key.label == "User"
+                && lookup.key.property == "email"
     ));
     assert_no_exec_op_family(&node_unique, ExecOpFamily::Filter);
     assert_no_exec_op_family(&node_unique, ExecOpFamily::Order);
@@ -70,10 +69,10 @@ fn cascades_chosen_access_matrix_proves_index_family_and_trace() {
     assert_selected_rule(&edge_equality, KnownRuleId::SeedAccessPath);
     assert!(matches!(
         unwrapped_first_exec_access(&edge_equality),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, value, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, value, .. } })
             if key.label == "FOLLOWS"
                 && key.property == "status"
-                && matches!(value, IndexValue::Literal(_))
+                && value.literal().as_property_value().as_str() == Some("active")
     ));
     assert_no_exec_op_family(&edge_equality, ExecOpFamily::Filter);
     assert_no_exec_op_family(&edge_equality, ExecOpFamily::Order);
@@ -238,7 +237,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&node_filter, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&node_filter),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -258,7 +257,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&edge_filter, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&edge_filter),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. } })
             if key.label == "FOLLOWS" && key.property == "status"
     ));
     assert!(matches!(
@@ -278,7 +277,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&node_label_filter, KnownRuleId::SeedAccessPath);
     assert!(matches!(
         unwrapped_first_exec_access(&node_label_filter),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert_no_exec_op_family(&node_label_filter, ExecOpFamily::Filter);
@@ -294,7 +293,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&edge_label_filter, KnownRuleId::SeedAccessPath);
     assert!(matches!(
         unwrapped_first_exec_access(&edge_label_filter),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. } })
             if key.label == "FOLLOWS" && key.property == "status"
     ));
     assert_no_exec_op_family(&edge_label_filter, ExecOpFamily::Filter);
@@ -310,7 +309,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&generic_where, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&generic_where),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -330,7 +329,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&explicit_order, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&explicit_order),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -355,7 +354,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_eq!(first_limited_access_limit(&indexed_skip), None);
     assert!(matches!(
         unwrapped_first_exec_access(&indexed_skip),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. } })
             if key.label == "FOLLOWS" && key.property == "status"
     ));
     assert!(matches!(
@@ -381,7 +380,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&variables, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&variables),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     let variable_ops = variables
@@ -419,7 +418,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&store, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&store),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -448,7 +447,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&stream_inject, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&stream_inject),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -473,7 +472,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&dedup, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&dedup),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -493,7 +492,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&node_expand, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&node_expand),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -519,7 +518,7 @@ fn cascades_stream_wrapper_matrix_preserves_indexed_access_and_wrapper_ops() {
     assert_selected_rule(&edge_expand, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&edge_expand),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. } })
             if key.label == "FOLLOWS" && key.property == "status"
     ));
     assert!(matches!(
@@ -728,21 +727,7 @@ fn cascades_chosen_access_matrix_proves_index_set_families() {
     );
     assert_selected_root_family(&node_union, "alternative");
     assert_selected_rule(&node_union, KnownRuleId::SeedAccessPath);
-    assert!(
-        node_union.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Union)
-        ),
-        "missing union merge in plan: {:?}",
-        node_union.steps()
-    );
-    assert_eq!(
-        access_steps_matching(&node_union, |access| matches!(
-            access,
-            ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
-                if key.label == "User" && key.property == "username"
-        )),
-        2
-    );
+    assert_batched_node_equality_set(&node_union, "User", "username", 2);
     assert_no_exec_op_family(&node_union, ExecOpFamily::Filter);
     assert_no_exec_op_family(&node_union, ExecOpFamily::Order);
     assert_no_exec_window(&node_union);
@@ -759,39 +744,121 @@ fn cascades_chosen_access_matrix_proves_index_set_families() {
     );
     assert_selected_root_family(&edge_intersection, "alternative");
     assert_selected_rule(&edge_intersection, KnownRuleId::SeedAccessPath);
-    assert!(
-        edge_intersection.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Intersect)
-        ),
-        "missing intersect merge in plan: {:?}",
-        edge_intersection.steps()
-    );
-    assert_eq!(
-        access_steps_matching(&edge_intersection, |access| matches!(
-            access,
-            ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
-                if key.label == "FOLLOWS" && key.property == "status"
-        )),
-        1
-    );
-    assert_eq!(
-        access_steps_matching(&edge_intersection, |access| matches!(
-            access,
-            ExecAccessPlan::Edge(ExecEdgeAccessPlan::RangeIndex { key, range, .. })
-                if key.label == "FOLLOWS"
-                    && key.property == "weight"
-                    && matches!(
-                        range,
-                        IndexRange::Upper {
-                            upper: IndexBound::Exclusive(_)
-                        }
-                    )
-        )),
-        1
-    );
+    assert_ordered_edge_secondary_intersection(&edge_intersection, "FOLLOWS", "weight", "status");
     assert_no_exec_op_family(&edge_intersection, ExecOpFamily::Filter);
     assert_no_exec_op_family(&edge_intersection, ExecOpFamily::Order);
     assert_no_exec_window(&edge_intersection);
+}
+
+#[test]
+fn cascades_ordered_secondary_intersections_elide_explicit_sorts() {
+    let indexes = chosen_plan_indexes();
+    let node = executable_traversal(
+        g().n_with_label_where(
+            "User",
+            Predicate::and(vec![
+                Predicate::eq("username", "alice"),
+                Predicate::gte("age", 21),
+            ]),
+        )
+        .order_by("age", Order::Asc)
+        .limit(5usize),
+        ctx(indexes.clone()),
+    );
+    let edge = executable_traversal(
+        g().e_with_label_where(
+            "FOLLOWS",
+            Predicate::and(vec![
+                Predicate::eq("status", "active"),
+                Predicate::lte("weight", 50),
+            ]),
+        )
+        .order_by("weight", Order::Asc)
+        .limit(5usize),
+        ctx(indexes),
+    );
+
+    assert_ordered_node_secondary_intersection(&node, "User", "age", "username");
+    assert_ordered_edge_secondary_intersection(&edge, "FOLLOWS", "weight", "status");
+    assert_no_exec_op_family(&node, ExecOpFamily::Order);
+    assert_no_exec_op_family(&edge, ExecOpFamily::Order);
+    assert_eq!(first_limited_access_limit(&node), Some(5));
+    assert_eq!(first_limited_access_limit(&edge), Some(5));
+}
+
+#[test]
+fn cascades_ordered_secondary_intersections_promote_the_requested_range_driver() {
+    let node_age =
+        ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc).unwrap();
+    let node_score =
+        ScopedPropertyDirectionKey::try_new("User", "score", RangeIndexDirection::Asc).unwrap();
+    let edge_age =
+        ScopedPropertyDirectionKey::try_new("FOLLOWS", "age", RangeIndexDirection::Desc).unwrap();
+    let edge_score =
+        ScopedPropertyDirectionKey::try_new("FOLLOWS", "score", RangeIndexDirection::Desc).unwrap();
+    let indexes = builtin_label_indexes()
+        .with_node_range(node_age.clone())
+        .with_node_range(node_score.clone())
+        .with_edge_range(edge_age.clone())
+        .with_edge_range(edge_score.clone());
+    let stats = StatsSnapshot::default()
+        .with_node_range_cardinality(node_age, 2)
+        .with_node_range_cardinality(node_score, 20)
+        .with_edge_range_cardinality(edge_age, 2)
+        .with_edge_range_cardinality(edge_score, 20);
+    let node = executable_traversal(
+        g().n_with_label_where(
+            "User",
+            Predicate::and(vec![Predicate::gte("age", 18), Predicate::gte("score", 0)]),
+        )
+        .order_by("score", Order::Asc)
+        .limit(2usize),
+        PlannerContext {
+            indexes: indexes.clone(),
+            stats: stats.clone(),
+            ..PlannerContext::default()
+        },
+    );
+    let edge = executable_traversal(
+        g().e_with_label_where(
+            "FOLLOWS",
+            Predicate::and(vec![Predicate::lte("age", 99), Predicate::lte("score", 99)]),
+        )
+        .order_by("score", Order::Desc)
+        .limit(2usize),
+        PlannerContext {
+            indexes,
+            stats,
+            ..PlannerContext::default()
+        },
+    );
+
+    assert!(matches!(
+        unwrapped_first_exec_access(&node),
+        ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet {
+            set: crate::exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters }
+        }) if driver.key.property == "score"
+            && filters.iter().any(|filter| matches!(
+                filter,
+                crate::exec::ExecNodeSecondarySetPlan::Range(range)
+                    if range.key.property == "age"
+            ))
+    ));
+    assert!(matches!(
+        unwrapped_first_exec_access(&edge),
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet {
+            set: crate::exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters }
+        }) if driver.key.property == "score"
+            && filters.iter().any(|filter| matches!(
+                filter,
+                crate::exec::ExecEdgeSecondarySetPlan::Range(range)
+                    if range.key.property == "age"
+            ))
+    ));
+    assert_no_exec_op_family(&node, ExecOpFamily::Order);
+    assert_no_exec_op_family(&edge, ExecOpFamily::Order);
+    assert_eq!(first_limited_access_limit(&node), Some(2));
+    assert_eq!(first_limited_access_limit(&edge), Some(2));
 }
 
 #[test]
@@ -810,24 +877,11 @@ fn cascades_index_set_limits_remain_semantic_after_set_merges() {
         ctx(indexes.clone()),
     );
     assert_access_window_selected(&limited_node_union);
-    assert!(
-        limited_node_union.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Union)
-        ),
-        "missing union merge in plan: {:?}",
-        limited_node_union.steps()
-    );
-    assert_eq!(
-        access_steps_matching(&limited_node_union, |access| matches!(
-            access,
-            ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
-                if key.label == "User" && key.property == "username"
-        )),
-        2
-    );
+    assert_batched_node_equality_set(&limited_node_union, "User", "username", 2);
     assert_no_exec_op_family(&limited_node_union, ExecOpFamily::Filter);
     assert_no_exec_op_family(&limited_node_union, ExecOpFamily::Order);
-    assert_retained_static_prefix_window(&limited_node_union, 1);
+    assert_eq!(first_limited_access_limit(&limited_node_union), Some(1));
+    assert_no_exec_op_family(&limited_node_union, ExecOpFamily::Limit);
 
     let limited_edge_intersection = executable_traversal(
         g().e_with_label_where(
@@ -841,32 +895,19 @@ fn cascades_index_set_limits_remain_semantic_after_set_merges() {
         ctx(indexes),
     );
     assert_access_window_selected(&limited_edge_intersection);
-    assert!(
-        limited_edge_intersection.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Intersect)
-        ),
-        "missing intersect merge in plan: {:?}",
-        limited_edge_intersection.steps()
-    );
-    assert_eq!(
-        access_steps_matching(&limited_edge_intersection, |access| matches!(
-            access,
-            ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
-                if key.label == "FOLLOWS" && key.property == "status"
-        )),
-        1
-    );
-    assert_eq!(
-        access_steps_matching(&limited_edge_intersection, |access| matches!(
-            access,
-            ExecAccessPlan::Edge(ExecEdgeAccessPlan::RangeIndex { key, .. })
-                if key.label == "FOLLOWS" && key.property == "weight"
-        )),
-        1
+    assert_ordered_edge_secondary_intersection(
+        &limited_edge_intersection,
+        "FOLLOWS",
+        "weight",
+        "status",
     );
     assert_no_exec_op_family(&limited_edge_intersection, ExecOpFamily::Filter);
     assert_no_exec_op_family(&limited_edge_intersection, ExecOpFamily::Order);
-    assert_retained_static_prefix_window(&limited_edge_intersection, 1);
+    assert_eq!(
+        first_limited_access_limit(&limited_edge_intersection),
+        Some(1)
+    );
+    assert_no_exec_op_family(&limited_edge_intersection, ExecOpFamily::Limit);
 }
 
 #[test]
@@ -885,19 +926,9 @@ fn cascades_index_set_ranges_push_end_caps_and_keep_range_suffixes() {
         ctx(indexes.clone()),
     );
     assert_access_window_selected(&ranged_node_union);
-    assert!(
-        ranged_node_union.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Union)
-        ),
-        "missing union merge in plan: {:?}",
-        ranged_node_union.steps()
-    );
-    assert!(matches!(
-        first_exec_op(&ranged_node_union, |op| matches!(op, ExecOp::Limit { .. })),
-        ExecOp::Limit {
-            count: StreamBoundPlan::Literal(2),
-        }
-    ));
+    assert_batched_node_equality_set(&ranged_node_union, "User", "username", 2);
+    assert_eq!(first_limited_access_limit(&ranged_node_union), Some(2));
+    assert_no_exec_op_family(&ranged_node_union, ExecOpFamily::Limit);
     assert_exec_range(&ranged_node_union, 1, 2);
     assert_no_exec_op_family(&ranged_node_union, ExecOpFamily::Filter);
     assert_no_exec_op_family(&ranged_node_union, ExecOpFamily::Order);
@@ -914,22 +945,17 @@ fn cascades_index_set_ranges_push_end_caps_and_keep_range_suffixes() {
         ctx(indexes),
     );
     assert_access_window_selected(&ranged_edge_intersection);
-    assert!(
-        ranged_edge_intersection.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Intersect)
-        ),
-        "missing intersect merge in plan: {:?}",
-        ranged_edge_intersection.steps()
+    assert_ordered_edge_secondary_intersection(
+        &ranged_edge_intersection,
+        "FOLLOWS",
+        "weight",
+        "status",
     );
-    assert!(matches!(
-        first_exec_op(&ranged_edge_intersection, |op| matches!(
-            op,
-            ExecOp::Limit { .. }
-        )),
-        ExecOp::Limit {
-            count: StreamBoundPlan::Literal(2),
-        }
-    ));
+    assert_eq!(
+        first_limited_access_limit(&ranged_edge_intersection),
+        Some(2)
+    );
+    assert_no_exec_op_family(&ranged_edge_intersection, ExecOpFamily::Limit);
     assert_exec_range(&ranged_edge_intersection, 1, 2);
     assert_no_exec_op_family(&ranged_edge_intersection, ExecOpFamily::Filter);
     assert_no_exec_op_family(&ranged_edge_intersection, ExecOpFamily::Order);
@@ -954,13 +980,7 @@ fn cascades_index_set_dynamic_ranges_remain_downstream_runtime_bounds() {
         ctx(indexes.clone()),
     );
     assert_selected_root_family(&dynamic_node_union, "alternative");
-    assert!(
-        dynamic_node_union.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Union)
-        ),
-        "missing union merge in plan: {:?}",
-        dynamic_node_union.steps()
-    );
+    assert_batched_node_equality_set(&dynamic_node_union, "User", "username", 2);
     assert!(matches!(
         first_exec_op(&dynamic_node_union, |op| matches!(op, ExecOp::Range { .. })),
         ExecOp::Range {
@@ -986,12 +1006,11 @@ fn cascades_index_set_dynamic_ranges_remain_downstream_runtime_bounds() {
         ctx(indexes),
     );
     assert_selected_root_family(&dynamic_edge_intersection, "alternative");
-    assert!(
-        dynamic_edge_intersection.steps().iter().any(
-            |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Intersect)
-        ),
-        "missing intersect merge in plan: {:?}",
-        dynamic_edge_intersection.steps()
+    assert_ordered_edge_secondary_intersection(
+        &dynamic_edge_intersection,
+        "FOLLOWS",
+        "weight",
+        "status",
     );
     assert!(matches!(
         first_exec_op(&dynamic_edge_intersection, |op| matches!(
@@ -1060,7 +1079,7 @@ fn cascades_chosen_predicate_matrix_proves_static_and_residual_filters() {
     assert_selected_rule(&node_residual, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&node_residual),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert_eq!(
@@ -1099,7 +1118,7 @@ fn cascades_chosen_predicate_matrix_proves_static_and_residual_filters() {
     assert_selected_rule(&edge_residual, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&edge_residual),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. } })
             if key.label == "FOLLOWS" && key.property == "status"
     ));
     assert_eq!(
@@ -1145,7 +1164,7 @@ fn cascades_partial_index_residuals_keep_limits_after_filters() {
     assert_eq!(first_limited_access_limit(&limited_node), None);
     assert!(matches!(
         unwrapped_first_exec_access(&limited_node),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(
@@ -1171,7 +1190,7 @@ fn cascades_partial_index_residuals_keep_limits_after_filters() {
     assert_eq!(first_limited_access_limit(&limited_edge), None);
     assert!(matches!(
         unwrapped_first_exec_access(&limited_edge),
-        ExecAccessPlan::Edge(ExecEdgeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. } })
             if key.label == "FOLLOWS" && key.property == "status"
     ));
     assert!(matches!(
@@ -1310,7 +1329,7 @@ fn cascades_limit_pushdown_matrix_proves_tight_caps_and_barriers() {
     assert_eq!(first_limited_access_limit(&equality_limit), Some(2));
     assert!(matches!(
         unwrapped_first_exec_access(&equality_limit),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert_no_exec_window(&equality_limit);
@@ -1325,7 +1344,7 @@ fn cascades_limit_pushdown_matrix_proves_tight_caps_and_barriers() {
     assert_eq!(first_limited_access_limit(&equality_skip_limit), Some(5));
     assert!(matches!(
         unwrapped_first_exec_access(&equality_skip_limit),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert_exec_range(&equality_skip_limit, 2, 5);
@@ -1342,10 +1361,9 @@ fn cascades_limit_pushdown_matrix_proves_tight_caps_and_barriers() {
     assert_eq!(first_limited_access_limit(&unique_covering_limit), None);
     assert!(matches!(
         unwrapped_first_exec_access(&unique_covering_limit),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, index, .. })
-            if key.label == "User"
-                && key.property == "email"
-                && index.uniqueness == IndexUniqueness::Unique
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Unique { lookup, .. })
+            if lookup.key.label == "User"
+                && lookup.key.property == "email"
     ));
     assert_no_exec_op_family(&unique_covering_limit, ExecOpFamily::Distinct);
     assert_no_exec_window(&unique_covering_limit);
@@ -1367,10 +1385,9 @@ fn cascades_limit_pushdown_matrix_proves_tight_caps_and_barriers() {
     );
     assert!(matches!(
         unwrapped_first_exec_access(&unique_distinct_covering_limit),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, index, .. })
-            if key.label == "User"
-                && key.property == "email"
-                && index.uniqueness == IndexUniqueness::Unique
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Unique { lookup, .. })
+            if lookup.key.label == "User"
+                && lookup.key.property == "email"
     ));
     assert_no_exec_op_family(&unique_distinct_covering_limit, ExecOpFamily::Distinct);
     assert_no_exec_window(&unique_distinct_covering_limit);
@@ -1397,7 +1414,7 @@ fn cascades_limit_pushdown_matrix_proves_tight_caps_and_barriers() {
     assert_eq!(first_limited_access_limit(&dynamic_equality_limit), None);
     assert!(matches!(
         unwrapped_first_exec_access(&dynamic_equality_limit),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
             if key.label == "User" && key.property == "username"
     ));
     assert!(matches!(

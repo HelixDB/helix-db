@@ -20,10 +20,10 @@ use crate::config::{
 };
 use crate::encoding::property::property_value::PropertyValue as StoredPropertyValue;
 use crate::encoding::property::{encode_properties, Property};
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-use crate::encoding::v1::keys::{AdjacencyKey, DataKeyKind, Key, NodePropertyKey};
-use crate::encoding::v1::values::edges::{encode_edges, Edges};
 use crate::encoding::v2::keys as index_keys;
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
+use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, NodePropertyKey};
+use crate::encoding::v2::values::adjacency::{encode_edges, Edges};
 use crate::execution::interpreter::{ExecutionResult, ExecutionScalar, ExecutionValue};
 use crate::index_lifecycle::{
     IndexDdlReceipt, IndexOperationStage, IndexOperationStatus, IndexOperationStatusCommon,
@@ -67,6 +67,7 @@ fn step(id: usize, dependencies: Vec<exec::ExecStepId>, op: exec::ExecOp) -> exe
         id: exec::ExecStepId::new(id).expect("scale fixture step ids are positive"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,
@@ -132,17 +133,17 @@ fn equality_search_plan(property: &str, value: PlannerPropertyValue) -> exec::Ex
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{property}"
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, property)
+                            catalog::ScopedPropertyKey::try_new(LABEL, property)
                                 .expect("scale equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(value)
                                     .expect("scale equality literal is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),
@@ -213,19 +214,19 @@ fn traversal_prefilter_plan(group: &str) -> exec::ExecutablePlan {
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{NON_UNIQUE_PROPERTY}"
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
+                            catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
                                 .expect("traversal equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(PlannerPropertyValue::String(
                                     group.to_string(),
                                 ))
                                 .expect("traversal equality literal is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),
@@ -265,19 +266,19 @@ fn traversal_prefilter_vector_plan(group: &str, query: Vec<f32>) -> exec::Execut
                 Vec::new(),
                 exec::ExecOp::Access {
                     plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::EqualityIndex {
-                            index: catalog::NodeEqualityIndexMeta::new(name(&format!(
+                        exec::ExecNodeAccessPlan::exact_equality(
+                            catalog::NodeEqualityIndexMeta::new(name(&format!(
                                 "node_eq:{LABEL}:{NON_UNIQUE_PROPERTY}"
                             ))),
-                            key: catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
+                            catalog::ScopedPropertyKey::try_new(LABEL, NON_UNIQUE_PROPERTY)
                                 .expect("traversal equality key is valid"),
-                            value: ir::IndexValue::Literal(
+                            ir::IndexValue::Literal(
                                 ir::SecondaryIndexLiteral::new(PlannerPropertyValue::String(
                                     group.to_string(),
                                 ))
                                 .expect("traversal equality literal is indexable"),
                             ),
-                        },
+                        ),
                     )),
                 },
             ),
@@ -389,7 +390,7 @@ fn projected_node_ids(result: ExecutionResult) -> Vec<u64> {
 
 /// Returns a source key in exactly one typed data scope.
 fn source_key(scope: DataScope, entity_id: u64) -> bytes::Bytes {
-    Key::Data {
+    DataKey::Data {
         scope,
         kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
     }
@@ -398,7 +399,7 @@ fn source_key(scope: DataScope, entity_id: u64) -> bytes::Bytes {
 
 /// Returns one typed adjacency key in exactly one data scope.
 fn adjacency_key(scope: DataScope, entity_id: u64) -> bytes::Bytes {
-    Key::Data {
+    DataKey::Data {
         scope,
         kind: DataKeyKind::Adjacency(AdjacencyKey::new(entity_id)),
     }
@@ -949,7 +950,7 @@ async fn assert_no_lifecycle_residue(db: &HelixDB, scopes: &[DataScope]) {
             index_keys::RecordKind::TextStatisticsEntity,
             index_keys::RecordKind::VectorPartitionMapping,
         ] {
-            let prefix = Key::data_prefix(*scope, index_keys::ScopedKey::logical_prefix(kind));
+            let prefix = DataKey::data_prefix(*scope, index_keys::ScopedKey::logical_prefix(kind));
             let mut rows = writer
                 .db()
                 .scan_prefix(

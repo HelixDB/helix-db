@@ -1,6 +1,6 @@
 ---
 title: "Getting started with HelixDB CLI"
-description: "Install the Helix CLI v3, bootstrap a first app, run a local instance, and send your first dynamic query"
+description: "Install the Helix CLI 3.x release, bootstrap a first app, run a local instance, and send your first dynamic query"
 icon: "rocket"
 pageType: "Tutorial"
 ---
@@ -26,79 +26,34 @@ If you are starting a new project inside a coding-agent environment, use `helix 
 helix chef
 ```
 
-`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches your coding agent (Claude Code, Codex, or OpenCode) to generate the app from your build intent.
+`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches the first supported agent it finds: Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 
 <Note>
 **Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
 
-For a fully scriptable setup with **no** Cloud auth, skip `chef` and scaffold by hand: `helix init local` → `helix start dev` → `helix query dev --file …` (see the Local quickstart below). This path never prompts and never logs in.
+For a fully scriptable setup with **no** Cloud auth, skip `chef` and follow the
+[canonical local quickstart](/database/helix-db/start-here/quickstart). This path
+never prompts and never logs in.
 </Note>
 
 ## Local quickstart
 
-<Steps>
+Windows PowerShell installs the CLI with:
 
-<Step title="Install the Helix CLI">
-```bash
-curl -sSL "https://install.helix-db.com" | bash
+```powershell
+irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-If you already have the CLI installed, update it with [`helix update`](/cli/command-reference/update).
-</Step>
+Use the [canonical local quickstart](/database/helix-db/start-here/quickstart)
+for the executable `helix init local` → `helix start dev` → `helix query dev`
+→ `helix stop dev` journey. It lists the exact generated files, instance name,
+and query file so this CLI guide does not maintain a second copy of the tutorial.
 
-<Step title="Create a new project">
-```bash
-mkdir my-helix-app
-cd my-helix-app
-helix init
-```
+## Version names
 
-`helix init` scaffolds:
-
-- `helix.toml` with a single `[local.dev]` instance.
-- `.helix/` workspace state (added to `.gitignore`).
-- `examples/request.json` — a runnable read request you can send straight away.
-
-In a TTY, `helix init` prompts you to pick `local` or `enterprise`. Pass the subcommand directly to skip the prompt: `helix init local`.
-</Step>
-
-<Step title="Run the local dev runtime">
-```bash
-helix start dev
-```
-
-`helix start` pulls `ghcr.io/helixdb/helixdb:v0.0.4`, starts a background container named `helix-<project>-dev`, publishes port `6969`, and waits for `GET /healthz` to report ready before returning.
-
-To stream logs in the foreground instead, use `helix start dev --foreground` and stop the container with Ctrl-C.
-
-For persistent local data, use `helix start dev --disk`. Disk mode starts a CLI-managed MinIO sidecar and keeps data across `helix stop`.
-
-<Warning>
-The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
-</Warning>
-</Step>
-
-<Step title="Send a dynamic query">
-```bash
-helix query dev --file examples/request.json
-```
-
-The example request runs a read query that counts `User` nodes. Pass `--compact`
-to print on a single line, or `--warm` to populate caches. A standalone local
-warm read prints its normal response; Helix Cloud fanout returns no body.
-</Step>
-
-<Step title="Stop the instance when you are done">
-```bash
-helix stop dev
-```
-
-`helix stop` is idempotent — it reports cleanly if the instance was not running.
-</Step>
-
-</Steps>
-
-Edit `examples/request.json` (or write your own JSON files) and run `helix query dev --file …` again to iterate. See the [`helix query`](/cli/command-reference/query) reference for the request shape and validation rules.
+- **HelixDB v3** is the current product and SDK generation.
+- **Helix CLI 3.x** is the independently released command-line client. Run `helix --version` for the exact installed release.
+- **`POST /v2/query`** is the current HTTP wire endpoint. The endpoint version is independent of the product and CLI versions.
 
 ## Helix Cloud quickstart
 
@@ -135,7 +90,7 @@ helix add cloud --name production --cluster-id <cluster-id>
 <Step title="Sync metadata and query">
 ```bash
 helix sync production
-export HELIX_API_KEY="..."   # or whatever query_auth_env resolves to
+export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
 helix query production --file examples/request.json
 ```
 

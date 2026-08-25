@@ -16,8 +16,8 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::encoding::property::Property;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 #[cfg(test)]
 use crate::encoding::v2::keys::RecordKind;
 use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
@@ -210,6 +210,71 @@ impl TextMutationSet {
         &self.active_handles
     }
 
+    /// Returns whether any routed text definition can observe this transition.
+    ///
+    /// Only definite label/property absence is skipped here. Present candidate
+    /// documents remain routed so complete projection preserves the existing
+    /// fail-closed validation behavior for malformed indexed values or tenants.
+    pub(crate) fn routed_transition_relevant(
+        &self,
+        routes: &crate::index_lifecycle::mutation_catalog::RoutedMutationTargets<'_>,
+        transition: &crate::index_lifecycle::graph_mutation::GraphMutationTransition,
+    ) -> Result<bool> {
+        let before = transition.before().map_or(
+            &[][..],
+            crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::properties,
+        );
+        let after = transition.after().map_or(
+            &[][..],
+            crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::properties,
+        );
+        for route in routes.iter() {
+            let definition = match route {
+                crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(
+                    ordinal,
+                ) => {
+                    let Some(target) = self.targets.get(ordinal) else {
+                        return Err(corruption(
+                            "text mutation route named a build target outside its catalog",
+                        ));
+                    };
+                    &target.definition
+                }
+                crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(
+                    ordinal,
+                ) => {
+                    let Some(handle) = self.active_handles.get(ordinal) else {
+                        return Err(corruption(
+                            "text mutation route named an Active target outside its catalog",
+                        ));
+                    };
+                    let Some(definition) = handle.text_definition() else {
+                        return Err(corruption(
+                            "text mutation route named a non-text Active target",
+                        ));
+                    };
+                    definition
+                }
+                crate::index_lifecycle::mutation_catalog::MutationRouteTarget::Secondary(_)
+                | crate::index_lifecycle::mutation_catalog::MutationRouteTarget::Vector(_) => {
+                    continue;
+                }
+            };
+            let before_is_candidate = matches!(
+                super::projection::source_candidate(definition, before),
+                super::projection::TextSourceCandidate::Candidate(_)
+            );
+            let after_is_candidate = matches!(
+                super::projection::source_candidate(definition, after),
+                super::projection::TextSourceCandidate::Candidate(_)
+            );
+            if before_is_candidate || after_is_candidate {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Returns whether request-level Active outcome authority must be retained.
     #[cfg(test)]
     pub(crate) const fn has_active_handles(&self) -> bool {
@@ -278,14 +343,14 @@ pub(crate) async fn load_mutation_set(
     scope: DataScope,
 ) -> Result<TextMutationSet> {
     let logical_prefix = ScopedKey::logical_prefix(RecordKind::IndexRecord);
-    let physical_prefix = Key::data_prefix(scope, logical_prefix);
+    let physical_prefix = ManagedIndexKey::data_prefix(scope, logical_prefix);
     let mut rows = transaction.scan_prefix(&physical_prefix, ..).await?;
     let mut mutations = TextMutationSet::default();
     while let Some(row) = rows.next().await? {
-        let Key::Data {
+        let ManagedIndexKey::Data {
             kind: ScopedKey::IndexRecord(key),
             ..
-        } = Key::parse_from_slice(scope, &row.key)?
+        } = ManagedIndexKey::parse_from_slice(scope, &row.key)?
         else {
             return Err(corruption(
                 "text mutation catalog prefix yielded another key kind",
@@ -395,6 +460,17 @@ async fn prepare_text_build_deltas_from(
         let target = mutations.targets.get(ordinal).ok_or_else(|| {
             corruption("text mutation route named a build target outside its catalog")
         })?;
+        let before_is_candidate = matches!(
+            super::projection::source_candidate(&target.definition, entity.before),
+            super::projection::TextSourceCandidate::Candidate(_)
+        );
+        let after_is_candidate = matches!(
+            super::projection::source_candidate(&target.definition, entity.after),
+            super::projection::TextSourceCandidate::Candidate(_)
+        );
+        if !before_is_candidate && !after_is_candidate {
+            continue;
+        }
         let relevant_property_changed = std::iter::once("$label")
             .chain(std::iter::once(target.definition.property().as_str()))
             .chain(
@@ -605,9 +681,9 @@ pub(super) fn stage_validated_text_build_deltas(
     Ok(())
 }
 
-/// Encodes one scoped V2 key through the canonical `encoding/v1` boundary.
+/// Encodes one scoped V2 key through the canonical `encoding/v2` boundary.
 fn scoped_index_key(scope: DataScope, key: ScopedKey) -> bytes::Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 fn corruption(message: &str) -> HelixDbError {
@@ -626,7 +702,8 @@ mod tests {
     use crate::encoding::property::property_value::PropertyValue;
     use crate::encoding::v2::values::{decode_build_delta, encode_index_record};
     use crate::index_lifecycle::{
-        IndexOperationId, IndexRevision, IndexStateTransition, PhysicalGeneration,
+        graph_mutation, mutation_catalog, IndexOperationId, IndexRevision, IndexStateTransition,
+        PhysicalGeneration,
     };
 
     /// Opens an isolated in-memory database for one mutation contract.
@@ -661,6 +738,62 @@ mod tests {
             Property::new("tenant", PropertyValue::String(tenant.to_string())),
             Property::new("unrelated", PropertyValue::I64(unrelated)),
         ]
+    }
+
+    #[test]
+    fn routed_relevance_skips_only_definite_absence_and_rejects_invalid_ordinals() {
+        let mutations = TextMutationSet::one_build_target(
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            definition(),
+        );
+        let missing_property = graph_mutation::GraphMutationTransition::delete(
+            DataScope::LegacyUnscoped,
+            graph_mutation::GraphEntity::node(1),
+            graph_mutation::CanonicalPropertyRow::new(vec![
+                Property::new("$label", PropertyValue::String("Document".to_string())),
+                Property::new("tenant", PropertyValue::String("acme".to_string())),
+            ]),
+        );
+        let candidate = graph_mutation::GraphMutationTransition::delete(
+            DataScope::LegacyUnscoped,
+            graph_mutation::GraphEntity::node(2),
+            graph_mutation::CanonicalPropertyRow::new(properties("indexed", "acme", 1)),
+        );
+        let building = mutation_catalog::RoutedMutationTargets::Owned(vec![
+            mutation_catalog::MutationRouteTarget::TextBuilding(0),
+        ]);
+        assert!(!mutations
+            .routed_transition_relevant(&building, &missing_property)
+            .expect("missing property is a valid relevance decision"));
+        assert!(mutations
+            .routed_transition_relevant(&building, &candidate)
+            .expect("present property remains a candidate"));
+
+        let unrelated = mutation_catalog::RoutedMutationTargets::Owned(vec![
+            mutation_catalog::MutationRouteTarget::Secondary(0),
+            mutation_catalog::MutationRouteTarget::Vector(0),
+        ]);
+        assert!(!mutations
+            .routed_transition_relevant(&unrelated, &candidate)
+            .expect("other families are not text relevant"));
+
+        for (route, reason) in [
+            (
+                mutation_catalog::MutationRouteTarget::TextBuilding(1),
+                "text mutation route named a build target outside its catalog",
+            ),
+            (
+                mutation_catalog::MutationRouteTarget::TextActive(0),
+                "text mutation route named an Active target outside its catalog",
+            ),
+        ] {
+            let invalid = mutation_catalog::RoutedMutationTargets::Owned(vec![route]);
+            assert!(matches!(
+                mutations.routed_transition_relevant(&invalid, &candidate),
+                Err(HelixDbError::IndexCatalogCorruption(actual)) if actual == reason
+            ));
+        }
     }
 
     #[tokio::test]
@@ -715,7 +848,7 @@ mod tests {
             .await
             .expect("coalesced text delta commits");
 
-        let prefix = Key::data_prefix(
+        let prefix = ManagedIndexKey::data_prefix(
             scope,
             ScopedKey::generation_prefix(RecordKind::BuildDelta, index_id, generation),
         );
@@ -738,6 +871,42 @@ mod tests {
         assert_eq!(delta.generation, generation);
         assert_eq!(delta.entity_kind, IndexElementKind::Node);
         assert_eq!(delta.entity_id, IndexEntityId::new(7));
+    }
+
+    #[tokio::test]
+    async fn missing_property_delete_prepares_no_hidden_build_delta() {
+        let db = test_db("missing-property-delete-no-delta").await;
+        let scope = DataScope::LegacyUnscoped;
+        let mutations = TextMutationSet::one_build_target(
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            definition(),
+        );
+        let before = vec![
+            Property::new("$label", PropertyValue::String("Document".to_string())),
+            Property::new("tenant", PropertyValue::String("acme".to_string())),
+            Property::new("unrelated", PropertyValue::I64(1)),
+        ];
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("missing-property text transaction opens");
+
+        let prepared = prepare_text_build_deltas(
+            &transaction,
+            scope,
+            &mutations,
+            TextEntityMutation::new(IndexElementKind::Node, 8, &before, &[]),
+        )
+        .await
+        .expect("missing-property delete preparation succeeds");
+        assert_eq!(prepared.measurements().output_operations(), 0);
+        assert_eq!(prepared.measurements().output_bytes(), 0);
+
+        drop(transaction);
+        db.close()
+            .await
+            .expect("missing-property text database closes");
     }
 
     #[tokio::test]

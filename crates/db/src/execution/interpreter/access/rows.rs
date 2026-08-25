@@ -12,14 +12,47 @@ use crate::search::text::TextSearchHit;
 use crate::search::vector::{DistanceOutputVersion, TypedVectorSearchResult, VectorEntityId};
 
 impl<'db> ExecutionContext<'db> {
+    pub(in crate::execution::interpreter) fn verified_node_rows(
+        &self,
+        ids: Vec<u64>,
+    ) -> Result<ExecutionValue> {
+        ids.iter()
+            .try_for_each(|_| self.check_execution_deadline())?;
+        Ok(ExecutionValue::Stream(
+            ids.into_iter()
+                .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                .collect(),
+        ))
+    }
+
+    pub(in crate::execution::interpreter) fn verified_edge_rows(
+        &self,
+        ids: Vec<u64>,
+    ) -> Result<ExecutionValue> {
+        ids.iter()
+            .try_for_each(|_| self.check_execution_deadline())?;
+        Ok(ExecutionValue::Stream(
+            ids.into_iter()
+                .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
+                .collect(),
+        ))
+    }
+
     pub(in crate::execution::interpreter) async fn node_rows(
         &self,
         ids: Vec<u64>,
     ) -> Result<ExecutionValue> {
+        self.node_row_vec(ids).await.map(ExecutionValue::Stream)
+    }
+
+    pub(in crate::execution::interpreter) async fn node_row_vec(
+        &self,
+        ids: Vec<u64>,
+    ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for id in ids {
             self.check_execution_deadline()?;
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
             }
@@ -28,17 +61,24 @@ impl<'db> ExecutionContext<'db> {
                 rows.push(ExecutionRow::current(ElementRef::Node(id)));
             }
         }
-        Ok(ExecutionValue::Stream(rows))
+        Ok(rows)
     }
 
     pub(in crate::execution::interpreter) async fn edge_rows(
         &self,
         ids: Vec<u64>,
     ) -> Result<ExecutionValue> {
+        self.edge_row_vec(ids).await.map(ExecutionValue::Stream)
+    }
+
+    pub(in crate::execution::interpreter) async fn edge_row_vec(
+        &self,
+        ids: Vec<u64>,
+    ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for id in ids {
             self.check_execution_deadline()?;
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(id)),
             }
@@ -47,13 +87,22 @@ impl<'db> ExecutionContext<'db> {
                 rows.push(ExecutionRow::current(ElementRef::Edge(id)));
             }
         }
-        Ok(ExecutionValue::Stream(rows))
+        Ok(rows)
     }
 
     pub(in crate::execution::interpreter) async fn node_search_rows(
         &self,
         results: Vec<TypedVectorSearchResult>,
     ) -> Result<ExecutionValue> {
+        self.node_search_row_vec(results)
+            .await
+            .map(ExecutionValue::Stream)
+    }
+
+    pub(in crate::execution::interpreter) async fn node_search_row_vec(
+        &self,
+        results: Vec<TypedVectorSearchResult>,
+    ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for result in results {
             self.check_execution_deadline()?;
@@ -62,7 +111,7 @@ impl<'db> ExecutionContext<'db> {
                     "edge-bound vector result reached node row materialization".to_string(),
                 ));
             };
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(entity_id)),
             }
@@ -71,13 +120,22 @@ impl<'db> ExecutionContext<'db> {
                 rows.push(search_row(ElementRef::Node(entity_id), result));
             }
         }
-        Ok(ExecutionValue::Stream(rows))
+        Ok(rows)
     }
 
     pub(in crate::execution::interpreter) async fn edge_search_rows(
         &self,
         results: Vec<TypedVectorSearchResult>,
     ) -> Result<ExecutionValue> {
+        self.edge_search_row_vec(results)
+            .await
+            .map(ExecutionValue::Stream)
+    }
+
+    pub(in crate::execution::interpreter) async fn edge_search_row_vec(
+        &self,
+        results: Vec<TypedVectorSearchResult>,
+    ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for result in results {
             self.check_execution_deadline()?;
@@ -86,7 +144,7 @@ impl<'db> ExecutionContext<'db> {
                     "node-bound vector result reached edge row materialization".to_string(),
                 ));
             };
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(entity_id)),
             }
@@ -95,16 +153,25 @@ impl<'db> ExecutionContext<'db> {
                 rows.push(search_row(ElementRef::Edge(entity_id), result));
             }
         }
-        Ok(ExecutionValue::Stream(rows))
+        Ok(rows)
     }
 
     pub(in crate::execution::interpreter) async fn node_text_search_rows(
         &self,
         results: Vec<TextSearchHit>,
     ) -> Result<ExecutionValue> {
+        self.node_text_search_row_vec(results)
+            .await
+            .map(ExecutionValue::Stream)
+    }
+
+    pub(in crate::execution::interpreter) async fn node_text_search_row_vec(
+        &self,
+        results: Vec<TextSearchHit>,
+    ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for result in results {
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(result.entity_id)),
             }
@@ -113,16 +180,25 @@ impl<'db> ExecutionContext<'db> {
                 rows.push(text_search_row(ElementRef::Node(result.entity_id), result));
             }
         }
-        Ok(ExecutionValue::Stream(rows))
+        Ok(rows)
     }
 
     pub(in crate::execution::interpreter) async fn edge_text_search_rows(
         &self,
         results: Vec<TextSearchHit>,
     ) -> Result<ExecutionValue> {
+        self.edge_text_search_row_vec(results)
+            .await
+            .map(ExecutionValue::Stream)
+    }
+
+    pub(in crate::execution::interpreter) async fn edge_text_search_row_vec(
+        &self,
+        results: Vec<TextSearchHit>,
+    ) -> Result<Vec<ExecutionRow>> {
         let mut rows = Vec::new();
         for result in results {
-            let key = keys::Key::Data {
+            let key = keys::DataKey::Data {
                 scope: self.tenant_scope,
                 kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(
                     result.entity_id,
@@ -133,7 +209,7 @@ impl<'db> ExecutionContext<'db> {
                 rows.push(text_search_row(ElementRef::Edge(result.entity_id), result));
             }
         }
-        Ok(ExecutionValue::Stream(rows))
+        Ok(rows)
     }
 }
 
@@ -164,7 +240,7 @@ mod tests {
 
     use super::super::super::test_support;
     use super::*;
-    use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+    use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
     use crate::search::vector::{DistanceScore, SearchResult};
 
     fn vector_result(kind: VectorEntityKind, entity_id: u64) -> TypedVectorSearchResult {

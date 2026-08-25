@@ -1,6 +1,6 @@
 use super::*;
 use crate::{catalog, error, ir, logical};
-use helix_ast::expr::{Expr, StreamBound};
+use helix_ast::expr::{Expr, Predicate, StreamBound};
 use helix_ast::traversal::{AstNode, Order};
 use helix_ast::value::{PropertyInput, PropertyValue};
 
@@ -33,10 +33,13 @@ fn pipeline_op_family_probes_return_typed_matches_and_misses() {
         input: input(),
         label: None,
     })));
-    assert!(family_op(filter::pipeline_op_from_ast(&AstNode::HasKey {
-        input: input(),
-        property: "email".to_owned(),
-    })));
+    assert!(family_op(filter::pipeline_op_from_ast(
+        &crate::context::PlannerContext::default(),
+        &AstNode::HasKey {
+            input: input(),
+            property: "email".to_owned(),
+        }
+    )));
     assert!(family_op(bounds::pipeline_op_from_ast(&AstNode::Dedup {
         input: input(),
     })));
@@ -48,7 +51,10 @@ fn pipeline_op_family_probes_return_typed_matches_and_misses() {
     assert!(family_miss(expansion::pipeline_op_from_ast(
         &AstNode::Context
     )));
-    assert!(family_miss(filter::pipeline_op_from_ast(&AstNode::Context)));
+    assert!(family_miss(filter::pipeline_op_from_ast(
+        &crate::context::PlannerContext::default(),
+        &AstNode::Context
+    )));
     assert!(family_miss(bounds::pipeline_op_from_ast(&AstNode::Context)));
     assert!(family_miss(variable::pipeline_op_from_ast(
         &AstNode::Inject {
@@ -186,6 +192,51 @@ fn pipeline_op_contract_rejects_non_pipeline_roots_and_invalid_payloads() {
         Err(error::PlannerError::InvalidEmptyName {
             field: ir::NameField::Variable
         })
+    ));
+}
+
+#[test]
+fn filter_wrappers_validate_payloads_and_defer_missing_bindings() {
+    let ctx = crate::context::PlannerContext::default();
+    let cases = [
+        AstNode::Has {
+            input: input(),
+            property: String::new(),
+            value: PropertyValue::Bool(true),
+        },
+        AstNode::EdgeHas {
+            input: input(),
+            property: String::new(),
+            value: PropertyInput::from(true),
+        },
+        AstNode::HasLabel {
+            input: input(),
+            label: String::new(),
+        },
+        AstNode::HasKey {
+            input: input(),
+            property: String::new(),
+        },
+    ];
+
+    for root in cases {
+        assert!(filter::pipeline_op_from_ast(&ctx, &root).is_err());
+    }
+
+    let predicate = Predicate::and(vec![
+        Predicate::eq_param("status", "missing_status"),
+        Predicate::is_in_param("group", "missing_groups"),
+    ]);
+    let root = AstNode::Where {
+        input: input(),
+        predicate: predicate.clone(),
+    };
+    let parsed = pipeline_op(&root);
+    assert!(matches!(
+        parsed.into_parts().1,
+        logical::StreamPipelineOp::Filter {
+            predicate: predicate_plan
+        } if predicate_plan == ir::PredicatePlan::new(predicate).unwrap()
     ));
 }
 

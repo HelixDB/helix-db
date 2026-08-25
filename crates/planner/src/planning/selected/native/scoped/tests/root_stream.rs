@@ -86,7 +86,7 @@ fn scoped_root_stream_normalizes_recursive_wrappers() {
     )
     .unwrap()
     .expect_stream("terminal is a root stream");
-    assert!(matches!(terminal, logical::RootStream::Project(_)));
+    assert!(matches!(terminal, logical::RootStream::Cardinality(_)));
 
     let pipeline = root_stream::root_stream_from_ast(
         &ctx,
@@ -150,7 +150,7 @@ fn scoped_root_stream_honors_context_scope() {
     .expect_stream("scoped context terminal is a root stream");
     assert!(matches!(
         bound_context_terminal,
-        logical::RootStream::Project(project)
+        logical::RootStream::Cardinality(project)
             if matches!(
                 project.input(),
                 logical::RootStream::VariableSource(source)

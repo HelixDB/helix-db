@@ -12,7 +12,7 @@ use std::num::NonZeroU64;
 use bytes::Bytes;
 use slatedb::DbTransaction;
 
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorKey, VectorLayer0NeighborsKey, VectorUpperNeighborsKey,
 };
 use crate::encoding::NodeId;
@@ -1032,9 +1032,9 @@ mod tests {
     use slatedb::{Db, IsolationLevel};
 
     use super::*;
-    use crate::encoding::v1::keys::tenant::DataScope;
-    use crate::encoding::v1::keys::vectors::VectorStorageLane;
-    use crate::encoding::v1::keys::Key;
+    use crate::encoding::v2::keys::indexes::vector::VectorStorageLane;
+    use crate::encoding::v2::keys::scope::DataScope;
+    use crate::encoding::v2::keys::DataKey;
     use crate::index_lifecycle::IndexElementKind;
     use crate::search::vector::{SimHasherRegistry, VectorDimension};
 
@@ -1047,7 +1047,7 @@ mod tests {
     async fn exact_namespace_rows(db: &Db, physical_index_id: u64) -> Vec<(Bytes, Bytes)> {
         let mut rows = Vec::new();
         for lane in VectorStorageLane::ALL {
-            let prefix = Key::data_prefix(
+            let prefix = DataKey::data_prefix(
                 DataScope::LegacyUnscoped,
                 lane.prefix_key(physical_index_id).to_bytes(),
             );

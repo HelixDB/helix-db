@@ -60,10 +60,10 @@ fn node_source_predicates_use_cascades_equality_indexes_in_executable_plan() {
 
     assert!(matches!(
         first_exec_access(&plan),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::EqualityIndex { key, value, .. })
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, value, .. } })
             if key.label == "User"
                 && key.property == "username"
-                && matches!(value, IndexValue::Literal(_))
+                && value.literal().as_property_value().as_str() == Some("alice")
     ));
     assert!(plan
         .steps()

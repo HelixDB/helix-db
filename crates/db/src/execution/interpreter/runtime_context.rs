@@ -269,9 +269,11 @@ impl RequestWriteScopeState {
 
 pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) db: &'db HelixDB,
-    pub(in crate::execution::interpreter) tenant_scope: crate::encoding::keys::tenant::DataScope,
+    pub(in crate::execution::interpreter) tenant_scope: crate::encoding::keys::scope::DataScope,
     pub(in crate::execution::interpreter) params: ParamBindingsOwnership,
     pub(in crate::execution::interpreter) variables: ExecutionValueStore<ir::NonEmptyString>,
+    pub(in crate::execution::interpreter) variable_return_shapes:
+        Arc<BTreeMap<ir::NonEmptyString, exec::ReturnShape>>,
     pub(in crate::execution::interpreter) step_outputs: ExecutionValueStore<exec::ExecStepId>,
     pub(in crate::execution::interpreter) step_output_uses: StepOutputUsePlan,
     pub(in crate::execution::interpreter) request_read_scope:
@@ -283,10 +285,12 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
         crate::execution_control::ExecutionControl,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) deadline_checks_remaining: AtomicUsize,
 }
 
 impl<'db> ExecutionContext<'db> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(in crate::execution::interpreter) fn new(
         db: &'db HelixDB,
         params: context::ParamBindings,
@@ -294,7 +298,7 @@ impl<'db> ExecutionContext<'db> {
         Self::new_scoped(
             db,
             params,
-            crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+            crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         )
     }
 
@@ -302,7 +306,7 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn new_scoped(
         db: &'db HelixDB,
         params: context::ParamBindings,
-        tenant_scope: crate::encoding::keys::tenant::DataScope,
+        tenant_scope: crate::encoding::keys::scope::DataScope,
     ) -> Self {
         Self::new_scoped_controlled(
             db,
@@ -315,7 +319,7 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn new_scoped_controlled(
         db: &'db HelixDB,
         params: context::ParamBindings,
-        tenant_scope: crate::encoding::keys::tenant::DataScope,
+        tenant_scope: crate::encoding::keys::scope::DataScope,
         execution_control: crate::execution_control::ExecutionControl,
     ) -> Self {
         Self::new_scoped_controlled_with_catalog_freshness(
@@ -330,7 +334,7 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) fn new_scoped_controlled_with_catalog_freshness(
         db: &'db HelixDB,
         params: context::ParamBindings,
-        tenant_scope: crate::encoding::keys::tenant::DataScope,
+        tenant_scope: crate::encoding::keys::scope::DataScope,
         execution_control: crate::execution_control::ExecutionControl,
         catalog_freshness: PendingCatalogFreshness,
     ) -> Self {
@@ -339,6 +343,7 @@ impl<'db> ExecutionContext<'db> {
             tenant_scope,
             params: ParamBindingsOwnership::Unique(params),
             variables: ExecutionValueStore::default(),
+            variable_return_shapes: Arc::default(),
             step_outputs: ExecutionValueStore::default(),
             step_output_uses: StepOutputUsePlan::default(),
             request_read_scope: super::read_view::RequestReadScopeState::Disabled,
@@ -348,6 +353,8 @@ impl<'db> ExecutionContext<'db> {
             execution_control,
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
+            #[cfg(test)]
+            deadline_checks_remaining: AtomicUsize::new(usize::MAX),
         }
     }
 
@@ -379,6 +386,12 @@ impl<'db> ExecutionContext<'db> {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) fn fail_deadline_after(&self, successful_checks: usize) {
+        self.deadline_checks_remaining
+            .store(successful_checks, Ordering::Relaxed);
+    }
+
     /// Borrows the active request transaction without exposing state transitions.
     pub(in crate::execution::interpreter) fn active_write_tx(&self) -> Option<&ActiveWriteTx> {
         self.request_write_scope.active()
@@ -395,6 +408,17 @@ impl<'db> ExecutionContext<'db> {
     }
 
     pub(in crate::execution::interpreter) fn check_execution_deadline(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.deadline_checks_remaining.load(Ordering::Relaxed) != usize::MAX
+            && self
+                .deadline_checks_remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_err()
+        {
+            return Err(HelixDbError::QueryDeadlineExceeded);
+        }
         self.execution_control.check()
     }
 }

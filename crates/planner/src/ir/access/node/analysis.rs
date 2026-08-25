@@ -43,6 +43,25 @@ pub(super) fn common_label(source: &NodeAccessPlan) -> Option<&ir::NonEmptyStrin
     }
 }
 
+pub(super) fn secondary_set_eligible(source: &NodeAccessPlan) -> bool {
+    match source {
+        NodeAccessPlan::Empty
+        | NodeAccessPlan::EqualityIndex { .. }
+        | NodeAccessPlan::RangeIndex { .. } => true,
+        NodeAccessPlan::Intersect(children) | NodeAccessPlan::Union(children) => children
+            .iter()
+            .all(|child| secondary_set_eligible(child.as_ref())),
+        NodeAccessPlan::PointIds { .. }
+        | NodeAccessPlan::FromParam { .. }
+        | NodeAccessPlan::FromVar { .. }
+        | NodeAccessPlan::AllScan
+        | NodeAccessPlan::LabelScan { .. }
+        | NodeAccessPlan::VectorSearch { .. }
+        | NodeAccessPlan::TextSearch { .. }
+        | NodeAccessPlan::ScanThenFilter { .. } => false,
+    }
+}
+
 pub(super) fn set_canonicalization_candidate(source: &NodeAccessPlan) -> bool {
     match source {
         NodeAccessPlan::Union(sources) => {

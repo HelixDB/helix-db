@@ -1,4 +1,5 @@
-//! Persistence boundary for lifecycle-managed index records.
+//! Canonical database key and value encoding boundary.
 
-pub(crate) mod keys;
-pub(crate) mod values;
+pub mod keys;
+pub(crate) mod legacy;
+pub mod values;

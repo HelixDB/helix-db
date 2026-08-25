@@ -5,6 +5,7 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
     let profile = cost::StorageCostProfile {
         default_unknown_scan_rows: cost::EstimatedRows::rows(9),
         default_equality_index_rows: cost::EstimatedRows::rows(5),
+        default_range_index_rows: cost::EstimatedRows::rows(9),
         ..cost::StorageCostProfile::default()
     };
     let key = catalog::ScopedPropertyKey::try_new("User", "email").unwrap();
@@ -65,13 +66,21 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
         node_access_hard_upper_bound(&non_unique_node_equality),
         None
     );
-    assert_eq!(node_access_cost(&node_equality, &profile).range_nexts, 1);
+    assert_eq!(node_access_cost(&node_equality, &profile).object_reads, 2);
     assert_eq!(
-        node_access_cost(&non_unique_node_equality, &profile).range_nexts,
-        5
+        node_access_cost(&node_equality, &profile).authoritative_graph_reads,
+        1
+    );
+    assert_eq!(
+        node_access_cost(&non_unique_node_equality, &profile).object_reads,
+        1
     );
     assert_eq!(node_access_cost(&node_search, &profile).range_nexts, 3);
     assert_eq!(node_access_cost(&node_range, &profile).range_nexts, 9);
+    assert_eq!(
+        node_access_cost(&node_range, &profile).authoritative_graph_reads,
+        9
+    );
     assert!(node_access_cost(&filtered_node, &profile).cpu_units >= 2);
 
     let edge_key = catalog::ScopedPropertyKey::try_new("FOLLOWS", "status").unwrap();
@@ -118,7 +127,7 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
     assert_eq!(edge_access_hard_upper_bound(&union_edge), Some(3));
     assert_eq!(edge_access_hard_upper_bound(&intersect_edge), None);
     assert_eq!(edge_access_hard_upper_bound(&edge_range), None);
-    assert_eq!(edge_access_cost(&edge_equality, &profile).range_nexts, 5);
+    assert_eq!(edge_access_cost(&edge_equality, &profile).object_reads, 1);
     assert_eq!(edge_access_cost(&edge_search, &profile).range_nexts, 4);
     assert_eq!(edge_access_cost(&edge_range, &profile).range_nexts, 9);
     assert!(edge_access_cost(&filtered_edge, &profile).cpu_units >= 2);

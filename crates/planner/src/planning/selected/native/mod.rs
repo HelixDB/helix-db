@@ -19,6 +19,7 @@ mod index_ddl;
 mod mutation;
 mod names;
 mod ordering;
+mod parameter_specialization;
 mod pipeline;
 #[cfg(test)]
 mod pipeline_tests;

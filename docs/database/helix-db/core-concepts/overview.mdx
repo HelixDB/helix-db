@@ -613,6 +613,20 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
 
+Populated values keep these existing shapes. Only a declared return with no
+value uses an inferred empty shape:
+
+| Semantic return | Populated | Empty or skipped |
+| --- | --- | --- |
+| At most one row, such as `limit(1)` | Existing one-element array | `null` |
+| Collection, many, or unknown cardinality | Existing array | `[]` |
+| `fold` or mutation | Existing array | `[]` |
+| Scalar terminal, such as `count()` or `exists()` | Existing scalar | No synthetic empty value |
+
+The planner infers this from the semantic output type and guaranteed
+multiplicity. It does not use the observed row count or optimizer estimates. An
+empty `returns` declaration returns `{}` because it declares no response keys.
+
 ## 9. Read it back in a later request
 
 Once the write has committed, the same traversal works from a read batch — Alice is now

@@ -7,7 +7,7 @@ use slatedb::object_store::ObjectStore;
 use slatedb::DbTransaction;
 
 use crate::config::ActiveTextMutationLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::scope::DataScope;
 use crate::error::{ActiveTextMutationResource, HelixDbError, Result};
 use crate::index_lifecycle::graph_mutation::{GraphEntity, GraphMutationTransition};
 
@@ -243,7 +243,7 @@ mod tests {
 
     use super::*;
     use crate::config::SearchIndexBackfillLimits;
-    use crate::encoding::v1::property::{encode_properties, Property};
+    use crate::encoding::v2::values::property::{encode_properties, Property};
     use crate::index_lifecycle::graph_mutation::{
         CanonicalPropertyRow, PropertyEdit, PropertyEditOutcome,
     };
@@ -389,6 +389,23 @@ mod tests {
         ));
         drop(transaction);
         db.close().await.expect("coalescing fixture closes");
+    }
+
+    #[test]
+    fn irrelevant_followup_still_completes_an_existing_coalesced_transition() {
+        let scope = DataScope::LegacyUnscoped;
+        let limits = SearchIndexBackfillLimits::default().active_text_mutation();
+        let indexed = properties("indexed");
+        let mut runtime = ActiveTextMutationRuntime::new();
+
+        runtime
+            .collect_routed(create(scope, 9, &indexed), true, limits)
+            .expect("relevant create collects");
+        runtime
+            .collect_routed(delete(scope, 9, &indexed), false, limits)
+            .expect("irrelevant followup preserves coalescing continuity");
+
+        assert!(collecting(&runtime).is_empty());
     }
 
     #[tokio::test]

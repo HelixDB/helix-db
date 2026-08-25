@@ -14,7 +14,7 @@ pub use rules::{
 };
 
 pub(crate) use self::diagnostics::{missing_index_candidates, CandidateIndexKind};
-pub(in crate::rules) use index::index_access_filter;
+pub(in crate::rules) use index::{index_access_filter, label_domain_has_candidate};
 pub(in crate::rules) use simplify::simplify_access_filter;
 
 /// Access-filter rewrite outcome at the rule boundary.

@@ -21,9 +21,8 @@ fn input_mutation_variants_can_feed_selected_root_stream_suffixes() {
     ));
     assert!(matches!(
         &projected_add.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
     assert_eq!(
         projected_add.steps()[2].dependencies,
@@ -144,9 +143,8 @@ fn input_mutation_variants_can_feed_selected_root_stream_suffixes() {
     ));
     assert!(matches!(
         &projected_drop_edge_by_id.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
     assert_eq!(
         projected_drop_edge_by_id.steps()[2].dependencies,

@@ -1,6 +1,6 @@
 //! Selected edge access-source matching.
 
-use crate::{ir, physical};
+use crate::{exec, ir, physical};
 
 use super::{SelectedAccessShapeMatch, SelectedAccessShapeMismatch};
 
@@ -16,18 +16,46 @@ pub(super) fn selected_edge_access_match(
     access: &physical::PhysicalAccess,
 ) -> SelectedAccessShapeMatch {
     match (plan, access) {
+        (
+            ir::EdgeAccessPlan::EqualityIndex { index, key, value },
+            physical::PhysicalAccess::EdgeExact(exact),
+        ) if exact.as_ref()
+            == &exec::ExecEdgeAccessPlan::exact_equality(
+                index.clone(),
+                key.clone(),
+                value.clone(),
+            ) =>
+        {
+            SelectedAccessShapeMatch::Matched
+        }
+        (
+            ir::EdgeAccessPlan::Union(_) | ir::EdgeAccessPlan::Intersect(_),
+            physical::PhysicalAccess::EdgeExact(exact),
+        ) if exec::edge_secondary_set(plan).is_some_and(|set| {
+            exact.as_ref() == &exec::ExecEdgeAccessPlan::SecondarySet { set }
+        }) =>
+        {
+            SelectedAccessShapeMatch::Matched
+        }
         (ir::EdgeAccessPlan::Empty, physical::PhysicalAccess::Empty)
         | (
             ir::EdgeAccessPlan::FromParam { .. } | ir::EdgeAccessPlan::FromVar { .. },
             physical::PhysicalAccess::RuntimeInput,
         )
         | (ir::EdgeAccessPlan::LabelScan { .. }, physical::PhysicalAccess::LabelScan)
-        | (ir::EdgeAccessPlan::EqualityIndex { .. }, physical::PhysicalAccess::EqualityIndex)
         | (ir::EdgeAccessPlan::RangeIndex { .. }, physical::PhysicalAccess::RangeIndex)
         | (ir::EdgeAccessPlan::VectorSearch { .. }, physical::PhysicalAccess::VectorSearch)
-        | (ir::EdgeAccessPlan::TextSearch { .. }, physical::PhysicalAccess::TextSearch)
-        | (ir::EdgeAccessPlan::Intersect(_), physical::PhysicalAccess::SetIntersection)
-        | (ir::EdgeAccessPlan::Union(_), physical::PhysicalAccess::SetUnion) => {
+        | (ir::EdgeAccessPlan::TextSearch { .. }, physical::PhysicalAccess::TextSearch) => {
+            SelectedAccessShapeMatch::Matched
+        }
+        (ir::EdgeAccessPlan::Intersect(_), physical::PhysicalAccess::SetIntersection)
+            if exec::edge_secondary_set(plan).is_none() =>
+        {
+            SelectedAccessShapeMatch::Matched
+        }
+        (ir::EdgeAccessPlan::Union(_), physical::PhysicalAccess::SetUnion)
+            if exec::edge_secondary_set(plan).is_none() =>
+        {
             SelectedAccessShapeMatch::Matched
         }
         (

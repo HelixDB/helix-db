@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "dfe4b4dc38609db8b3fe8dc6f2d3de64bfe63f0e" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "30d9f28cfeb93cf95652aac2b7724811c5c49630" }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
+helix-value-semantics = { path = "../value-semantics" }
 helix-metrics = { path = "../metrics" }
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "fs", "time"] }

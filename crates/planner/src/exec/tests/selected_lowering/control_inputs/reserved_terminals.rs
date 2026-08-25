@@ -25,7 +25,7 @@ fn selected_executable_batch_lowers_reserved_root_terminal_input() {
     );
     let terminal_delivered = project_delivered_properties(
         reserved_alternative.delivered.clone(),
-        &ir::ProjectionPlan::Count,
+        &ir::ProjectionPlan::Exists,
     );
     let terminal_cost = profile.stream_operator(cost::EstimatedRows::rows(1));
     let terminal_alternative = physical::PhysicalAlternative::new(
@@ -57,10 +57,11 @@ fn selected_executable_batch_lowers_reserved_root_terminal_input() {
                                 },
                             ),
                         )),
-                        projection: ir::ProjectionPlan::Count,
+                        projection: ir::ProjectionPlan::Exists,
                     },
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("count")),
+                return_shape: ReturnShape::Scalar,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),
@@ -87,7 +88,7 @@ fn selected_executable_batch_lowers_reserved_root_terminal_input() {
     assert!(matches!(
         &plan.steps()[3].op,
         ExecOp::Project {
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         }
     ));
     assert_eq!(plan.steps()[3].dependencies, vec![plan.steps()[2].id]);
@@ -158,6 +159,7 @@ fn selected_executable_batch_lowers_reserved_root_aggregate_terminal_input() {
                     },
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("groups")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),
@@ -259,6 +261,7 @@ fn selected_executable_batch_lowers_reserved_root_variable_write_terminal_input(
                     },
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("paths")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),

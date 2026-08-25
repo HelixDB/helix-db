@@ -3,10 +3,9 @@ title: "HelixDB Model Context Protocol (MCP)"
 description: "Connect Codex, Cursor, VS Code, Claude Code, and other agents to Helix Cloud insights"
 sidebarTitle: "Model Context Protocol (MCP)"
 pageType: "Tutorial"
-status: "Preview"
 ---
 
-<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge><Badge color="orange" size="sm">Preview</Badge></div>
+<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
 > For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
@@ -43,18 +42,13 @@ active indexes, usage, and dedicated-cluster health.
 - It works with MCP clients that support remote Streamable HTTP servers and OAuth.
 - It cannot execute queries or change database or Cloud resources.
 
-<Warning>
-  The preview endpoint uses the Helix development environment. Use test
-  resources only until the production endpoint is announced.
-</Warning>
-
 ## Quick start
 
 <CardGroup cols={2}>
-  <Card title="Cursor" icon={<CursorLogo />} href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5kZXYuaGVsaXgtZGIuY29tL21jcCJ9">
+  <Card title="Cursor" icon={<CursorLogo />} href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5oZWxpeC1kYi5jb20vbWNwIn0=">
     One-click install
   </Card>
-  <Card title="VS Code" icon={<VSCodeLogo />} href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.dev.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
+  <Card title="VS Code" icon={<VSCodeLogo />} href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
     One-click install
   </Card>
   <Card title="Codex" icon={<CodexLogo />} href="#codex-cli">
@@ -75,10 +69,14 @@ current workspace, project, cluster, and tenant membership on every tool call.
 Removing a user's Helix access removes the corresponding MCP access without a
 separate resource grant.
 
+If your browser already has an active Helix session, WorkOS can reuse that
+account during authorization. Confirm the email address on the consent screen
+before you approve access.
+
 **Server URL:**
 
 ```text
-https://mcp.dev.helix-db.com/mcp
+https://mcp.helix-db.com/mcp
 ```
 
 ## Security boundary
@@ -102,7 +100,7 @@ names, and recommendation bodies are not written to logs.
 
 ### Cursor
 
-<Card title="Install HelixDB in Cursor" icon={<CursorLogo />} horizontal href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5kZXYuaGVsaXgtZGIuY29tL21jcCJ9">
+<Card title="Install HelixDB in Cursor" icon={<CursorLogo />} horizontal href="https://cursor.com/en-US/install-mcp?name=HelixDB&config=eyJ1cmwiOiJodHRwczovL21jcC5oZWxpeC1kYi5jb20vbWNwIn0=">
   Add the hosted MCP server, then complete OAuth in your browser.
 </Card>
 
@@ -112,7 +110,7 @@ For manual installation, add this configuration to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "helix-db": {
-      "url": "https://mcp.dev.helix-db.com/mcp"
+      "url": "https://mcp.helix-db.com/mcp"
     }
   }
 }
@@ -123,7 +121,7 @@ Helix sign-in flow. Restart Cursor if the server does not appear.
 
 ### VS Code
 
-<Card title="Install HelixDB in VS Code" icon={<VSCodeLogo />} horizontal href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.dev.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
+<Card title="Install HelixDB in VS Code" icon={<VSCodeLogo />} horizontal href="vscode:mcp/install?%7B%22url%22%3A%22https%3A%2F%2Fmcp.helix-db.com%2Fmcp%22%2C%22name%22%3A%22HelixDB%22%2C%22type%22%3A%22http%22%7D">
   Add the hosted MCP server, then complete OAuth in your browser.
 </Card>
 
@@ -132,7 +130,7 @@ For manual installation:
 1. Open the Command Palette.
 2. Run **MCP: Add Server**.
 3. Choose **HTTP**.
-4. Enter `https://mcp.dev.helix-db.com/mcp` and name it `HelixDB`.
+4. Enter `https://mcp.helix-db.com/mcp` and name it `HelixDB`.
 5. Start the server and approve the browser authentication prompt.
 
 ### Codex CLI
@@ -141,7 +139,7 @@ Add the server, then authenticate if Codex does not open the browser flow
 automatically:
 
 ```bash
-codex mcp add helix-db --url https://mcp.dev.helix-db.com/mcp
+codex mcp add helix-db --url https://mcp.helix-db.com/mcp
 codex mcp login helix-db
 codex mcp list
 ```
@@ -162,7 +160,7 @@ is enabled and authenticated.
 Add the remote HTTP server:
 
 ```bash
-claude mcp add --transport http helix-db https://mcp.dev.helix-db.com/mcp
+claude mcp add --transport http helix-db https://mcp.helix-db.com/mcp
 ```
 
 Start Claude Code, run `/mcp`, select `helix-db`, and complete authentication in
@@ -178,7 +176,7 @@ Add the server to `~/.config/opencode/opencode.json`:
   "mcp": {
     "helix-db": {
       "type": "remote",
-      "url": "https://mcp.dev.helix-db.com/mcp"
+      "url": "https://mcp.helix-db.com/mcp"
     }
   }
 }
@@ -199,7 +197,7 @@ Create a custom remote MCP connection with this URL and choose OAuth when the
 client asks for an authentication method:
 
 ```text
-https://mcp.dev.helix-db.com/mcp
+https://mcp.helix-db.com/mcp
 ```
 
 The client must support Streamable HTTP, OAuth protected-resource discovery,
@@ -286,13 +284,28 @@ Remove any manually configured OAuth resource, remove and re-add the MCP
 server, then authenticate again. For Codex, use only:
 
 ```bash
-codex mcp add helix-db --url https://mcp.dev.helix-db.com/mcp
+codex mcp add helix-db --url https://mcp.helix-db.com/mcp
+codex mcp login helix-db
+```
+
+### WorkOS used the wrong account
+
+WorkOS can reuse the Helix account that is already active in your browser. If
+the consent screen shows the wrong email address, do not approve access. Sign
+out of Helix Cloud in that browser, then start authentication again and sign in
+with the account that has access to the required workspace. Use a separate
+browser profile or private window if you need to keep both accounts signed in.
+
+For Codex, clear the existing MCP authorization before you authenticate again:
+
+```bash
+codex mcp logout helix-db
 codex mcp login helix-db
 ```
 
 ### The server cannot connect
 
-Confirm the URL ends in exactly `/mcp`. Older preview paths are not supported.
+Confirm the URL ends in exactly `/mcp`. Older paths are not supported.
 Restart the client after changing its MCP configuration.
 
 ### A database is missing

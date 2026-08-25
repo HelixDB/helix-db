@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use super::*;
 
 impl<'db> ExecutionContext<'db> {
-    pub(in crate::execution::interpreter::stream) async fn eval_predicate(
+    pub(in crate::execution::interpreter) async fn eval_predicate(
         &self,
         row: &ExecutionRow,
         predicate: &Predicate,
@@ -153,30 +153,8 @@ impl<'db> ExecutionContext<'db> {
             }
             Predicate::IsIn { value, values } => {
                 let value = Box::pin(self.eval_expr_with_resolver(row, value, resolver)).await?;
-                Ok(
-                    match Box::pin(self.eval_expr_with_resolver(row, values, resolver)).await? {
-                        DbPropertyValue::Array(values) => {
-                            values.iter().any(|item| item.eq_value(&value))
-                        }
-                        DbPropertyValue::I64Array(values) => values
-                            .iter()
-                            .any(|item| DbPropertyValue::I64(*item).eq_value(&value)),
-                        DbPropertyValue::StringArray(values) => values
-                            .iter()
-                            .any(|item| DbPropertyValue::String(item.clone()).eq_value(&value)),
-                        other @ (DbPropertyValue::Null
-                        | DbPropertyValue::Bool(_)
-                        | DbPropertyValue::I64(_)
-                        | DbPropertyValue::DateTime(_)
-                        | DbPropertyValue::F64(_)
-                        | DbPropertyValue::F32(_)
-                        | DbPropertyValue::String(_)
-                        | DbPropertyValue::Bytes(_)
-                        | DbPropertyValue::F64Array(_)
-                        | DbPropertyValue::F32Array(_)
-                        | DbPropertyValue::Object(_)) => other.eq_value(&value),
-                    },
-                )
+                let values = Box::pin(self.eval_expr_with_resolver(row, values, resolver)).await?;
+                Ok(property_value_is_in(&value, &values))
             }
             Predicate::And { predicates } => {
                 for predicate in predicates {
@@ -201,6 +179,36 @@ impl<'db> ExecutionContext<'db> {
                 Ok(!Box::pin(self.eval_predicate_with_resolver(row, predicate, resolver)).await?)
             }
         }
+    }
+}
+
+pub(in crate::execution::interpreter) fn property_value_is_in(
+    value: &DbPropertyValue,
+    values: &DbPropertyValue,
+) -> bool {
+    match values {
+        DbPropertyValue::Array(values) => values.iter().any(|item| item.eq_value(value)),
+        DbPropertyValue::I64Array(values) => values
+            .iter()
+            .any(|item| DbPropertyValue::I64(*item).eq_value(value)),
+        DbPropertyValue::F64Array(values) => values
+            .iter()
+            .any(|item| DbPropertyValue::F64(*item).eq_value(value)),
+        DbPropertyValue::F32Array(values) => values
+            .iter()
+            .any(|item| DbPropertyValue::F32(f64::from(*item)).eq_value(value)),
+        DbPropertyValue::StringArray(values) => values
+            .iter()
+            .any(|item| DbPropertyValue::String(item.clone()).eq_value(value)),
+        other @ (DbPropertyValue::Null
+        | DbPropertyValue::Bool(_)
+        | DbPropertyValue::I64(_)
+        | DbPropertyValue::DateTime(_)
+        | DbPropertyValue::F64(_)
+        | DbPropertyValue::F32(_)
+        | DbPropertyValue::String(_)
+        | DbPropertyValue::Bytes(_)
+        | DbPropertyValue::Object(_)) => other.eq_value(value),
     }
 }
 

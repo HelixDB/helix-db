@@ -10,6 +10,7 @@
 mod batch;
 mod construction;
 mod control_flow;
+mod count;
 mod family;
 mod index_ddl;
 mod matching;
@@ -42,6 +43,7 @@ pub use self::construction::{SelectedAlternativeConstructionError, SelectedRootC
 pub use self::control_flow::{
     SelectedBranchPlan, SelectedRepeatPlan, SelectedRootBranch, SelectedRootRepeat,
 };
+pub use self::count::{SelectedCountInput, SelectedRootCount};
 pub use self::index_ddl::SelectedRootIndexDdl;
 pub use self::mutation::{SelectedMutationInput, SelectedMutationPlan, SelectedRootMutation};
 pub use self::physical::SelectedPhysicalPlan;

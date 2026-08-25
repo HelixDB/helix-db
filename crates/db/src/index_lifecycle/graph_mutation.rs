@@ -1,17 +1,17 @@
 //! Canonical in-memory graph transitions shared by foreground index writers.
 //!
 //! These types are deliberately runtime-only. Property rows continue to use
-//! the V1 value codec; retaining the encoded bytes beside the decoded values
+//! the canonical value codec; retaining the encoded bytes beside the decoded values
 //! prevents each index family from rebuilding the same payload.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, Key};
-use crate::encoding::v1::property::{self, Property};
+use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
+use crate::encoding::v2::values::property::{self, Property};
 use crate::error::Result;
 
 use super::{IndexElementKind, IndexEntityId};
@@ -53,17 +53,17 @@ impl GraphEntity {
     fn property_key_kind(self) -> DataKeyKind<'static> {
         match self {
             Self::Node(id) => {
-                DataKeyKind::NodeProperty(crate::encoding::v1::keys::NodePropertyKey::new(id.get()))
+                DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(id.get()))
             }
             Self::Edge(id) => DataKeyKind::EdgePropertyById(
-                crate::encoding::v1::keys::EdgePropertyByIdKey::new(id.get()),
+                crate::encoding::v2::keys::EdgePropertyByIdKey::new(id.get()),
             ),
         }
     }
 
     /// Returns the canonical scoped property-row key.
     pub(crate) fn property_key(self, scope: DataScope) -> Bytes {
-        Key::Data {
+        DataKey::Data {
             scope,
             kind: self.property_key_kind(),
         }
@@ -71,7 +71,7 @@ impl GraphEntity {
     }
 }
 
-/// One decoded property row paired with its canonical V1 encoding.
+/// One decoded property row paired with its canonical encoding.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalPropertyRow {
     properties: Arc<Vec<Property>>,
@@ -79,7 +79,7 @@ pub(crate) struct CanonicalPropertyRow {
 }
 
 impl CanonicalPropertyRow {
-    /// Encodes an owned property set exactly once through the V1 codec.
+    /// Encodes an owned property set exactly once through the canonical codec.
     pub(crate) fn new(properties: Vec<Property>) -> Self {
         let encoded = property::encode_properties(&properties);
         Self {
@@ -88,7 +88,7 @@ impl CanonicalPropertyRow {
         }
     }
 
-    /// Decodes one existing canonical V1 property row exactly once.
+    /// Decodes one existing canonical property row exactly once.
     pub(crate) fn decode(encoded: Bytes) -> Result<Self> {
         let properties = property::decode_properties(&encoded)?;
         Ok(Self {
@@ -368,7 +368,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::encoding::v1::property::property_value::PropertyValue;
+    use crate::encoding::v2::values::property::property_value::PropertyValue;
 
     fn row() -> CanonicalPropertyRow {
         CanonicalPropertyRow::new(vec![
@@ -597,15 +597,15 @@ mod tests {
         assert!(delete.before().is_some());
         assert!(delete.after().is_none());
         assert!(matches!(
-            Key::parse_from_slice(scope, &create.graph_key()).unwrap(),
-            Key::Data {
+            DataKey::parse_from_slice(scope, &create.graph_key()).unwrap(),
+            DataKey::Data {
                 kind: DataKeyKind::NodeProperty(_),
                 ..
             }
         ));
         assert!(matches!(
-            Key::parse_from_slice(scope, &delete.graph_key()).unwrap(),
-            Key::Data {
+            DataKey::parse_from_slice(scope, &delete.graph_key()).unwrap(),
+            DataKey::Data {
                 kind: DataKeyKind::EdgePropertyById(_),
                 ..
             }

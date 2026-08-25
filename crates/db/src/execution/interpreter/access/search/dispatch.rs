@@ -8,7 +8,7 @@ use super::limits::SearchReadLimit;
 use super::tenant::{validate_text_search_tenant, validate_vector_search_tenant};
 use super::*;
 use crate::config::{TextElementType, VectorElementType};
-use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
 use crate::search::text::{RestrictedTextCandidates, TextSearchScope};
 use crate::search::vector::distance::{Cosine, Euclidean, Manhattan};
 use crate::search::vector::RestrictedVectorCandidates;
@@ -56,7 +56,7 @@ struct TextSearchAccess<'a> {
 }
 
 impl<'db> ExecutionContext<'db> {
-    pub(in crate::execution::interpreter::access) async fn vector_search_results(
+    pub(in crate::execution::interpreter) async fn vector_search_results(
         &self,
         element_type: VectorElementType,
         label: &ir::NonEmptyString,
@@ -203,7 +203,7 @@ impl<'db> ExecutionContext<'db> {
             .collect())
     }
 
-    pub(in crate::execution::interpreter::access) async fn text_search_hits(
+    pub(in crate::execution::interpreter) async fn text_search_hits(
         &self,
         element_type: TextElementType,
         label: &ir::NonEmptyString,

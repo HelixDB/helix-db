@@ -11,7 +11,6 @@ impl<'db> ExecutionContext<'db> {
         projection: &ir::ProjectionPlan,
     ) -> Result<ExecutionValue> {
         match projection {
-            ir::ProjectionPlan::Count => Ok(ExecutionValue::Count(rows.len())),
             ir::ProjectionPlan::Exists => Ok(ExecutionValue::Bool(!rows.is_empty())),
             ir::ProjectionPlan::Id => {
                 let mut scalars = Vec::with_capacity(rows.len());

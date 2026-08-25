@@ -136,7 +136,7 @@ const VECTOR_QUERY: [f32; 3] = [0.1, 0.0, 0.0];
 const EXPECTED_VECTOR_HITS: [(u64, u32); 3] =
     [(1, 1_008_981_771), (2, 1_062_165_544), (3, 1_082_151_404)];
 const SOURCE_HYPERSCALE_REVISION: &str = "e5bac15b020c9acac1649c44b58a2cf16dd1f874";
-const TARGET_SLATEDB_VERSION: &str = "0.14.1";
+const TARGET_SLATEDB_VERSION: &str = "0.15.0";
 const TARGET_SLATEDB_GIT_SOURCE: &str = "git+https://github.com/HelixDB/slatedb.git?rev=";
 const FIRST_SCALE_NODE_ID: u64 = 1_000_000;
 const SCALE_SEED_PROGRESS_INTERVAL: u64 = 100_000;
@@ -5016,6 +5016,8 @@ async fn run_target_garbage_collection(
         compactions_options: Some(directory),
         detach_options: None,
         metric_level: None,
+        boundary_files_enabled: true,
+        object_store_max_retries: None,
     };
     let clock: Arc<dyn SystemClock> = Arc::new(ShiftedSystemClock {
         advance: clock_advance,
@@ -5487,7 +5489,7 @@ mod tests {
         let lock = format!(
             r#"[[package]]
 name = "slatedb"
-version = "0.14.1"
+version = "0.15.0"
 source = "git+https://github.com/HelixDB/slatedb.git?rev={revision}#{revision}"
 "#
         );
@@ -5505,7 +5507,7 @@ source = "git+https://github.com/HelixDB/slatedb.git?rev={revision}#{revision}"
         let package = format!(
             r#"[[package]]
 name = "slatedb"
-version = "0.14.1"
+version = "0.15.0"
 source = "git+https://github.com/HelixDB/slatedb.git?rev={revision}#{revision}"
 "#
         );
@@ -5513,7 +5515,7 @@ source = "git+https://github.com/HelixDB/slatedb.git?rev={revision}#{revision}"
         assert!(target_slatedb_revision_from_lock(
             r#"[[package]]
 name = "slatedb"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 "#,
         )
@@ -5521,7 +5523,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         assert!(target_slatedb_revision_from_lock(
             r#"[[package]]
 name = "slatedb"
-version = "0.14.1"
+version = "0.15.0"
 source = "git+https://github.com/HelixDB/slatedb.git?rev=main#not-a-revision"
 "#,
         )

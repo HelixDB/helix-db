@@ -1,49 +1,94 @@
 name: Build and Upload Binaries
+run-name: Release Helix CLI from ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
-    inputs:
-      release_type:
-        description: Version bump type
-        required: true
-        default: patch
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: cli-release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create_release:
+  validate:
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: zendesk/action-create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          auto_increment_type: ${{ inputs.release_type }}
-          prerelease: false
-          draft: false
-          tag_schema: semantic
+          components: clippy, rustfmt
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - name: Install TypeScript SDK dependencies
+        working-directory: sdks/typescript
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/${{ github.event.repository.default_branch }}" ]]; then
+            echo "CLI releases must run from the default branch" >&2
+            exit 1
+          fi
+
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "helix-cli") | .version')"
+          if [[ -z "${version}" || "${version}" == "null" ]]; then
+            echo "Could not read the helix-cli package version" >&2
+            exit 1
+          fi
+
+          tag="v${version}"
+          if git show-ref --verify --quiet "refs/tags/${tag}"; then
+            echo "CLI release tag ${tag} already exists" >&2
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test CLI
+        run: cargo test --locked -p helix-cli
+
+      - name: Lint CLI
+        run: cargo clippy --locked -p helix-cli --all-targets -- -D warnings
+
+      - name: Build host CLI
+        run: cargo build --locked --release -p helix-cli
+
+      - name: Verify host CLI version
+        shell: bash
+        run: |
+          expected="Helix CLI ${{ steps.version.outputs.version }}"
+          actual="$(target/release/helix --version)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Expected '${expected}', got '${actual}'" >&2
+            exit 1
+          fi
 
   build:
-    needs: create_release
+    needs: validate
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -53,44 +98,83 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: helix-x86_64-unknown-linux-gnu
-            executable_name: helix
+            executable_path: target/x86_64-unknown-linux-gnu/release/helix
 
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary_name: helix-aarch64-unknown-linux-gnu
-            executable_name: helix
+            executable_path: target/aarch64-unknown-linux-gnu/release/helix
 
           - os: macos-15-intel
             target: x86_64-apple-darwin
             binary_name: helix-x86_64-apple-darwin
-            executable_name: helix
+            executable_path: target/x86_64-apple-darwin/release/helix
 
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: helix-aarch64-apple-darwin
-            executable_name: helix
+            executable_path: target/aarch64-apple-darwin/release/helix
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: helix-x86_64-pc-windows-msvc.exe
-            executable_name: helix.exe
+            executable_path: target/x86_64-pc-windows-msvc/release/helix.exe
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust target
-        run: rustup target add ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Build CLI
-        working-directory: crates/cli
-        run: cargo build --release --target ${{ matrix.target }} --bin helix
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin helix
+
+      - name: Verify CLI version
+        shell: bash
+        run: |
+          expected="Helix CLI ${{ needs.validate.outputs.version }}"
+          actual="$("${{ matrix.executable_path }}" --version | tr -d '\r')"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Expected '${expected}', got '${actual}'" >&2
+            exit 1
+          fi
+
+      - name: Stage release asset
+        shell: bash
+        run: cp "${{ matrix.executable_path }}" "${{ matrix.binary_name }}"
 
       - name: Upload release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.create_release.outputs.upload_url }}
-          asset_path: target/${{ matrix.target }}/release/${{ matrix.executable_name }}
-          asset_name: ${{ matrix.binary_name }}
-          asset_content_type: application/octet-stream
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: helix-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          gh release create "${RELEASE_TAG}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${RELEASE_TAG}" \
+            --generate-notes

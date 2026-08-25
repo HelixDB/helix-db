@@ -13,7 +13,7 @@ mod sources;
 mod window;
 
 pub(in crate::rules) use self::filter::{
-    index_access_filter, simplify_access_filter, AccessFilterRewrite,
+    index_access_filter, label_domain_has_candidate, simplify_access_filter, AccessFilterRewrite,
 };
 pub(crate) use self::filter::{missing_index_candidates, CandidateIndexKind};
 pub(in crate::rules) use self::sets::{

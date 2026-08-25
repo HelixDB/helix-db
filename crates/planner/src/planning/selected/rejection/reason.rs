@@ -41,6 +41,8 @@ pub(in crate::planning::selected) enum Reason {
     RootStreamChildKindMismatch,
     /// A selected terminal root-stream child was not a terminal root.
     TerminalRootStreamChildKindMismatch,
+    /// A selected count program and its selected dependency shape disagreed.
+    SelectedCountInputMismatch,
 }
 
 impl Reason {
@@ -65,6 +67,7 @@ impl Reason {
         Self::RootStreamChildArityMismatch,
         Self::RootStreamChildKindMismatch,
         Self::TerminalRootStreamChildKindMismatch,
+        Self::SelectedCountInputMismatch,
     ];
 
     pub(super) const fn as_str(self) -> &'static str {
@@ -125,6 +128,9 @@ impl Reason {
             }
             Self::TerminalRootStreamChildKindMismatch => {
                 "selected terminal root-stream child was not a terminal root"
+            }
+            Self::SelectedCountInputMismatch => {
+                "selected count dependency did not match its physical input contract"
             }
         }
     }

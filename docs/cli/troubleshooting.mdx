@@ -1,6 +1,6 @@
 ---
 title: "Troubleshooting"
-description: "Solutions to common issues and error messages in Helix CLI v3"
+description: "Solutions to common issues and error messages in the Helix CLI 3.x release line"
 sidebarTitle: "Troubleshooting"
 icon: "wrench"
 mode: "wide"
@@ -11,25 +11,34 @@ pageType: "Troubleshooting"
 
 > For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
-This guide helps you resolve common issues with the Helix CLI v3.
+This guide helps you resolve common issues with the Helix CLI 3.x release line.
 
 ## Installation issues
 
 ### `command not found: helix`
 
-The CLI installs to `~/.helix/bin/helix`. If your shell can't find it after running the installer:
+On macOS and Linux, the CLI installs to `~/.local/bin/helix`. If your shell can't
+find it after running the installer:
 
 ```bash
 # Bash
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # Zsh
-echo 'export PATH="$HOME/.helix/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Verify the binary exists with `ls -la ~/.helix/bin/helix`.
+Verify the binary exists with `ls -la ~/.local/bin/helix`.
+
+On Windows, the PowerShell installer writes
+`%LOCALAPPDATA%\Helix\bin\helix.exe` and adds that directory to your user `PATH`.
+Restart PowerShell after the first install, then verify it with:
+
+```powershell
+& "$env:LOCALAPPDATA\Helix\bin\helix.exe" --version
+```
 
 ### Updating the CLI
 
@@ -51,7 +60,7 @@ export HELIX_NO_UPDATE_CHECK=1   # also accepts HELIX_DISABLE_UPDATE_CHECK
 
 ### `helix compile` / `helix check`
 
-These commands do **not** exist in Helix CLI v3. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
+These commands do **not** exist in the Helix CLI 3.x release line. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
 
 ```bash
 helix query dev --file examples/request.json
@@ -196,6 +205,10 @@ The auth env var named by `query_auth_env` is unset.
 ```bash
 export HELIX_API_KEY="..."
 ```
+
+Set the raw key only. With the default `Authorization` header, an omitted
+`query_auth_scheme` infers `bearer` and adds the `Bearer` prefix. Headers such
+as `x-api-key` infer `raw`.
 
 ### `--warm is only valid for read requests`
 

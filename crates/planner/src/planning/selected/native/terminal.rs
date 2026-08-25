@@ -10,7 +10,7 @@ mod tests;
 
 use helix_ast::traversal::AstNode;
 
-use crate::{error, logical};
+use crate::{context, error, logical};
 
 pub(super) use expr::{native_terminal_expr_from_ast, NativeTerminalExprRoot};
 #[cfg(test)]
@@ -26,8 +26,9 @@ pub(in crate::planning::selected::native) fn terminal_payload_from_ast(
 }
 
 pub(in crate::planning::selected::native) fn terminal_expr_from_payload(
+    ctx: &context::PlannerContext,
     input: logical::RootStream,
     payload: NativeTerminalPayload,
 ) -> logical::LogicalExpr {
-    expr::terminal_expr_from_payload(input, payload)
+    expr::terminal_expr_from_payload(ctx, input, payload)
 }

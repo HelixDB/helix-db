@@ -1,4 +1,4 @@
-use crate::{ir, properties};
+use crate::{exec, ir, properties};
 
 use super::{ElementKeyspace, ExecStepId};
 
@@ -35,6 +35,8 @@ pub enum ExecPlanError {
     DuplicateStepId { id: ExecStepId },
     /// Root step was not present.
     MissingRoot { root: ExecStepId },
+    /// Requested return variable has no executable binding.
+    MissingReturnBinding { name: ir::NonEmptyString },
     /// Dependency step was not present.
     MissingDependency {
         step: ExecStepId,
@@ -55,6 +57,22 @@ pub enum ExecPlanError {
     StepIdSpaceExhausted,
     /// Parallel schedule requires at least two dependencies.
     InvalidParallelDependencyCount { step: ExecStepId, actual: usize },
+    /// A count program failed its internal executable-contract validation.
+    InvalidCountProgram {
+        /// Count step.
+        step: ExecStepId,
+        /// Exact rejected invariant.
+        reason: exec::ExecCountValidationError,
+    },
+    /// A count step's predecessor shape disagreed with its selected input.
+    InvalidCountDependencyCount {
+        /// Count step.
+        step: ExecStepId,
+        /// Selected input contract.
+        dependency: exec::ExecCountDependency,
+        /// Actual predecessor count.
+        actual: usize,
+    },
     /// Previous-output condition referenced a step that is not a dependency.
     PreviousConditionMissingDependency {
         /// Step with the condition.
@@ -103,6 +121,9 @@ impl std::fmt::Display for ExecPlanError {
             }
             Self::DuplicateStepId { id } => write!(f, "duplicate exec step id {}", id.get()),
             Self::MissingRoot { root } => write!(f, "missing root exec step {}", root.get()),
+            Self::MissingReturnBinding { name } => {
+                write!(f, "return variable `{name}` has no executable binding")
+            }
             Self::MissingDependency { step, dependency } => write!(
                 f,
                 "exec step {} depends on missing step {}",
@@ -125,6 +146,20 @@ impl std::fmt::Display for ExecPlanError {
             Self::InvalidParallelDependencyCount { step, actual } => write!(
                 f,
                 "parallel exec step {} has {actual} dependencies, expected at least 2",
+                step.get()
+            ),
+            Self::InvalidCountProgram { step, reason } => write!(
+                f,
+                "count exec step {} contains an invalid program: {reason:?}",
+                step.get()
+            ),
+            Self::InvalidCountDependencyCount {
+                step,
+                dependency,
+                actual,
+            } => write!(
+                f,
+                "count exec step {} has {actual} predecessors for {dependency:?} input",
                 step.get()
             ),
             Self::PreviousConditionMissingDependency { step, dependency } => write!(

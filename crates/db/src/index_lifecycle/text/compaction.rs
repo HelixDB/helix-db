@@ -16,9 +16,9 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::config::{SearchIndexBatchLimits, TextBackfillCompactionLimits};
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::work;
@@ -84,7 +84,7 @@ pub(super) async fn select_artifacts(
     batch_limits: SearchIndexBatchLimits,
     compaction_limits: TextBackfillCompactionLimits,
 ) -> Result<ArtifactSelection> {
-    let prefix = Key::data_prefix(
+    let prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::generation_prefix(
             index_keys::RecordKind::TextBuildArtifact,
@@ -364,11 +364,167 @@ fn retirement_measurement(
     (1, u64::try_from(artifact_key.len()).unwrap_or(u64::MAX))
 }
 
-/// Encodes one scoped V2 key through the canonical `encoding/v1` boundary.
+/// Encodes one scoped V2 key through the canonical `encoding/v2` boundary.
 fn scoped_key(scope: DataScope, key: index_keys::ScopedKey) -> Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::{Db, IsolationLevel};
+
+    use super::*;
+    use crate::index_lifecycle::text::test_support;
+    use crate::index_lifecycle::{
+        IndexElementKind, IndexEntityId, OperationCounters, TextLogicalVersion,
+    };
+
+    #[tokio::test]
+    async fn compaction_selection_resolution_and_retirement_are_exact() {
+        let db = Db::open("text-compaction-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text compaction test database opens");
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let operation = test_support::operation();
+        let scope = DataScope::LegacyUnscoped;
+        let partition = work::TextPartition::Unpartitioned;
+        let progress = PrefixScanProgress {
+            cursor: None,
+            counters: OperationCounters::default(),
+        };
+        let batch = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+        let generous = test_support::compaction_limits(8, 1_024, 2_048, 1_024, 1_024);
+
+        assert!(matches!(
+            select_artifacts(&transaction, scope, &operation, &progress, batch, generous,)
+                .await
+                .unwrap(),
+            ArtifactSelection::Exhausted
+        ));
+
+        let first = test_support::artifact_row(scope, &operation, partition.clone(), 0, 1);
+        let second = test_support::artifact_row(scope, &operation, partition.clone(), 1, 2);
+        transaction.put(first.0.clone(), first.1.clone()).unwrap();
+        transaction.put(second.0.clone(), second.1.clone()).unwrap();
+
+        let single = select_artifacts(
+            &transaction,
+            scope,
+            &operation,
+            &progress,
+            batch,
+            test_support::compaction_limits(1, 1_024, 2_048, 1_024, 1_024),
+        )
+        .await
+        .unwrap();
+        let ArtifactSelection::Advance {
+            cursor,
+            observation,
+        } = single
+        else {
+            panic!("fan-in one advances the exact first artifact")
+        };
+        assert_eq!(cursor.as_bytes(), &first.0);
+        assert_eq!(observation.value, Some(first.1.clone()));
+
+        assert!(select_artifacts(
+            &transaction,
+            scope,
+            &operation,
+            &PrefixScanProgress {
+                cursor: Some(IndexCursor::try_new(Bytes::from_static(b"wrong-prefix")).unwrap()),
+                counters: OperationCounters::default(),
+            },
+            batch,
+            generous,
+        )
+        .await
+        .is_err());
+
+        let selected =
+            select_artifacts(&transaction, scope, &operation, &progress, batch, generous)
+                .await
+                .unwrap();
+        let ArtifactSelection::Compact(selected) = selected else {
+            panic!("two same-partition artifacts produce one exact merge")
+        };
+        assert_eq!(selected.partition, partition);
+        assert_eq!(selected.artifact_keys.len(), 2);
+        assert_eq!(selected.split_refs.len(), 2);
+        assert_eq!(selected.observations.len(), 2);
+        assert_eq!(selected.input_blob_bytes, 256);
+        assert_eq!(selected.retirement_output_operations, 2);
+        assert!(selected.retirement_output_bytes > 0);
+        assert!(selected.pruning.may_match_any([b"term-1".as_slice()]));
+
+        assert!(
+            resolve_live_versions(&transaction, scope, &operation, &partition, &[(7, 0)],)
+                .await
+                .is_err()
+        );
+        let state_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+                root: index_keys::TextManifestRootKey {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    partition: partition.fingerprint(),
+                },
+                entity: index_keys::IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(7),
+                },
+            }),
+        );
+        transaction
+            .put(
+                state_key,
+                index_values::encode_text_entity_state(&work::TextEntityStateValue {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    partition: partition.clone(),
+                    entity_kind: IndexElementKind::Node,
+                    entity_id: IndexEntityId::new(7),
+                    logical_version: TextLogicalVersion::new(3).unwrap(),
+                    live: true,
+                }),
+            )
+            .unwrap();
+        let resolved = resolve_live_versions(
+            &transaction,
+            scope,
+            &operation,
+            &partition,
+            &[(7, 1), (7, 3), (8, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.live_versions.get(&7), Some(&3));
+        assert!(!resolved.live_versions.contains_key(&8));
+        assert_eq!(resolved.observations.len(), 2);
+
+        assert!(stage_input_retirement(&transaction, scope, &operation, &[])
+            .await
+            .is_err());
+        assert!(stage_input_retirement(
+            &transaction,
+            scope,
+            &operation,
+            &selected.artifact_keys[..1],
+        )
+        .await
+        .is_err());
+        stage_input_retirement(&transaction, scope, &operation, &selected.artifact_keys)
+            .await
+            .unwrap();
+        assert!(transaction.get(&first.0).await.unwrap().is_none());
+        assert!(transaction.get(&second.0).await.unwrap().is_none());
+    }
 }

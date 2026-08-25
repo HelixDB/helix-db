@@ -389,7 +389,7 @@ impl<'db> ExecutionContext<'db> {
             .iter()
             .flat_map(|from| {
                 targets.iter().map(move |target| {
-                    keys::Key::Data {
+                    keys::DataKey::Data {
                         scope: tenant_scope,
                         kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(
                             *from, *target,
@@ -410,7 +410,7 @@ impl<'db> ExecutionContext<'db> {
                 continue;
             };
             candidate_edge_ids
-                .extend(values::secondary::SecondaryEqualityValue::decode(&value)?.into_ids());
+                .extend(values::indexes::SecondaryEqualityValue::decode(&value)?.into_ids());
         }
         let mut observed_edges = self
             .observe_edge_deletions(

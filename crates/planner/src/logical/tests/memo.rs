@@ -26,7 +26,7 @@ fn logical_expr_memo_children_skip_parent_local_access_and_root_stream_inputs() 
     assert_eq!(
         LogicalExpr::StreamProject(StreamProject::new(
             RootStream::Pipeline(Box::new(root_pipeline.clone())),
-            ir::ProjectionPlan::Count,
+            ir::ProjectionPlan::Exists,
         ))
         .memo_children(),
         vec![LogicalExpr::RootPipeline(root_pipeline)]
@@ -41,7 +41,7 @@ fn logical_expr_memo_children_skip_parent_local_access_and_root_stream_inputs() 
 #[test]
 fn logical_expr_memo_children_preserve_nested_terminal_lineage() {
     let seed = RootStream::VariableSource(VariableSource::new(name("seed")));
-    let project = StreamProject::new(seed, ir::ProjectionPlan::Count);
+    let project = StreamProject::new(seed, ir::ProjectionPlan::Exists);
     let write = StreamVariableWrite::new(
         RootStream::Project(Box::new(project.clone())),
         StreamVariableWriteOp::Store(name("counted")),

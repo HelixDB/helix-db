@@ -14,11 +14,11 @@ use slatedb::DbTransaction;
 use tokio::sync::Semaphore;
 
 use crate::config::ActiveTextMutationLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::property::Property;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
+use crate::encoding::v2::values::property::Property;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::graph_mutation::{CanonicalPropertyRow, GraphEntity};
 use crate::index_lifecycle::{self, work};
@@ -823,7 +823,7 @@ async fn prepare_destination(
         key.partition.fingerprint(),
         pointer_page,
     )?;
-    let pointer_key = Key::Global {
+    let pointer_key = ManagedIndexKey::Global {
         kind: index_keys::GlobalKey::TextCompactionPointer(target),
     }
     .to_bytes();
@@ -860,14 +860,14 @@ async fn prepare_destination(
     let page_bytes = writes
         .iter()
         .filter_map(|write| {
-            Key::parse_from_slice(key.scope, &write.key)
+            ManagedIndexKey::parse_from_slice(key.scope, &write.key)
                 .ok()
                 .and_then(|parsed| match parsed {
-                    Key::Data {
+                    ManagedIndexKey::Data {
                         kind: index_keys::ScopedKey::TextManifestPage(_),
                         ..
                     } => Some(u64::try_from(write.value.len()).unwrap_or(u64::MAX)),
-                    Key::Global { .. } | Key::Data { .. } => None,
+                    ManagedIndexKey::Global { .. } | ManagedIndexKey::Data { .. } => None,
                 })
         })
         .max()
@@ -1127,7 +1127,7 @@ pub(crate) fn stage_active_text_epoch(
 }
 
 fn scoped_key(scope: DataScope, key: index_keys::ScopedKey) -> Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 fn corruption(reason: impl Into<String>) -> HelixDbError {
@@ -1258,3 +1258,7 @@ mod tests {
             .expect("destination conflict database closes");
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_active_batch.rs"]
+mod external_contracts;

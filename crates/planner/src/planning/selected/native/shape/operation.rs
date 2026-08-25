@@ -5,7 +5,7 @@ use helix_ast::traversal;
 
 use crate::planning::selected::native::stream;
 use crate::planning::selected::native::{ordering, variables};
-use crate::{error, ir};
+use crate::{context, error, ir};
 
 /// Validated access-stream wrapper operation pending a source-rooted input.
 pub(super) enum NativeAccessStreamOp<'a> {
@@ -34,10 +34,11 @@ pub(super) enum NativeAccessStreamOp<'a> {
 impl<'a> NativeAccessStreamOp<'a> {
     pub(super) fn append_to(
         self,
+        ctx: &context::PlannerContext,
         stream: stream::NativeAccessStream,
     ) -> Result<stream::NativeAccessStream, error::PlannerError> {
         match self {
-            Self::Filter(predicate) => stream.filter(&predicate),
+            Self::Filter(predicate) => stream.filter(ctx, &predicate),
             Self::Distinct => Ok(stream.distinct()),
             Self::Limit(count) => stream.limit(count),
             Self::Skip(count) => stream.skip(count),

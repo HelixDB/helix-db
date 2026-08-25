@@ -148,9 +148,16 @@ fn access_path_contract_covers_edge_source_families() {
     );
     assert_eq!(
         equality.cost,
-        storage.range_scan(cost::EstimatedRows::rows(6))
+        storage
+            .bitmap_equality_lookup(cost::EstimatedRows::rows(6))
+            .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(6)))
     );
-    assert_eq!(range.cost, storage.range_scan(cost::EstimatedRows::rows(8)));
+    assert_eq!(
+        range.cost,
+        storage
+            .secondary_range_lookup(cost::EstimatedRows::rows(8))
+            .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(8)))
+    );
     assert!(matches!(
         range.delivered.ordering,
         properties::DeliveredOrdering::ByKeys(_)

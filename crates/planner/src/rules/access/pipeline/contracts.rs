@@ -1,6 +1,6 @@
 //! Access-pipeline rewrite contracts.
 
-use crate::{ir, logical, optimizer};
+use crate::{logical, optimizer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum AccessPipelineRebuild {
@@ -37,7 +37,6 @@ impl PipelineSimplification {
 pub(super) enum PipelineSimplificationRejection {
     NoLocalSimplification {
         empty: EmptyPipelineRejection,
-        filters: PipelineFilterMergeRejection,
         distinct: PipelineDistinctRejection,
     },
 }
@@ -68,25 +67,5 @@ pub(super) enum PipelineDistinctRejection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PipelineDistinctPair {
     Adjacent { first_index: usize },
-    NotFound,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum PipelineFilterMerge {
-    Merged(optimizer::RuleResult),
-    NotApplicable(PipelineFilterMergeRejection),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PipelineFilterMergeRejection {
-    NoAdjacentFilters,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum AdjacentFilterPair {
-    Found {
-        first_index: usize,
-        predicates: ir::AtLeast<ir::PredicatePlan, 2>,
-    },
     NotFound,
 }

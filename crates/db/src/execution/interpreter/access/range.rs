@@ -15,7 +15,76 @@ use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDir
 use crate::HelixStorage;
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) async fn node_range_index_ids(
+    pub(in crate::execution::interpreter) async fn node_range_index_count_with_membership(
+        &self,
+        key: &catalog::ScopedPropertyDirectionKey,
+        range: &ir::IndexRange,
+        membership: &[roaring::RoaringTreemap],
+        limit: Option<usize>,
+    ) -> Result<usize> {
+        self.range_index_count_with_membership(
+            crate::index_lifecycle::IndexElementKind::Node,
+            key,
+            range,
+            membership,
+            limit,
+        )
+        .await
+    }
+
+    pub(in crate::execution::interpreter) async fn edge_range_index_count_with_membership(
+        &self,
+        key: &catalog::ScopedPropertyDirectionKey,
+        range: &ir::IndexRange,
+        membership: &[roaring::RoaringTreemap],
+        limit: Option<usize>,
+    ) -> Result<usize> {
+        self.range_index_count_with_membership(
+            crate::index_lifecycle::IndexElementKind::Edge,
+            key,
+            range,
+            membership,
+            limit,
+        )
+        .await
+    }
+
+    async fn range_index_count_with_membership(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyDirectionKey,
+        range: &ir::IndexRange,
+        membership: &[roaring::RoaringTreemap],
+        limit: Option<usize>,
+    ) -> Result<usize> {
+        let direction = storage_range_direction(key.direction);
+        let query = range_query(self, range)?;
+        let identity =
+            secondary_range_identity(element_kind, key.label.as_ref(), key.property.as_ref())?;
+        if let Some(active) = self.active_write_tx() {
+            return count_range_with_membership_in_view(
+                self,
+                &active.txn,
+                &identity,
+                &query,
+                direction,
+                limit,
+                membership,
+            )
+            .await;
+        }
+        if let Some(view) = self.request_read_view() {
+            return count_range_with_membership_in_view(
+                self, view, &identity, &query, direction, limit, membership,
+            )
+            .await;
+        }
+        Err(HelixDbError::InvariantViolation(
+            "filtered secondary range lookup escaped its request read view".to_string(),
+        ))
+    }
+
+    pub(in crate::execution::interpreter) async fn node_range_index_ids(
         &self,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
@@ -62,7 +131,7 @@ impl<'db> ExecutionContext<'db> {
         ))
     }
 
-    pub(super) async fn edge_range_index_ids(
+    pub(in crate::execution::interpreter) async fn edge_range_index_ids(
         &self,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
@@ -170,6 +239,18 @@ async fn scan_managed_range_in_view(
     requested_direction: StorageRangeIndexDirection,
     limit: Option<usize>,
 ) -> Result<Vec<u64>> {
+    let active =
+        active_range_handle_in_view(context, reader, identity, requested_direction).await?;
+    crate::index_lifecycle::secondary::scan_active_range_generation(reader, &active, query, limit)
+        .await
+}
+
+async fn active_range_handle_in_view(
+    context: &ExecutionContext<'_>,
+    reader: &(impl DbReadOps + Send + Sync),
+    identity: &crate::index_lifecycle::IndexIdentity,
+    requested_direction: StorageRangeIndexDirection,
+) -> Result<crate::index_lifecycle::ActiveIndexHandle> {
     let Some(record) = crate::index_lifecycle::repository::load_index_record(
         reader,
         context.tenant_scope,
@@ -204,8 +285,32 @@ async fn scan_managed_range_in_view(
             "planner range direction disagrees with its Active secondary definition".to_string(),
         ));
     }
-    crate::index_lifecycle::secondary::scan_active_range_generation(reader, &active, query, limit)
-        .await
+    Ok(active)
+}
+
+async fn count_range_with_membership_in_view(
+    context: &ExecutionContext<'_>,
+    reader: &(impl DbReadOps + Send + Sync),
+    identity: &crate::index_lifecycle::IndexIdentity,
+    query: &OwnedRangeQuery,
+    requested_direction: StorageRangeIndexDirection,
+    limit: Option<usize>,
+    membership: &[roaring::RoaringTreemap],
+) -> Result<usize> {
+    let managed_query = match query {
+        OwnedRangeQuery::All => None,
+        OwnedRangeQuery::Bounded(query) => Some(query),
+    };
+    let active =
+        active_range_handle_in_view(context, reader, identity, requested_direction).await?;
+    crate::index_lifecycle::secondary::count_active_range_generation_with_membership(
+        reader,
+        &active,
+        managed_query,
+        limit,
+        membership,
+    )
+    .await
 }
 
 enum OwnedRangeQuery {

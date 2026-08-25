@@ -8,18 +8,22 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The forthcoming v3 Go SDK builds the shared operation-tree AST and executes it through
-a typed client.
+The Go SDK builds the shared operation-tree AST and executes requests through a
+typed HTTP client.
 
 <Note>
-The v3 SDK packages have not been published yet. The Go SDK keeps the module path
-`github.com/helixdb/helix-db/sdks/go`; it does not add a `/v3` suffix.
+Version `v0.3.1` ships the server query builder and HTTP client. It does not
+distribute the native bindings required by embedded execution or native graph
+algorithms.
+
+The module path remains `github.com/helixdb/helix-db/sdks/go`; it does not add a
+`/v3` suffix because the module itself has not reached major version 2.
 </Note>
 
 ## Install
 
 ```bash
-go get github.com/helixdb/helix-db/sdks/go
+go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```go
@@ -66,11 +70,11 @@ if err := client.Exec(ctx, FindUsers("acme", 25), &response); err != nil {
 Write requests can pass `helix.WriterOnly()` and `helix.AwaitDurability(true)` execution
 options. The client does not retry conflicts automatically.
 
-## Embedded runtime
+## Release scope
 
-Install the SDK with `go get github.com/helixdb/helix-db/sdks/go`. See
-[Embedded database](/database/helix-db/start-here/local-development/embedded-database)
-for storage, cache, and handle configuration.
+Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Embedded
+constructors and `Client.Graph` return native-binding-unavailable errors in a
+standard module installation.
 
 ## Verify
 

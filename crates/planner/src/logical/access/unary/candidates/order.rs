@@ -42,10 +42,32 @@ fn access_order_satisfaction_candidate(access: &AccessPath, ordering: &ir::Order
     match access {
         AccessPath::Node(path) => match path.source().as_ref() {
             ir::NodeAccessPlan::RangeIndex { key, .. } => range_satisfies_order(key, required),
+            ir::NodeAccessPlan::Intersect(children)
+                if path.source().is_secondary_set_eligible() =>
+            {
+                children.iter().any(|child| {
+                    matches!(
+                        child.as_ref(),
+                        ir::NodeAccessPlan::RangeIndex { key, .. }
+                            if range_satisfies_order(key, required)
+                    )
+                })
+            }
             _ => false,
         },
         AccessPath::Edge(path) => match path.source().as_ref() {
             ir::EdgeAccessPlan::RangeIndex { key, .. } => range_satisfies_order(key, required),
+            ir::EdgeAccessPlan::Intersect(children)
+                if path.source().is_secondary_set_eligible() =>
+            {
+                children.iter().any(|child| {
+                    matches!(
+                        child.as_ref(),
+                        ir::EdgeAccessPlan::RangeIndex { key, .. }
+                            if range_satisfies_order(key, required)
+                    )
+                })
+            }
             _ => false,
         },
     }

@@ -7,6 +7,7 @@
 
 mod access;
 mod alternative;
+mod cardinality;
 mod expr;
 mod pipeline;
 mod stream;
@@ -14,6 +15,7 @@ mod stream;
 pub use self::{
     access::PhysicalAccess,
     alternative::PhysicalAlternative,
+    cardinality::{PhysicalCardinality, PhysicalCountPlan},
     expr::PhysicalExpr,
     pipeline::{PhysicalPipeline, PhysicalPipelineOp, PhysicalPipelineTerminalSplit},
     stream::{PhysicalControlOp, PhysicalStreamOp},

@@ -4,7 +4,7 @@
 //! requires no new blob. The authoritative graph transaction must still bump
 //! the old partition's manifest revision and write an exact dead entity-state
 //! row so readers reject every older split version. This module prepares those
-//! two canonical V1 rows, retains their exact Active-record/root/state reads,
+//! two canonical rows, retains their exact Active-record/root/state reads,
 //! and separates fallible revalidation from infallible staging. Request-level
 //! orchestration can therefore admit and validate all retirements, uploads, and
 //! hidden-build deltas before buffering any graph or index write.
@@ -38,7 +38,7 @@ pub(super) struct PreparedActiveTextRetirement {
     measurements: ActiveTextMutationMeasurements,
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 impl PreparedActiveTextRetirement {
     /// Returns exact work contributed to request-level resource admission.
     pub(super) const fn measurements(&self) -> ActiveTextMutationMeasurements {
@@ -47,7 +47,7 @@ impl PreparedActiveTextRetirement {
 }
 
 /// Fully revalidated retirement rows ready for infallible staging.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ValidatedActiveTextRetirement {
     prepared: PreparedActiveTextRetirement,
@@ -208,7 +208,7 @@ pub(super) async fn prepare_active_text_retirement(
 }
 
 /// Revalidates one retirement without staging either replacement row.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(super) async fn validate_active_text_retirement(
     transaction: &DbTransaction,
     prepared: &PreparedActiveTextRetirement,
@@ -226,7 +226,7 @@ pub(super) async fn validate_active_text_retirement(
 }
 
 /// Stages one retirement only after every request input has validated.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(super) fn stage_validated_active_text_retirement(
     transaction: &DbTransaction,
     validated: ValidatedActiveTextRetirement,
@@ -241,7 +241,7 @@ fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/index_lifecycle_active_text_retirement.rs"]
 pub(crate) mod production_contracts;
 
@@ -258,8 +258,13 @@ mod tests {
         SearchIndexBackfillLimits, SearchIndexBatchLimits, SecondaryIndexDefinition,
         TextAnalyzerKind, TextBackfillCompactionLimits, TextBuildArtifactLimits,
     };
-    use crate::encoding::v1::keys::tenant::DataScope;
-    use crate::encoding::v2::keys::Key;
+    use crate::encoding::v2::keys::scope::DataScope;
+    use crate::encoding::v2::keys::ManagedIndexKey;
+
+    #[tokio::test]
+    async fn production_active_text_retirement_matrix_runs_in_workspace_tests() {
+        production_contracts::run().await;
+    }
     use crate::index_lifecycle::{
         IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, IndexOperationId,
         IndexRecordV2, IndexRevision, IndexStateTransition, PhysicalGeneration, TextLogicalVersion,
@@ -278,7 +283,7 @@ mod tests {
     }
 
     fn scoped_key(scope: DataScope, logical: index_keys::ScopedKey) -> Bytes {
-        Key::Data {
+        ManagedIndexKey::Data {
             scope,
             kind: logical,
         }

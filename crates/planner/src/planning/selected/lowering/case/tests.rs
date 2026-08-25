@@ -29,7 +29,7 @@ fn access_expr() -> logical::LogicalExpr {
 fn classifies_selected_terminal_case() {
     let source = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         variable_stream(),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     assert!(matches!(
@@ -96,11 +96,28 @@ fn classification_does_not_need_costed_physical_alternative() {
     );
     let source = logical::LogicalExpr::StreamProject(logical::StreamProject::new(
         variable_stream(),
-        ir::ProjectionPlan::Count,
+        ir::ProjectionPlan::Exists,
     ));
 
     assert!(matches!(
         SelectedRootPlanCase::classify(&source, &selected.expr).unwrap(),
         SelectedRootPlanCase::Terminal(TerminalRootPayload::Project(_))
     ));
+}
+
+#[test]
+fn count_classification_carries_the_validated_physical_payload() {
+    let source =
+        logical::LogicalExpr::StreamCardinality(logical::StreamCardinality::new(variable_stream()));
+    let plan = exec::ExecCountPlan::Constant(3);
+    let physical = physical::PhysicalExpr::Cardinality(Box::new(physical::PhysicalCountPlan::new(
+        plan.clone(),
+    )));
+
+    let SelectedRootPlanCase::Count(_, count) =
+        SelectedRootPlanCase::classify(&source, &physical).unwrap()
+    else {
+        panic!("cardinality pair must retain its typed physical payload")
+    };
+    assert_eq!(count.executable(), &plan);
 }

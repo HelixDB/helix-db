@@ -113,3 +113,53 @@ fn source_stream_collapses_static_predicates_before_filtering() {
             if matches!(path.source().as_ref(), ir::EdgeAccessPlan::Empty)
     ));
 }
+
+#[test]
+fn source_stream_preserves_missing_predicate_bindings_for_runtime_evaluation() {
+    for predicate in [
+        Predicate::eq_param("status", "missing_status"),
+        Predicate::is_in_param("group", "missing_groups"),
+    ] {
+        let node = source_stream_from_ast(
+            &context::PlannerContext::default(),
+            &AstNode::NodesWhere {
+                predicate: predicate.clone(),
+            },
+        )
+        .unwrap();
+        let NativeSourceStreamRoot::Source(node) = node else {
+            panic!("nodes_where is a source stream");
+        };
+        assert!(matches!(
+            node.into_logical_expr().unwrap(),
+            logical::LogicalExpr::AccessFilter(filter)
+                if matches!(
+                    filter.access(),
+                    logical::AccessPath::Node(path)
+                        if matches!(path.source().as_ref(), ir::NodeAccessPlan::AllScan)
+                )
+                && filter.predicate() == &ir::PredicatePlan::new(predicate.clone()).unwrap()
+        ));
+
+        let edge = source_stream_from_ast(
+            &context::PlannerContext::default(),
+            &AstNode::EdgesWhere {
+                predicate: predicate.clone(),
+            },
+        )
+        .unwrap();
+        let NativeSourceStreamRoot::Source(edge) = edge else {
+            panic!("edges_where is a source stream");
+        };
+        assert!(matches!(
+            edge.into_logical_expr().unwrap(),
+            logical::LogicalExpr::AccessFilter(filter)
+                if matches!(
+                    filter.access(),
+                    logical::AccessPath::Edge(path)
+                        if matches!(path.source().as_ref(), ir::EdgeAccessPlan::AllScan)
+                )
+                && filter.predicate() == &ir::PredicatePlan::new(predicate).unwrap()
+        ));
+    }
+}

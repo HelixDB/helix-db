@@ -136,8 +136,7 @@ fn native_root_lowers_access_sources_and_rejects_unsupported_wrappers() {
     .expect_native("count terminal is native");
     assert!(matches!(
         terminal,
-        logical::LogicalExpr::StreamProject(project)
-            if matches!(project.projection(), ir::ProjectionPlan::Count)
+        logical::LogicalExpr::StreamCardinality(_)
     ));
 
     let reserved = support::lower(AstNode::Fold {

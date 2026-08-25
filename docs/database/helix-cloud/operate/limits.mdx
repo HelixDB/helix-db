@@ -1,5 +1,7 @@
 ---
-title: 'Limits'
+title: "Limits"
+description: "Understand Helix Cloud request rate limits and database constraints"
+sidebarTitle: "Limits"
 pageType: "Reference"
 ---
 
@@ -9,6 +11,87 @@ pageType: "Reference"
 
 Current constraints and practical limits. These reflect the current implementation, not
 fundamental architectural boundaries.
+
+## Helix Cloud request rate limits
+
+Helix Cloud applies a distributed token bucket to `POST /v2/query`. The bucket is
+scoped to the authenticated Cloud database, so reads and writes from every API
+key, application instance, and gateway replica draw from the same allowance.
+
+| Plan | Sustained rate | Burst capacity |
+| --- | ---: | ---: |
+| Idea | 5 requests per second | 10 requests |
+| Startup | 10 requests per second | 20 requests |
+| Growth | 20 requests per second | 40 requests |
+
+Database-specific overrides can change the sustained rate and burst capacity.
+The values assigned to your database take precedence over its plan limits. Each
+admitted query request costs one token from one shared bucket per Cloud database.
+
+### Token-bucket behavior
+
+- A full bucket can admit requests up to its burst capacity. Tokens then refill
+  continuously at the plan's sustained rate, up to that capacity. This is not a
+  fixed one-second window.
+- One incoming request consumes one token whether it is a read, write, or cache
+  warming request. Warming fanout and gateway retries do not consume additional
+  tokens.
+- Requests rejected during authentication, gateway header validation, or outer
+  request JSON decoding do not consume a token. Query AST and planner validation
+  happen after admission, so those later validation failures consume one token.
+- The bucket is shared across API keys and gateway replicas. Rotating keys or
+  distributing calls across connections does not create more capacity.
+- Burst capacity controls short-term admission, not the number of queries that
+  can execute concurrently. Bound client concurrency separately.
+
+### Rate-limit responses
+
+When no token is available, the gateway rejects the request before database
+execution:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 1
+
+{"error":"rate_limited","msg":"rate limit exceeded"}
+```
+
+`Retry-After` is a whole number of seconds. Wait at least that long before
+retrying, and add jitter when many workers share the same database. The response
+does not currently include `RateLimit-*` or `X-RateLimit-*` limit, remaining, or
+reset headers.
+
+Current official SDK error objects expose the HTTP status, stable code, and
+diagnostic, but not response headers. Use direct HTTP or an application
+transport that retains headers when the exact `Retry-After` value is required;
+otherwise use a configured, bounded status/code-aware delay with jitter.
+
+If the gateway cannot make a safe distributed rate-limit decision, it fails
+closed before database execution:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{"error":"rate_limit_unavailable","msg":"tenant rate limit is unavailable"}
+```
+
+Retry `rate_limit_unavailable` with bounded exponential backoff and jitter. A
+`402` `tenant_disabled` response is an account-credit gate, and a `408`
+`query_timeout` response is an execution deadline; neither means the request
+bucket was exhausted.
+
+### Application guidance
+
+1. Coordinate admission across workers that target the same Cloud database.
+2. Honor `Retry-After` on `rate_limited` instead of retrying immediately.
+3. Use bounded exponential backoff with jitter for transient `503` responses.
+4. Bound in-flight concurrency as well as request rate to avoid local queues and
+   latency spikes.
+5. Apply a separate per-user or per-workspace limiter when multiple application
+   tenants share one Cloud database; the Helix bucket does not distinguish those
+   application tenants.
 
 ## Data Model
 

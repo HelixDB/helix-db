@@ -128,7 +128,7 @@ impl<'db> ExecutionContext<'db> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::v1::values::vector_generation::{ActiveScoreSemantic, VectorEntityKind};
+    use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
     use crate::execution::interpreter::ExecutionRow;
     use crate::search::vector::{DistanceScore, SearchResult, TypedVectorSearchResult};
 

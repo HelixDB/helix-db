@@ -153,3 +153,69 @@ mod tests {
         );
     }
 }
+
+/// Decoded current equality-row value containing node or edge identifiers.
+///
+/// The key family determines whether the identifiers are nodes or edges. The
+/// value deliberately retains the deployed untyped integer bitmap so existing
+/// bytes remain unchanged; callers receive it only after this codec validates
+/// the portable Roaring representation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SecondaryEqualityValue(RoaringTreemap);
+
+impl SecondaryEqualityValue {
+    /// Encodes identifiers with the exact current portable Roaring format.
+    pub(crate) fn encode_ids(ids: &RoaringTreemap) -> Bytes {
+        let mut bytes = Vec::new();
+        ids.serialize_into(&mut bytes)
+            .expect("serializing a RoaringTreemap into memory is infallible");
+        Bytes::from(bytes)
+    }
+
+    /// Decodes the exact current portable Roaring equality-row value.
+    pub(crate) fn decode(data: &[u8]) -> Result<Self, EncodingError> {
+        let ids = RoaringTreemap::deserialize_from(Cursor::new(data)).map_err(|error| {
+            EncodingError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to decode RoaringTreemap: {error}"),
+            ))
+        })?;
+        Ok(Self(ids))
+    }
+
+    /// Returns whether this physical equality row contains an exact entity ID.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, id: u64) -> bool {
+        self.0.contains(id)
+    }
+
+    /// Returns the number of entity IDs represented by this physical row.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    /// Releases the validated identifier set to existing search callers.
+    pub(crate) fn into_ids(self) -> RoaringTreemap {
+        self.0
+    }
+}
+
+#[cfg(test)]
+mod deployed_row_tests {
+    use super::*;
+
+    #[test]
+    fn equality_value_preserves_ids_and_rejects_malformed_bytes() {
+        let ids = RoaringTreemap::from_iter([7, 9, u64::from(u32::MAX) + 1]);
+        let encoded = SecondaryEqualityValue::encode_ids(&ids);
+        let decoded = SecondaryEqualityValue::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.len(), 3);
+        assert!(decoded.contains(7));
+        assert!(decoded.contains(u64::from(u32::MAX) + 1));
+        assert!(!decoded.contains(8));
+        assert_eq!(decoded.into_ids(), ids);
+        assert!(SecondaryEqualityValue::decode(b"not a bitmap").is_err());
+    }
+}

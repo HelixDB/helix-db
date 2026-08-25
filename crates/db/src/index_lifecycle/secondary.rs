@@ -31,25 +31,25 @@ use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDir
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{decode_properties, Property};
 #[cfg(test)]
-use crate::encoding::v1::keys::metadata::MetadataKey;
-use crate::encoding::v1::keys::tenant::DataScope;
+use crate::encoding::v2::keys::metadata::MetadataKey;
+use crate::encoding::v2::keys::scope::DataScope;
 #[cfg(test)]
-use crate::encoding::v1::keys::GlobalKeyKind;
-use crate::encoding::v1::keys::{
-    DataKeyKind, EdgePropertyByIdKey, Key, KeyPrefix, NodePropertyKey,
-};
-use crate::encoding::v1::property::equality_value::{
-    project_equality_value, EqualityValueProjection,
-};
-use crate::encoding::v1::property::range_value::{
-    project_range_value, CanonicalRangeValue, RangeValueProjection,
-};
-#[cfg(test)]
-use crate::encoding::v1::values::id_allocation::IdAllocationWatermarkValue;
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::GlobalKeyKind;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, RecordKind, ScopedKey,
     SecondaryEntryKey, SecondaryEntryLane, SecondaryEqualityBitmapKey,
+};
+use crate::encoding::v2::keys::{
+    DataKey, DataKeyKind, EdgePropertyByIdKey, KeyPrefix, NodePropertyKey,
+};
+#[cfg(test)]
+use crate::encoding::v2::values::id_allocation::IdAllocationWatermarkValue;
+use crate::encoding::v2::values::property::equality_index_value::{
+    project_equality_value, EqualityValueProjection,
+};
+use crate::encoding::v2::values::property::range_index_value::{
+    project_range_value, CanonicalRangeValue, RangeValueProjection,
 };
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_delta, decode_index_record, decode_secondary_entry,
@@ -80,8 +80,20 @@ use crate::index_lifecycle::{
 
 use super::IndexScopeGates;
 
+mod exact;
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
+#[cfg(test)]
+pub(crate) use exact::scan_active_range_generation_with_membership;
+pub(crate) use exact::{
+    count_active_range_generation_with_membership, lookup_active_equality_literal_batch,
+    lookup_active_equality_point_literal, record_equality_graph_read,
+};
+
 #[cfg(any(test, feature = "production-coverage"))]
 static BENCHMARK_POINT_READS: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "production-coverage"))]
+static BENCHMARK_MULTI_GETS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(test, feature = "production-coverage"))]
 static BENCHMARK_SCANS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(test, feature = "production-coverage"))]
@@ -93,6 +105,7 @@ static BENCHMARK_GRAPH_READS: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SecondaryEqualityReadMetrics {
     pub(crate) point_reads: u64,
+    pub(crate) multi_get_calls: u64,
     pub(crate) scans: u64,
     pub(crate) graph_reads: u64,
 }
@@ -100,6 +113,7 @@ pub(crate) struct SecondaryEqualityReadMetrics {
 #[cfg(any(test, feature = "production-coverage"))]
 pub(crate) fn reset_equality_read_metrics() {
     BENCHMARK_POINT_READS.store(0, AtomicOrdering::Relaxed);
+    BENCHMARK_MULTI_GETS.store(0, AtomicOrdering::Relaxed);
     BENCHMARK_SCANS.store(0, AtomicOrdering::Relaxed);
     BENCHMARK_GRAPH_READS.store(0, AtomicOrdering::Relaxed);
 }
@@ -108,6 +122,7 @@ pub(crate) fn reset_equality_read_metrics() {
 pub(crate) fn equality_read_metrics() -> SecondaryEqualityReadMetrics {
     SecondaryEqualityReadMetrics {
         point_reads: BENCHMARK_POINT_READS.load(AtomicOrdering::Relaxed),
+        multi_get_calls: BENCHMARK_MULTI_GETS.load(AtomicOrdering::Relaxed),
         scans: BENCHMARK_SCANS.load(AtomicOrdering::Relaxed),
         graph_reads: BENCHMARK_GRAPH_READS.load(AtomicOrdering::Relaxed),
     }
@@ -2670,7 +2685,7 @@ impl BatchAccounting {
     }
 }
 
-pub(super) fn canonical_value(
+pub(crate) fn canonical_value(
     definition: &ValidatedSecondaryIndexDefinition,
     properties: &[Property],
     _entity_id: IndexEntityId,
@@ -2741,7 +2756,7 @@ pub(super) fn canonical_value(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum SecondaryValueError {
+pub(crate) enum SecondaryValueError {
     UnsupportedEquality(&'static str),
     UnsupportedRange(&'static str),
     NaNRange,
@@ -2891,6 +2906,83 @@ pub(crate) async fn lookup_active_equality_generation(
         })
         .transpose()
         .map(Option::unwrap_or_default)
+}
+
+/// Reads and unions equality values from one exact Active generation.
+///
+/// Non-unique indexed values use one `multi_get` over their V4 bitmap rows.
+/// Unique, null, non-reflexive, and error projections retain the authoritative
+/// single-value path so their verification contracts remain unchanged.
+pub(crate) async fn lookup_active_equality_generations(
+    reader: &(impl DbReadOps + Sync),
+    handle: &ActiveIndexHandle,
+    values: &[PropertyValue],
+) -> Result<roaring::RoaringTreemap> {
+    if values.is_empty() {
+        return Ok(roaring::RoaringTreemap::new());
+    }
+    let Some(definition) = handle.secondary_definition() else {
+        return Err(corruption(
+            "secondary equality batch serving received a non-secondary Active handle",
+        ));
+    };
+    if !definition_uses_equality_bitmap(definition) {
+        let mut owners = roaring::RoaringTreemap::new();
+        for value in values {
+            owners |= lookup_active_equality_generation(reader, handle, value).await?;
+        }
+        return Ok(owners);
+    }
+
+    let mut canonical = Vec::with_capacity(values.len());
+    for value in values {
+        let EqualityValueProjection::Indexed(value) = project_equality_value(value) else {
+            let mut owners = roaring::RoaringTreemap::new();
+            for value in values {
+                owners |= lookup_active_equality_generation(reader, handle, value).await?;
+            }
+            return Ok(owners);
+        };
+        canonical.push(CanonicalSecondaryValue::equality(value));
+    }
+    let mut keys = canonical
+        .into_iter()
+        .map(|value| {
+            secondary_entry_key(
+                handle.scope(),
+                handle.index_id(),
+                handle.generation(),
+                definition,
+                value,
+                IndexEntityId::initial(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    keys.sort_unstable();
+    keys.dedup();
+    keys.iter().for_each(|_| record_equality_point_read());
+    if keys.len() == 1 {
+        return reader
+            .get(
+                keys.pop()
+                    .expect("one-key equality batch remains non-empty"),
+            )
+            .await?
+            .map(|bytes| {
+                SecondaryEqualityBitmapValue::decode(&bytes)
+                    .map(SecondaryEqualityBitmapValue::into_ids)
+                    .map_err(HelixDbError::from)
+            })
+            .transpose()
+            .map(Option::unwrap_or_default);
+    }
+    #[cfg(any(test, feature = "production-coverage"))]
+    BENCHMARK_MULTI_GETS.fetch_add(1, AtomicOrdering::Relaxed);
+    let mut owners = roaring::RoaringTreemap::new();
+    for bytes in reader.multi_get(&keys).await?.into_iter().flatten() {
+        owners |= SecondaryEqualityBitmapValue::decode(&bytes)?.into_ids();
+    }
+    Ok(owners)
 }
 
 async fn scan_authoritative_null_equality(
@@ -3286,7 +3378,7 @@ fn definition_lane(definition: &ValidatedSecondaryIndexDefinition) -> SecondaryE
     }
 }
 
-pub(super) fn definition_uses_equality_bitmap(
+pub(crate) fn definition_uses_equality_bitmap(
     definition: &ValidatedSecondaryIndexDefinition,
 ) -> bool {
     matches!(
@@ -3403,14 +3495,14 @@ async fn read_authoritative_properties(
         .transpose()
 }
 
-pub(super) fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
+pub(crate) fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
     match entity.kind {
-        IndexElementKind::Node => Key::Data {
+        IndexElementKind::Node => DataKey::Data {
             scope,
             kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity.id.get())),
         }
         .to_bytes(),
-        IndexElementKind::Edge => Key::Data {
+        IndexElementKind::Edge => DataKey::Data {
             scope,
             kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(entity.id.get())),
         }
@@ -3450,37 +3542,37 @@ async fn generation_has_rows(
     Ok(rows.next().await?.is_some())
 }
 
-pub(super) fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
+pub(crate) fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
     let prefix = match kind {
         IndexElementKind::Node => KeyPrefix::NodeProperty,
         IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
     };
-    Key::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
+    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
 }
 
-pub(super) fn source_entity(
+pub(crate) fn source_entity(
     scope: DataScope,
     expected: IndexElementKind,
     key: &[u8],
 ) -> Result<Option<IndexEntityId>> {
-    let parsed = Key::parse_from_slice(scope, key)?;
+    let parsed = DataKey::parse_from_slice(scope, key)?;
     Ok(match (expected, parsed) {
         (
             IndexElementKind::Node,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::NodeProperty(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.node_id())),
         (
             IndexElementKind::Edge,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::EdgePropertyById(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, Key::Data { .. }) => None,
-        (IndexElementKind::Node, Key::Data { .. }) | (_, Key::Global { .. }) => {
+        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
+        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
             return Err(corruption(
                 "secondary source prefix yielded another key kind",
             ));
@@ -3541,12 +3633,14 @@ mod tests {
     use std::time::Duration;
 
     use slatedb::object_store::memory::InMemory;
-    use slatedb::{Db, IsolationLevel};
+    use slatedb::{ByteRangeBounds, Db, DbIterator, DbReadOps, IsolationLevel, KeyValue};
 
     use super::*;
-    use crate::config::{SearchIndexBackfillLimits, SecondaryIndexDefinition};
-    use crate::encoding::v1::property::encode_properties;
+    use crate::config::{
+        SearchIndexBackfillLimits, SecondaryIndexDefinition, VectorIndexDefinition,
+    };
     use crate::encoding::v2::values::encode_index_record;
+    use crate::encoding::v2::values::property::encode_properties;
     use crate::index_lifecycle::lifecycle::{
         create_index_operation, drop_index_operation, InitialBuildProgress,
     };
@@ -3554,15 +3648,16 @@ mod tests {
         claim_operation, execute_claimed_step, observe_operation_pointer, read_operation,
         ClaimPermission, CommittedOperationStep, OperationPointerObservation,
     };
-    use crate::index_lifecycle::repository::bootstrap_writer;
     use crate::index_lifecycle::{
         ClaimSequence, IndexDdlReceipt, IndexOperationExecutionState, IndexOperationId,
-        IndexOperationKind, IndexRevision, IndexStateTransition, PhysicalGeneration, WriterEpoch,
+        IndexOperationKind, IndexRevision, IndexStateTransition, PhysicalGeneration,
+        VectorGenerationDescriptor, VectorPhysicalIndexId, VectorPhysicalLayout, WriterEpoch,
     };
+    use crate::migrations::startup::bootstrap_writer;
 
     const NOW_MILLIS: u64 = 1;
 
-    async fn test_db(name: &str) -> Db {
+    pub(super) async fn test_db(name: &str) -> Db {
         let db = Db::builder(name, Arc::new(InMemory::new()))
             .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
             .build()
@@ -3580,7 +3675,7 @@ mod tests {
     }
 
     /// Persists an Active record and projects its exact serving handle.
-    async fn active_read_handle(
+    pub(super) async fn active_read_handle(
         db: &Db,
         definition: SecondaryIndexDefinition,
     ) -> ActiveIndexHandle {
@@ -3609,6 +3704,171 @@ mod tests {
         .expect("secondary read fixture Active record persists");
         ActiveIndexHandle::try_from_record(DataScope::LegacyUnscoped, &active)
             .expect("secondary read fixture projects an Active handle")
+    }
+
+    async fn active_vector_read_handle(db: &Db) -> ActiveIndexHandle {
+        let definition = ValidatedDynamicIndexDefinition::try_from(
+            VectorIndexDefinition::new_node(
+                "User",
+                "embedding",
+                2,
+                crate::search::vector::VectorDistanceMetric::Cosine,
+            )
+            .expect("vector fixture validates"),
+        )
+        .expect("validated vector fixture");
+        let ValidatedDynamicIndexDefinition::Vector(vector) = &definition else {
+            panic!("fixture is a vector definition")
+        };
+        let building = IndexRecordV2::building(
+            IndexId::initial(),
+            definition.clone(),
+            IndexRevision::initial(),
+            PhysicalGeneration::Vector {
+                generation: IndexGenerationId::initial(),
+                layout: VectorPhysicalLayout::Unpartitioned {
+                    physical_index_id: VectorPhysicalIndexId::initial(),
+                },
+                descriptor: VectorGenerationDescriptor::for_definition(vector),
+            },
+            IndexOperationId::new_v4(),
+        )
+        .expect("vector read fixture starts building");
+        let active = building
+            .transition(IndexStateTransition::Activate)
+            .expect("vector read fixture activates");
+        db.put(
+            scoped_index_key(
+                DataScope::LegacyUnscoped,
+                ScopedKey::index_record(definition.identity()),
+            ),
+            encode_index_record(&active),
+        )
+        .await
+        .expect("vector read fixture Active record persists");
+        ActiveIndexHandle::try_from_record(DataScope::LegacyUnscoped, &active)
+            .expect("vector read fixture projects an Active handle")
+    }
+
+    struct ExactKeyScan<'a> {
+        db: &'a Db,
+        key: Bytes,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ExactReadFailure {
+        Get,
+        MultiGet,
+        Scan,
+        Next,
+    }
+
+    struct FailingExactRead<'a> {
+        db: &'a Db,
+        failure: ExactReadFailure,
+    }
+
+    #[async_trait::async_trait]
+    impl DbReadOps for FailingExactRead<'_> {
+        async fn get_with_options<K: AsRef<[u8]> + Send>(
+            &self,
+            key: K,
+            options: &slatedb::config::ReadOptions,
+        ) -> std::result::Result<Option<Bytes>, slatedb::Error> {
+            if matches!(self.failure, ExactReadFailure::Get) {
+                return Err(slatedb::Error::unavailable(
+                    "injected exact get failure".to_string(),
+                ));
+            }
+            self.db.get_with_options(key, options).await
+        }
+
+        async fn multi_get_with_options<K>(
+            &self,
+            keys: &[K],
+            options: &slatedb::config::ReadOptions,
+        ) -> std::result::Result<Vec<Option<Bytes>>, slatedb::Error>
+        where
+            K: AsRef<[u8]> + Send + Sync,
+        {
+            if matches!(self.failure, ExactReadFailure::MultiGet) {
+                return Err(slatedb::Error::unavailable(
+                    "injected exact multi-get failure".to_string(),
+                ));
+            }
+            self.db.multi_get_with_options(keys, options).await
+        }
+
+        async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+            &self,
+            key: K,
+            options: &slatedb::config::ReadOptions,
+        ) -> std::result::Result<Option<KeyValue>, slatedb::Error> {
+            self.db.get_key_value_with_options(key, options).await
+        }
+
+        async fn scan_with_options<T>(
+            &self,
+            range: T,
+            options: &slatedb::config::ScanOptions,
+        ) -> std::result::Result<DbIterator, slatedb::Error>
+        where
+            T: ByteRangeBounds + Send,
+        {
+            if matches!(self.failure, ExactReadFailure::Scan) {
+                return Err(slatedb::Error::unavailable(
+                    "injected exact scan failure".to_string(),
+                ));
+            }
+            let rows = self.db.scan_with_options(range, options).await?;
+            if matches!(self.failure, ExactReadFailure::Next) {
+                self.db.close().await?;
+            }
+            Ok(rows)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DbReadOps for ExactKeyScan<'_> {
+        async fn get_with_options<K: AsRef<[u8]> + Send>(
+            &self,
+            key: K,
+            options: &slatedb::config::ReadOptions,
+        ) -> std::result::Result<Option<Bytes>, slatedb::Error> {
+            self.db.get_with_options(key, options).await
+        }
+
+        async fn multi_get_with_options<K>(
+            &self,
+            keys: &[K],
+            options: &slatedb::config::ReadOptions,
+        ) -> std::result::Result<Vec<Option<Bytes>>, slatedb::Error>
+        where
+            K: AsRef<[u8]> + Send + Sync,
+        {
+            self.db.multi_get_with_options(keys, options).await
+        }
+
+        async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+            &self,
+            key: K,
+            options: &slatedb::config::ReadOptions,
+        ) -> std::result::Result<Option<KeyValue>, slatedb::Error> {
+            self.db.get_key_value_with_options(key, options).await
+        }
+
+        async fn scan_with_options<T>(
+            &self,
+            _range: T,
+            options: &slatedb::config::ScanOptions,
+        ) -> std::result::Result<DbIterator, slatedb::Error>
+        where
+            T: ByteRangeBounds + Send,
+        {
+            self.db
+                .scan_with_options(self.key.clone()..=self.key.clone(), options)
+                .await
+        }
     }
 
     /// Persists one generation-qualified entry matching the fixture handle.
@@ -3818,6 +4078,34 @@ mod tests {
                 .collect::<Vec<_>>(),
                 vec![2, 9]
             );
+            assert_eq!(
+                lookup_active_equality_point_literal(
+                    &db,
+                    &handle,
+                    &PropertyValue::String("same".to_string()),
+                )
+                .await
+                .expect("exact managed equality point read succeeds")
+                .into_iter()
+                .collect::<Vec<_>>(),
+                vec![2, 9]
+            );
+            assert_eq!(
+                lookup_active_equality_literal_batch(
+                    &db,
+                    &handle,
+                    &[
+                        PropertyValue::String("same".to_string()),
+                        PropertyValue::String("other".to_string()),
+                        PropertyValue::String("same".to_string()),
+                    ],
+                )
+                .await
+                .expect("exact literal batch preserves duplicate physical reads")
+                .into_iter()
+                .collect::<Vec<_>>(),
+                vec![2, 4, 9]
+            );
             assert!(lookup_active_equality_generation(
                 &db,
                 &handle,
@@ -3848,6 +4136,26 @@ mod tests {
             .collect::<Vec<_>>(),
             vec![7]
         );
+        assert_eq!(
+            lookup_active_equality_point_literal(
+                &db,
+                &handle,
+                &PropertyValue::String("only".to_string()),
+            )
+            .await
+            .expect("exact unique owner point read succeeds")
+            .into_iter()
+            .collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert!(lookup_active_equality_point_literal(
+            &db,
+            &handle,
+            &PropertyValue::String("missing".to_string()),
+        )
+        .await
+        .expect("missing exact unique owner is empty")
+        .is_empty());
         db.close()
             .await
             .expect("unique equality read fixture closes");
@@ -3894,6 +4202,71 @@ mod tests {
                 expected_all
             );
             assert_eq!(
+                scan_active_range_generation_with_membership(&db, &handle, None, None, &[])
+                    .await
+                    .expect("exact range without membership succeeds"),
+                expected_all
+            );
+            assert_eq!(
+                scan_active_range_generation_with_membership(
+                    &db,
+                    &handle,
+                    Some(&SecondaryRangeQuery::Lower {
+                        value: PropertyValue::String("a".to_string()),
+                        inclusive: false,
+                    }),
+                    None,
+                    &[],
+                )
+                .await
+                .expect("exact bounded range succeeds"),
+                expected_gt
+            );
+            let membership = roaring::RoaringTreemap::from_iter([20, 30]);
+            let second_filter = roaring::RoaringTreemap::from_iter([10, 20]);
+            assert_eq!(
+                scan_active_range_generation_with_membership(
+                    &db,
+                    &handle,
+                    None,
+                    None,
+                    &[membership.clone(), second_filter.clone()],
+                )
+                .await
+                .expect("exact range applies membership in encoded order"),
+                vec![20]
+            );
+            assert_eq!(
+                count_active_range_generation_with_membership(&db, &handle, None, None, &[])
+                    .await
+                    .expect("exact range count succeeds without owner materialization"),
+                expected_all.len()
+            );
+            assert_eq!(
+                count_active_range_generation_with_membership(
+                    &db,
+                    &handle,
+                    None,
+                    None,
+                    &[membership.clone(), second_filter.clone()],
+                )
+                .await
+                .expect("exact range count applies membership in encoded order"),
+                1
+            );
+            assert_eq!(
+                count_active_range_generation_with_membership(&db, &handle, None, Some(0), &[],)
+                    .await
+                    .expect("zero accepted-match threshold performs an empty count"),
+                0
+            );
+            assert_eq!(
+                count_active_range_generation_with_membership(&db, &handle, None, Some(2), &[],)
+                    .await
+                    .expect("bounded exact range count stops at its threshold"),
+                expected_all.len().min(2)
+            );
+            assert_eq!(
                 scan_active_range_generation(
                     &db,
                     &handle,
@@ -3927,7 +4300,13 @@ mod tests {
                 scan_active_range_generation(&db, &handle, None, Some(1))
                     .await
                     .expect("managed range limit is pushed into iteration"),
-                expected_all.into_iter().take(1).collect::<Vec<_>>()
+                expected_all.iter().copied().take(1).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                scan_active_range_generation_with_membership(&db, &handle, None, Some(1), &[])
+                    .await
+                    .expect("exact range stops at its accepted-match threshold"),
+                expected_all.iter().copied().take(1).collect::<Vec<_>>()
             );
             assert!(scan_active_range_generation(
                 &db,
@@ -3942,6 +4321,21 @@ mod tests {
             )
             .await
             .expect("reversed between bounds are empty")
+            .is_empty());
+            assert!(scan_active_range_generation_with_membership(
+                &db,
+                &handle,
+                Some(&SecondaryRangeQuery::Between {
+                    lower: PropertyValue::String("b".to_string()),
+                    lower_inclusive: true,
+                    upper: PropertyValue::String("a".to_string()),
+                    upper_inclusive: true,
+                }),
+                None,
+                &[],
+            )
+            .await
+            .expect("exact reversed between bounds are empty")
             .is_empty());
             db.close().await.expect("range read fixture closes");
         }
@@ -3983,7 +4377,516 @@ mod tests {
                 crate::encoding::error::EncodingError::Io(_)
             ))
         ));
+        assert!(matches!(
+            lookup_active_equality_point_literal(
+                &db,
+                &handle,
+                &PropertyValue::String("same".to_string()),
+            )
+            .await,
+            Err(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Io(_)
+            ))
+        ));
+        assert!(matches!(
+            lookup_active_equality_literal_batch(
+                &db,
+                &handle,
+                &[
+                    PropertyValue::String("same".to_string()),
+                    PropertyValue::String("same".to_string()),
+                ],
+            )
+            .await,
+            Err(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Io(_)
+            ))
+        ));
         db.close().await.expect("owner mismatch fixture closes");
+    }
+
+    #[tokio::test]
+    async fn exact_secondary_primitives_reject_cross_family_and_unindexed_inputs() {
+        let db = test_db("secondary-exact-primitive-contract-errors").await;
+        let equality = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_equality("User", "value").unwrap(),
+        )
+        .await;
+        let unique = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_unique_equality("User", "email").unwrap(),
+        )
+        .await;
+        let range = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+        )
+        .await;
+        let vector = active_vector_read_handle(&db).await;
+
+        for value in [PropertyValue::Null, PropertyValue::F64(f64::NAN)] {
+            assert!(matches!(
+                lookup_active_equality_point_literal(&db, &equality, &value).await,
+                Err(HelixDbError::IndexCatalogCorruption(message))
+                    if message.contains("non-indexed value")
+            ));
+        }
+        assert!(matches!(
+            lookup_active_equality_point_literal(
+                &db,
+                &range,
+                &PropertyValue::String("a".to_string()),
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("range definition")
+        ));
+        assert!(matches!(
+            lookup_active_equality_literal_batch(
+                &db,
+                &equality,
+                &[PropertyValue::String("only".to_string())],
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("fewer than two")
+        ));
+        assert!(matches!(
+            lookup_active_equality_literal_batch(
+                &db,
+                &unique,
+                &[
+                    PropertyValue::String("a".to_string()),
+                    PropertyValue::String("b".to_string()),
+                ],
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("non-bitmap definition")
+        ));
+        assert!(matches!(
+            lookup_active_equality_literal_batch(
+                &db,
+                &equality,
+                &[
+                    PropertyValue::String("a".to_string()),
+                    PropertyValue::Null,
+                ],
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("non-indexed value")
+        ));
+        assert!(matches!(
+            scan_active_range_generation_with_membership(&db, &equality, None, None, &[]).await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("equality definition")
+        ));
+        for result in [
+            lookup_active_equality_point_literal(
+                &db,
+                &vector,
+                &PropertyValue::String("value".to_string()),
+            )
+            .await,
+            lookup_active_equality_literal_batch(
+                &db,
+                &vector,
+                &[
+                    PropertyValue::String("a".to_string()),
+                    PropertyValue::String("b".to_string()),
+                ],
+            )
+            .await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(HelixDbError::IndexCatalogCorruption(message))
+                    if message.contains("non-secondary Active handle")
+            ));
+        }
+        assert!(matches!(
+            scan_active_range_generation_with_membership(&db, &vector, None, None, &[]).await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("non-secondary Active handle")
+        ));
+        let oversized = PropertyValue::Bytes(vec![0; 1_100_000]);
+        let oversized_error = lookup_active_equality_point_literal(&db, &equality, &oversized)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            oversized_error,
+            HelixDbError::SecondaryIndexValue(SecondaryIndexValueError::EncodedKeyTooLarge { .. })
+        ));
+        assert!(scan_active_range_generation_with_membership(
+            &db,
+            &range,
+            Some(&SecondaryRangeQuery::Lower {
+                value: PropertyValue::Array(vec![PropertyValue::I64(1)]),
+                inclusive: true,
+            }),
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+
+        db.close()
+            .await
+            .expect("exact primitive contract fixture closes");
+    }
+
+    #[tokio::test]
+    async fn exact_secondary_primitives_propagate_every_storage_boundary_failure() {
+        let db = test_db("secondary-exact-storage-errors").await;
+        let equality = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_equality("User", "value").unwrap(),
+        )
+        .await;
+        let get_failure = FailingExactRead {
+            db: &db,
+            failure: ExactReadFailure::Get,
+        };
+        assert!(lookup_active_equality_point_literal(
+            &get_failure,
+            &equality,
+            &PropertyValue::String("same".to_string()),
+        )
+        .await
+        .is_err());
+        let multi_get_failure = FailingExactRead {
+            db: &db,
+            failure: ExactReadFailure::MultiGet,
+        };
+        assert!(lookup_active_equality_literal_batch(
+            &multi_get_failure,
+            &equality,
+            &[
+                PropertyValue::String("same".to_string()),
+                PropertyValue::String("other".to_string()),
+            ],
+        )
+        .await
+        .is_err());
+
+        let unique = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_unique_equality("User", "email").unwrap(),
+        )
+        .await;
+        let unique_definition = unique.secondary_definition().unwrap();
+        db.put(
+            secondary_entry_key(
+                unique.scope(),
+                unique.index_id(),
+                unique.generation(),
+                unique_definition,
+                CanonicalSecondaryValue::equality_string("broken@example.com"),
+                IndexEntityId::initial(),
+            )
+            .unwrap(),
+            Bytes::from_static(b"malformed unique owner"),
+        )
+        .await
+        .unwrap();
+        assert!(lookup_active_equality_point_literal(
+            &db,
+            &unique,
+            &PropertyValue::String("broken@example.com".to_string()),
+        )
+        .await
+        .is_err());
+
+        let range = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+        )
+        .await;
+        let scan_failure = FailingExactRead {
+            db: &db,
+            failure: ExactReadFailure::Scan,
+        };
+        assert!(scan_active_range_generation_with_membership(
+            &scan_failure,
+            &range,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+        let malformed_key = Bytes::from_static(b"not-an-index-key");
+        db.put(&malformed_key, Bytes::from_static(b"ignored"))
+            .await
+            .unwrap();
+        assert!(scan_active_range_generation_with_membership(
+            &ExactKeyScan {
+                db: &db,
+                key: malformed_key,
+            },
+            &range,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+        db.close().await.unwrap();
+
+        let next_db = test_db("secondary-exact-next-error").await;
+        let next_range = active_read_handle(
+            &next_db,
+            SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+        )
+        .await;
+        put_read_entry(&next_db, &next_range, "a", 1).await;
+        let next_failure = FailingExactRead {
+            db: &next_db,
+            failure: ExactReadFailure::Next,
+        };
+        assert!(scan_active_range_generation_with_membership(
+            &next_failure,
+            &next_range,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn exact_range_scan_rejects_adversarial_rows_and_stale_authority() {
+        let db = test_db("secondary-exact-adversarial-range-rows").await;
+        let handle = active_read_handle(
+            &db,
+            SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+        )
+        .await;
+        let other_kind = scoped_index_key(
+            handle.scope(),
+            ScopedKey::index_record(handle.identity().clone()),
+        );
+        db.put(&other_kind, Bytes::from_static(b"ignored"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            scan_active_range_generation_with_membership(
+                &ExactKeyScan {
+                    db: &db,
+                    key: other_kind,
+                },
+                &handle,
+                None,
+                None,
+                &[],
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("another key kind")
+        ));
+
+        let definition = handle.secondary_definition().unwrap();
+        let escaped_key = secondary_entry_key(
+            handle.scope(),
+            handle.index_id().checked_next().unwrap(),
+            handle.generation(),
+            definition,
+            CanonicalSecondaryValue::range_string(StorageRangeIndexDirection::Asc, "a"),
+            IndexEntityId::new(1),
+        )
+        .unwrap();
+        db.put(
+            &escaped_key,
+            encode_secondary_entry(&SecondaryEntryValue {
+                index_id: handle.index_id().checked_next().unwrap(),
+                generation: handle.generation(),
+                lane: definition_lane(definition),
+                entity_id: IndexEntityId::new(1),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            scan_active_range_generation_with_membership(
+                &ExactKeyScan {
+                    db: &db,
+                    key: escaped_key,
+                },
+                &handle,
+                None,
+                None,
+                &[],
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("escaped its exact serving prefix")
+        ));
+        let generation_key = secondary_entry_key(
+            handle.scope(),
+            handle.index_id(),
+            handle.generation().checked_next().unwrap(),
+            definition,
+            CanonicalSecondaryValue::range_string(StorageRangeIndexDirection::Asc, "a"),
+            IndexEntityId::new(2),
+        )
+        .unwrap();
+        db.put(
+            &generation_key,
+            encode_secondary_entry(&SecondaryEntryValue {
+                index_id: handle.index_id(),
+                generation: handle.generation().checked_next().unwrap(),
+                lane: definition_lane(definition),
+                entity_id: IndexEntityId::new(2),
+            }),
+        )
+        .await
+        .unwrap();
+        let equality_key = scoped_index_key(
+            handle.scope(),
+            ScopedKey::SecondaryEntry(
+                SecondaryEntryKey::try_new(
+                    handle.index_id(),
+                    handle.generation(),
+                    SecondaryEntryLane::NodeEquality,
+                    CanonicalSecondaryValue::equality_string("a"),
+                    Some(IndexEntityId::new(3)),
+                )
+                .unwrap(),
+            ),
+        );
+        db.put(
+            &equality_key,
+            encode_secondary_entry(&SecondaryEntryValue {
+                index_id: handle.index_id(),
+                generation: handle.generation(),
+                lane: SecondaryEntryLane::NodeEquality,
+                entity_id: IndexEntityId::new(3),
+            }),
+        )
+        .await
+        .unwrap();
+        for key in [generation_key, equality_key] {
+            assert!(matches!(
+                scan_active_range_generation_with_membership(
+                    &ExactKeyScan { db: &db, key },
+                    &handle,
+                    None,
+                    None,
+                    &[],
+                )
+                .await,
+                Err(HelixDbError::IndexCatalogCorruption(message))
+                    if message.contains("escaped its exact serving prefix")
+            ));
+        }
+        db.close().await.unwrap();
+
+        let mismatch_db = test_db("secondary-exact-range-owner-mismatch").await;
+        let mismatch = active_read_handle(
+            &mismatch_db,
+            SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+        )
+        .await;
+        let mismatch_definition = mismatch.secondary_definition().unwrap();
+        let mismatch_key = secondary_entry_key(
+            mismatch.scope(),
+            mismatch.index_id(),
+            mismatch.generation(),
+            mismatch_definition,
+            CanonicalSecondaryValue::range_string(StorageRangeIndexDirection::Asc, "a"),
+            IndexEntityId::new(1),
+        )
+        .unwrap();
+        mismatch_db
+            .put(
+                mismatch_key.clone(),
+                encode_secondary_entry(&SecondaryEntryValue {
+                    index_id: mismatch.index_id(),
+                    generation: mismatch.generation(),
+                    lane: definition_lane(mismatch_definition),
+                    entity_id: IndexEntityId::new(2),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            scan_active_range_generation_with_membership(
+                &mismatch_db,
+                &mismatch,
+                None,
+                None,
+                &[],
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(message))
+                if message.contains("key/value owners disagree")
+        ));
+        mismatch_db
+            .put(mismatch_key, Bytes::from_static(b"malformed range owner"))
+            .await
+            .unwrap();
+        assert!(scan_active_range_generation_with_membership(
+            &mismatch_db,
+            &mismatch,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+        mismatch_db.close().await.unwrap();
+
+        for (database, authoritative) in [
+            (
+                "secondary-exact-range-stale-authority",
+                encode_properties(&[
+                    Property::string("$label", "User"),
+                    Property::string("rank", "different"),
+                ]),
+            ),
+            (
+                "secondary-exact-range-malformed-authority",
+                Bytes::from_static(b"malformed authoritative properties"),
+            ),
+        ] {
+            let authority_db = test_db(database).await;
+            let authority = active_read_handle(
+                &authority_db,
+                SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+            )
+            .await;
+            put_read_entry(&authority_db, &authority, "a", 7).await;
+            authority_db
+                .put(
+                    authoritative_property_key(
+                        authority.scope(),
+                        IndexEntity {
+                            kind: IndexElementKind::Node,
+                            id: IndexEntityId::new(7),
+                        },
+                    ),
+                    authoritative,
+                )
+                .await
+                .unwrap();
+            let result = scan_active_range_generation_with_membership(
+                &authority_db,
+                &authority,
+                None,
+                None,
+                &[],
+            )
+            .await;
+            if database.contains("stale") {
+                assert!(result.unwrap().is_empty());
+            } else {
+                assert!(result.is_err());
+            }
+            authority_db.close().await.unwrap();
+        }
     }
 
     /// Covers the pure range-bound, diagnostic, and checked-arithmetic
@@ -4296,12 +5199,12 @@ mod tests {
 
     fn source_key(scope: DataScope, kind: IndexElementKind, entity_id: u64) -> Bytes {
         match kind {
-            IndexElementKind::Node => Key::Data {
+            IndexElementKind::Node => DataKey::Data {
                 scope,
                 kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
             }
             .to_bytes(),
-            IndexElementKind::Edge => Key::Data {
+            IndexElementKind::Edge => DataKey::Data {
                 scope,
                 kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(entity_id)),
             }
@@ -4736,7 +5639,7 @@ mod tests {
     #[tokio::test]
     async fn shared_edge_equality_builds_one_bitmap_and_serves_one_point_read() {
         let db = test_db("secondary-shared-edge-bitmap-read").await;
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
             0xFD00_0000_0000_0000_0000_0000_0000_0007,
         ));
         let definition = validated(
@@ -4800,6 +5703,7 @@ mod tests {
             equality_read_metrics(),
             SecondaryEqualityReadMetrics {
                 point_reads: 1,
+                multi_get_calls: 0,
                 scans: 0,
                 graph_reads: 0,
             }
@@ -5528,7 +6432,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "nightly sparse bitmap larger than the default 8 MiB lifecycle input limit"]
     async fn oversized_v4_bitmap_cleanup_survives_reopen_at_default_limit() {
         let default_limits = SearchIndexBackfillLimits::default().batch();
         let input_limit = usize::try_from(default_limits.max_input_bytes().get())
@@ -5550,7 +6453,7 @@ mod tests {
 
         let scopes = [
             DataScope::LegacyUnscoped,
-            DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+            DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
                 u128::from_be_bytes([0xFD; 16]),
             )),
         ];
@@ -5710,7 +6613,7 @@ mod tests {
     #[tokio::test]
     async fn source_upper_bound_uses_the_exclusive_allocator_watermark() {
         let db = test_db("secondary-source-upper-bound").await;
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(7));
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(7));
         let definition = validated(
             SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("node equality definition"),
@@ -5726,7 +6629,7 @@ mod tests {
             source_cursor(scope, IndexElementKind::Node, 0)
         );
         db.put(
-            Key::Global {
+            DataKey::Global {
                 kind: GlobalKeyKind::Metadata(MetadataKey::next_node_id_key()),
             }
             .to_bytes(),
@@ -5749,7 +6652,7 @@ mod tests {
             unreachable!("test definition is secondary");
         };
         db.put(
-            Key::Global {
+            DataKey::Global {
                 kind: GlobalKeyKind::Metadata(MetadataKey::next_edge_id_key()),
             }
             .to_bytes(),
@@ -5828,6 +6731,135 @@ mod tests {
             .await
             .expect("updated active entry is readable")
             .is_some());
+        db.close().await.expect("secondary test database closes");
+    }
+
+    #[tokio::test]
+    async fn driver_owned_catch_up_executes_the_legacy_exact_delta_contract() {
+        let db = test_db("secondary-driver-owned-catch-up").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let before = user_properties("before@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &before).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Progressed
+        );
+        let after = user_properties("after@example.com");
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &before, &after)
+            .await
+            .expect("building mutation stores one durable delta");
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("catch-up operation is readable")
+            .expect("catch-up operation exists");
+        assert!(matches!(
+            operation.progress(),
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                SecondaryBuildStage::CatchUp(_)
+            ))
+        ));
+
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("driver-owned catch-up transaction begins");
+        driver
+            .step(&db, &transaction, scope, &operation, one_entity_limits())
+            .await
+            .expect("driver-owned catch-up executes");
+        transaction
+            .commit()
+            .await
+            .expect("driver-owned catch-up commits");
+
+        assert!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation,)
+                .await
+                .is_empty()
+        );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    #[tokio::test]
+    async fn driver_owned_catch_up_stops_before_the_next_indivisible_write_plan() {
+        let db = test_db("secondary-driver-owned-catch-up-output-boundary").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let first_before = user_properties("first-before@example.com");
+        let second_before = user_properties("second-before@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &first_before).await;
+        put_source(&db, scope, IndexElementKind::Node, 1, &second_before).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Progressed
+        );
+
+        mutate_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &first_before,
+            &user_properties("first-after@example.com"),
+        )
+        .await
+        .expect("first mutation stores a delta");
+        mutate_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            1,
+            &second_before,
+            &user_properties("second-after@example.com"),
+        )
+        .await
+        .expect("second mutation stores a delta");
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("catch-up operation is readable")
+            .expect("catch-up operation exists");
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("bounded catch-up transaction begins");
+        let one_update_limits = SearchIndexBatchLimits::try_new(
+            std::num::NonZeroUsize::new(2).expect("two entities are positive"),
+            std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+            std::num::NonZeroU64::new(4).expect("four writes are positive"),
+            std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+            std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+        )
+        .expect("one-update limits are internally consistent");
+        driver
+            .step(&db, &transaction, scope, &operation, one_update_limits)
+            .await
+            .expect("bounded driver-owned catch-up executes");
+        transaction
+            .commit()
+            .await
+            .expect("bounded driver-owned catch-up commits");
+
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation,)
+                .await
+                .len(),
+            1,
+            "the second indivisible reconciliation remains durable"
+        );
         db.close().await.expect("secondary test database closes");
     }
 
@@ -6058,8 +7090,8 @@ mod tests {
     #[tokio::test]
     async fn tenant_move_keeps_generation_rows_in_their_exact_scopes() {
         let db = test_db("secondary-tenant-move").await;
-        let tenant_a = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(1));
-        let tenant_b = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(2));
+        let tenant_a = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(1));
+        let tenant_b = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(2));
         let definition = validated(
             SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("node equality definition"),
@@ -6162,7 +7194,7 @@ mod tests {
         bootstrap_writer(&db)
             .await
             .expect("reopen test database bootstraps");
-        let scope = DataScope::Tenant(crate::encoding::v1::keys::tenant::TenantId::from_u128(
+        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
             0xABCD,
         ));
         let definition = validated(
@@ -6267,3 +7299,7 @@ mod tests {
         db.close().await.expect("reopen test database closes");
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/index_lifecycle_secondary_contracts.rs"]
+mod external_contracts;

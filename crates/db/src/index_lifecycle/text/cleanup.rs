@@ -9,9 +9,9 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::config::SearchIndexBatchLimits;
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::outbox::IndexOperationStepResult;
 use crate::index_lifecycle::{
@@ -103,7 +103,7 @@ async fn delete_metadata(
     let mut resume = progress.cursor.as_ref().map(IndexCursor::as_bytes);
 
     loop {
-        let prefix = Key::data_prefix(
+        let prefix = ManagedIndexKey::data_prefix(
             scope,
             index_keys::ScopedKey::generation_prefix(
                 lane.record_kind(),
@@ -218,10 +218,10 @@ fn cleanup_lane_from_cursor(
     operation: &IndexOperationRecord,
     cursor: &IndexCursor,
 ) -> Result<CleanupLane> {
-    let Key::Data {
+    let ManagedIndexKey::Data {
         scope: cursor_scope,
         kind: key,
-    } = Key::parse_from_slice(scope, cursor.as_bytes())?
+    } = ManagedIndexKey::parse_from_slice(scope, cursor.as_bytes())?
     else {
         return Err(corruption("text cleanup cursor is not a scoped V2 key"));
     };
@@ -243,10 +243,10 @@ fn validate_owned_key(
     expected_lane: CleanupLane,
     bytes: &[u8],
 ) -> Result<()> {
-    let Key::Data {
+    let ManagedIndexKey::Data {
         scope: key_scope,
         kind: key,
-    } = Key::parse_from_slice(scope, bytes)?
+    } = ManagedIndexKey::parse_from_slice(scope, bytes)?
     else {
         return Err(corruption("text cleanup scan yielded a non-data key"));
     };
@@ -328,4 +328,256 @@ fn progressed_cleanup(aborting: bool, progress: TextCleanupProgress) -> IndexOpe
 
 fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::{Db, IsolationLevel};
+
+    use super::*;
+    use crate::index_lifecycle::text::test_support;
+    use crate::index_lifecycle::{IndexElementKind, IndexEntityId};
+
+    fn initial_progress() -> TextCleanupProgress {
+        TextCleanupProgress::DeleteMetadata(PrefixScanProgress {
+            cursor: None,
+            counters: OperationCounters::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn cleanup_walks_typed_lanes_and_preserves_build_drop_terminal_shapes() {
+        let db = Db::open("text-cleanup-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text cleanup test database opens");
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let operation = test_support::operation();
+        let scope = DataScope::LegacyUnscoped;
+        let limits = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+
+        let empty = step_cleanup(
+            &transaction,
+            scope,
+            &operation,
+            &initial_progress(),
+            false,
+            limits,
+        )
+        .await
+        .unwrap();
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextCleanup(
+            TextCleanupProgress::Finalize(final_progress),
+        )) = empty
+        else {
+            panic!("empty metadata lanes advance to drop finalization")
+        };
+        assert_eq!(final_progress.counters, OperationCounters::default());
+        assert!(matches!(
+            step_cleanup(
+                &transaction,
+                scope,
+                &operation,
+                &TextCleanupProgress::Finalize(final_progress),
+                false,
+                limits,
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Completed(IndexOperationOutcome::DropSucceeded)
+        ));
+        assert!(matches!(
+            step_cleanup(
+                &transaction,
+                scope,
+                &operation,
+                &TextCleanupProgress::Finalize(NoCursorProgress {
+                    counters: OperationCounters::default(),
+                }),
+                true,
+                limits,
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Aborted
+            ))
+        ));
+
+        let artifact = test_support::artifact_row(
+            scope,
+            &operation,
+            crate::index_lifecycle::work::TextPartition::Unpartitioned,
+            0,
+            1,
+        );
+        transaction
+            .put(artifact.0.clone(), artifact.1.clone())
+            .unwrap();
+        assert!(matches!(
+            step_cleanup(
+                &transaction,
+                scope,
+                &operation,
+                &initial_progress(),
+                false,
+                test_support::batch_limits(1, u64::MAX, u64::MAX),
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Blocked(
+                crate::index_lifecycle::IndexOperationBlocker::InvariantViolation
+            )
+        ));
+
+        let deleted = step_cleanup(
+            &transaction,
+            scope,
+            &operation,
+            &initial_progress(),
+            true,
+            limits,
+        )
+        .await
+        .unwrap();
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+            TextBuildProgress::Aborting(TextCleanupProgress::DeleteMetadata(progress)),
+        )) = deleted
+        else {
+            panic!("aborted build retains its exact cleanup cursor")
+        };
+        assert_eq!(progress.cursor.as_ref().unwrap().as_bytes(), &artifact.0);
+        assert_eq!(progress.counters.entities, 1);
+        assert!(transaction.get(&artifact.0).await.unwrap().is_none());
+        assert!(matches!(
+            step_cleanup(
+                &transaction,
+                scope,
+                &operation,
+                &TextCleanupProgress::DeleteMetadata(progress),
+                true,
+                limits,
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Aborting(TextCleanupProgress::Finalize(_))
+            ))
+        ));
+    }
+
+    #[test]
+    fn every_cleanup_lane_has_one_exact_owner_and_rejects_other_key_families() {
+        let operation = test_support::operation();
+        let index_id = operation.index_id();
+        let generation = operation.generation();
+        let partition = crate::index_lifecycle::work::TextPartition::Unpartitioned;
+        let root = index_keys::TextManifestRootKey {
+            index_id,
+            generation,
+            partition: partition.fingerprint(),
+        };
+        let entity = index_keys::IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(7),
+        };
+        let corpus = index_keys::TextCorpusStatisticsKey {
+            index_id,
+            generation,
+            partition: partition.fingerprint(),
+        };
+        let keys = [
+            (
+                CleanupLane::BuildArtifact,
+                index_keys::ScopedKey::TextBuildArtifact(index_keys::TextBuildArtifactKey {
+                    root,
+                    ordinal: 0,
+                }),
+            ),
+            (
+                CleanupLane::ManifestPage,
+                index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
+                    root,
+                    page: 0,
+                }),
+            ),
+            (
+                CleanupLane::ManifestRoot,
+                index_keys::ScopedKey::TextManifestRoot(root),
+            ),
+            (
+                CleanupLane::EntityState,
+                index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+                    root,
+                    entity,
+                }),
+            ),
+            (
+                CleanupLane::CorpusStatistics,
+                index_keys::ScopedKey::TextCorpusStatistics(corpus),
+            ),
+            (
+                CleanupLane::TermStatistics,
+                index_keys::ScopedKey::TextTermStatistics(index_keys::TextTermStatisticsKey {
+                    corpus,
+                    term: index_keys::TextTermFingerprint::new([1; 32]),
+                }),
+            ),
+            (
+                CleanupLane::StatisticsEntity,
+                index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
+                    index_id,
+                    generation,
+                    entity,
+                }),
+            ),
+            (
+                CleanupLane::BuildDelta,
+                index_keys::ScopedKey::BuildDelta(index_keys::IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity,
+                }),
+            ),
+            (
+                CleanupLane::AppliedState,
+                index_keys::ScopedKey::AppliedState(index_keys::IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity,
+                }),
+            ),
+        ];
+        for (expected, key) in keys {
+            assert_eq!(key_owner(key).unwrap().0, expected);
+        }
+        assert!(key_owner(index_keys::ScopedKey::index_record(
+            operation.identity().clone()
+        ))
+        .is_err());
+
+        let artifact =
+            test_support::artifact_row(DataScope::LegacyUnscoped, &operation, partition, 0, 1);
+        let cursor = IndexCursor::try_new(artifact.0.clone()).unwrap();
+        assert_eq!(
+            cleanup_lane_from_cursor(DataScope::LegacyUnscoped, &operation, &cursor).unwrap(),
+            CleanupLane::BuildArtifact
+        );
+        validate_owned_key(
+            DataScope::LegacyUnscoped,
+            &operation,
+            CleanupLane::BuildArtifact,
+            &artifact.0,
+        )
+        .unwrap();
+        assert!(validate_owned_key(
+            DataScope::LegacyUnscoped,
+            &operation,
+            CleanupLane::ManifestPage,
+            &artifact.0,
+        )
+        .is_err());
+    }
 }

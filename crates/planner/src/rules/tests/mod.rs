@@ -363,7 +363,7 @@ fn rule_metadata_encodes_scheduler_applicability() {
         )
         .unwrap(),
     );
-    let adjacent_filter_pipeline = logical::LogicalExpr::AccessPipeline(
+    let canonical_filter_pipeline = logical::LogicalExpr::AccessPipeline(
         logical::AccessPipeline::new(
             node_access_path(ir::NodeAccessPlan::AllScan),
             ir::AtLeast::<_, 1>::from_one_and_rest(
@@ -386,9 +386,9 @@ fn rule_metadata_encodes_scheduler_applicability() {
     assert!(pipeline_simplification_rule
         .applicability
         .matches(&empty_pipeline));
-    assert!(pipeline_simplification_rule
+    assert!(!pipeline_simplification_rule
         .applicability
-        .matches(&adjacent_filter_pipeline));
+        .matches(&canonical_filter_pipeline));
     assert!(!pipeline_simplification_rule
         .applicability
         .matches(&pipeline_order));

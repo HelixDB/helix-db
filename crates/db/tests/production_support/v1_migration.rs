@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Populated V1-to-current-index migration acceptance fixtures.
 //!
 //! These fixtures persist only deployed V1 keys and values, then enter through
@@ -27,8 +29,7 @@ use crate::encoding::property::{decode_properties, encode_properties, Property};
 use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v1::keys::vectors::{VectorIndexMetadataKey, VectorKey};
 use crate::encoding::v1::keys::{
-    DataKeyKind, EdgeEndpointsKey, EdgePropertyByIdKey, EdgePropertyPairKey, Key, MetadataKey,
-    NodePropertyKey,
+    DataKeyKind, EdgeEndpointsKey, EdgePropertyByIdKey, EdgePropertyPairKey, Key, NodePropertyKey,
 };
 use crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue;
 use crate::index_lifecycle::{
@@ -446,7 +447,7 @@ fn active_observations(db: &HelixDB) -> Vec<V1ActiveIndexObservation> {
 pub(super) async fn legacy_catalog_empty_raw(db: &Db) -> bool {
     let prefix = Key::data_prefix(
         DataScope::LegacyUnscoped,
-        MetadataKey::dynamic_index_prefix().to_bytes(),
+        crate::encoding::v2::legacy::index_catalog::catalog_scan_prefix(DataScope::LegacyUnscoped),
     );
     let mut rows = db
         .scan_prefix(prefix, ..)
@@ -652,4 +653,25 @@ pub async fn populated_v1_current_index_migration_contract() -> V1PopulatedMigra
         cold_reopen_identical: true,
         ..second
     }
+}
+
+#[test]
+fn v1_facade_forwards_to_identical_v2_bytes() {
+    let v1_key = Key::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::NodeProperty(NodePropertyKey::new(41)),
+    };
+    let v2_key = crate::encoding::v2::keys::DataKey::Data {
+        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+        kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+            crate::encoding::v2::keys::NodePropertyKey::new(41),
+        ),
+    };
+    assert_eq!(v1_key.to_bytes(), v2_key.to_bytes());
+
+    let properties = [Property::string("name", "migration-parity")];
+    assert_eq!(
+        crate::encoding::v1::property::encode_properties(&properties),
+        crate::encoding::v2::values::property::encode_properties(&properties),
+    );
 }

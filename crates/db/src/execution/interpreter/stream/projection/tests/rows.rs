@@ -21,12 +21,6 @@ async fn stream_projection_terminal_and_property_shapes_are_explicit() {
     let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
 
     assert_eq!(
-        ctx.project(ExecutionValue::Stream(rows()), &ir::ProjectionPlan::Count)
-            .await
-            .expect("count projection succeeds"),
-        ExecutionValue::Count(3)
-    );
-    assert_eq!(
         ctx.project(
             ExecutionValue::Stream(Vec::new()),
             &ir::ProjectionPlan::Exists,
@@ -677,8 +671,8 @@ async fn row_cache_stays_typed_and_snapshot_local_during_concurrent_mutation() {
         .await
         .expect("projection request snapshot opens");
 
-    let key = crate::encoding::keys::Key::Data {
-        scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+    let key = crate::encoding::keys::DataKey::Data {
+        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         kind: crate::encoding::keys::DataKeyKind::NodeProperty(
             crate::encoding::keys::NodePropertyKey::new(id),
         ),
@@ -747,15 +741,15 @@ async fn row_cache_stays_typed_and_snapshot_local_during_concurrent_mutation() {
 async fn typed_element_cache_keys_keep_equal_node_and_edge_ids_distinct() {
     let db = test_support::open_db("projection-typed-element-cache-key").await;
     let id = 7;
-    let scope = crate::encoding::keys::tenant::DataScope::LegacyUnscoped;
-    let node_key = crate::encoding::keys::Key::Data {
+    let scope = crate::encoding::keys::scope::DataScope::LegacyUnscoped;
+    let node_key = crate::encoding::keys::DataKey::Data {
         scope,
         kind: crate::encoding::keys::DataKeyKind::NodeProperty(
             crate::encoding::keys::NodePropertyKey::new(id),
         ),
     }
     .to_bytes();
-    let edge_key = crate::encoding::keys::Key::Data {
+    let edge_key = crate::encoding::keys::DataKey::Data {
         scope,
         kind: crate::encoding::keys::DataKeyKind::EdgePropertyById(
             crate::encoding::keys::EdgePropertyByIdKey::new(id),
@@ -826,8 +820,8 @@ async fn typed_element_cache_keys_keep_equal_node_and_edge_ids_distinct() {
 async fn corrupt_property_blob_errors_propagate_through_materializers() {
     let db = test_support::open_db("projection-corrupt-property-blob").await;
     let id = 9;
-    let key = crate::encoding::keys::Key::Data {
-        scope: crate::encoding::keys::tenant::DataScope::LegacyUnscoped,
+    let key = crate::encoding::keys::DataKey::Data {
+        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
         kind: crate::encoding::keys::DataKeyKind::NodeProperty(
             crate::encoding::keys::NodePropertyKey::new(id),
         ),

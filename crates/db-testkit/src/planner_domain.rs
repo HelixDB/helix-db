@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 use helix_ast::batch::BatchQuery;
 use helix_ast::query::QueryValue;
+use helix_ast::{batch, expr, index, traversal, value};
+use helix_planner::catalog;
 use helix_planner::context;
 use helix_planner::cost;
 use helix_planner::experiments::{
@@ -49,11 +51,19 @@ pub enum PlannerShape {
     SearchIndexDdlWorkloads,
     /// Query-service-derived mixed requests.
     RuntimeDerivedMixedQueries,
+    /// Same-index bitmap batches intersected with a different equality index.
+    CardinalityBitmapSets,
+    /// Verified range drivers with bitmap membership and normalized windows.
+    CardinalityRangesAndWindows,
+    /// Unique equality and explicit authoritative null cardinality.
+    CardinalityUniqueAndNull,
+    /// Late-bound node and edge equality inside `foreach`.
+    CardinalityLateBoundFilters,
 }
 
 impl PlannerShape {
     /// Complete closed shape domain.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 16] = [
         Self::WideBooleanPredicates,
         Self::ManyAvailableIndexes,
         Self::BatchedRootReuse,
@@ -66,10 +76,14 @@ impl PlannerShape {
         Self::MutationHeavyBatches,
         Self::SearchIndexDdlWorkloads,
         Self::RuntimeDerivedMixedQueries,
+        Self::CardinalityBitmapSets,
+        Self::CardinalityRangesAndWindows,
+        Self::CardinalityUniqueAndNull,
+        Self::CardinalityLateBoundFilters,
     ];
 
-    const fn production(self) -> PlanningScalabilityShape {
-        match self {
+    const fn production(self) -> Option<PlanningScalabilityShape> {
+        Some(match self {
             Self::WideBooleanPredicates => PlanningScalabilityShape::WideBooleanPredicates,
             Self::ManyAvailableIndexes => PlanningScalabilityShape::ManyAvailableIndexes,
             Self::BatchedRootReuse => PlanningScalabilityShape::BatchedRootReuse,
@@ -86,7 +100,11 @@ impl PlannerShape {
             Self::RuntimeDerivedMixedQueries => {
                 PlanningScalabilityShape::RuntimeDerivedMixedQueries
             }
-        }
+            Self::CardinalityBitmapSets
+            | Self::CardinalityRangesAndWindows
+            | Self::CardinalityUniqueAndNull
+            | Self::CardinalityLateBoundFilters => return None,
+        })
     }
 }
 
@@ -304,14 +322,19 @@ impl NormalizedPlannerCase {
 
     /// Builds the production query and immutable context for this domain point.
     pub fn inputs(self) -> (BatchQuery, context::PlannerContext) {
-        let fixture = PlanScalabilityFixture::new(self.shape.production(), self.scale.value())
-            .expect("normalized scale classes are positive")
-            .case();
-        let query = match fixture.workload() {
-            PlanningScalabilityWorkload::Read(batch) => BatchQuery::Read(batch.clone()),
-            PlanningScalabilityWorkload::Write(batch) => BatchQuery::Write(batch.clone()),
+        let (query, mut ctx) = match self.shape.production() {
+            Some(shape) => {
+                let fixture = PlanScalabilityFixture::new(shape, self.scale.value())
+                    .expect("normalized scale classes are positive")
+                    .case();
+                let query = match fixture.workload() {
+                    PlanningScalabilityWorkload::Read(batch) => BatchQuery::Read(batch.clone()),
+                    PlanningScalabilityWorkload::Write(batch) => BatchQuery::Write(batch.clone()),
+                };
+                (query, fixture.context().clone())
+            }
+            None => cardinality_inputs(self.shape, self.scale),
         };
-        let mut ctx = fixture.context().clone();
         ctx.limits.max_index_union_branches = self.union_limit.production();
         self.optimizer_limits.apply(&mut ctx);
         self.optional_context.apply(&mut ctx);
@@ -416,6 +439,187 @@ impl NormalizedPlannerCase {
             storage_cost: StorageCostClass::ALL[indexes[5]],
         }
     }
+}
+
+fn cardinality_inputs(
+    shape: PlannerShape,
+    scale: ScaleClass,
+) -> (BatchQuery, context::PlannerContext) {
+    let node_status = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+    let node_tier = catalog::ScopedPropertyKey::try_new("User", "tier").unwrap();
+    let edge_status = catalog::ScopedPropertyKey::try_new("FOLLOWS", "status").unwrap();
+    let mut indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(node_status.clone())
+        .with_node_eq(node_tier)
+        .with_edge_eq(edge_status.clone());
+    let stats = context::StatsSnapshot::default()
+        .with_node_label_cardinality(ir::NonEmptyString::new("User").unwrap(), 1_000_000)
+        .with_edge_label_cardinality(ir::NonEmptyString::new("FOLLOWS").unwrap(), 2_000_000);
+
+    let query = match shape {
+        PlannerShape::CardinalityBitmapSets => {
+            let values = (0..scale.value().max(2))
+                .map(|index| expr::Predicate::eq("status", format!("state-{index}")))
+                .collect();
+            let node_predicate = expr::Predicate::and(vec![
+                expr::Predicate::or(values),
+                expr::Predicate::eq("tier", "gold"),
+            ]);
+            let edge_predicate = expr::Predicate::or(vec![
+                expr::Predicate::eq("status", "open"),
+                expr::Predicate::eq("status", "closed"),
+            ]);
+            BatchQuery::Read(
+                batch::read_batch()
+                    .var_as(
+                        "node_count",
+                        traversal::g()
+                            .n_with_label_where("User", node_predicate)
+                            .count(),
+                    )
+                    .var_as(
+                        "edge_count",
+                        traversal::g()
+                            .e_with_label_where("FOLLOWS", edge_predicate)
+                            .count(),
+                    )
+                    .returning(["node_count", "edge_count"]),
+            )
+        }
+        PlannerShape::CardinalityRangesAndWindows => {
+            let direction = if scale.value().is_multiple_of(2) {
+                index::RangeIndexDirection::Asc
+            } else {
+                index::RangeIndexDirection::Desc
+            };
+            indexes = indexes.with_node_range(
+                catalog::ScopedPropertyDirectionKey::try_new("User", "age", direction).unwrap(),
+            );
+            let predicate = expr::Predicate::and(vec![
+                expr::Predicate::gte("age", 18_i64),
+                expr::Predicate::lt("age", 90_i64),
+                expr::Predicate::eq("status", "active"),
+            ]);
+            BatchQuery::Read(
+                batch::read_batch()
+                    .var_as(
+                        "result",
+                        traversal::g()
+                            .n_with_label_where("User", predicate)
+                            .order_by(
+                                "age",
+                                match direction {
+                                    index::RangeIndexDirection::Asc => traversal::Order::Asc,
+                                    index::RangeIndexDirection::Desc => traversal::Order::Desc,
+                                },
+                            )
+                            .skip(1usize)
+                            .limit(scale.value())
+                            .count(),
+                    )
+                    .returning(["result"]),
+            )
+        }
+        PlannerShape::CardinalityUniqueAndNull => {
+            let email = catalog::ScopedPropertyKey::try_new("User", "email").unwrap();
+            indexes = indexes.with_node_eq(email.clone());
+            indexes
+                .node_eq
+                .get_mut(&email)
+                .expect("unique email index was inserted")
+                .uniqueness = catalog::IndexUniqueness::Unique;
+            BatchQuery::Read(
+                batch::read_batch()
+                    .var_as(
+                        "unique_count",
+                        traversal::g()
+                            .n_with_label_where(
+                                "User",
+                                expr::Predicate::eq("email", "user@example.com"),
+                            )
+                            .count(),
+                    )
+                    .var_as(
+                        "null_count",
+                        traversal::g()
+                            .n_with_label_where(
+                                "User",
+                                expr::Predicate::eq("status", value::PropertyValue::Null),
+                            )
+                            .count(),
+                    )
+                    .returning(["unique_count", "null_count"]),
+            )
+        }
+        PlannerShape::CardinalityLateBoundFilters => {
+            let audit_event = catalog::ScopedPropertyKey::try_new("Audit", "event_id").unwrap();
+            let mention_event =
+                catalog::ScopedPropertyKey::try_new("MENTIONS", "event_id").unwrap();
+            indexes = indexes
+                .with_node_eq(audit_event)
+                .with_edge_eq(mention_event);
+            let body = batch::write_batch()
+                .var_as(
+                    "nodes",
+                    traversal::g()
+                        .n_with_label_where(
+                            "Audit",
+                            expr::Predicate::and(vec![
+                                expr::Predicate::eq_param("event_id", "event_id"),
+                                expr::Predicate::contains("message", "accepted"),
+                            ]),
+                        )
+                        .count(),
+                )
+                .var_as(
+                    "edges",
+                    traversal::g()
+                        .e_with_label_where(
+                            "MENTIONS",
+                            expr::Predicate::eq_param("event_id", "event_id"),
+                        )
+                        .count(),
+                );
+            return (
+                BatchQuery::Write(batch::write_batch().for_each_param("events", body)),
+                context::PlannerContext {
+                    indexes,
+                    stats: stats
+                        .with_node_label_cardinality(
+                            ir::NonEmptyString::new("Audit").unwrap(),
+                            500_000,
+                        )
+                        .with_edge_label_cardinality(
+                            ir::NonEmptyString::new("MENTIONS").unwrap(),
+                            500_000,
+                        ),
+                    ..context::PlannerContext::default()
+                },
+            );
+        }
+        PlannerShape::WideBooleanPredicates
+        | PlannerShape::ManyAvailableIndexes
+        | PlannerShape::BatchedRootReuse
+        | PlannerShape::ForEachBodyRootReuse
+        | PlannerShape::DeepTraversalChain
+        | PlannerShape::ManyMemoAlternatives
+        | PlannerShape::OverLimitIndexDisjunction
+        | PlannerShape::BranchHeavyQueries
+        | PlannerShape::OrderedRangeWindowPushdown
+        | PlannerShape::MutationHeavyBatches
+        | PlannerShape::SearchIndexDdlWorkloads
+        | PlannerShape::RuntimeDerivedMixedQueries => {
+            unreachable!("production scalability shapes use their existing fixtures")
+        }
+    };
+    (
+        query,
+        context::PlannerContext {
+            indexes,
+            stats,
+            ..context::PlannerContext::default()
+        },
+    )
 }
 
 /// Checks one externally supplied AST/context pair with the same properties as
@@ -547,7 +751,7 @@ mod tests {
                 ]
             })
             .collect::<Vec<_>>();
-        let levels = [12, 4, 4, 3, 4, 3];
+        let levels = [PlannerShape::ALL.len(), 4, 4, 3, 4, 3];
         for left_axis in 0..levels.len() {
             for right_axis in left_axis + 1..levels.len() {
                 for left_value in 0..levels[left_axis] {
@@ -564,7 +768,7 @@ mod tests {
     #[test]
     fn complete_domain_has_exact_cartesian_cardinality_and_unique_cases() {
         let cases = NormalizedPlannerCase::complete();
-        assert_eq!(cases.len(), 12 * 4 * 4 * 3 * 4 * 3);
+        assert_eq!(cases.len(), PlannerShape::ALL.len() * 4 * 4 * 3 * 4 * 3);
         assert_eq!(
             cases.iter().copied().collect::<BTreeSet<_>>().len(),
             cases.len()
@@ -584,6 +788,27 @@ mod tests {
                 outcome,
                 PlannerCaseOutcome::Planned { .. } | PlannerCaseOutcome::Rejected { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn cardinality_shapes_reach_validated_executable_plans() {
+        for shape in [
+            PlannerShape::CardinalityBitmapSets,
+            PlannerShape::CardinalityRangesAndWindows,
+            PlannerShape::CardinalityUniqueAndNull,
+            PlannerShape::CardinalityLateBoundFilters,
+        ] {
+            let outcome = NormalizedPlannerCase {
+                shape,
+                ..NormalizedPlannerCase::DEFAULT
+            }
+            .check()
+            .unwrap();
+            assert!(
+                matches!(outcome, PlannerCaseOutcome::Planned { .. }),
+                "cardinality corpus shape {shape:?} must reach executable-plan validation: {outcome:?}"
+            );
         }
     }
 

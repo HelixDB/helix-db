@@ -9,7 +9,6 @@ pub(in crate::execution::interpreter::stream::projection) fn project_scalar_item
 ) -> Result<ExecutionValue> {
     let values = scalar_items(value);
     match projection {
-        ir::ProjectionPlan::Count => Ok(ExecutionValue::Count(values.len())),
         ir::ProjectionPlan::Exists => Ok(ExecutionValue::Bool(!values.is_empty())),
         ir::ProjectionPlan::Id => Ok(ExecutionValue::Scalars(
             values

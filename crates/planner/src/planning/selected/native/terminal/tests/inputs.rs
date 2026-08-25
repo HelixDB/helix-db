@@ -16,7 +16,7 @@ fn native_terminals_accept_source_stream_wrappers() {
     .expect_native("filtered count is native");
     assert!(matches!(
         expr,
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(
                 project.input(),
                 logical::RootStream::Access(logical::AccessStream::Filter(_))
@@ -35,7 +35,7 @@ fn native_terminals_accept_terminal_chains() {
     .expect_native("reserved-to-project chain is native");
     assert!(matches!(
         reserved_project,
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(
                 project.input(),
                 logical::RootStream::Reserved(reserved)
@@ -52,8 +52,8 @@ fn native_terminals_accept_terminal_chains() {
     .expect_native("project-to-project chain is native");
     assert!(matches!(
         project_project,
-        logical::LogicalExpr::StreamProject(project)
-            if matches!(project.input(), logical::RootStream::Project(_))
+        logical::LogicalExpr::StreamCardinality(project)
+            if matches!(project.input(), logical::RootStream::Cardinality(_))
     ));
 
     let aggregate_project = support::lower(&AstNode::Count {
@@ -66,7 +66,7 @@ fn native_terminals_accept_terminal_chains() {
     .expect_native("aggregate-to-project chain is native");
     assert!(matches!(
         aggregate_project,
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(project.input(), logical::RootStream::Aggregate(_))
     ));
 }
@@ -83,7 +83,7 @@ fn native_terminals_accept_control_flow_inputs() {
     .expect_native("optional-to-project chain is native");
     assert!(matches!(
         optional_count,
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(project.input(), logical::RootStream::Branch(_))
     ));
 
@@ -97,7 +97,7 @@ fn native_terminals_accept_control_flow_inputs() {
     .expect_native("repeat-to-project chain is native");
     assert!(matches!(
         repeat_count,
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(project.input(), logical::RootStream::Repeat(_))
     ));
 }
@@ -114,7 +114,7 @@ fn native_terminals_accept_variable_source_inputs() {
     .expect_native("variable-source count is native");
     assert!(matches!(
         expr,
-        logical::LogicalExpr::StreamProject(project)
+        logical::LogicalExpr::StreamCardinality(project)
             if matches!(
                 project.input(),
                 logical::RootStream::VariableSource(source)

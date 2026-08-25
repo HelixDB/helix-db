@@ -1,33 +1,10 @@
-//! Typed stored values owned by lifecycle-managed index families.
-
-use bytes::Bytes;
-
-use crate::encoding::error::EncodingError;
-use crate::encoding::v2::keys::SecondaryEntryLane;
-use crate::index_lifecycle::work::SecondaryEntryValue;
+//! Stored values for secondary, text, and vector indexes.
 
 pub(crate) mod equality;
 pub(crate) mod range;
+mod secondary_entry;
 pub(crate) mod text;
-pub(crate) mod vector;
+pub mod vector;
 
-pub(crate) use equality::SecondaryEqualityBitmapValue;
-
-pub(crate) fn encode_secondary_entry(value: &SecondaryEntryValue) -> Bytes {
-    if value.lane.is_equality() {
-        equality::encode_entry(value).expect("equality lane selects its typed value codec")
-    } else {
-        range::encode_entry(value).expect("range lane selects its typed value codec")
-    }
-}
-
-pub(crate) fn decode_secondary_entry(
-    expected_lane: SecondaryEntryLane,
-    value: &[u8],
-) -> Result<SecondaryEntryValue, EncodingError> {
-    if expected_lane.is_equality() {
-        equality::decode_entry(expected_lane, value)
-    } else {
-        range::decode_entry(expected_lane, value)
-    }
-}
+pub(crate) use equality::{SecondaryEqualityBitmapValue, SecondaryEqualityValue};
+pub(crate) use secondary_entry::{decode_secondary_entry, encode_secondary_entry};

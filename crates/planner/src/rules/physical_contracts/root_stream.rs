@@ -15,6 +15,7 @@ pub(in crate::rules) use contract::{
     stream_project_pipeline_contract, stream_reserved_pipeline_contract,
     stream_variable_write_pipeline_contract,
 };
+pub(in crate::rules) use delivered::root_stream_delivered_properties;
 
 #[cfg(test)]
 mod tests;

@@ -79,8 +79,9 @@ pub enum NodeAccessPlan {
         /// Result count.
         k: ir::SearchLimitPlan,
     },
-    /// Set intersection. This is an unordered access contract; callers that
-    /// need a stable property order must still request an explicit order plan.
+    /// Set intersection. A pure-secondary intersection is ordered only when a
+    /// direct range child is selected as its executable driver; otherwise it
+    /// is unordered.
     Intersect(ir::AtLeast<NodeAccessSourcePlan, 2>),
     /// Set union.
     Union(ir::AtLeast<NodeAccessSourcePlan, 2>),
@@ -100,6 +101,11 @@ impl AsRef<NodeAccessPlan> for NodeAccessPlan {
 }
 
 impl NodeAccessPlan {
+    /// Whether every leaf can participate in one executable secondary ID set.
+    pub(crate) fn is_secondary_set_eligible(&self) -> bool {
+        analysis::secondary_set_eligible(self)
+    }
+
     /// Return the direct label proven by this single node access operator.
     ///
     /// Set plans use [`NodeAccessSourcePlan::common_label`] because their
@@ -166,6 +172,34 @@ mod tests {
         source(NodeAccessPlan::LabelScan {
             label: ir::NonEmptyString::new(label).unwrap(),
         })
+    }
+
+    #[test]
+    fn secondary_set_eligibility_covers_nested_and_mixed_node_trees() {
+        let range = NodeAccessPlan::RangeIndex {
+            index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
+            key: catalog::ScopedPropertyDirectionKey::try_new(
+                "User",
+                "age",
+                helix_ast::index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+            range: ir::IndexRange::All,
+        };
+        let nested = NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
+            source(NodeAccessPlan::Empty),
+            source(NodeAccessPlan::Union(ir::AtLeast::from_pair(
+                source(NodeAccessPlan::Empty),
+                source(range.clone()),
+            ))),
+        ));
+        let mixed = NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
+            source(range),
+            source(NodeAccessPlan::AllScan),
+        ));
+
+        assert!(nested.is_secondary_set_eligible());
+        assert!(!mixed.is_secondary_set_eligible());
     }
 
     #[test]

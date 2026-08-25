@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/private/tmp}/helix-proper-server-production-coverage.XXXXXX")"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/helix-proper-server-production-coverage.XXXXXX")"
 REPORT_PATH="$TEMP_ROOT/coverage.json"
 SUMMARY_PATH="$TEMP_ROOT/summary.json"
 BASELINES_PATH="$ROOT/scripts/server-production-coverage-baselines.json"

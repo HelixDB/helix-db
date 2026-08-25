@@ -13,7 +13,7 @@ use bytes::Bytes;
 use slatedb::{DbReadOps, DbTransaction};
 
 use crate::config;
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::{self, Property};
 use crate::encoding::v1::keys::{DataKeyKind, EdgePropertyByIdKey, Key, KeyPrefix};
 use crate::error::{HelixDbError, Result};
@@ -410,7 +410,8 @@ mod tests {
         VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey,
     };
     use crate::encoding::v1::values::edge_endpoints::EdgeEndpointsValue;
-    use crate::encoding::v1::values::vectors::{metadata, simhash};
+    use crate::encoding::v1::values::vectors::simhash;
+    use crate::encoding::v2::legacy::vector::metadata as legacy_metadata;
     use crate::index_lifecycle::ValidatedVectorIndexDefinition;
     use crate::search::vector::{self, Item, VectorDistanceMetric, VectorIndexConfig};
 
@@ -494,7 +495,9 @@ mod tests {
         let current = index.get_metadata(db).await.unwrap().unwrap();
         db.put(
             metadata_key,
-            Bytes::copy_from_slice(&metadata::encode_legacy_metadata_for_contract(&current)),
+            Bytes::copy_from_slice(&legacy_metadata::encode_legacy_metadata_for_contract(
+                &current,
+            )),
         )
         .await
         .unwrap();
@@ -868,7 +871,7 @@ mod tests {
                     )),
                 }
                 .to_bytes(),
-                Bytes::copy_from_slice(&metadata::encode_legacy_metadata_for_contract(
+                Bytes::copy_from_slice(&legacy_metadata::encode_legacy_metadata_for_contract(
                     &vector::VectorIndexMetadata::new(config),
                 )),
             )

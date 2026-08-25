@@ -59,7 +59,15 @@ pub(super) fn project_id_step(id: usize, dependency: usize) -> exec::ExecStep {
 }
 
 pub(super) fn project_count_step(id: usize, dependency: usize) -> exec::ExecStep {
-    project_step(id, dependency, ir::ProjectionPlan::Count)
+    test_support::step(
+        id,
+        vec![exec::ExecStepId::new(dependency).expect("positive dependency step id")],
+        exec::ExecOp::Count {
+            plan: Box::new(exec::ExecCountPlan::InputRows {
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+        },
+    )
 }
 
 pub(super) fn project_step(

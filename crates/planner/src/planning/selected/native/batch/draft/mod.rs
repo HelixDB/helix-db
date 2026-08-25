@@ -8,6 +8,7 @@
 mod entry;
 
 use helix_ast::batch::BatchEntry;
+use std::collections::BTreeSet;
 
 use super::super::super::{cache, metrics, SelectedCascadesPlanner};
 use crate::{cost, error, exec, ir};
@@ -24,6 +25,7 @@ impl<'a> SelectedBatchDraft<'a> {
         planner: &SelectedCascadesPlanner<'_>,
         entries: &'a [BatchEntry],
         op: error::BatchOp,
+        late_bound_params: &BTreeSet<ir::NonEmptyString>,
         pending: &mut cache::PendingSelectedRunRoots,
     ) -> Result<Self, error::PlannerError> {
         let Some((first, rest)) = entries.split_first() else {
@@ -33,10 +35,10 @@ impl<'a> SelectedBatchDraft<'a> {
                 actual: 0,
             });
         };
-        let first = InitialEntryDraft::prepare(planner, first, pending)?;
+        let first = InitialEntryDraft::prepare(planner, first, late_bound_params, pending)?;
         let rest = rest
             .iter()
-            .map(|entry| FollowupEntryDraft::prepare(planner, entry, pending))
+            .map(|entry| FollowupEntryDraft::prepare(planner, entry, late_bound_params, pending))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { first, rest })
     }

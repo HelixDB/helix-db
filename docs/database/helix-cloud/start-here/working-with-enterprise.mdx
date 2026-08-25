@@ -57,6 +57,13 @@ client = Client(
 
 </CodeGroup>
 
+These SDK examples target a database-specific cluster-mode gateway URL. Such an
+endpoint authenticates the API key but rejects `X-Helix-Database-Id` and
+`X-Helix-Tenant-Id`. A GA shared gateway instead requires
+`X-Helix-Database-Id`; the current public SDK request builders do not expose
+that selection header, so use the direct HTTP contract for GA shared-gateway
+requests.
+
 Each client sends the same operation-tree request body:
 
 ```json JSON
@@ -113,8 +120,8 @@ fails. If every target fails, the normal deterministic error response is returne
 
 Managed clusters target database pods that are ready, running, routable, and not
 quarantined. Add `X-Helix-Require-Writer: true` to target only the authoritative
-writer. Authentication, read rate limits, retries, and the normal query timeout still
-apply before and during fanout.
+writer. Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+retries, and the normal query timeout still apply before and during fanout.
 
 Warming populates the storage, vector, and text caches touched by the read; it does
 not create a separate result cache. `X-Helix-Warm: true` or `1` enables warming;

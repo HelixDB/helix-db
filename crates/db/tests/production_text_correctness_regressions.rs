@@ -9,7 +9,7 @@ use db::config::{
     DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, TextAnalyzerKind,
     TextIndexDefinition, VectorIndexDefinition,
 };
-use db::encoding::v1::keys::tenant::DataScope;
+use db::encoding::v2::keys::scope::DataScope;
 use db::execution::interpreter::{ElementRef, ExecutionResult, ExecutionRow, ExecutionValue};
 use db::index_lifecycle::{
     IndexDdlReceipt, IndexOperationId, IndexOperationStage, IndexOperationStatus,
@@ -203,6 +203,7 @@ fn step(id: usize, dependencies: Vec<exec::ExecStepId>, op: exec::ExecOp) -> exe
         id: exec::ExecStepId::new(id).expect("fixture step ID is positive"),
         dependencies,
         output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
         condition: exec::ExecCondition::Always,
         op,
         schedule: exec::ExecSchedule::Pipeline,

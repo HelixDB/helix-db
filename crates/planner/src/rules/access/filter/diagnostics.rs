@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 
-use super::atoms::{AccessFilterIndexAtom, AccessFilterIndexPlan, AccessFilterIndexPlanMatch};
+use super::atoms::{
+    AccessEqualityDomain, AccessFilterIndexAtom, AccessFilterIndexPlan, AccessFilterIndexPlanMatch,
+};
 use crate::{catalog, context, ir};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,10 +87,10 @@ fn collect_missing_atom(
     candidates: &mut HashSet<MissingIndexCandidate>,
 ) {
     let (property, kind, present) = match atom {
-        AccessFilterIndexAtom::Equality { property, value } => {
+        AccessFilterIndexAtom::Equality { property, domain } => {
             if matches!(
-                value,
-                ir::IndexValue::Literal(value)
+                domain,
+                AccessEqualityDomain::One(ir::IndexValue::Literal(value))
                     if value.as_property_value() == &helix_ast::value::PropertyValue::Null
             ) {
                 return;

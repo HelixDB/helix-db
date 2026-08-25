@@ -10,12 +10,14 @@ use slatedb::{Db, IsolationLevel};
 
 use super::*;
 use crate::config::{SecondaryIndexDefinition, VectorIndexDefinition};
-use crate::encoding::v1::keys::tenant::{DataScope, TenantId};
-use crate::encoding::v1::keys::vectors::{VectorKey, VectorMemoryPrefixKey, VectorUpperVectorKey};
-use crate::encoding::v1::keys::{DataKeyKind, Key as GraphKey};
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::indexes::vector::{
+    VectorKey, VectorMemoryPrefixKey, VectorUpperVectorKey,
+};
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::SecondaryEntryLane;
 use crate::encoding::v2::keys::VectorPartitionMappingKey;
+use crate::encoding::v2::keys::{DataKey as GraphKey, DataKeyKind};
 use crate::encoding::v2::values::{encode_partition_mapping, encode_secondary_entry};
 use crate::index_lifecycle::work::{
     SecondaryEntryValue, VectorPartitionMappingValue, VectorTenantPartition,

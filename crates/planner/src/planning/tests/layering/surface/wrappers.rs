@@ -120,7 +120,7 @@ fn filter_wrappers_emit_residual_filter_contracts() {
                 property: "weight".to_string(),
                 value: PropertyInput::param("wanted_weight"),
             },
-            Predicate::eq("weight", PropertyInput::param("wanted_weight")),
+            Predicate::eq("weight", 7),
         ),
         (
             AstNode::EdgeHasLabel {
@@ -132,7 +132,16 @@ fn filter_wrappers_emit_residual_filter_contracts() {
     ];
 
     for (root, expected) in cases {
-        let executable = executable_ast(root, PlannerContext::default());
+        let executable = executable_ast(
+            root,
+            PlannerContext {
+                params: ParamBindings::default().with_value(
+                    NonEmptyString::new("wanted_weight").unwrap(),
+                    PropertyValue::I64(7),
+                ),
+                ..PlannerContext::default()
+            },
+        );
         let ExecOp::Filter { predicate } =
             first_exec_op(&executable, |op| matches!(op, ExecOp::Filter { .. }))
         else {

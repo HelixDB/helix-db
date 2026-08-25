@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use helix_ast::value::PropertyValue;
+use helix_value_semantics::CanonicalNumber;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -201,15 +202,82 @@ impl RangeIndexLiteral {
 
     pub(super) fn partial_cmp_same_type(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
-            (Self::I64(left), Self::I64(right)) => Some(left.cmp(right)),
+            (
+                Self::I64(_) | Self::F64(_) | Self::F32(_),
+                Self::I64(_) | Self::F64(_) | Self::F32(_),
+            ) => {
+                let left = match self {
+                    Self::I64(value) => CanonicalNumber::from_i64(*value),
+                    Self::F64(value) => {
+                        CanonicalNumber::from_f64(value.get()).expect("range f64 excludes NaN")
+                    }
+                    Self::F32(value) => {
+                        CanonicalNumber::from_f32(value.get()).expect("range f32 excludes NaN")
+                    }
+                    Self::DateTime(_) | Self::String(_) => {
+                        unreachable!("numeric range arm contains only numbers")
+                    }
+                };
+                let right = match other {
+                    Self::I64(value) => CanonicalNumber::from_i64(*value),
+                    Self::F64(value) => {
+                        CanonicalNumber::from_f64(value.get()).expect("range f64 excludes NaN")
+                    }
+                    Self::F32(value) => {
+                        CanonicalNumber::from_f32(value.get()).expect("range f32 excludes NaN")
+                    }
+                    Self::DateTime(_) | Self::String(_) => {
+                        unreachable!("numeric range arm contains only numbers")
+                    }
+                };
+                Some(left.cmp(&right))
+            }
             (Self::DateTime(left), Self::DateTime(right)) => Some(left.cmp(right)),
-            (Self::F64(left), Self::F64(right)) => left.value.partial_cmp(&right.value),
-            (Self::F32(left), Self::F32(right)) => left.value.partial_cmp(&right.value),
             (Self::String(left), Self::String(right)) => Some(left.cmp(right)),
             (
                 Self::I64(_) | Self::DateTime(_) | Self::F64(_) | Self::F32(_) | Self::String(_),
                 _,
             ) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_cross_numeric_comparison_preserves_integer_boundaries() {
+        let exact_integer = RangeIndexLiteral::I64(9_007_199_254_740_992);
+        let next_integer = RangeIndexLiteral::I64(9_007_199_254_740_993);
+        let rounded_float = RangeIndexLiteral::F64(
+            RangeIndexF64::new(9_007_199_254_740_992.0).expect("finite test value"),
+        );
+
+        assert_eq!(
+            exact_integer.partial_cmp_same_type(&rounded_float),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            next_integer.partial_cmp_same_type(&rounded_float),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn signed_zero_is_equal_across_float_widths_but_datetime_is_not_numeric() {
+        let negative_zero =
+            RangeIndexLiteral::F32(RangeIndexF32::new(-0.0).expect("zero is not NaN"));
+        let positive_zero =
+            RangeIndexLiteral::F64(RangeIndexF64::new(0.0).expect("zero is not NaN"));
+
+        assert_eq!(
+            negative_zero.partial_cmp_same_type(&positive_zero),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            RangeIndexLiteral::DateTime(0).partial_cmp_same_type(&RangeIndexLiteral::I64(0)),
+            None
+        );
     }
 }

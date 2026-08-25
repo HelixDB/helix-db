@@ -10,6 +10,9 @@ pageType: "Troubleshooting"
 Start with the first error returned by the SDK or server. HelixDB rejects invalid
 requests and transactions instead of partially applying them.
 
+For the stable Cloud response envelope and gateway code reference, see
+[Error handling](/database/helix-cloud/operate/error-handling).
+
 ## Request uses the wrong AST shape
 
 **Symptoms:** unknown variant errors, missing `query`, or a request containing
@@ -72,6 +75,29 @@ a multi-mutation request.
 
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
+
+## Request returns HTTP 429
+
+`rate_limited` means the shared request bucket for the Cloud database has no
+token available. The rejected query did not reach database execution.
+
+Wait for the response's `Retry-After` interval before retrying. Add jitter when
+many workers can wake together, and inspect aggregate traffic across every API
+key and application instance that uses the database. All of them share the same
+bucket.
+
+See [Helix Cloud request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+for the current plan limits and token-bucket behavior.
+
+## Request returns `rate_limit_unavailable`
+
+An HTTP `503` with `rate_limit_unavailable` means the gateway could not make a
+safe distributed admission decision. It fails closed, so the query did not
+reach database execution.
+
+Retry with bounded exponential backoff and jitter. If the response persists,
+check [HelixDB status](https://status.helix-db.com) and include the response code,
+timestamp, and database identifier when contacting support.
 
 ## Local server cannot reach storage
 

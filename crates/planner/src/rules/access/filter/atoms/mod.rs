@@ -2,14 +2,13 @@
 
 mod collect;
 mod limits;
-mod literal;
 mod property;
 mod types;
 
 use crate::{context, ir};
 
 pub(super) use self::types::{
-    AccessFilterIndexAtom, AccessFilterIndexAtoms, AccessFilterIndexBranches,
+    AccessEqualityDomain, AccessFilterIndexAtom, AccessFilterIndexAtoms, AccessFilterIndexBranches,
     AccessFilterIndexPlan, AccessFilterIndexPlanMatch, AccessFilterIndexPlanRejection,
 };
 
@@ -18,26 +17,15 @@ pub(super) fn access_filter_index_plan(
     label: &ir::NonEmptyString,
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterIndexPlanMatch {
-    match literal::literal_in_index_plan(predicate, planner_limits) {
-        AccessFilterIndexPlanMatch::Planned(plan) => {
-            return AccessFilterIndexPlanMatch::Planned(plan);
-        }
-        AccessFilterIndexPlanMatch::NotIndexable(
-            AccessFilterIndexPlanRejection::NotIndexCandidate,
-        ) => {}
-        AccessFilterIndexPlanMatch::NotIndexable(reason) => {
-            return AccessFilterIndexPlanMatch::NotIndexable(reason);
-        }
-    }
     if let Some(plan) = scoped_conjunction_disjunction_plan(predicate, label, planner_limits) {
         return plan;
     }
     match predicate {
         helix_ast::expr::Predicate::Or { predicates } => plan_disjunction_from_atom_results(
             predicates.len(),
-            predicates
-                .iter()
-                .map(|predicate| collect::access_filter_index_atoms(predicate, label)),
+            predicates.iter().map(|predicate| {
+                collect::access_filter_index_atoms(predicate, label, planner_limits)
+            }),
             planner_limits,
         ),
         helix_ast::expr::Predicate::Eq { .. }
@@ -57,7 +45,7 @@ pub(super) fn access_filter_index_plan(
         | helix_ast::expr::Predicate::And { .. }
         | helix_ast::expr::Predicate::Not { .. }
         | helix_ast::expr::Predicate::Compare { .. } => {
-            match collect::access_filter_index_atoms(predicate, label) {
+            match collect::access_filter_index_atoms(predicate, label, planner_limits) {
                 Ok(atoms) => {
                     AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Conjunction(atoms))
                 }
@@ -98,7 +86,7 @@ fn scoped_conjunction_disjunction_plan(
         branches.len(),
         branches.iter().map(|branch| {
             if shared.is_empty() {
-                collect::access_filter_index_atoms(branch, label)
+                collect::access_filter_index_atoms(branch, label, planner_limits)
             } else {
                 let mut predicates = shared
                     .iter()
@@ -106,7 +94,7 @@ fn scoped_conjunction_disjunction_plan(
                     .collect::<Vec<_>>();
                 predicates.push(branch.clone());
                 let distributed = helix_ast::expr::Predicate::and(predicates);
-                collect::access_filter_index_atoms(&distributed, label)
+                collect::access_filter_index_atoms(&distributed, label, planner_limits)
             }
         }),
         planner_limits,

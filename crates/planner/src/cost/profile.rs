@@ -26,6 +26,7 @@ pub use overrides::StorageCostProfileOverrides;
 /// All default values are intentionally centralized in `profile::defaults` so
 /// experiments can tune costs without changing optimizer rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageCostProfile {
     /// Latency for a cold logical object/KV read.
     pub object_get_latency: LatencyEstimate,
@@ -43,6 +44,14 @@ pub struct StorageCostProfile {
     pub cpu_predicate_eval: LatencyEstimate,
     /// Per-row generic stream operator CPU cost.
     pub stream_operator_eval: LatencyEstimate,
+    /// Per-ID CPU cost for decoding a secondary equality bitmap.
+    pub bitmap_decode_per_id: LatencyEstimate,
+    /// Per-ID CPU cost for a bitmap union or intersection.
+    pub secondary_set_per_id: LatencyEstimate,
+    /// Per-ID CPU cost for constructing the final execution row.
+    pub secondary_row_materialization_per_id: LatencyEstimate,
+    /// Per-candidate cost for an authoritative graph-property verification.
+    pub authoritative_verify_per_id: LatencyEstimate,
     /// Fixed setup cost for an explicit sort.
     pub sort_setup: LatencyEstimate,
     /// Per-row explicit sort CPU/materialization cost.
@@ -59,10 +68,14 @@ pub struct StorageCostProfile {
     pub default_key_read_bytes: ByteEstimate,
     /// Default bytes charged per row materialized by blocking operators.
     pub default_materialized_row_bytes: ByteEstimate,
+    /// Default compressed bytes charged per decoded bitmap ID.
+    pub default_bitmap_id_bytes: ByteEstimate,
     /// Default row count used when no catalog or runtime row stats exist.
     pub default_unknown_scan_rows: EstimatedRows,
     /// Default row count for non-unique equality index lookups with no stats.
     pub default_equality_index_rows: EstimatedRows,
+    /// Default row count for range-index lookups with no stats.
+    pub default_range_index_rows: EstimatedRows,
     /// Default row count for unique equality index lookups with no stats.
     pub default_unique_equality_rows: UniqueEqualityRows,
     /// Maximum parallel KV reads the planner should schedule by default.

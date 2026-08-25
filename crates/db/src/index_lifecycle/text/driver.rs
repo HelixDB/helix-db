@@ -27,9 +27,9 @@ use crate::config::{
     IndexLifecycleScanTuning, SearchIndexBatchLimits, TextBackfillCompactionLimits,
 };
 use crate::encoding::property;
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v1::keys::{DataKeyKind, Key, KeyPrefix};
-use crate::encoding::v2::keys::Key as IndexKey;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{
     IndexEntity, IndexEntityStateKey, PartitionFingerprint, RecordKind, ScopedKey,
     TextBuildArtifactKey, TextEntityStateKey, TextManifestRootKey,
@@ -2566,18 +2566,6 @@ async fn scan_partition_documents(
                     });
                 }
                 let root_output_operations = root.output_operations();
-                if root_output_operations > limits.max_output_operations().get() {
-                    return Ok(PartitionScanSelection::Repository {
-                        empty_root: None,
-                        result: IndexOperationStepResult::Blocked(
-                            IndexOperationBlocker::ManifestLimit {
-                                partition: row_partition,
-                                observed: root_output_operations,
-                                limit: limits.max_output_operations().get(),
-                            },
-                        ),
-                    });
-                }
                 let root_output_bytes = root.output_bytes();
                 if root_output_bytes > limits.max_output_bytes().get() {
                     return Ok(PartitionScanSelection::Repository {
@@ -2738,16 +2726,6 @@ async fn scan_partition_documents(
             });
         }
         let root_output_operations = root.output_operations();
-        if root_output_operations > limits.max_output_operations().get() {
-            return Ok(PartitionScanSelection::Repository {
-                empty_root: None,
-                result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
-                    partition: TextPartition::Unpartitioned,
-                    observed: root_output_operations,
-                    limit: limits.max_output_operations().get(),
-                }),
-            });
-        }
         let root_output_bytes = root.output_bytes();
         if root_output_bytes > limits.max_output_bytes().get() {
             return Ok(PartitionScanSelection::Repository {
@@ -2907,13 +2885,13 @@ fn text_document(
 fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
     let kind = match entity.kind {
         IndexElementKind::Node => DataKeyKind::NodeProperty(
-            crate::encoding::v1::keys::NodePropertyKey::new(entity.id.get()),
+            crate::encoding::v2::keys::NodePropertyKey::new(entity.id.get()),
         ),
         IndexElementKind::Edge => DataKeyKind::EdgePropertyById(
-            crate::encoding::v1::keys::EdgePropertyByIdKey::new(entity.id.get()),
+            crate::encoding::v2::keys::EdgePropertyByIdKey::new(entity.id.get()),
         ),
     };
-    Key::Data { scope, kind }.to_bytes()
+    DataKey::Data { scope, kind }.to_bytes()
 }
 
 /// Returns the typed blocker for one invalid authoritative graph row.
@@ -3341,7 +3319,7 @@ fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
         IndexElementKind::Node => KeyPrefix::NodeProperty,
         IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
     };
-    Key::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
+    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
 }
 
 /// Parses one source row and rejects a keyspace/entity-kind mismatch.
@@ -3350,24 +3328,24 @@ fn source_entity(
     expected: IndexElementKind,
     key: &[u8],
 ) -> Result<Option<IndexEntityId>> {
-    let parsed = Key::parse_from_slice(scope, key)?;
+    let parsed = DataKey::parse_from_slice(scope, key)?;
     Ok(match (expected, parsed) {
         (
             IndexElementKind::Node,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::NodeProperty(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.node_id())),
         (
             IndexElementKind::Edge,
-            Key::Data {
+            DataKey::Data {
                 kind: DataKeyKind::EdgePropertyById(key),
                 ..
             },
         ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, Key::Data { .. }) => None,
-        (IndexElementKind::Node, Key::Data { .. }) | (_, Key::Global { .. }) => {
+        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
+        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
             return Err(corruption("text source prefix yielded another key kind"));
         }
     })
@@ -3384,7 +3362,7 @@ fn cursor_suffix(prefix: &Bytes, cursor: Option<&IndexCursor>) -> Result<Option<
     Ok(Some(Bytes::copy_from_slice(suffix)))
 }
 
-/// Encodes one scoped V2 key through the canonical `encoding/v1` boundary.
+/// Encodes one scoped V2 key through the canonical `encoding/v2` boundary.
 fn scoped_index_key(scope: DataScope, key: ScopedKey) -> Bytes {
     IndexKey::Data { scope, kind: key }.to_bytes()
 }
@@ -3413,3 +3391,583 @@ fn operation_error(error: crate::index_lifecycle::IndexOperationModelError) -> H
 fn work_error(error: crate::index_lifecycle::work::IndexWorkModelError) -> HelixDbError {
     HelixDbError::InvariantViolation(error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU64, NonZeroUsize};
+
+    use slatedb::object_store::memory::InMemory;
+
+    use super::*;
+    use crate::index_lifecycle::worker::ActiveTextCompactionDriver;
+    use crate::index_lifecycle::{
+        IndexGenerationId, IndexId, IndexOperationId, IndexOperationKind, IndexOperationRevision,
+        IndexRevision,
+    };
+
+    fn operation() -> IndexOperationRecord {
+        let runtime = crate::config::TextIndexDefinition::new_node("Document", "body")
+            .expect("text test definition validates");
+        let definition = ValidatedTextIndexDefinition::try_from_runtime(&runtime)
+            .expect("text test definition has a V2 representation");
+        IndexOperationRecord::try_new(
+            IndexOperationId::new_v4(),
+            IndexId::initial(),
+            definition.identity(),
+            IndexGenerationId::initial(),
+            IndexRevision::initial(),
+            IndexOperationRevision::initial(),
+            IndexOperationKind::Build,
+            IndexOperationFamily::Text,
+            IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                TextBuildStage::CatchUp(PrefixScanProgress {
+                    cursor: None,
+                    counters: OperationCounters::default(),
+                }),
+            )),
+            0,
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        )
+        .expect("text test operation is internally consistent")
+    }
+
+    fn definition() -> ValidatedTextIndexDefinition {
+        let runtime = crate::config::TextIndexDefinition::new_node("Document", "body")
+            .expect("text test definition validates");
+        ValidatedTextIndexDefinition::try_from_runtime(&runtime)
+            .expect("text test definition has a V2 representation")
+    }
+
+    fn limits(
+        max_input_bytes: u64,
+        max_output_operations: u64,
+        max_output_bytes: u64,
+    ) -> SearchIndexBatchLimits {
+        SearchIndexBatchLimits::try_new(
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroU64::new(max_input_bytes).unwrap(),
+            NonZeroU64::new(max_output_operations).unwrap(),
+            NonZeroU64::new(max_output_bytes).unwrap(),
+            NonZeroU64::new(max_output_bytes).unwrap(),
+        )
+        .expect("test limits are internally consistent")
+    }
+
+    fn entity() -> IndexEntity {
+        IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(7),
+        }
+    }
+
+    fn catch_up_root(
+        partition: TextPartition,
+        revision: TextManifestRevision,
+    ) -> PreparedCatchUpManifestRoot {
+        let key = partition.canonical_bytes();
+        PreparedCatchUpManifestRoot {
+            observation: PreparedTextExpectedRead { key, value: None },
+            root: work::TextManifestRootValue::try_new(
+                IndexId::initial(),
+                IndexGenerationId::initial(),
+                partition,
+                revision,
+                0,
+                0,
+            )
+            .expect("zero-page test root is valid"),
+            write: None,
+        }
+    }
+
+    fn absent_state(partition: TextPartition) -> ObservedTextEntityState {
+        ObservedTextEntityState::Absent {
+            key: partition.canonical_bytes(),
+            partition,
+        }
+    }
+
+    fn present_state(
+        partition: TextPartition,
+        logical_version: TextLogicalVersion,
+        live: bool,
+    ) -> ObservedTextEntityState {
+        ObservedTextEntityState::Present {
+            key: partition.canonical_bytes(),
+            value: Bytes::from_static(b"observed-state"),
+            partition,
+            logical_version,
+            live,
+        }
+    }
+
+    fn build_plan(
+        previous: Option<(TextPartition, TextLogicalVersion)>,
+        current: Option<(TextPartition, String)>,
+        previous_state: Option<ObservedTextEntityState>,
+        current_state: Option<ObservedTextEntityState>,
+        roots: PreparedCatchUpManifestRoots,
+    ) -> Result<TextCatchUpPlanRead> {
+        build_text_catch_up_plan(
+            &operation(),
+            entity(),
+            Bytes::from_static(b"delta-key"),
+            Bytes::from_static(b"delta-value"),
+            Bytes::from_static(b"applied-key"),
+            Some(Bytes::from_static(b"applied-value")),
+            Bytes::from_static(b"graph-key"),
+            Some(Bytes::from_static(b"graph-value")),
+            previous,
+            current,
+            previous_state,
+            current_state,
+            roots,
+        )
+    }
+
+    fn planned(result: Result<TextCatchUpPlanRead>) -> TextCatchUpEntityPlan {
+        let TextCatchUpPlanRead::Planned(plan) = result.expect("catch-up plan succeeds") else {
+            panic!("catch-up fixture must produce physical work")
+        };
+        plan
+    }
+
+    #[tokio::test]
+    async fn driver_and_manifest_root_boundaries_preserve_exact_observations() {
+        let source_only =
+            TextIndexDriver::default().with_scan_tuning(IndexLifecycleScanTuning::default());
+        assert!(format!("{source_only:?}").contains("storage_installed: false"));
+
+        let db = Db::open("text-driver-root-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text driver test database opens");
+        assert!(!source_only.compact_active_text_once(&db).await.unwrap());
+        let transaction = db
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("text driver test transaction begins");
+        let operation = operation();
+        let scope = DataScope::LegacyUnscoped;
+
+        let missing = prepare_empty_manifest_root(
+            &transaction,
+            scope,
+            &operation,
+            TextPartition::Unpartitioned,
+        )
+        .await
+        .unwrap();
+        assert!(missing.requires_creation());
+        assert_eq!(missing.output_operations(), 1);
+        assert!(missing.input_bytes() > 0);
+        assert!(missing.output_bytes() > 0);
+        let (_, Some(PreparedTextWrite::Put { key, value })) = missing.into_parts() else {
+            panic!("missing root produces one typed put")
+        };
+        transaction.put(key, value).unwrap();
+
+        let existing = prepare_empty_manifest_root(
+            &transaction,
+            scope,
+            &operation,
+            TextPartition::Unpartitioned,
+        )
+        .await
+        .unwrap();
+        assert!(!existing.requires_creation());
+        assert_eq!(existing.output_operations(), 0);
+        assert_eq!(existing.output_bytes(), 0);
+
+        let mut catch_up = prepare_catch_up_manifest_root(
+            &transaction,
+            scope,
+            &operation,
+            TextPartition::Unpartitioned,
+        )
+        .await
+        .unwrap();
+        assert_eq!(catch_up.next_logical_version().unwrap().get(), 2);
+        assert_eq!(
+            catch_up
+                .advance_for_entity_transition()
+                .unwrap()
+                .unwrap()
+                .get(),
+            2
+        );
+        let (observation, write) = catch_up.into_parts();
+        assert!(observation.value.is_some());
+        assert!(matches!(write, Some(PreparedTextWrite::Put { .. })));
+
+        let state_key = scoped_index_key(
+            scope,
+            ScopedKey::TextEntityState(TextEntityStateKey {
+                root: TextManifestRootKey {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    partition: TextPartition::Unpartitioned.fingerprint(),
+                },
+                entity: entity(),
+            }),
+        );
+        assert!(matches!(
+            read_catch_up_entity_state(
+                &transaction,
+                scope,
+                &operation,
+                entity(),
+                TextPartition::Unpartitioned,
+            )
+            .await
+            .unwrap(),
+            ObservedTextEntityState::Absent { .. }
+        ));
+        transaction
+            .put(
+                state_key.clone(),
+                encode_text_entity_state(&TextEntityStateValue {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    partition: TextPartition::Unpartitioned,
+                    entity_kind: entity().kind,
+                    entity_id: entity().id,
+                    logical_version: TextLogicalVersion::initial(),
+                    live: true,
+                }),
+            )
+            .unwrap();
+        assert!(matches!(
+            read_catch_up_entity_state(
+                &transaction,
+                scope,
+                &operation,
+                entity(),
+                TextPartition::Unpartitioned,
+            )
+            .await
+            .unwrap(),
+            ObservedTextEntityState::Present { live: true, .. }
+        ));
+        transaction
+            .put(
+                state_key,
+                encode_text_entity_state(&TextEntityStateValue {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    partition: TextPartition::Unpartitioned,
+                    entity_kind: entity().kind,
+                    entity_id: IndexEntityId::new(8),
+                    logical_version: TextLogicalVersion::initial(),
+                    live: true,
+                }),
+            )
+            .unwrap();
+        assert!(read_catch_up_entity_state(
+            &transaction,
+            scope,
+            &operation,
+            entity(),
+            TextPartition::Unpartitioned,
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn catch_up_reads_one_exact_delta_and_obeys_encoded_resource_boundaries() {
+        let db = Db::open("text-driver-catch-up-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text catch-up test database opens");
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let operation = operation();
+        let definition = definition();
+        let scope = DataScope::LegacyUnscoped;
+        let progress = PrefixScanProgress {
+            cursor: None,
+            counters: OperationCounters::default(),
+        };
+        let delta_key = scoped_index_key(
+            scope,
+            ScopedKey::BuildDelta(IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity: entity(),
+            }),
+        );
+        transaction
+            .put(
+                delta_key.clone(),
+                crate::encoding::v2::values::encode_build_delta(&work::CoalescedBuildDeltaValue {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    entity_kind: entity().kind,
+                    entity_id: entity().id,
+                }),
+            )
+            .unwrap();
+
+        let no_document =
+            plan_next_catch_up(&transaction, scope, &operation, &definition, &progress)
+                .await
+                .unwrap();
+        let TextCatchUpPlanRead::Planned(no_document) = no_document else {
+            panic!("missing graph row produces one repository-only catch-up plan")
+        };
+        assert!(no_document.document.is_none());
+
+        for constrained in [limits(1, u64::MAX, u64::MAX), limits(u64::MAX, 1, u64::MAX)] {
+            assert!(matches!(
+                catch_up(
+                    &transaction,
+                    scope,
+                    &operation,
+                    &definition,
+                    &progress,
+                    constrained,
+                )
+                .await
+                .unwrap(),
+                IndexOperationStepResult::Blocked(IndexOperationBlocker::OversizedEntity { .. })
+            ));
+        }
+        assert!(matches!(
+            catch_up(
+                &transaction,
+                scope,
+                &operation,
+                &definition,
+                &progress,
+                limits(u64::MAX, u64::MAX, 1),
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::OversizedEntity { .. })
+        ));
+        assert!(matches!(
+            catch_up(
+                &transaction,
+                scope,
+                &operation,
+                &definition,
+                &progress,
+                limits(u64::MAX, u64::MAX, u64::MAX),
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Progressed(_)
+        ));
+        assert!(transaction.get(&delta_key).await.unwrap().is_none());
+        assert!(matches!(
+            plan_next_catch_up(&transaction, scope, &operation, &definition, &progress,)
+                .await
+                .unwrap(),
+            TextCatchUpPlanRead::Exhausted
+        ));
+        assert!(plan_next_catch_up(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &PrefixScanProgress {
+                cursor: Some(IndexCursor::try_new(Bytes::from_static(b"cursor")).unwrap()),
+                counters: OperationCounters::default(),
+            },
+        )
+        .await
+        .is_err());
+
+        transaction
+            .put(
+                delta_key.clone(),
+                crate::encoding::v2::values::encode_build_delta(&work::CoalescedBuildDeltaValue {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    entity_kind: entity().kind,
+                    entity_id: entity().id,
+                }),
+            )
+            .unwrap();
+        transaction
+            .put(
+                authoritative_property_key(scope, entity()),
+                property::encode_properties(&[
+                    property::Property::string("$label", "Document"),
+                    property::Property::string("body", "the searchable document"),
+                ]),
+            )
+            .unwrap();
+        assert!(matches!(
+            catch_up(
+                &transaction,
+                scope,
+                &operation,
+                &definition,
+                &progress,
+                limits(u64::MAX, u64::MAX, u64::MAX),
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::TransientFailure
+        ));
+        transaction
+            .put(
+                authoritative_property_key(scope, entity()),
+                Bytes::from_static(b"malformed-properties"),
+            )
+            .unwrap();
+        assert!(matches!(
+            plan_next_catch_up(&transaction, scope, &operation, &definition, &progress,)
+                .await
+                .unwrap(),
+            TextCatchUpPlanRead::Blocked(IndexOperationBlocker::InvalidSourceData { .. })
+        ));
+    }
+
+    #[test]
+    fn catch_up_plan_encodes_insert_update_retire_move_and_noop_algorithms() {
+        let first = TextPartition::Unpartitioned;
+        let second = TextPartition::try_tenant_value(Bytes::from_static(b"tenant-b")).unwrap();
+        let version = TextLogicalVersion::initial();
+        let revision = TextManifestRevision::initial();
+
+        let noop = planned(build_plan(
+            None,
+            None,
+            None,
+            None,
+            PreparedCatchUpManifestRoots::None,
+        ));
+        assert!(noop.document.is_none());
+        assert_eq!(noop.writes.len(), 1);
+        assert_eq!(noop.expected_reads.len(), 3);
+
+        let insert = planned(build_plan(
+            None,
+            Some((first.clone(), "inserted".to_string())),
+            None,
+            Some(absent_state(first.clone())),
+            PreparedCatchUpManifestRoots::One(catch_up_root(first.clone(), revision)),
+        ));
+        assert!(insert.document.is_some());
+        assert_eq!(insert.writes.len(), 4);
+
+        let update = planned(build_plan(
+            Some((first.clone(), version)),
+            Some((first.clone(), "updated".to_string())),
+            Some(present_state(first.clone(), version, true)),
+            Some(present_state(first.clone(), version, true)),
+            PreparedCatchUpManifestRoots::One(catch_up_root(first.clone(), revision)),
+        ));
+        assert!(update.document.is_some());
+        assert_eq!(update.writes.len(), 4);
+        assert!(update.input_bytes > 0);
+        assert_eq!(update.output_operations, update.writes.len() as u64);
+        assert!(update.output_bytes > 0);
+
+        let retirement = planned(build_plan(
+            Some((first.clone(), version)),
+            None,
+            Some(present_state(first.clone(), version, true)),
+            None,
+            PreparedCatchUpManifestRoots::One(catch_up_root(first.clone(), revision)),
+        ));
+        assert!(retirement.document.is_none());
+        assert_eq!(retirement.writes.len(), 4);
+
+        for destination_state in [
+            absent_state(second.clone()),
+            present_state(second.clone(), version, false),
+        ] {
+            let moved = planned(build_plan(
+                Some((first.clone(), version)),
+                Some((second.clone(), "moved".to_string())),
+                Some(present_state(first.clone(), version, true)),
+                Some(destination_state),
+                PreparedCatchUpManifestRoots::Move {
+                    previous: catch_up_root(first.clone(), revision),
+                    current: catch_up_root(second.clone(), revision),
+                },
+            ));
+            assert!(moved.document.is_some());
+            assert_eq!(moved.writes.len(), 6);
+        }
+    }
+
+    #[test]
+    fn catch_up_plan_rejects_every_cross_state_and_revision_mismatch() {
+        let first = TextPartition::Unpartitioned;
+        let second = TextPartition::try_tenant_value(Bytes::from_static(b"tenant-b")).unwrap();
+        let version = TextLogicalVersion::initial();
+        let revision = TextManifestRevision::initial();
+
+        assert!(build_plan(
+            None,
+            None,
+            Some(absent_state(first.clone())),
+            None,
+            PreparedCatchUpManifestRoots::None,
+        )
+        .is_err());
+        assert!(build_plan(
+            None,
+            Some((first.clone(), "insert".to_string())),
+            None,
+            Some(absent_state(first.clone())),
+            PreparedCatchUpManifestRoots::None,
+        )
+        .is_err());
+        assert!(build_plan(
+            Some((first.clone(), version)),
+            None,
+            None,
+            None,
+            PreparedCatchUpManifestRoots::One(catch_up_root(first.clone(), revision)),
+        )
+        .is_err());
+        assert!(build_plan(
+            Some((first.clone(), version)),
+            Some((first.clone(), "update".to_string())),
+            Some(present_state(
+                first.clone(),
+                TextLogicalVersion::new(2).unwrap(),
+                true,
+            )),
+            None,
+            PreparedCatchUpManifestRoots::One(catch_up_root(first.clone(), revision)),
+        )
+        .is_err());
+        assert!(build_plan(
+            Some((first.clone(), version)),
+            Some((second.clone(), "move".to_string())),
+            Some(present_state(first.clone(), version, true)),
+            Some(present_state(second.clone(), version, true)),
+            PreparedCatchUpManifestRoots::Move {
+                previous: catch_up_root(first.clone(), revision),
+                current: catch_up_root(second.clone(), revision),
+            },
+        )
+        .is_err());
+
+        let blocked = build_plan(
+            None,
+            Some((first.clone(), "insert".to_string())),
+            None,
+            Some(absent_state(first.clone())),
+            PreparedCatchUpManifestRoots::One(catch_up_root(
+                first,
+                TextManifestRevision::new(u64::MAX).unwrap(),
+            )),
+        )
+        .unwrap();
+        assert!(matches!(
+            blocked,
+            TextCatchUpPlanRead::Blocked(IndexOperationBlocker::InvariantViolation)
+        ));
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_driver_prepared.rs"]
+mod prepared_contracts;

@@ -16,9 +16,9 @@ use bytes::Bytes;
 use slatedb::DbTransaction;
 
 use crate::config::{SearchIndexBatchLimits, TextBackfillCompactionLimits};
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::work;
@@ -155,7 +155,7 @@ pub(super) async fn select_page(
     batch_limits: SearchIndexBatchLimits,
     manifest_limits: TextBackfillCompactionLimits,
 ) -> Result<ManifestSelection> {
-    let prefix = Key::data_prefix(
+    let prefix = ManagedIndexKey::data_prefix(
         scope,
         index_keys::ScopedKey::generation_prefix(
             index_keys::RecordKind::TextBuildArtifact,
@@ -518,12 +518,129 @@ fn row_bytes(key: &[u8], value: Option<&Bytes>) -> u64 {
     u64::try_from(key.len().saturating_add(value.map_or(0, Bytes::len))).unwrap_or(u64::MAX)
 }
 
-/// Encodes one scoped V2 key through the canonical `encoding/v1` boundary.
+/// Encodes one scoped V2 key through the canonical `encoding/v2` boundary.
 fn scoped_key(scope: DataScope, key: index_keys::ScopedKey) -> Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 /// Converts a violated persisted manifest contract into the public DB error boundary.
 fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::{Db, IsolationLevel};
+
+    use super::*;
+    use crate::index_lifecycle::text::test_support;
+    use crate::index_lifecycle::OperationCounters;
+
+    #[tokio::test]
+    async fn manifest_selection_revalidates_ranges_and_stages_only_the_encoded_page() {
+        let db = Db::open("text-manifest-contracts", Arc::new(InMemory::new()))
+            .await
+            .expect("text manifest test database opens");
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let operation = test_support::operation();
+        let scope = DataScope::LegacyUnscoped;
+        let progress = PrefixScanProgress {
+            cursor: None,
+            counters: OperationCounters::default(),
+        };
+        let batch = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+        let manifest = test_support::compaction_limits(8, 1_024, 2_048, 1_024, 1_024);
+
+        let ManifestSelection::Exhausted(empty_range) =
+            select_page(&transaction, scope, &operation, &progress, batch, manifest)
+                .await
+                .unwrap()
+        else {
+            panic!("empty artifact prefix is exhausted")
+        };
+        assert!(empty_range.is_current(&transaction).await.unwrap());
+
+        let first =
+            test_support::artifact_row(scope, &operation, work::TextPartition::Unpartitioned, 0, 1);
+        let second =
+            test_support::artifact_row(scope, &operation, work::TextPartition::Unpartitioned, 1, 2);
+        transaction.put(first.0.clone(), first.1.clone()).unwrap();
+        transaction.put(second.0.clone(), second.1.clone()).unwrap();
+        assert!(!empty_range.is_current(&transaction).await.unwrap());
+
+        let blocked = select_page(
+            &transaction,
+            scope,
+            &operation,
+            &progress,
+            test_support::batch_limits(1, u64::MAX, u64::MAX),
+            manifest,
+        )
+        .await
+        .unwrap();
+        let ManifestSelection::Blocked {
+            blocker,
+            range,
+            observations,
+        } = blocked
+        else {
+            panic!("an indivisible first artifact reports its exact manifest limit")
+        };
+        assert!(matches!(
+            blocker,
+            IndexOperationBlocker::ManifestLimit { .. }
+        ));
+        assert!(range.is_current(&transaction).await.unwrap());
+        assert_eq!(observations.len(), 2);
+
+        let prepared = select_page(&transaction, scope, &operation, &progress, batch, manifest)
+            .await
+            .unwrap();
+        let ManifestSelection::Page(prepared) = prepared else {
+            panic!("two bounded artifacts produce one physical manifest page")
+        };
+        assert_eq!(prepared.completed_cursor().as_bytes(), &second.0);
+        assert!(prepared.input_bytes() > 0);
+        assert_eq!(prepared.output_operations(), 4);
+        assert!(prepared.output_bytes() > 0);
+        assert!(prepared.manifest_page_bytes() > 0);
+        assert!(prepared.manifest_root_bytes() > 0);
+
+        transaction
+            .put(first.0.clone(), Bytes::from_static(b"stale-artifact"))
+            .unwrap();
+        assert!(!prepared.stage(&transaction).await.unwrap());
+        transaction.put(first.0.clone(), first.1.clone()).unwrap();
+
+        let ManifestSelection::Page(prepared) =
+            select_page(&transaction, scope, &operation, &progress, batch, manifest)
+                .await
+                .unwrap()
+        else {
+            panic!("restored artifacts prepare the same manifest page")
+        };
+        assert!(prepared.stage(&transaction).await.unwrap());
+        assert!(transaction.get(&first.0).await.unwrap().is_none());
+        assert!(transaction.get(&second.0).await.unwrap().is_none());
+
+        let third =
+            test_support::artifact_row(scope, &operation, work::TextPartition::Unpartitioned, 2, 3);
+        transaction.put(third.0.clone(), third.1).unwrap();
+        let ManifestSelection::Page(next_page) =
+            select_page(&transaction, scope, &operation, &progress, batch, manifest)
+                .await
+                .unwrap()
+        else {
+            panic!("an existing root admits its next contiguous page")
+        };
+        assert_eq!(next_page.completed_cursor().as_bytes(), &third.0);
+        assert!(next_page.stage(&transaction).await.unwrap());
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_manifest.rs"]
+mod external_contracts;

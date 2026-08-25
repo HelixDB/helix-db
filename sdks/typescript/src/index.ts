@@ -19,7 +19,8 @@ const QUERY_PATH = "/v2/query";
  *
  * Strict port of the Rust `HelixError` enum:
  * - `Network` ↔ `ReqwestError` (the request failed to reach the server)
- * - `Remote` ↔ `RemoteError` (the server returned a non-200 response)
+ * - `Remote` ↔ `RemoteError` (the server returned neither query success `200`
+ *   nor Cloud warm success `204`)
  * - `Serialization` ↔ `SerializationError` (request/response (de)serialization failed)
  * - `InvalidUrl` ↔ `InvalidURL` (the client URL could not be parsed)
  * - `InvalidRequest` ↔ `InvalidRequest` (server-only options were used in embedded mode)
@@ -27,12 +28,33 @@ const QUERY_PATH = "/v2/query";
 export class HelixError extends Error {
   readonly kind: "Network" | "Remote" | "Serialization" | "InvalidUrl" | "InvalidRequest" | "EmbeddedUnavailable" | "Embedded";
   readonly details?: string;
+  readonly statusCode?: number;
+  readonly code?: string;
+  readonly serverMessage?: string;
+  readonly serverDetails?: unknown;
+  readonly rawBody?: string;
 
-  private constructor(kind: HelixError["kind"], message: string, details?: string) {
+  private constructor(
+    kind: HelixError["kind"],
+    message: string,
+    details?: string,
+    code?: string,
+    remote?: {
+      statusCode: number;
+      serverMessage: string;
+      serverDetails?: unknown;
+      rawBody: string;
+    },
+  ) {
     super(message);
     this.name = "HelixError";
     this.kind = kind;
     this.details = details;
+    this.statusCode = remote?.statusCode;
+    this.code = code;
+    this.serverMessage = remote?.serverMessage;
+    this.serverDetails = remote?.serverDetails;
+    this.rawBody = remote?.rawBody;
   }
 
   static network(message: string, url?: string): HelixError {
@@ -42,8 +64,48 @@ export class HelixError extends Error {
     return new HelixError("Network", `error communicating with server: ${message}.${hint}`, message);
   }
 
-  static remote(details: string): HelixError {
-    return new HelixError("Remote", `got error from server: ${details}`, details);
+  static remote(details: string, code?: string): HelixError;
+  static remote(statusCode: number, rawBody: string, statusText: string): HelixError;
+  static remote(statusCodeOrDetails: number | string, rawBodyOrCode = "", statusText = ""): HelixError {
+    if (typeof statusCodeOrDetails === "string") {
+      return new HelixError("Remote", `got error from server: ${statusCodeOrDetails}`, statusCodeOrDetails, rawBodyOrCode || undefined);
+    }
+
+    const statusCode = statusCodeOrDetails;
+    const rawBody = rawBodyOrCode;
+    let code: string | undefined;
+    let serverMessage: string | undefined;
+    let serverDetails: unknown;
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const body = parsed as Record<string, unknown>;
+        const errorField = typeof body.error === "string" && body.error.length > 0 ? body.error : undefined;
+        const msgField = typeof body.msg === "string" && body.msg.length > 0 ? body.msg : undefined;
+        const codeField = typeof body.code === "string" && body.code.length > 0 ? body.code : undefined;
+        const messageField = typeof body.message === "string" && body.message.length > 0 ? body.message : undefined;
+        if (errorField !== undefined && msgField !== undefined) {
+          code = errorField;
+          serverMessage = msgField;
+        } else if (errorField !== undefined && codeField !== undefined) {
+          code = codeField;
+          serverMessage = errorField;
+        } else {
+          code = codeField;
+          serverMessage = messageField ?? errorField;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "details")) serverDetails = body.details;
+      }
+    } catch {}
+
+    serverMessage = (serverMessage ?? rawBody) || statusText || `unknown error with code: ${statusCode}`;
+    const details = serverMessage;
+    return new HelixError("Remote", `got error from server: ${serverMessage}`, details, code, {
+      statusCode,
+      serverMessage,
+      serverDetails,
+      rawBody,
+    });
   }
 
   static serialization(message: string): HelixError {
@@ -55,16 +117,38 @@ export class HelixError extends Error {
   }
 
   static invalidRequest(message: string): HelixError {
-    return new HelixError("InvalidRequest", `invalid request: ${message}`, message);
+    return new HelixError("InvalidRequest", `invalid request: ${message}`, message, "invalid_request");
   }
 
   static embeddedUnavailable(message: string): HelixError {
     return new HelixError("EmbeddedUnavailable", `embedded bindings unavailable: ${message}`, message);
   }
 
-  static embedded(message: string): HelixError {
-    return new HelixError("Embedded", `embedded HelixDB error: ${message}`, message);
+  static embedded(message: string, code?: string): HelixError {
+    return new HelixError("Embedded", `embedded HelixDB error: ${message}`, message, code);
   }
+
+  isConflict(): boolean {
+    return this.kind === "Remote" && this.statusCode === 409;
+  }
+
+  isRateLimited(): boolean {
+    return this.kind === "Remote" && this.statusCode === 429;
+  }
+}
+
+function embeddedError(error: unknown): HelixError {
+  if (typeof error === "object" && error !== null) {
+    const fields = error as { error?: unknown; msg?: unknown };
+    if (typeof fields.error === "string" && typeof fields.msg === "string") {
+      return HelixError.embedded(fields.msg, fields.error);
+    }
+  }
+  return HelixError.embedded(error instanceof Error ? error.message : String(error));
+}
+
+function remoteError(body: string, fallback: string, statusCode: number): HelixError {
+  return HelixError.remote(statusCode, body, fallback);
 }
 
 type ClientBackend = { kind: "server"; url: URL; apiKey?: string } | { kind: "embedded"; native: NativeHelixDB };
@@ -74,6 +158,11 @@ interface RequestParts {
   backend: ClientBackend;
   headers: Record<string, string>;
   query: QueryRequest;
+}
+
+interface QueryResponse {
+  status: number;
+  body: Uint8Array;
 }
 
 export type HelixDbSource =
@@ -181,7 +270,7 @@ export class Client {
             : await native.HelixDB.open_with_config(nativeSource, toNativeCacheConfig(native.EmbeddedCacheMode, cache)),
       });
     } catch (error) {
-      throw HelixError.embedded(error instanceof Error ? error.message : String(error));
+      throw embeddedError(error);
     }
   }
 
@@ -197,7 +286,7 @@ export class Client {
             : await native.HelixDB.open_reader_with_config(nativeSource, toNativeCacheConfig(native.EmbeddedCacheMode, cache)),
       });
     } catch (error) {
-      throw HelixError.embedded(error instanceof Error ? error.message : String(error));
+      throw embeddedError(error);
     }
   }
 
@@ -233,7 +322,7 @@ export class Client {
       try {
         return (await this.backend.native.graph(request.toJsonBytes(), nativeSpec)) as Record<string, any>;
       } catch (error) {
-        throw HelixError.embedded(error instanceof Error ? error.message : String(error));
+        throw embeddedError(error);
       }
     }
     return this.requestBuilder<Uint8Array>().query(request).sendBytes();
@@ -244,7 +333,7 @@ export class Client {
       try {
         await this.backend.native.close();
       } catch (error) {
-        throw HelixError.embedded(error instanceof Error ? error.message : String(error));
+        throw embeddedError(error);
       }
     }
   }
@@ -286,7 +375,7 @@ export class QueryBuilder<R = unknown> {
 export class QueryExecutionRequest<R = unknown> {
   constructor(private readonly parts: RequestParts) {}
 
-  async sendBytes(): Promise<Uint8Array> {
+  private async execute(): Promise<QueryResponse> {
     const { backend, headers, query } = this.parts;
 
     if (backend.kind === "embedded") {
@@ -298,9 +387,9 @@ export class QueryExecutionRequest<R = unknown> {
       try {
         response = await backend.native.query_json(query.toJsonBytes());
       } catch (error) {
-        throw HelixError.embedded(error instanceof Error ? error.message : String(error));
+        throw embeddedError(error);
       }
-      return response;
+      return { status: 200, body: response };
     }
 
     let url: string;
@@ -320,25 +409,28 @@ export class QueryExecutionRequest<R = unknown> {
       throw HelixError.network(error instanceof Error ? error.message : String(error), url);
     }
 
-    // Mirror the Rust client: only HTTP 200 is treated as success.
-    if (response.status === 200) {
-      return new Uint8Array(await response.arrayBuffer());
+    if (response.status === 200 || response.status === 204) {
+      return { status: response.status, body: new Uint8Array(await response.arrayBuffer()) };
     }
 
-    let details: string;
+    let body: string;
     try {
-      details = await response.text();
+      body = await response.text();
     } catch {
-      details = response.statusText;
+      body = "";
     }
-    if (details.length === 0) details = response.statusText || `unknown error with code: ${response.status}`;
-    throw HelixError.remote(details);
+    throw remoteError(body, response.statusText || `unknown error with code: ${response.status}`, response.status);
+  }
+
+  async sendBytes(): Promise<Uint8Array> {
+    return (await this.execute()).body;
   }
 
   async send(): Promise<R> {
-    const response = await this.sendBytes();
+    const response = await this.execute();
+    if (response.status === 204) return undefined as R;
     try {
-      return parseJson(new TextDecoder().decode(response)) as R;
+      return parseJson(new TextDecoder().decode(response.body)) as R;
     } catch (error) {
       throw HelixError.serialization(error instanceof Error ? error.message : String(error));
     }

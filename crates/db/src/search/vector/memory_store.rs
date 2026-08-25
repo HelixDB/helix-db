@@ -29,17 +29,17 @@ use super::simhash::SimHash;
 use super::storage::{SimHashRow, VectorRowKeyspace, VectorRows};
 #[cfg(feature = "production-coverage")]
 use crate::encoding::error::EncodingError;
-use crate::encoding::keys::{tenant::DataScope, DataKeyKind, Key};
-use crate::encoding::v1::keys::vectors::{VectorKey, VectorMemoryPrefixKey};
+use crate::encoding::keys::{scope::DataScope, DataKey, DataKeyKind};
+use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMemoryPrefixKey};
 #[cfg(test)]
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorSimHashKey, VectorUpperNeighborsKey, VectorUpperVectorKey,
 };
 #[cfg(feature = "production-coverage")]
-use crate::encoding::v1::values::vectors::neighbors::encode_upper_neighbors;
-use crate::encoding::v1::values::vectors::simhash::decode_simhash;
+use crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors;
+use crate::encoding::v2::values::indexes::vector::simhash::decode_simhash;
 #[cfg(test)]
-use crate::encoding::v1::values::vectors::simhash::encode_simhash;
+use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 
@@ -297,7 +297,9 @@ impl VectorMemoryAccess {
             && let Some(value) = store.get_upper_neighbors_bytes(layer, node_id)
         {
             return Ok(Some(
-                crate::encoding::v1::values::vectors::neighbors::decode_upper_neighbors(&value)?,
+                crate::encoding::v2::values::indexes::vector::neighbors::decode_upper_neighbors(
+                    &value,
+                )?,
             ));
         }
 
@@ -745,7 +747,7 @@ impl VectorMemoryStore {
     where
         R: DbReadOps + Send + Sync,
     {
-        let prefix = Key::Data {
+        let prefix = DataKey::Data {
             scope: self.scope,
             kind: DataKeyKind::Vector(VectorKey::MemoryPrefix(VectorMemoryPrefixKey::new(
                 self.index_id,

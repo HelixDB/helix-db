@@ -34,8 +34,10 @@ use crate::encoding::v1::keys::vectors::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorSimHashKey, VectorStorageLane,
 };
 use crate::encoding::v1::keys::{DataKeyKind, Key, NodePropertyKey};
-use crate::encoding::v1::values::vectors::{metadata, simhash};
-use crate::encoding::v2::keys::{GlobalKey, Key as IndexKey, ScopedKey};
+use crate::encoding::v1::values::vectors::simhash;
+use crate::encoding::v2::keys::{GlobalKey, ManagedIndexKey as IndexKey, ScopedKey};
+use crate::encoding::v2::legacy::vector::metadata as legacy_metadata;
+use crate::encoding::v2::values::indexes::vector::metadata;
 use crate::encoding::v2::values::{
     encode_index_record, encode_metadata_value, encode_operation_record,
 };
@@ -292,7 +294,7 @@ async fn run_inner(entity_count: u64) -> Result<VectorMigrationScaleReport> {
             .build()
             .await?,
     );
-    crate::index_lifecycle::repository::bootstrap_writer(db.as_ref()).await?;
+    crate::migrations::startup::bootstrap_writer(db.as_ref()).await?;
     let writer = crate::HelixWriter::new(Arc::clone(&db), config::DbConfig::new().id_lease_size());
     let scope = DataScope::LegacyUnscoped;
     let definition: ValidatedDynamicIndexDefinition = config::VectorIndexDefinition::new_node(
@@ -398,7 +400,7 @@ async fn run_inner(entity_count: u64) -> Result<VectorMigrationScaleReport> {
             ))),
         }
         .to_bytes(),
-        Bytes::copy_from_slice(&metadata::encode_legacy_metadata_for_contract(
+        Bytes::copy_from_slice(&legacy_metadata::encode_legacy_metadata_for_contract(
             &legacy_metadata,
         )),
     )?;

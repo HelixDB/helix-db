@@ -5,10 +5,14 @@ use helix_ast::traversal::AstNode;
 
 #[test]
 fn native_terminals_lower_projection_contracts() {
+    let count = support::lower(&AstNode::Count {
+        input: support::node_source(),
+    })
+    .unwrap()
+    .expect_native("count should lower");
+    assert!(matches!(count, logical::LogicalExpr::StreamCardinality(_)));
+
     [
-        AstNode::Count {
-            input: support::node_source(),
-        },
         AstNode::Exists {
             input: support::node_source(),
         },

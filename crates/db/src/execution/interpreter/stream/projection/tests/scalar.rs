@@ -29,17 +29,13 @@ fn scalar_projection_contract_preserves_terminal_only_shapes() {
 }
 
 #[test]
-fn scalar_projection_count_exists_and_ids_are_terminal_item_aware() {
+fn scalar_projection_exists_and_ids_are_terminal_item_aware() {
     let scalar_ids = ExecutionValue::Scalars(vec![
         ExecutionScalar::NodeId(1),
         ExecutionScalar::Value(DbPropertyValue::I64(9)),
         ExecutionScalar::EdgeId(2),
     ]);
 
-    assert_eq!(
-        project_scalar_items(scalar_ids.clone(), &ir::ProjectionPlan::Count).unwrap(),
-        ExecutionValue::Count(3)
-    );
     assert_eq!(
         project_scalar_items(scalar_ids.clone(), &ir::ProjectionPlan::Exists).unwrap(),
         ExecutionValue::Bool(true)

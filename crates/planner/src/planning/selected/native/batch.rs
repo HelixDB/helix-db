@@ -39,7 +39,13 @@ impl SelectedCascadesPlanner<'_> {
     ) -> Result<(exec::SelectedExecutableBatchEntries, exec::PlannerMetrics), error::PlannerError>
     {
         let mut pending = cache::PendingSelectedRunRoots::default();
-        let draft = draft::SelectedBatchDraft::prepare(self, entries, op, &mut pending)?;
+        let draft = draft::SelectedBatchDraft::prepare(
+            self,
+            entries,
+            op,
+            &self.ctx().late_bound_params,
+            &mut pending,
+        )?;
 
         let optimized = self.selected_uncached_logical_run_roots(pending)?;
         draft.materialize(optimized, &self.ctx().storage)

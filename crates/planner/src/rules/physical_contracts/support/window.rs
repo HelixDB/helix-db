@@ -2,7 +2,7 @@ use crate::{cost, ir, logical, physical, properties};
 
 use super::cardinality::{estimated_rows_bounded_by, StreamRowUpperBound};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(in crate::rules) enum AccessWindowPhysicalEffect {
     Identity,
     Op(physical::PhysicalPipelineOp),

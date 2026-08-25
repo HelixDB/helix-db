@@ -16,10 +16,10 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::IsolationLevel;
 
 use super::{scale_result_id, VectorIndex};
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorItemKey, VectorKey, VectorLayer0NeighborsKey,
 };
-use crate::encoding::v1::values::vectors::encode_layer0_neighbors;
+use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
 use crate::search::vector::distance::{Cosine, Distance};
 use crate::search::vector::item::Item;
 use crate::search::vector::simhash::{order_code_from_simhash_bits, SimHashCache};
@@ -251,4 +251,20 @@ async fn vector_search_scale_gate_reports_recall_and_median_throughput() {
                 .map_or_else(|| "not-supplied".to_string(), |ratio| format!("{ratio:.6}")),
         );
     }
+}
+
+#[tokio::test]
+async fn vector_search_scale_fixture_is_valid_at_the_smallest_query_complete_size() {
+    let observation = observe_scale(QUERY_COUNT as u64).await;
+    assert_eq!(observation.entity_count, QUERY_COUNT as u64);
+    assert_eq!(observation.recall_at_10, 1.0);
+    assert!(observation.median_search_ns > 0);
+
+    let neighbors = skip_neighbors(1, QUERY_COUNT as u64);
+    assert!(!neighbors.contains(&1));
+    assert!(neighbors.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        exact_neighbors(vector_for(1, QUERY_COUNT as u64), QUERY_COUNT as u64)[0],
+        1
+    );
 }

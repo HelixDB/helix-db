@@ -1,4 +1,4 @@
-use super::super::super::{ExecutionContext, FoldedStream};
+use super::super::super::{ExecutionContext, FoldedStream, ReturnedValue};
 use super::support::*;
 
 #[tokio::test]
@@ -36,15 +36,19 @@ async fn terminal_chain_counts_scalar_terminal_items() {
             test_support::step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
             test_support::step(
                 3,
                 vec![first_count_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputScalars {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
         ],
@@ -93,7 +97,10 @@ async fn planner_emitted_terminal_chain_executes_through_db_facade() {
         .await
         .expect("planner-emitted terminal chain executes");
 
-    assert_eq!(result.returns.get(&output), Some(&ExecutionValue::Count(1)));
+    assert_eq!(
+        result.returns.get(&output),
+        Some(&ReturnedValue::Present(ExecutionValue::Count(1)))
+    );
 }
 
 #[tokio::test]
@@ -128,8 +135,10 @@ async fn scalar_terminal_windows_and_distinct_execute_as_scalar_items() {
             test_support::step(
                 4,
                 vec![limited_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputScalars {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
         ],
@@ -155,8 +164,10 @@ async fn scalar_terminal_windows_and_distinct_execute_as_scalar_items() {
             test_support::step(
                 2,
                 vec![access_id],
-                exec::ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
                 },
             ),
             test_support::step(3, vec![first_count_id], exec::ExecOp::Distinct),

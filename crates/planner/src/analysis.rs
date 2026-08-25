@@ -17,7 +17,9 @@ mod scalar;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use self::index_atoms::{equality_atom, range_atom, EqualityIndexAtom, RangeIndexAtom};
+pub(crate) use self::index_atoms::{
+    equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
+};
 pub(crate) use self::labels::{label_equality_atom, label_scope, FeasibleLabelScope, LabelScope};
 pub(crate) use self::prune::{prune_statically_impossible_branches, PrunedPredicate};
 pub(crate) use self::scalar::{

@@ -1,4 +1,4 @@
-use crate::config::InstanceInfo;
+use crate::config::{InstanceInfo, QueryAuthScheme};
 use crate::errors::CliError;
 use crate::project::ProjectContext;
 use eyre::{eyre, Report, Result};
@@ -25,15 +25,18 @@ pub async fn run(
     let request_json = parse_query_request(file, json, ts, ts_file)?;
 
     validate_dynamic_request(&request_json, warm)?;
-    let client = reqwest::Client::new();
     let (mut request, endpoint, is_local) = match project.config.get_instance(&instance)? {
         InstanceInfo::Local(config) => {
+            let client = reqwest::Client::new();
             let host = host.unwrap_or_else(|| "localhost".to_string());
             let port = port.unwrap_or(config.port);
             let endpoint = format!("http://{host}:{port}/v2/query");
             (client.post(&endpoint), endpoint, true)
         }
         InstanceInfo::Enterprise(config) => {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
             let gateway_url = config.gateway_url.as_deref().ok_or_else(|| {
                 eyre!(
                     "Enterprise gateway URL is not configured for '{instance}'. Run 'helix sync {instance}' or set gateway_url in helix.toml."
@@ -51,11 +54,14 @@ pub async fn run(
                 .into()
             })?;
             let header_name = HeaderName::from_bytes(config.query_auth_header.as_bytes())?;
+            let header_value = query_auth_header_value(
+                config.resolved_query_auth_scheme(),
+                &auth_value,
+                &config.query_auth_env,
+            )?;
             let endpoint = format!("{}/v2/query", gateway_url.trim_end_matches('/'));
             (
-                client
-                    .post(&endpoint)
-                    .header(header_name, HeaderValue::from_str(&auth_value)?),
+                client.post(&endpoint).header(header_name, header_value),
                 endpoint,
                 false,
             )
@@ -99,6 +105,29 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+fn query_auth_header_value(
+    scheme: QueryAuthScheme,
+    value: &str,
+    env_name: &str,
+) -> Result<HeaderValue> {
+    let value = scheme
+        .format_header_value(value)
+        .ok_or_else(|| -> Report {
+            CliError::new(format!(
+                "environment variable {env_name} must contain a valid, non-empty Enterprise query auth value"
+            ))
+            .into()
+        })?;
+    let mut value = HeaderValue::from_str(&value).map_err(|_| -> Report {
+        CliError::new(format!(
+            "environment variable {env_name} contains a value that cannot be used for Enterprise query auth"
+        ))
+        .into()
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 /// Error for a query that never reached a Helix instance (connection refused,
@@ -189,6 +218,16 @@ fn validate_dynamic_request(request: &Value, warm: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::QueryAuthScheme;
+
+    #[test]
+    fn query_auth_header_values_are_sensitive() {
+        let value =
+            query_auth_header_value(QueryAuthScheme::Bearer, "secret", "HELIX_API_KEY").unwrap();
+
+        assert_eq!(value, "Bearer secret");
+        assert!(value.is_sensitive());
+    }
 
     #[test]
     fn parse_query_request_accepts_inline_json() {

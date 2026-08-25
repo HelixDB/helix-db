@@ -38,6 +38,7 @@ fn selected_executable_batch_lowers_control_root_pipeline_with_selected_input() 
                     }),
                 ))),
                 output: ir::BatchOutputPlan::Bind(name("expanded")),
+                return_shape: ReturnShape::List,
                 condition: ir::RunConditionPlan::Always,
             }),
         )),
@@ -87,12 +88,12 @@ fn selected_executable_batch_lowers_control_root_terminals_with_selected_input()
         (
             SelectedRootTerminal::Project {
                 input: branch_input.clone(),
-                projection: ir::ProjectionPlan::Count,
+                projection: ir::ProjectionPlan::Exists,
             },
             physical::PhysicalStreamOp::Project,
             project_delivered_properties(
                 branch_alternative.delivered.clone(),
-                &ir::ProjectionPlan::Count,
+                &ir::ProjectionPlan::Exists,
             ),
             profile.stream_operator(profile.default_unknown_scan_rows),
             ExpectedTerminal::Project,
@@ -161,6 +162,7 @@ fn selected_executable_batch_lowers_control_root_terminals_with_selected_input()
                                 selected_root_terminal_plan(terminal_alternative, terminal),
                             )),
                             output: ir::BatchOutputPlan::Bind(name("terminal")),
+                            return_shape: ReturnShape::List,
                             condition: ir::RunConditionPlan::Always,
                         },
                     )),
@@ -189,7 +191,7 @@ fn selected_executable_batch_lowers_control_root_terminals_with_selected_input()
             ExpectedTerminal::Project => assert!(matches!(
                 &plan.steps()[2].op,
                 ExecOp::Project {
-                    projection: ir::ProjectionPlan::Count,
+                    projection: ir::ProjectionPlan::Exists,
                 }
             )),
             ExpectedTerminal::Aggregate => assert!(matches!(

@@ -4,12 +4,12 @@ use crate::{context, cost, logical, properties};
 
 use super::access;
 use crate::rules::physical_contracts::support::{
-    aggregate_output_delivered, estimated_pipeline_rows, project_output_delivered,
-    reserved_output_delivered, stream_pipeline_op_contract,
+    aggregate_output_delivered, cardinality_output_delivered, estimated_pipeline_rows,
+    project_output_delivered, reserved_output_delivered, stream_pipeline_op_contract,
     stream_variable_write_delivered_properties,
 };
 
-pub(super) fn root_stream_delivered_properties(
+pub(in crate::rules) fn root_stream_delivered_properties(
     input: &logical::RootStream,
     storage: &cost::StorageCostProfile,
     stats: &context::StatsSnapshot,
@@ -30,6 +30,9 @@ pub(super) fn root_stream_delivered_properties(
         RootStreamDeliveredFamily::Project(project) => project_output_delivered(
             root_stream_delivered_properties(project.input(), storage, stats),
             project.projection(),
+        ),
+        RootStreamDeliveredFamily::Cardinality(cardinality) => cardinality_output_delivered(
+            root_stream_delivered_properties(cardinality.input(), storage, stats),
         ),
         RootStreamDeliveredFamily::Aggregate(aggregate) => aggregate_output_delivered(
             root_stream_delivered_properties(aggregate.input(), storage, stats),
@@ -52,6 +55,7 @@ pub(super) enum RootStreamDeliveredFamily<'a> {
     Pipeline(&'a logical::RootPipeline),
     Reserved(&'a logical::StreamReserved),
     Project(&'a logical::StreamProject),
+    Cardinality(&'a logical::StreamCardinality),
     Aggregate(&'a logical::StreamAggregate),
     VariableWrite(&'a logical::StreamVariableWrite),
 }
@@ -67,6 +71,7 @@ impl<'a> RootStreamDeliveredFamily<'a> {
             logical::RootStream::Pipeline(pipeline) => Self::Pipeline(pipeline),
             logical::RootStream::Reserved(reserved) => Self::Reserved(reserved),
             logical::RootStream::Project(project) => Self::Project(project),
+            logical::RootStream::Cardinality(cardinality) => Self::Cardinality(cardinality),
             logical::RootStream::Aggregate(aggregate) => Self::Aggregate(aggregate),
             logical::RootStream::VariableWrite(write) => Self::VariableWrite(write),
         }

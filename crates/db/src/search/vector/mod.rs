@@ -129,7 +129,7 @@ mod policy;
 #[path = "../../../tests/production_support/vector/primitives.rs"]
 mod primitive_production_contracts;
 mod randomness;
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/read_fault.rs"]
 pub(crate) mod read_fault_production_support;
 mod read_index;
@@ -156,15 +156,18 @@ use serde::{Deserialize, Serialize};
 use crate::error::HelixDbError;
 
 #[cfg(test)]
-use crate::encoding::v1::keys::vectors::{
+use crate::encoding::v2::keys::indexes::vector::{
     VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorIndexMetadataKey,
-    VectorIndexPrefixKey, VectorItemKey, VectorLayer0NeighborsKey, VectorTxnGuardKey,
-    VectorUpperVectorKey,
+    VectorIndexPrefixKey, VectorItemKey, VectorLayer0NeighborsKey, VectorUpperVectorKey,
 };
-use crate::encoding::v1::keys::vectors::{VectorKey, VectorMetadataScanPrefix};
+use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMetadataScanPrefix};
 #[cfg(test)]
-use crate::encoding::v1::keys::vectors::{VectorReverseEdgeKey, VectorReverseEdgePrefixKey};
-use crate::encoding::v1::values::vectors as vector_values;
+use crate::encoding::v2::keys::indexes::vector::{
+    VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
+};
+#[cfg(test)]
+use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey as VectorTxnGuardKey;
+use crate::encoding::v2::values::indexes::vector as vector_values;
 use crate::encoding::NodeId;
 
 #[cfg(feature = "production-coverage")]
@@ -735,12 +738,12 @@ pub fn is_vector_index_metadata_key(key: &[u8]) -> bool {
 
 /// Encode entry-candidate node layer as `[layer:2]`.
 pub fn encode_entry_candidate_layer(layer: u16) -> Bytes {
-    vector_values::entry::encode_entry_candidate_layer(layer)
+    vector_values::entry_candidate::encode_entry_candidate_layer(layer)
 }
 
 /// Decode entry-candidate node layer from `[layer:2]`.
 pub fn decode_entry_candidate_layer(data: &[u8]) -> Result<u16, String> {
-    vector_values::entry::decode_entry_candidate_layer(data).map_err(|_| {
+    vector_values::entry_candidate::decode_entry_candidate_layer(data).map_err(|_| {
         format!(
             "Invalid entry-candidate layer length: expected 2 bytes, got {}",
             data.len()

@@ -2,10 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{catalog, context, cost};
+use std::collections::BTreeSet;
+
+use crate::{catalog, context, cost, ir};
 
 /// Cascades optimizer configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptimizerConfig {
     /// Exploration guardrails.
     pub limits: context::OptimizerLimits,
@@ -17,6 +19,10 @@ pub struct OptimizerConfig {
     pub storage: cost::StorageCostProfile,
     /// Immutable index catalog snapshot visible to exploration rules.
     pub indexes: catalog::IndexCatalogSnapshot,
+    /// Immutable request bindings used to specialize ordinary parameters.
+    pub params: context::ParamBindings,
+    /// Active scopes whose object fields keep enclosed parameters runtime-dependent.
+    pub late_bound_params: BTreeSet<ir::NonEmptyString>,
 }
 
 impl OptimizerConfig {
@@ -28,6 +34,8 @@ impl OptimizerConfig {
             stats: ctx.effective_stats(),
             storage: ctx.storage.clone(),
             indexes: ctx.indexes.clone(),
+            params: ctx.params.clone(),
+            late_bound_params: ctx.late_bound_params.clone(),
         }
     }
 }

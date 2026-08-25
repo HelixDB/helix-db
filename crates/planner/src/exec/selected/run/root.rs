@@ -1,6 +1,7 @@
 //! Recursive selected executable run-root ADT.
 
 use super::super::control_flow::{SelectedRootBranch, SelectedRootRepeat};
+use super::super::count::SelectedRootCount;
 use super::super::family::SelectedExecutableAlternativeFamily;
 use super::super::index_ddl::SelectedRootIndexDdl;
 use super::super::mutation::SelectedRootMutation;
@@ -33,6 +34,8 @@ pub enum SelectedExecutableRunRoot {
     Pipeline(Box<SelectedRootPipeline>),
     /// Selected root-stream terminal with a selected input root.
     Terminal(Box<SelectedRootTerminalPlan>),
+    /// Selected exact cardinality program.
+    Count(Box<SelectedRootCount>),
 }
 
 impl SelectedExecutableRunRoot {

@@ -99,7 +99,7 @@ pub(in crate::exec) fn project_delivered_properties(
     projection: &ir::ProjectionPlan,
 ) -> properties::DeliveredProperties {
     match projection {
-        ir::ProjectionPlan::Count | ir::ProjectionPlan::Exists => properties::DeliveredProperties {
+        ir::ProjectionPlan::Exists => properties::DeliveredProperties {
             cardinality: properties::CardinalityBounds::exact(1),
             materialization: properties::Materialization::Materialized,
             effect: input.effect,

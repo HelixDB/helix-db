@@ -2,12 +2,17 @@ use super::*;
 
 #[test]
 fn projection_terminals_preserve_projection_payloads() {
-    assert_eq!(
-        projection_of(AstNode::Count {
-            input: boxed(nodes_root())
-        }),
-        ProjectionPlan::Count
+    let count = executable_ast(
+        AstNode::Count {
+            input: boxed(nodes_root()),
+        },
+        PlannerContext::default(),
     );
+    assert!(matches!(
+        &count.steps()[0].op,
+        ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::NodeFullScan { .. })
+    ));
     assert_eq!(
         projection_of(AstNode::Exists {
             input: boxed(nodes_root())

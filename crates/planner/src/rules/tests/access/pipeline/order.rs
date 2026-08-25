@@ -189,6 +189,62 @@ fn access_pipeline_order_rule_elides_order_after_residual_filters() {
 }
 
 #[test]
+fn access_pipeline_order_rule_promotes_the_requested_intersection_driver() {
+    let rule = AccessPipelineOrderRule::default();
+    let storage = cost::StorageCostProfile::default();
+    let filter = logical::StreamPipelineOp::Filter {
+        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true)).unwrap(),
+    };
+    let window = logical::AccessWindowRange::new(0, Some(2)).unwrap();
+    let expr = logical::LogicalExpr::AccessPipeline(
+        logical::AccessPipeline::new(
+            logical::AccessPath::Node(logical::NodeAccessPath::new(
+                ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::Intersect(
+                    ir::AtLeast::from_pair(
+                        node_range_source("User", "age", lower_range(18)),
+                        node_range_source("User", "score", lower_range(0)),
+                    ),
+                ))
+                .unwrap(),
+            )),
+            ir::AtLeast::<_, 1>::from_one_and_rest(
+                filter.clone(),
+                vec![
+                    logical::StreamPipelineOp::Order {
+                        ordering: order_keys_for("score", helix_ast::traversal::Order::Asc),
+                    },
+                    logical::StreamPipelineOp::Window { window },
+                ],
+            ),
+        )
+        .unwrap(),
+    );
+
+    let rewritten = logical_access_pipeline(rule.apply(optimizer::RuleInput {
+        expr: &expr,
+        storage: &storage,
+        indexes: empty_indexes(),
+        planner_limits: default_planner_limits(),
+        stats: default_stats(),
+    }));
+    let logical::AccessPath::Node(path) = rewritten.access() else {
+        panic!("expected node access path");
+    };
+    let ir::NodeAccessPlan::Intersect(children) = path.source().as_ref() else {
+        panic!("expected node intersection");
+    };
+
+    assert!(matches!(
+        children[0].as_ref(),
+        ir::NodeAccessPlan::RangeIndex { key, .. } if key.property == "score"
+    ));
+    assert_eq!(
+        rewritten.ops(),
+        &[filter, logical::StreamPipelineOp::Window { window }]
+    );
+}
+
+#[test]
 fn access_pipeline_order_rule_rejects_non_access_pipeline_input() {
     let rule = AccessPipelineOrderRule::default();
     let storage = cost::StorageCostProfile::default();

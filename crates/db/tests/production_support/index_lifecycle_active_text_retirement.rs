@@ -17,8 +17,8 @@ use crate::config::{
     SearchIndexBackfillLimits, SearchIndexBatchLimits, SecondaryIndexDefinition, TextAnalyzerKind,
     TextBackfillCompactionLimits, TextBuildArtifactLimits,
 };
-use crate::encoding::v1::keys::tenant::DataScope;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::index_lifecycle::{
     IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, IndexOperationId, IndexRecordV2,
     IndexRevision, IndexStateTransition, PhysicalGeneration, TextLogicalVersion,
@@ -42,7 +42,7 @@ async fn raw_db(name: &str) -> Db {
 
 /// Encodes one scoped V2 key through the current typed boundary.
 fn scoped_key(scope: DataScope, logical: index_keys::ScopedKey) -> Bytes {
-    Key::Data {
+    ManagedIndexKey::Data {
         scope,
         kind: logical,
     }

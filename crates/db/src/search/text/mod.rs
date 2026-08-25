@@ -35,7 +35,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::config::{TextAnalyzerKind, TextIndexDefinition};
-use crate::encoding::keys::tenant::DataScope;
+use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::decode_properties;
 use crate::encoding::property::property::Property;
 use crate::encoding::property::property_value::PropertyValue;
@@ -396,20 +396,8 @@ pub async fn load_all_manifests_scoped(
 }
 
 fn decode_manifest_bytes(bytes: &[u8]) -> Result<TextIndexGenerationManifest, HelixDbError> {
-    let manifest = serde_json::from_slice::<TextIndexGenerationManifest>(bytes)
-        .map_err(|err| HelixDbError::Config(format!("failed to decode text manifest: {err}")))?;
-    if manifest.format_version != TEXT_INDEX_MANIFEST_FORMAT_V2 {
-        return Err(HelixDbError::Config(format!(
-            "unsupported text manifest format version {}",
-            manifest.format_version
-        )));
-    }
-    if manifest.splits.is_empty() || manifest.splits.first() != Some(&manifest.split) {
-        return Err(HelixDbError::Config(
-            "text manifest must contain its primary split as the first split".into(),
-        ));
-    }
-    Ok(manifest)
+    crate::encoding::v2::legacy::text::manifest::decode(bytes)
+        .map_err(|error| HelixDbError::Config(error.to_string()))
 }
 
 pub async fn search_manifest(
@@ -1250,13 +1238,14 @@ pub fn manifest_blob_hashes(manifests: &[TextIndexGenerationManifest]) -> BTreeS
 }
 
 pub fn encode_live_state_bytes(state: &TextIndexLiveState) -> Result<Vec<u8>, HelixDbError> {
-    serde_json::to_vec(state)
-        .map_err(|err| HelixDbError::Config(format!("failed to encode text live-state: {err}")))
+    crate::encoding::v2::legacy::text::live_state::encode_for_retained_api(state)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| HelixDbError::Config(error.to_string()))
 }
 
 pub fn decode_live_state_bytes(bytes: &[u8]) -> Result<TextIndexLiveState, HelixDbError> {
-    serde_json::from_slice(bytes)
-        .map_err(|err| HelixDbError::Config(format!("failed to decode text live-state row: {err}")))
+    crate::encoding::v2::legacy::text::live_state::decode(bytes)
+        .map_err(|error| HelixDbError::Config(error.to_string()))
 }
 
 pub(crate) async fn materialize_split_ref_to_file(
@@ -2211,7 +2200,7 @@ fn sha256_hex(sha256: [u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::config::{TextAnalyzerKind, TextIndexDefinition};
-    use crate::encoding::keys::tenant::TenantId;
+    use crate::encoding::keys::scope::TenantId;
     use crate::encoding::property::encode_properties;
     use proptest::prelude::*;
     use slatedb::object_store::memory::InMemory;
@@ -3019,7 +3008,7 @@ mod tests {
         let tx = db.begin(IsolationLevel::Snapshot).await.unwrap();
         tx.put(Bytes::from_static(&[0x02]), Bytes::new()).unwrap();
         tx.put(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(1)),
             }
@@ -3031,7 +3020,7 @@ mod tests {
         )
         .unwrap();
         tx.put(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(2)),
             }
@@ -3079,7 +3068,7 @@ mod tests {
 
         let tx = db.begin(IsolationLevel::Snapshot).await.unwrap();
         tx.put(
-            keys::Key::Data {
+            keys::DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(3)),
             }

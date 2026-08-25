@@ -1,6 +1,6 @@
 use crate::config::{
-    EnterpriseInstanceConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
-    DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
+    EnterpriseInstanceConfig, LocalInstanceConfig, LocalStorageMode, QueryAuthScheme,
+    S3StorageConfig, DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
 };
 use crate::output::Operation;
 use crate::project::ProjectContext;
@@ -62,6 +62,7 @@ pub async fn run(path: Option<String>, target: Option<AddTarget>) -> Result<()> 
                     gateway_url: target.gateway_url,
                     query_auth_header: DEFAULT_QUERY_AUTH_HEADER.to_string(),
                     query_auth_env: DEFAULT_QUERY_AUTH_ENV.to_string(),
+                    query_auth_scheme: Some(QueryAuthScheme::Bearer),
                     availability_mode: None,
                     gateway_node_type: None,
                     db_node_type: None,

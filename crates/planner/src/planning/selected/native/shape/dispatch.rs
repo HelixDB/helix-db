@@ -39,7 +39,7 @@ fn wrapped_access_stream_from_ast(
     match native_access_stream_from_ast(ctx, wrapper.input())? {
         NativeAccessStreamRoot::Stream(stream) => wrapper
             .into_op()
-            .append_to(stream)
+            .append_to(ctx, stream)
             .map(NativeAccessStreamRoot::Stream),
         NativeAccessStreamRoot::NotAccessStream => Ok(NativeAccessStreamRoot::NotAccessStream),
     }

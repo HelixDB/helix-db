@@ -14,4 +14,6 @@ pub(in crate::rules::access) use direction::{
     rewrite_access_order_range_direction, AccessOrderRangeDirectionRewrite,
 };
 pub(in crate::rules::access) use distinct::access_distinct_is_noop;
-pub(in crate::rules::access) use satisfaction::access_satisfies_order;
+pub(in crate::rules::access) use satisfaction::{
+    access_order_satisfaction, AccessOrderSatisfaction,
+};

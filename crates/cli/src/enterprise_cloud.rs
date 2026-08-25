@@ -149,6 +149,8 @@ pub struct CliEnterpriseCluster {
     #[serde(default)]
     pub query_auth_env: Option<String>,
     #[serde(default)]
+    pub query_auth_scheme: Option<crate::config::QueryAuthScheme>,
+    #[serde(default)]
     pub min_gateway_count: Option<u64>,
     #[serde(default)]
     pub max_gateway_count: Option<u64>,

@@ -26,16 +26,21 @@ pub(in crate::planning::selected::native) fn native_terminal_expr_from_ast(
     };
     let (input, payload) = terminal_op.into_parts();
     root_stream::required_root_stream_from_ast(ctx, input).map(|input| {
-        NativeTerminalExprRoot::Terminal(Box::new(terminal_expr_from_payload(input, payload)))
+        NativeTerminalExprRoot::Terminal(Box::new(terminal_expr_from_payload(ctx, input, payload)))
     })
 }
 
 /// Build a logical terminal expression from a selected root-stream input.
 pub(in crate::planning::selected::native) fn terminal_expr_from_payload(
+    ctx: &context::PlannerContext,
     input: logical::RootStream,
     payload: NativeTerminalPayload,
 ) -> logical::LogicalExpr {
     match payload {
+        NativeTerminalPayload::Cardinality => logical::LogicalExpr::StreamCardinality(
+            logical::StreamCardinality::new(input)
+                .with_planning_bindings(ctx.params.clone(), ctx.late_bound_params.clone()),
+        ),
         NativeTerminalPayload::Project(projection) => {
             logical::LogicalExpr::StreamProject(logical::StreamProject::new(input, projection))
         }
@@ -68,7 +73,7 @@ mod tests {
             )
             .unwrap(),
             NativeTerminalExprRoot::Terminal(expr)
-                if matches!(expr.as_ref(), logical::LogicalExpr::StreamProject(_))
+                if matches!(expr.as_ref(), logical::LogicalExpr::StreamCardinality(_))
         ));
         assert!(matches!(
             native_terminal_expr_from_ast(&context::PlannerContext::default(), &AstNode::Context)

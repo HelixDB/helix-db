@@ -11,7 +11,7 @@ pub(super) fn projection_payload_from_ast(
     Ok(match root {
         AstNode::Count { input } => NativeTerminalRoot::Terminal(NativeTerminalOp::new(
             input.as_ref(),
-            NativeTerminalPayload::Project(ir::ProjectionPlan::Count),
+            NativeTerminalPayload::Cardinality,
         )),
         AstNode::Exists { input } => NativeTerminalRoot::Terminal(NativeTerminalOp::new(
             input.as_ref(),

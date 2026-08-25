@@ -102,11 +102,7 @@ pub(in crate::exec) fn edge_exec_access(plan: SimpleEdgeAccessLeaf<'_>) -> ExecE
             label: label.clone(),
         },
         SimpleEdgeAccessLeaf::EqualityIndex { index, key, value } => {
-            ExecEdgeAccessPlan::EqualityIndex {
-                index: index.clone(),
-                key: key.clone(),
-                value: value.clone(),
-            }
+            ExecEdgeAccessPlan::exact_equality(index.clone(), key.clone(), value.clone())
         }
         SimpleEdgeAccessLeaf::RangeIndex { index, key, range } => ExecEdgeAccessPlan::RangeIndex {
             index: index.clone(),

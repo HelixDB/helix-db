@@ -9,7 +9,7 @@ use slatedb::{Db, IsolationLevel};
 
 use crate::config::TextBackfillCompactionLimits;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{self, work};
@@ -444,10 +444,10 @@ fn runtime_split(split: work::SplitRef) -> crate::search::text::TextSplitRef {
 }
 
 fn scoped_key(
-    scope: crate::encoding::v1::keys::tenant::DataScope,
+    scope: crate::encoding::v2::keys::scope::DataScope,
     key: index_keys::ScopedKey,
 ) -> Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 fn compaction_error(
@@ -524,7 +524,7 @@ mod tests {
         .unwrap()
         .transition(index_lifecycle::IndexStateTransition::Activate)
         .unwrap();
-        let scope = crate::encoding::v1::keys::tenant::DataScope::LegacyUnscoped;
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
         db.put(
             scoped_key(
                 scope,
@@ -639,7 +639,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let pointer_key = Key::Global {
+        let pointer_key = ManagedIndexKey::Global {
             kind: index_keys::GlobalKey::TextCompactionPointer(target),
         }
         .to_bytes();

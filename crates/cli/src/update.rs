@@ -378,6 +378,11 @@ mod tests {
     }
 
     #[test]
+    fn current_release_does_not_offer_itself_as_an_update() {
+        assert!(!is_newer_version(CURRENT_VERSION, CURRENT_VERSION));
+    }
+
+    #[test]
     fn update_cache_round_trips() {
         let cache = UpdateCache {
             last_check: 42,

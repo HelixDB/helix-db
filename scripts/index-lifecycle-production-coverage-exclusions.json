@@ -20,15 +20,5 @@
     "classification": "llvm-artifact",
     "reason": "LLVM assigns zero-count continuation positions to successful async scans, typed artifact decoding, and the mapped append-page Result even though the surrounding range, page, and exhausted-revision outcomes are asserted.",
     "evidence": "pages_are_bounded_resumable_and_root_revisions_remain_contiguous and range_revalidation_rejects_phantoms_and_conflicts_with_late_insertion"
-  },
-  {
-    "path": "crates/db/src/index_lifecycle/text/manifest.rs",
-    "lines": [
-      199
-    ],
-    "functions": [],
-    "classification": "structurally-unreachable",
-    "reason": "Exact-prefix scans cannot return outside their prefix; typed contiguous roots and fixed non-empty page constructors eliminate the residual constructor failures; SHA-256 partition ownership cannot disagree without a fingerprint collision; and admission records a cursor and byte bound from the same non-empty serialized page.",
-    "evidence": "pages_are_bounded_resumable_and_root_revisions_remain_contiguous and first_indivisible_page_blocks_at_every_configured_transaction_limit and pages_never_mix_canonical_partitions"
   }
 ]

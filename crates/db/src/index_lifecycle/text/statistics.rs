@@ -7,9 +7,9 @@ use sha2::{Digest, Sha256};
 use slatedb::{DbReadOps, DbTransaction};
 
 use crate::config::TextAnalyzerKind;
-use crate::encoding::v1::keys::tenant::DataScope;
 use crate::encoding::v2::keys as index_keys;
-use crate::encoding::v2::keys::Key;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{self, work};
@@ -922,7 +922,7 @@ fn term_key(
 }
 
 fn scoped_key(scope: DataScope, key: index_keys::ScopedKey) -> Bytes {
-    Key::Data { scope, kind: key }.to_bytes()
+    ManagedIndexKey::Data { scope, kind: key }.to_bytes()
 }
 
 /// Decodes one corpus-statistics value without accepting another work kind.
@@ -1087,3 +1087,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_statistics_contracts.rs"]
+mod external_contracts;

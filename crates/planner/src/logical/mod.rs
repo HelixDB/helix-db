@@ -9,6 +9,7 @@ mod pure;
 mod root;
 mod variables;
 
+pub(crate) use self::access::canonicalize_stream_pipeline_ops;
 pub use self::access::{
     AccessDistinct, AccessFilter, AccessOrder, AccessPath, AccessPipeline, AccessSourceKind,
     AccessStream, AccessWindow, AccessWindowRange, EdgeAccessPath, NodeAccessPath,
@@ -20,7 +21,7 @@ pub use self::core::{
 pub use self::pure::{FilterChain, FilterPushdown, FilterPushdownOp, PurePipeline};
 pub use self::root::{
     RootBranch, RootIndexDdl, RootMutation, RootPipeline, RootRepeat, RootShortestPath, RootStream,
-    StreamAggregate, StreamProject, StreamReserved, StreamVariableWrite,
+    StreamAggregate, StreamCardinality, StreamProject, StreamReserved, StreamVariableWrite,
 };
 pub use self::variables::{PureStreamVariableOp, StreamVariableWriteOp, VariableSource};
 

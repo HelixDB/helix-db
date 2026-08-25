@@ -69,7 +69,7 @@ fn selected_stream_terminal_rejects_non_pipeline_physical_shape() {
         selected_root_provenance(),
         SelectedRootTerminal::Project {
             input: selected_access_stream_input(ir::NodeAccessPlan::AllScan),
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         },
     );
 
@@ -94,7 +94,7 @@ fn selected_stream_terminal_rejects_incompatible_physical_suffix() {
         selected_root_provenance(),
         SelectedRootTerminal::Project {
             input: selected_access_stream_input(ir::NodeAccessPlan::AllScan),
-            projection: ir::ProjectionPlan::Count,
+            projection: ir::ProjectionPlan::Exists,
         },
     );
 
@@ -119,7 +119,7 @@ fn selected_stream_project_and_aggregate_pipelines_lower_to_native_dag() {
                 predicate.clone(),
             ),
         )),
-        projection: ir::ProjectionPlan::Count,
+        projection: ir::ProjectionPlan::Exists,
     };
     let aggregate = SelectedRootTerminal::Aggregate {
         input: SelectedRootStreamInput::Access(logical::AccessStream::Order(
@@ -180,7 +180,7 @@ fn selected_stream_project_and_aggregate_pipelines_lower_to_native_dag() {
                 assert!(matches!(
                     &plan.steps()[2].op,
                     ExecOp::Project {
-                        projection: ir::ProjectionPlan::Count
+                        projection: ir::ProjectionPlan::Exists
                     }
                 ));
                 assert_eq!(plan.steps()[2].dependencies, vec![plan.steps()[1].id]);

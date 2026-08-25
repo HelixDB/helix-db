@@ -166,9 +166,8 @@ fn single_run_executable_entrypoint_uses_cascades_selected_control_root_terminal
     );
     assert!(matches!(
         &plan.steps()[2].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::InputRows { .. })
     ));
     assert_eq!(
         plan.steps()[2].dependencies,
@@ -228,9 +227,8 @@ fn single_run_executable_entrypoint_uses_cascades_selected_control_pipeline_term
     );
     assert!(matches!(
         &plan.steps()[3].op,
-        crate::exec::ExecOp::Project {
-            projection: ProjectionPlan::Count,
-        }
+        crate::exec::ExecOp::Count { plan }
+            if matches!(plan.as_ref(), ExecCountPlan::Stream(_))
     ));
     assert_eq!(
         plan.steps()[3].dependencies,

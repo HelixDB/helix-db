@@ -20,9 +20,10 @@ pub(in crate::rules) use self::{
     },
     delivered::{
         access_delivered, aggregate_output_delivered, barrier_delivered, bounded_delivered,
-        element_keyspace, empty_delivered, filtered_delivered, materialized_delivered,
-        ordered_delivered, project_output_delivered, required_to_delivered_ordering,
-        reserved_output_delivered, stream_variable_write_delivered_properties,
+        cardinality_output_delivered, element_keyspace, empty_delivered, filtered_delivered,
+        materialized_delivered, ordered_delivered, project_output_delivered,
+        required_to_delivered_ordering, reserved_output_delivered,
+        stream_variable_write_delivered_properties,
     },
     pipeline::{
         access_pipeline_op, physical_pipeline_from_first_and_rest,
