@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -758,6 +759,44 @@ func TestClientUnknownWriteOutcomeIsTerminalAndSentOnce(t *testing.T) {
 				t.Fatal("unknown write outcome must not be retryable")
 			}
 		})
+	}
+}
+
+func TestLostResponseGatewayProbe(t *testing.T) {
+	baseURL := os.Getenv("HELIX_LOST_RESPONSE_GATEWAY_URL")
+	if baseURL == "" {
+		t.Skip("real lost-response gateway fixture is not configured")
+	}
+	probeID := os.Getenv("HELIX_LOST_RESPONSE_PROBE_ID")
+	if probeID == "" {
+		t.Fatal("HELIX_LOST_RESPONSE_PROBE_ID is required")
+	}
+	client, err := NewClient(baseURL, WithAPIKey(os.Getenv("HELIX_LOST_RESPONSE_API_KEY")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := WriteQuery("lost_response_probe").
+		VarAs(
+			"created",
+			G().AddN("LostResponseProbe", Props{Prop("business_id", probeID)}),
+		).
+		Returning("created")
+	err = client.Exec(context.Background(), request, nil)
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) {
+		t.Fatalf("expected HelixError, got %T", err)
+	}
+	if helixErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", helixErr.StatusCode)
+	}
+	if helixErr.Code != QueryErrorCode("WRITE_OUTCOME_UNKNOWN") {
+		t.Fatalf("code = %q, want WRITE_OUTCOME_UNKNOWN", helixErr.Code)
+	}
+	if helixErr.Retryable == nil || *helixErr.Retryable {
+		t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
+	}
+	if IsConflict(err) || IsRetryable(err) {
+		t.Fatal("unknown write outcome must be terminal and non-retryable")
 	}
 }
 

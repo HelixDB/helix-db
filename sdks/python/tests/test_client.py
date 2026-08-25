@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import types
 import unittest
@@ -168,6 +169,31 @@ def fake_native_module() -> types.SimpleNamespace:
 
 
 class ClientTests(unittest.TestCase):
+    def test_lost_response_gateway_probe(self) -> None:
+        base_url = os.environ.get("HELIX_LOST_RESPONSE_GATEWAY_URL")
+        if base_url is None:
+            self.skipTest("real lost-response gateway fixture is not configured")
+        probe_id = os.environ["HELIX_LOST_RESPONSE_PROBE_ID"]
+        request = QueryRequest.write(
+            write_batch()
+            .var_as(
+                "created",
+                g().add_n("LostResponseProbe", {"business_id": probe_id}),
+            )
+            .returning(["created"])
+        )
+
+        with self.assertRaises(HelixError) as ctx:
+            Client(
+                base_url,
+                api_key=os.environ.get("HELIX_LOST_RESPONSE_API_KEY"),
+            ).query(request)
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, "WRITE_OUTCOME_UNKNOWN")
+        self.assertIs(ctx.exception.retryable, False)
+        self.assertFalse(ctx.exception.is_retryable())
+
     def test_public_client_api_is_explicitly_accounted_for(self) -> None:
         self.assertEqual(
             public_api_members(Client),

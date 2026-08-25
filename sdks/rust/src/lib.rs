@@ -1530,6 +1530,40 @@ mod client_tests {
     }
 
     #[tokio::test]
+    async fn lost_response_gateway_probe() {
+        let Ok(base_url) = std::env::var("HELIX_LOST_RESPONSE_GATEWAY_URL") else {
+            return;
+        };
+        let probe_id =
+            std::env::var("HELIX_LOST_RESPONSE_PROBE_ID").expect("lost-response probe ID");
+        let request = QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "created",
+                    g().add_n(
+                        "LostResponseProbe",
+                        vec![("business_id", PropertyInput::from(probe_id))],
+                    ),
+                )
+                .returning(["created"]),
+        );
+        let api_key = std::env::var("HELIX_LOST_RESPONSE_API_KEY").ok();
+        let error = Client::new(Some(&base_url))
+            .unwrap()
+            .with_api_key(api_key.as_deref())
+            .query::<serde_json::Value>(request)
+            .send()
+            .await
+            .expect_err("lost response must be terminal");
+
+        assert_eq!(error.status_code(), Some(503));
+        assert_eq!(error.remote_code(), Some("WRITE_OUTCOME_UNKNOWN"));
+        assert_eq!(error.retryable(), Some(false));
+        assert!(!error.is_conflict());
+        assert!(!error.is_retryable());
+    }
+
+    #[tokio::test]
     async fn remote_error_preserves_status_matrix() {
         for status in [400, 401, 403, 409, 429, 503] {
             let body = format!(r#"{{"message":"status {status}","code":"test_error"}}"#);
