@@ -33,6 +33,10 @@ fn create_post(title: String) -> WriteBatch {
 
 fn main() -> Result<(), QueryError> {
     let request = find_user("alice".to_string())?;
+    assert_eq!(request.query_name(), Some("find_user"));
+
+    let request = create_post("hello".to_string())?;
+    assert_eq!(request.query_name(), Some("create_post"));
     Ok(())
 }
 ```
