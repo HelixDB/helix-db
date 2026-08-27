@@ -70,6 +70,85 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
     }
 }
 
+/// Initializes a pristine managed database without entering any migration path.
+pub(crate) async fn bootstrap_managed_writer(db: &Db) -> Result<()> {
+    let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    let mut rows = transaction.scan(..).await?;
+    if rows.next().await?.is_some() {
+        transaction.rollback();
+        return Err(HelixDbError::WriterMigrationRequired {
+            requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+        });
+    }
+    stage_writer_bootstrap_initialization(&transaction)?;
+    crate::migrations::stage_current_storage_schema_ready(&transaction)?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Validates current managed storage using point reads only.
+pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
+    let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    let marker_key = global_key(GlobalKey::StorageVersion);
+    let logical_key = global_key(GlobalKey::LogicalIndexIdWatermark);
+    let vector_key = global_key(GlobalKey::VectorPhysicalIdWatermark);
+    let marker = transaction.get(&marker_key).await?;
+    let logical = transaction.get(&logical_key).await?;
+    let vector = transaction.get(&vector_key).await?;
+    let cleanup_ready = crate::migrations::index_storage_v4_cleanup_ready(&transaction).await?;
+    let tenant_envelope_ready = crate::migrations::tenant_key_envelope_ready(&transaction).await?;
+
+    let Some(marker) = marker else {
+        transaction.rollback();
+        if logical.is_some() || vector.is_some() || cleanup_ready || tenant_envelope_ready {
+            return Err(HelixDbError::MigrationRequired {
+                reason: "managed storage has a partial bootstrap tuple".to_string(),
+            });
+        }
+        return Err(HelixDbError::WriterMigrationRequired {
+            requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+        });
+    };
+    let IndexV2MetadataValue::StorageVersion(version) =
+        metadata_or_migration_required(&marker, "storage marker")?
+    else {
+        return Err(HelixDbError::MigrationRequired {
+            reason: "V2 storage marker contains the wrong value kind".to_string(),
+        });
+    };
+    validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
+    if version < IndexStorageVersion::CURRENT {
+        transaction.rollback();
+        if cleanup_ready {
+            return Err(HelixDbError::MigrationRequired {
+                reason: format!(
+                    "index storage V4 cleanup is marked complete beside storage version {}",
+                    version.get()
+                ),
+            });
+        }
+        return Err(HelixDbError::WriterMigrationRequired {
+            requirement: WriterMigrationRequirement::StorageVersion {
+                found: version.get(),
+                target: IndexStorageVersion::CURRENT.get(),
+            },
+        });
+    }
+    let progress =
+        crate::migrations::storage_schema_progress(&transaction, DataScope::LegacyUnscoped).await?;
+    transaction.rollback();
+    if cleanup_ready
+        && tenant_envelope_ready
+        && progress == crate::migrations::StorageSchemaProgress::Complete
+    {
+        Ok(())
+    } else {
+        Err(HelixDbError::WriterMigrationRequired {
+            requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+        })
+    }
+}
+
 /// Validates all durable bootstrap state before tenant migration may write.
 async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -156,6 +235,15 @@ async fn initialize_writer_bootstrap(db: &Db) -> Result<()> {
             reason: "V2 storage bootstrap changed after writer preflight".to_string(),
         });
     }
+    stage_writer_bootstrap_initialization(&transaction)?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+fn stage_writer_bootstrap_initialization(transaction: &DbTransaction) -> Result<()> {
+    let marker_key = global_key(GlobalKey::StorageVersion);
+    let logical_key = global_key(GlobalKey::LogicalIndexIdWatermark);
+    let vector_key = global_key(GlobalKey::VectorPhysicalIdWatermark);
     transaction.put(
         marker_key,
         encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
@@ -179,7 +267,6 @@ async fn initialize_writer_bootstrap(db: &Db) -> Result<()> {
         )),
     )?;
     crate::migrations::stage_index_storage_v4_cleanup_ready(&transaction)?;
-    transaction.commit().await?;
     Ok(())
 }
 

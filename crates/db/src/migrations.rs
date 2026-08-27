@@ -54,6 +54,11 @@ const TENANT_KEY_ENVELOPE_READY: &[u8] = b"kv_migration_ready:tenant_key_envelop
 const INDEX_STORAGE_V4_CLEANUP_READY: &[u8] = b"kv_migration_ready:index_storage_v4_cleanup";
 const STORAGE_SCHEMA_VERSION: u64 = 1;
 const STORAGE_SCHEMA_COMPLETE: &[u8] = b"storage_schema_complete:v1";
+
+#[cfg(test)]
+pub(crate) fn storage_schema_complete_key_for_tests(scope: DataScope) -> Bytes {
+    scoped_metadata_key(scope, STORAGE_SCHEMA_COMPLETE)
+}
 const LEGACY_DYNAMIC_INDEX_CATALOG_METADATA: [&[u8]; 3] = [
     b"dynamic_index_catalog_blob",
     b"dynamic_index_catalog_token",
@@ -1251,10 +1256,8 @@ pub(crate) fn stage_tenant_key_envelope_ready(transaction: &DbTransaction) -> Re
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn stage_reader_compatible_storage_schema_for_tests(
-    transaction: &DbTransaction,
-) -> Result<()> {
+/// Stages the complete current storage-schema marker tuple in one transaction.
+pub(crate) fn stage_current_storage_schema_ready(transaction: &DbTransaction) -> Result<()> {
     for marker in [
         GRAPH_FORMAT_V1_READY,
         INDEX_V2_MIGRATION_READY,
@@ -1266,6 +1269,13 @@ pub(crate) fn stage_reader_compatible_storage_schema_for_tests(
         )?;
     }
     stage_tenant_key_envelope_ready(transaction)
+}
+
+#[cfg(test)]
+pub(crate) fn stage_reader_compatible_storage_schema_for_tests(
+    transaction: &DbTransaction,
+) -> Result<()> {
+    stage_current_storage_schema_ready(transaction)
 }
 
 /// Stages V4 cleanup completion in the caller's existing transaction.
