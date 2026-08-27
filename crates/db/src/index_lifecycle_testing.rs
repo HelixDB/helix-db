@@ -37,6 +37,7 @@ use crate::index_lifecycle::{
 };
 use crate::{
     DbConfig, HelixDB, HelixDbMode, HelixDbSource, HelixStorage, IndexLifecycleScheduling,
+    WriterOpenMode,
 };
 
 mod contracts;
@@ -1558,7 +1559,7 @@ impl HelixDB {
             path,
             object_store,
             config,
-            None,
+            WriterOpenMode::Embedded,
             scheduling.internal(),
         )
         .await
@@ -1579,7 +1580,7 @@ impl HelixDB {
             database.into(),
             object_store,
             config,
-            None,
+            WriterOpenMode::Embedded,
             scheduling.internal(),
         )
         .await
