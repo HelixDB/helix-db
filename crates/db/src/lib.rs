@@ -110,20 +110,32 @@ pub const MANAGED_STORAGE_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedMigrationAuthorization {
     operation_id: String,
+    target_revision: String,
     target_schema_version: NonZeroU32,
 }
 
 impl ManagedMigrationAuthorization {
     /// Creates authorization for one exact controlled rollout operation.
-    pub fn new(operation_id: impl Into<String>, target_schema_version: NonZeroU32) -> Result<Self> {
+    pub fn new(
+        operation_id: impl Into<String>,
+        target_revision: impl Into<String>,
+        target_schema_version: NonZeroU32,
+    ) -> Result<Self> {
         let operation_id = operation_id.into();
-        if operation_id.trim().is_empty() {
+        if operation_id.trim().is_empty() || operation_id.trim() != operation_id {
             return Err(HelixDbError::Config(
-                "managed migration operation ID must not be empty".into(),
+                "managed migration operation ID must be nonempty and canonical".into(),
+            ));
+        }
+        let target_revision = target_revision.into();
+        if target_revision.trim().is_empty() || target_revision.trim() != target_revision {
+            return Err(HelixDbError::Config(
+                "managed migration target revision must be nonempty and canonical".into(),
             ));
         }
         Ok(Self {
             operation_id,
+            target_revision,
             target_schema_version,
         })
     }
@@ -131,6 +143,11 @@ impl ManagedMigrationAuthorization {
     /// Exact durable controlled-rollout operation authorizing migration.
     pub fn operation_id(&self) -> &str {
         &self.operation_id
+    }
+
+    /// Exact workload revision authorized to run this migration.
+    pub fn target_revision(&self) -> &str {
+        &self.target_revision
     }
 
     /// Storage schema version the controlled rollout is authorized to install.
@@ -3287,10 +3304,27 @@ mod tests {
     }
 
     #[test]
-    fn managed_migration_authorization_rejects_empty_operation_ids() {
+    fn managed_migration_authorization_rejects_incomplete_identity() {
         assert!(matches!(
             ManagedMigrationAuthorization::new(
                 "   ",
+                "v2",
+                NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
+            ),
+            Err(HelixDbError::Config(_))
+        ));
+        assert!(matches!(
+            ManagedMigrationAuthorization::new(
+                " migration-a",
+                "v2",
+                NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
+            ),
+            Err(HelixDbError::Config(_))
+        ));
+        assert!(matches!(
+            ManagedMigrationAuthorization::new(
+                "migration-a",
+                " ",
                 NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
             ),
             Err(HelixDbError::Config(_))
@@ -3650,6 +3684,7 @@ mod tests {
 
         let authorization = ManagedMigrationAuthorization::new(
             "controlled-v2-to-v4",
+            "v2",
             NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
         )
         .expect("valid controlled migration authorization");
