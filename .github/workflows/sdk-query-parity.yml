@@ -93,9 +93,13 @@ jobs:
           raise SystemExit(doctest.testmod(module).failed)'
       - run: go test ./...
         working-directory: sdks/go
-      - run: cargo test --locked --manifest-path sdks/rust/Cargo.toml --lib --doc
-      - name: Compile-test #[query] end-to-end example
-        run: cargo check --locked --manifest-path sdks/rust/Cargo.toml --example basic_query
+      - run: cargo test --locked --manifest-path sdks/rust/Cargo.toml --lib
+      - run: cargo test --locked --manifest-path sdks/rust/Cargo.toml --doc
+      - name: Compile-test public #[query] README examples
+        run: |
+          cargo check --locked --manifest-path sdks/rust/Cargo.toml --example basic_query
+          cargo check --locked --manifest-path sdks/rust/Cargo.toml --example readme_sdk_query
+          cargo check --locked --manifest-path sdks/rust/Cargo.toml --example readme_macros_query
       - run: cargo test --locked -p helixdb-uniffi
 
   embedded-go-generator:

@@ -105,7 +105,8 @@
 //! ```
 //!
 //! See [`Client`] for the full request-building surface and error handling.
-//! The compile-tested end-to-end binary is `examples/basic_query.rs`.
+//! Compile-tested README mirrors live under `examples/`:
+//! `basic_query`, `readme_sdk_query`, and `readme_macros_query`.
 
 pub mod dsl;
 pub mod graph;

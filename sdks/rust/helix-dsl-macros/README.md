@@ -8,20 +8,27 @@ query-building function into a callable function returning
 
 ## Usage
 
+The compile-tested mirror of this example is
+[`examples/readme_macros_query.rs`](../examples/readme_macros_query.rs).
+
 ```rust
-use helix_db::prelude::*;
+use helix_db::dsl::prelude::*;
 
 #[query]
 fn find_user(username: String) -> ReadBatch {
     read_batch()
-        .var_as("user", g().n_where(SourcePredicate::eq("username", username)))
+        .var_as(
+            "user",
+            g().n_where(SourcePredicate::eq("username", username)),
+        )
         .returning(["user"])
 }
 
 #[query]
-fn create_post(payload: ParamObject) -> WriteBatch {
+fn create_post(title: String) -> WriteBatch {
     write_batch()
-        .create_node("Post", payload)
+        .var_as("post", g().add_n("Post", vec![("title", title)]))
+        .returning(["post"])
 }
 
 fn main() -> Result<(), QueryError> {

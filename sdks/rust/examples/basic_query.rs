@@ -3,8 +3,12 @@
 //! Compile-checked in CI via:
 //! `cargo check --locked --manifest-path sdks/rust/Cargo.toml --example basic_query`
 //!
-//! Matches the public contract in the root README and `sdks/rust/README.md`:
+//! Matches the public contract in the root README (`README.md` at repo root):
 //! `#[query]` helpers return `Result<QueryRequest, QueryError>`.
+//!
+//! Companion compile-tested README mirrors:
+//! - [`readme_sdk_query`](./readme_sdk_query.rs)
+//! - [`readme_macros_query`](./readme_macros_query.rs)
 
 #![recursion_limit = "256"]
 

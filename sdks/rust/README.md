@@ -249,8 +249,11 @@ Annotate a query builder with `#[query]` to get a callable helper that builds a
 `DateTime`, unsupported bytes) returns `QueryError` rather than panicking, so a
 failed conversion cannot leave a partially populated request.
 
-The compile-tested end-to-end example is
-[`examples/basic_query.rs`](./examples/basic_query.rs).
+The compile-tested end-to-end examples are:
+
+- [`examples/basic_query.rs`](./examples/basic_query.rs) — root README journey
+- [`examples/readme_sdk_query.rs`](./examples/readme_sdk_query.rs) — this section
+- [`examples/readme_macros_query.rs`](./examples/readme_macros_query.rs) — macros README usage
 
 ```rust
 use helix_db::dsl::prelude::*;
