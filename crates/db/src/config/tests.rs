@@ -240,6 +240,10 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
 
     let slate = slatedb::Settings {
         flush_interval: Some(std::time::Duration::from_secs(7)),
+        wal_replay: slatedb::config::WalReplaySettings {
+            max_concurrent_objects: 17,
+            max_inflight_bytes: 23 * 1024 * 1024,
+        },
         ..Default::default()
     };
     let cache = CacheConfig::new(VectorMemorySettings::default(), CacheMode::VectorMemoryOnly);
@@ -254,6 +258,13 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
     assert_eq!(
         helix.db().slate().to_writer_settings(None).flush_interval,
         Some(std::time::Duration::from_secs(7))
+    );
+    assert_eq!(
+        helix.db().slate().to_reader_options(None).wal_replay,
+        slatedb::config::WalReplaySettings {
+            max_concurrent_objects: 17,
+            max_inflight_bytes: 23 * 1024 * 1024,
+        }
     );
 }
 

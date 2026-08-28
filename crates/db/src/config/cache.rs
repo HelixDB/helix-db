@@ -349,6 +349,7 @@ impl SlateRuntimeConfig {
         object_store_cache: Option<&SlateObjectStoreCacheSettings>,
     ) -> slatedb::config::DbReaderOptions {
         slatedb::config::DbReaderOptions {
+            wal_replay: self.runtime_settings.wal_replay,
             object_store_cache_options: match object_store_cache {
                 None => slatedb::config::ObjectStoreCacheOptions {
                     root_folder: None,
