@@ -57,7 +57,7 @@ use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
 
@@ -1018,8 +1018,38 @@ impl HelixDB {
         open_mode: WriterOpenMode,
         index_scheduling: IndexLifecycleScheduling,
     ) -> Result<Self> {
+        let open_started = Instant::now();
+        let (open_intent, writer_epoch) = match &open_mode {
+            WriterOpenMode::Embedded => ("embedded", 0),
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent: ManagedWriterOpenIntent::Bootstrap,
+            } => ("bootstrap", writer_epoch.get()),
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent: ManagedWriterOpenIntent::Failover,
+            } => ("failover", writer_epoch.get()),
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent: ManagedWriterOpenIntent::ControlledMigration(_),
+            } => ("controlled_migration", writer_epoch.get()),
+        };
+        let log_stage = |stage: &'static str, stage_started: Instant| {
+            tracing::info!(
+                stage,
+                open_intent,
+                writer_epoch,
+                elapsed_ms = u64::try_from(stage_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                total_elapsed_ms =
+                    u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "HelixDB writer open stage completed"
+            );
+        };
+
         let vector_memory_settings = *config.cache().vector_memory();
+        let stage_started = Instant::now();
         let slate_db_cache = build_slate_db_cache(config.cache().mode()).await?;
+        log_stage("slatedb_cache_construction", stage_started);
         let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
             .with_settings(
@@ -1042,7 +1072,10 @@ impl HelixDB {
                 builder = builder.with_db_cache(Arc::clone(cache));
             }
         }
+        let stage_started = Instant::now();
         let db = Arc::new(builder.build().await?);
+        log_stage("slatedb_writer_open", stage_started);
+        let stage_started = Instant::now();
         match &open_mode {
             WriterOpenMode::Embedded => {
                 index_lifecycle::repository::bootstrap_writer(&db).await?;
@@ -1072,15 +1105,18 @@ impl HelixDB {
                 migrations::preflight_legacy_vector_reservations(&db).await?;
             }
         }
+        log_stage("storage_contract_validation", stage_started);
         let writer = HelixWriter::new(Arc::clone(&db), config.id_lease_size());
-        if matches!(
+        let stage_started = Instant::now();
+        let migration_authorized = matches!(
             &open_mode,
             WriterOpenMode::Embedded
                 | WriterOpenMode::Managed {
                     intent: ManagedWriterOpenIntent::ControlledMigration(_),
                     ..
                 }
-        ) {
+        );
+        if migration_authorized {
             migrations::run_blocking_startup_migration(&writer, config.migrations()).await?;
             index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
                 &db,
@@ -1088,12 +1124,29 @@ impl HelixDB {
             )
             .await?;
         }
+        tracing::info!(
+            stage = "startup_migration",
+            open_intent,
+            writer_epoch,
+            migration_authorized,
+            elapsed_ms = u64::try_from(stage_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            total_elapsed_ms =
+                u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "HelixDB writer open stage completed"
+        );
+        let stage_started = Instant::now();
         index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+        log_stage("operation_queue_reconciliation", stage_started);
+        let stage_started = Instant::now();
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(db.as_ref(), DataScope::LegacyUnscoped)
                 .await?;
+        log_stage("catalog_load", stage_started);
         let storage = HelixStorage::Writer(Arc::new(writer));
+        let stage_started = Instant::now();
         let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+        log_stage("fts_cache_construction", stage_started);
+        let stage_started = Instant::now();
         let db = Self::from_storage_with_index_scheduling(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
@@ -1103,14 +1156,9 @@ impl HelixDB {
             index_scheduling,
             index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
-        if matches!(
-            &open_mode,
-            WriterOpenMode::Embedded
-                | WriterOpenMode::Managed {
-                    intent: ManagedWriterOpenIntent::ControlledMigration(_),
-                    ..
-                }
-        ) {
+        log_stage("runtime_construction", stage_started);
+        let stage_started = Instant::now();
+        if migration_authorized {
             if let Err(error) = migrations::migrate_legacy_definitions(&db).await {
                 let _ = db.close().await;
                 return Err(error);
@@ -1122,11 +1170,22 @@ impl HelixDB {
                 return Err(error);
             }
         }
+        log_stage("legacy_migration_cleanup", stage_started);
         let allow_blocking_warm = matches!(&open_mode, WriterOpenMode::Embedded);
+        let stage_started = Instant::now();
         db.run_configured_startup_cache_warm(allow_blocking_warm)
             .await?;
+        log_stage("startup_cache_warm", stage_started);
+        let stage_started = Instant::now();
         db.run_configured_vector_memory_warm(vector_memory_settings, allow_blocking_warm)
             .await?;
+        log_stage("vector_memory_warm", stage_started);
+        tracing::info!(
+            open_intent,
+            writer_epoch,
+            elapsed_ms = u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "HelixDB writer open completed"
+        );
         Ok(db)
     }
 
