@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "8052841a12c23f4f3a31d2db13ead2f3d67e6a2d" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "2ec7156c18d48a652638713ebec45a01621c49bd" }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
 helix-value-semantics = { path = "../value-semantics" }
