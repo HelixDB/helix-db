@@ -266,6 +266,10 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
             max_inflight_bytes: 23 * 1024 * 1024,
         }
     );
+    assert_eq!(
+        helix.db().slate().to_reader_options(None).wal_poll_interval,
+        std::time::Duration::from_secs(1)
+    );
 }
 
 #[test]
