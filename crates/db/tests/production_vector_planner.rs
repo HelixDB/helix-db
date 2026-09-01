@@ -758,7 +758,8 @@ struct VectorMachine {
 impl VectorMachine {
     /// Opens one coordinated writer whose token survives model reopen actions.
     async fn open(database: &'static str) -> Self {
-        let token = ProcessLocalDatabaseToken::new(database).expect("vector lifecycle token is valid");
+        let token =
+            ProcessLocalDatabaseToken::new(database).expect("vector lifecycle token is valid");
         let db = HelixDB::open(HelixDbSource::InMemoryToken {
             token: token.clone(),
         })
