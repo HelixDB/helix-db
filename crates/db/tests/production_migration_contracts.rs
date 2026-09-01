@@ -562,8 +562,8 @@ fn legacy_text_rebuild_recovers_at_every_durable_boundary() {
     });
 }
 
-/// Invalid indexed source rows fail closed without retiring any legacy source;
-/// all supported non-null tenant values remain compatible.
+/// Invalid durable source rows fail closed without retiring legacy state;
+/// unrecoverable oversized rows are rejected before durable acknowledgement.
 #[test]
 fn invalid_legacy_text_sources_fail_closed_and_retry_after_correction() {
     run_contract(|| async {
@@ -572,8 +572,24 @@ fn invalid_legacy_text_sources_fail_closed_and_retry_after_correction() {
             NullTenant, ObjectTenant, OversizedTenant, UnsupportedText,
         };
 
+        let Err(oversized_error) =
+            db::production_coverage::seed_legacy_text_source_fixture(OversizedTenant).await
+        else {
+            panic!("an oversized tenant row must not become durable")
+        };
+        assert!(
+            matches!(&oversized_error, db::error::HelixDbError::Storage(_)),
+            "oversized tenant returned the wrong failure category: {oversized_error}"
+        );
+        assert!(
+            oversized_error
+                .to_string()
+                .contains("decoded WAL row block"),
+            "oversized tenant must fail the WAL recoverability fence: {oversized_error}"
+        );
+
         let mut invalid_fixtures = Vec::new();
-        for kind in [MissingTenant, NullTenant, OversizedTenant, UnsupportedText] {
+        for kind in [MissingTenant, NullTenant, UnsupportedText] {
             let fixture = db::production_coverage::seed_legacy_text_source_fixture(kind)
                 .await
                 .expect("invalid legacy text fixture seeds");
@@ -687,7 +703,7 @@ fn invalid_legacy_text_sources_fail_closed_and_retry_after_correction() {
         }
         assert_eq!(
             observed_versions,
-            vec![Some(db::production_coverage::CURRENT_INDEX_STORAGE_VERSION); 9]
+            vec![Some(db::production_coverage::CURRENT_INDEX_STORAGE_VERSION); 8]
         );
     });
 }
