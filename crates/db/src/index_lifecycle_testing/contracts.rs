@@ -182,6 +182,107 @@ pub(super) async fn run_tenant_reopen_recovery() {
     }
 }
 
+/// Runs public secondary/vector writes at every exact build boundary.
+pub(super) async fn run_secondary_vector_public_boundaries() {
+    for (family_ordinal, family) in [
+        PublicMutationFamily::Secondary,
+        PublicMutationFamily::Vector,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (boundary_ordinal, boundary) in PublicMutationBoundary::ALL.into_iter().enumerate() {
+            let ordinal = family_ordinal * PublicMutationBoundary::ALL.len() + boundary_ordinal;
+            let db = HelixDB::open_for_index_lifecycle_testing(
+                HelixDbSource::InMemory {
+                    database: format!("index-lifecycle-public-boundary-{ordinal}"),
+                },
+                DbConfig::new(),
+                LifecycleTestScheduling::Explicit,
+            )
+            .await
+            .expect("public-boundary writer opens");
+            let controller = LifecycleTestController::new();
+            let scope = DataScope::LegacyUnscoped;
+            controller
+                .seed_node_property_rows(
+                    &db,
+                    scope,
+                    NonZeroU64::new(3).expect("public-boundary seed count is positive"),
+                    NonZeroUsize::MIN,
+                    |entity_id| family.source_properties(entity_id),
+                )
+                .await
+                .expect("public-boundary source rows seed");
+            let definition = family.definition();
+            let IndexDdlReceipt::Accepted { operation_id, .. } = controller
+                .create_index(
+                    &db,
+                    scope,
+                    definition.clone(),
+                    ir::IndexCreateMode::ErrorIfExists,
+                )
+                .await
+                .expect("public-boundary build is accepted")
+            else {
+                panic!("fresh public-boundary build must enqueue");
+            };
+            let stage = boundary.stage(family);
+            drive_until_stage(&db, &controller, scope, operation_id, stage).await;
+
+            let first_ordinal =
+                u64::try_from(ordinal * 2).expect("public-boundary first ordinal fits u64");
+            let second_ordinal = first_ordinal + 1;
+            let first_plan = public_add_node_plan(family, first_ordinal);
+            let second_plan = public_add_node_plan(family, second_ordinal);
+            let (first, second) = tokio::join!(
+                execute_write_with_retry(&db, &first_plan),
+                execute_write_with_retry(&db, &second_plan),
+            );
+            first.expect("first exact-boundary public write commits");
+            second.expect("second exact-boundary public write commits");
+            assert_build_delta_count_at_least(&db, scope, &definition, 2).await;
+
+            let evidence = controller
+                .advance(
+                    &db,
+                    LifecycleWorkTarget::Operation {
+                        scope,
+                        operation_id,
+                    },
+                )
+                .await
+                .expect("public-boundary operation resumes after writes");
+            assert_monotonic_step(&evidence);
+            if matches!(
+                stage,
+                IndexOperationStage::Validate
+                    | IndexOperationStage::ValidateDescriptor
+                    | IndexOperationStage::Activate
+            ) {
+                assert_eq!(
+                    db.get_index_operation(scope, operation_id)
+                        .await
+                        .expect("public-boundary operation remains readable")
+                        .common()
+                        .stage,
+                    IndexOperationStage::CatchUp,
+                    "{family:?} must re-enter CatchUp after a public write at {stage:?}"
+                );
+            }
+            assert!(matches!(
+                drive_to_terminal(&db, &controller, scope, operation_id).await,
+                IndexOperationStatus::Succeeded { .. }
+            ));
+            assert_identity_active(&db, scope, &definition).await;
+            assert_build_deltas_empty(&db, scope, &definition).await;
+            assert_public_indexed_read(&db, family, first_ordinal).await;
+            assert_public_indexed_read(&db, family, second_ordinal).await;
+            db.close().await.expect("public-boundary writer closes");
+        }
+    }
+}
+
 fn one_row_lifecycle_config() -> DbConfig {
     let defaults = SearchIndexBackfillLimits::default();
     let batch = defaults.batch();
@@ -1214,9 +1315,121 @@ async fn wait_for_automatic_terminal(
 /// Runs data-bearing backfill/mutation and uniqueness contracts.
 pub(super) async fn run_mutations() {
     run_secondary_mutation_interleaving().await;
+    run_unique_activation_conflict_repair().await;
     run_secondary_edge_mutation_interleaving().await;
     run_every_family_public_mutation_interleaving().await;
     run_partitioned_search_edge_tenant_moves().await;
+}
+
+/// Proves an activation-boundary unique conflict blocks, repairs, and retries.
+async fn run_unique_activation_conflict_repair() {
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        HelixDbSource::InMemory {
+            database: "index-lifecycle-unique-activation-conflict".to_string(),
+        },
+        DbConfig::new(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("unique activation-conflict writer opens");
+    let controller = LifecycleTestController::new();
+    let scope = DataScope::LegacyUnscoped;
+    let entity_ids = allocate_node_ids(&db, 2).await;
+    let duplicate = "activation-duplicate";
+    let first = vec![
+        Property::string("$label", "ActivationUnique"),
+        Property::string("value", duplicate),
+    ];
+    let second = vec![
+        Property::string("$label", "ActivationUnique"),
+        Property::string("value", "activation-distinct"),
+    ];
+    put_source(&db, scope, entity_ids.start, &first).await;
+    put_source(&db, scope, entity_ids.start + 1, &second).await;
+    let definition: ValidatedDynamicIndexDefinition =
+        SecondaryIndexDefinition::node_unique_equality("ActivationUnique", "value")
+            .expect("activation unique definition validates")
+            .try_into()
+            .expect("activation unique definition converts");
+    let IndexDdlReceipt::Accepted { operation_id, .. } = controller
+        .create_index(
+            &db,
+            scope,
+            definition.clone(),
+            ir::IndexCreateMode::ErrorIfExists,
+        )
+        .await
+        .expect("activation unique build is accepted")
+    else {
+        panic!("fresh activation unique build must enqueue");
+    };
+    drive_until_stage(
+        &db,
+        &controller,
+        scope,
+        operation_id,
+        IndexOperationStage::Activate,
+    )
+    .await;
+
+    let conflicting = vec![
+        Property::string("$label", "ActivationUnique"),
+        Property::string("value", duplicate),
+    ];
+    mutate_source(&db, scope, entity_ids.start + 1, &second, &conflicting)
+        .await
+        .expect("activation-boundary duplicate records one build delta");
+    let evidence = controller
+        .advance(
+            &db,
+            LifecycleWorkTarget::Operation {
+                scope,
+                operation_id,
+            },
+        )
+        .await
+        .expect("activation-boundary duplicate returns to catch-up");
+    assert_monotonic_step(&evidence);
+    assert_eq!(
+        db.get_index_operation(scope, operation_id)
+            .await
+            .expect("activation unique operation remains readable")
+            .common()
+            .stage,
+        IndexOperationStage::CatchUp
+    );
+    let blocked = drive_to_terminal(&db, &controller, scope, operation_id).await;
+    assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
+
+    let repaired = vec![
+        Property::string("$label", "ActivationUnique"),
+        Property::string("value", "activation-repaired"),
+    ];
+    mutate_source(&db, scope, entity_ids.start + 1, &conflicting, &repaired)
+        .await
+        .expect("blocked activation unique source repairs");
+    let retried = db
+        .retry_index_operation(scope, operation_id)
+        .await
+        .expect("activation unique operation retries");
+    assert_eq!(retried.common().stage, blocked.common().stage);
+    assert!(matches!(
+        drive_to_terminal(&db, &controller, scope, operation_id).await,
+        IndexOperationStatus::Succeeded { .. }
+    ));
+    assert_equality(&db, scope, &definition, duplicate, [entity_ids.start]).await;
+    assert_equality(
+        &db,
+        scope,
+        &definition,
+        "activation-repaired",
+        [entity_ids.start + 1],
+    )
+    .await;
+    assert_build_deltas_empty(&db, scope, &definition).await;
+    db.close()
+        .await
+        .expect("unique activation-conflict writer closes");
 }
 
 /// Runs late insert, update, and delete races at every family validation boundary.
@@ -1879,6 +2092,34 @@ enum PublicMutationFamily {
     Secondary,
     Vector,
     Text,
+}
+
+/// Exact durable stages where public writes can race one secondary/vector build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicMutationBoundary {
+    Scan,
+    CatchUp,
+    Validate,
+    Activate,
+}
+
+impl PublicMutationBoundary {
+    const ALL: [Self; 4] = [Self::Scan, Self::CatchUp, Self::Validate, Self::Activate];
+
+    fn stage(self, family: PublicMutationFamily) -> IndexOperationStage {
+        match (self, family) {
+            (Self::Scan, _) => IndexOperationStage::Scan,
+            (Self::CatchUp, _) => IndexOperationStage::CatchUp,
+            (Self::Validate, PublicMutationFamily::Secondary) => IndexOperationStage::Validate,
+            (Self::Validate, PublicMutationFamily::Vector) => {
+                IndexOperationStage::ValidateDescriptor
+            }
+            (Self::Activate, _) => IndexOperationStage::Activate,
+            (Self::Validate, PublicMutationFamily::Text) => {
+                unreachable!("text uses its manifest validation matrix")
+            }
+        }
+    }
 }
 
 impl PublicMutationFamily {

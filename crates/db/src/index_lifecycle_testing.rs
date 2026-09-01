@@ -162,6 +162,12 @@ pub async fn run_deterministic_all_index_validation_contracts() {
     contracts::run_all_index_validation_mutations().await;
 }
 
+/// Runs public secondary/vector writes at every exact build boundary.
+pub async fn run_secondary_vector_public_boundary_contracts() {
+    let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
+    contracts::run_secondary_vector_public_boundaries().await;
+}
+
 /// Runs retry-safe concurrent CREATE convergence for every family.
 pub async fn run_deterministic_lifecycle_race_contracts() {
     let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
