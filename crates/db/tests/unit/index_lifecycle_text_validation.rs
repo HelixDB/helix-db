@@ -1412,7 +1412,13 @@ async fn moved_non_live_entity_requires_the_exact_live_state_in_marker_partition
     transaction
         .put(marker_key, index_values::encode_statistics_entity(&marker))
         .unwrap();
-    let (new_root_typed, _) = root_key(scope, &operation, &new_partition);
+    let (new_root_typed, new_root_key) = root_key(scope, &operation, &new_partition);
+    transaction
+        .put(
+            new_root_key,
+            root_value(&operation, new_partition.clone(), 1, 1),
+        )
+        .unwrap();
     let live_key = scoped_key(
         scope,
         index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
