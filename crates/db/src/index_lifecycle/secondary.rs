@@ -1338,10 +1338,12 @@ async fn catch_up(
         let plan = match reconciliation_plan(
             transaction,
             scope,
-            operation.index_id(),
-            operation.generation(),
+            IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity,
+            },
             definition,
-            entity.id,
             &value.state,
             next_value,
         )
@@ -2293,17 +2295,21 @@ fn apply_active_change_from_overlay(
 async fn reconciliation_plan(
     transaction: &DbTransaction,
     scope: DataScope,
-    index_id: IndexId,
-    generation: IndexGenerationId,
+    state_key: IndexEntityStateKey,
     definition: &ValidatedSecondaryIndexDefinition,
-    entity_id: IndexEntityId,
     delta_state: &CoalescedBuildDeltaState,
     next_value: Option<CanonicalSecondaryValue>,
 ) -> Result<ReconciliationPlan> {
-    let entity = IndexEntity {
-        kind: definition.element_kind(),
-        id: entity_id,
-    };
+    let IndexEntityStateKey {
+        index_id,
+        generation,
+        entity,
+    } = state_key;
+    if entity.kind != definition.element_kind() {
+        return Err(corruption(
+            "secondary reconciliation entity kind disagrees with definition",
+        ));
+    }
     let applied_key = scoped_index_key(
         scope,
         ScopedKey::AppliedState(IndexEntityStateKey {
@@ -2334,7 +2340,7 @@ async fn reconciliation_plan(
                 generation,
                 definition,
                 value.clone(),
-                entity_id,
+                entity.id,
             )?;
             let observed = transaction.get(&key).await?;
             unique_entries.insert(key, observed);

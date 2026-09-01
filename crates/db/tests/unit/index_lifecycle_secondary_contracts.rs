@@ -32,6 +32,20 @@ fn equality(value: &str) -> CanonicalSecondaryValue {
     CanonicalSecondaryValue::equality_string(value)
 }
 
+fn entity_state_key(
+    definition: &ValidatedSecondaryIndexDefinition,
+    entity_id: IndexEntityId,
+) -> IndexEntityStateKey {
+    IndexEntityStateKey {
+        index_id: IndexId::initial(),
+        generation: IndexGenerationId::initial(),
+        entity: IndexEntity {
+            kind: definition.element_kind(),
+            id: entity_id,
+        },
+    }
+}
+
 fn applied_key(
     scope: DataScope,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -39,14 +53,7 @@ fn applied_key(
 ) -> Bytes {
     scoped_index_key(
         scope,
-        ScopedKey::AppliedState(IndexEntityStateKey {
-            index_id: IndexId::initial(),
-            generation: IndexGenerationId::initial(),
-            entity: IndexEntity {
-                kind: definition.element_kind(),
-                id: entity_id,
-            },
-        }),
+        ScopedKey::AppliedState(entity_state_key(definition, entity_id)),
     )
 }
 
@@ -143,15 +150,17 @@ async fn legacy_secondary_marker_without_applied_state_fails_closed() {
         .await
         .unwrap();
     let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
+    let entity = IndexEntity {
+        kind: definition.element_kind(),
+        id: IndexEntityId::new(7),
+    };
 
     assert!(matches!(
         reconciliation_plan(
             &transaction,
             DataScope::LegacyUnscoped,
-            IndexId::initial(),
-            IndexGenerationId::initial(),
+            entity_state_key(&definition, entity.id),
             &definition,
-            IndexEntityId::new(7),
             &CoalescedBuildDeltaState::Marker,
             Some(equality("current@example.com")),
         )
@@ -173,15 +182,17 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let scope = DataScope::LegacyUnscoped;
     let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
     let entity_id = IndexEntityId::new(7);
+    let entity = IndexEntity {
+        kind: definition.element_kind(),
+        id: entity_id,
+    };
     let value = equality("first@example.com");
 
     let ReconciliationPlan::Writes(add) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
         &CoalescedBuildDeltaState::SecondaryBefore(None),
         Some(value.clone()),
     )
@@ -200,10 +211,8 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let ReconciliationPlan::Writes(noop) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
         &CoalescedBuildDeltaState::Marker,
         Some(value),
     )
@@ -217,10 +226,8 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let ReconciliationPlan::Writes(remove) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
         &CoalescedBuildDeltaState::Marker,
         None,
     )
@@ -250,6 +257,10 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     let definition =
         validated(SecondaryIndexDefinition::node_unique_equality("User", "email").unwrap());
     let entity_id = IndexEntityId::new(7);
+    let entity = IndexEntity {
+        kind: definition.element_kind(),
+        id: entity_id,
+    };
     let foreign_id = IndexEntityId::new(9);
     let previous = equality("previous@example.com");
     let next = equality("next@example.com");
@@ -286,10 +297,8 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     }) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
         &CoalescedBuildDeltaState::Marker,
         Some(next.clone()),
     )
@@ -312,10 +321,8 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     }) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
         &CoalescedBuildDeltaState::Marker,
         Some(next),
     )
