@@ -400,6 +400,104 @@ async fn page_validation_batches_contiguous_pages_and_preserves_partition_progre
 }
 
 #[tokio::test]
+async fn page_batch_defers_on_bytes_deduplicates_heads_and_fences_every_page() {
+    let db = Db::open(
+        "text-validation-page-batch-contracts",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let operation = test_support::operation();
+    let definition = definition();
+    let scope = DataScope::LegacyUnscoped;
+    let partition = TextPartition::Unpartitioned;
+    let (root_typed, root_key) = root_key(scope, &operation, &partition);
+    let root_value = root_value(&operation, partition.clone(), 2, 2);
+    transaction
+        .put(root_key.clone(), root_value.clone())
+        .unwrap();
+    let shared_split = test_support::split(8, 128);
+    let mut pages = Vec::new();
+    for page in 0..2 {
+        let key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
+                root: root_typed,
+                page,
+            }),
+        );
+        let value = index_values::encode_manifest_page(
+            &work::TextManifestPageValue::try_new(
+                operation.index_id(),
+                operation.generation(),
+                partition.clone(),
+                page,
+                vec![shared_split],
+            )
+            .unwrap(),
+        );
+        transaction.put(key.clone(), value.clone()).unwrap();
+        pages.push((key, value));
+    }
+    let one_page_bytes = row_bytes(&pages[0].0, Some(&pages[0].1))
+        .saturating_add(row_bytes(&root_key, Some(&root_value)));
+    assert_eq!(
+        one_page_bytes,
+        row_bytes(&pages[1].0, Some(&pages[1].1))
+            .saturating_add(row_bytes(&root_key, Some(&root_value)))
+    );
+
+    let ValidationSelection::Page(first) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &TextManifestValidationProgress::Pages(TextManifestPageValidationProgress::initial(
+            OperationCounters::default(),
+        )),
+        validation_batch_limits(8, one_page_bytes),
+    )
+    .await
+    .unwrap() else {
+        panic!("one page fits the exact byte budget")
+    };
+    let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+        TextBuildProgress::Constructing(TextBuildStage::ValidateManifests(
+            TextManifestValidationProgress::Pages(first_progress),
+        )),
+    )) = first.stage(&transaction).await.unwrap()
+    else {
+        panic!("the deferred second page remains pending")
+    };
+    assert_eq!(first_progress.cursor().unwrap().as_bytes(), &pages[0].0);
+    assert_eq!(first_progress.counters().input_bytes, one_page_bytes);
+
+    let ValidationSelection::Page(batch) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &TextManifestValidationProgress::Pages(TextManifestPageValidationProgress::initial(
+            OperationCounters::default(),
+        )),
+        validation_batch_limits(8, u64::MAX),
+    )
+    .await
+    .unwrap() else {
+        panic!("both pages form one externally validated batch")
+    };
+    assert_eq!(batch.blobs(), &[shared_split.blob()]);
+    transaction
+        .put(pages[1].0.clone(), Bytes::from_static(b"changed"))
+        .unwrap();
+    assert!(matches!(
+        batch.stage(&transaction).await.unwrap(),
+        IndexOperationStepResult::TransientFailure
+    ));
+}
+
+#[tokio::test]
 async fn root_validation_batches_tenant_partitions_in_key_order() {
     let db = Db::open("text-validation-root-batches", Arc::new(InMemory::new()))
         .await
@@ -475,6 +573,91 @@ async fn root_validation_batches_tenant_partitions_in_key_order() {
         second_progress.cursor.as_ref().unwrap().as_bytes(),
         &root_keys[2]
     );
+}
+
+#[tokio::test]
+async fn root_batch_defers_on_bytes_and_fences_every_admitted_root() {
+    let db = Db::open(
+        "text-validation-root-batch-contracts",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let operation = test_support::operation();
+    let definition = ValidatedTextIndexDefinition::try_from_runtime(
+        &crate::config::TextIndexDefinition::new_node("Document", "body")
+            .unwrap()
+            .with_tenant_property("tenant")
+            .unwrap(),
+    )
+    .unwrap();
+    let scope = DataScope::LegacyUnscoped;
+    let mut roots = Vec::new();
+    for tenant in ["alpha", "bravo"] {
+        let partition = TextPartition::try_tenant_value(Bytes::from(tenant.to_string())).unwrap();
+        let (_, key) = root_key(scope, &operation, &partition);
+        let value = root_value(&operation, partition.clone(), 0, 0);
+        let corpus_key = super::super::statistics::corpus_key(
+            scope,
+            operation.index_id(),
+            operation.generation(),
+            &partition,
+        );
+        transaction.put(key.clone(), value.clone()).unwrap();
+        roots.push((key, value, corpus_key));
+    }
+    roots.sort_by(|left, right| left.0.cmp(&right.0));
+    let one_root_bytes =
+        row_bytes(&roots[0].0, Some(&roots[0].1)).saturating_add(row_bytes(&roots[0].2, None));
+    assert_eq!(
+        one_root_bytes,
+        row_bytes(&roots[1].0, Some(&roots[1].1)).saturating_add(row_bytes(&roots[1].2, None))
+    );
+
+    let ValidationSelection::Database(first) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &root_progress(OperationCounters::default()),
+        validation_batch_limits(8, one_root_bytes),
+    )
+    .await
+    .unwrap() else {
+        panic!("root validation is database-only")
+    };
+    let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+        TextBuildProgress::Constructing(TextBuildStage::ValidateManifests(
+            TextManifestValidationProgress::Roots(first_progress),
+        )),
+    )) = first.stage(&transaction).await.unwrap()
+    else {
+        panic!("the deferred second root remains pending")
+    };
+    assert_eq!(
+        first_progress.cursor.as_ref().unwrap().as_bytes(),
+        &roots[0].0
+    );
+    assert_eq!(first_progress.counters.input_bytes, one_root_bytes);
+
+    let ValidationSelection::Database(batch) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &root_progress(OperationCounters::default()),
+        validation_batch_limits(8, u64::MAX),
+    )
+    .await
+    .unwrap() else {
+        panic!("root validation is database-only")
+    };
+    transaction.delete(roots[1].0.clone()).unwrap();
+    assert!(matches!(
+        batch.stage(&transaction).await.unwrap(),
+        IndexOperationStepResult::TransientFailure
+    ));
 }
 
 fn build_delta_row(
