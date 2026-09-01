@@ -140,7 +140,19 @@ pub(super) async fn select(
     progress: &TextManifestValidationProgress,
     limits: SearchIndexBatchLimits,
 ) -> Result<ValidationSelection> {
-    match progress {
+    let delta_prefix = generation_prefix(scope, index_keys::RecordKind::BuildDelta, operation);
+    let (delta_range, delta) = select_one(transaction, delta_prefix, None).await?;
+    if delta.is_some() {
+        return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+            ranges: vec![delta_range],
+            observations: Vec::new(),
+            result: progressed(TextBuildStage::CatchUp(PrefixScanProgress {
+                cursor: None,
+                counters: progress.counters(),
+            })),
+        }));
+    }
+    let mut selection = match progress {
         TextManifestValidationProgress::Pages(progress) => {
             select_page(transaction, scope, operation, progress, limits).await
         }
@@ -150,7 +162,12 @@ pub(super) async fn select(
         TextManifestValidationProgress::EntityStates(progress) => {
             select_entity_state(transaction, scope, operation, progress, limits).await
         }
+    }?;
+    match &mut selection {
+        ValidationSelection::Database(prepared) => prepared.ranges.push(delta_range),
+        ValidationSelection::Page(prepared) => prepared.database.ranges.push(delta_range),
     }
+    Ok(selection)
 }
 
 /// Validates one immutable page and its exact root relationship.
