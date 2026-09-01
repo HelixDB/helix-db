@@ -757,9 +757,8 @@ struct VectorMachine {
 
 impl VectorMachine {
     /// Opens one coordinated writer whose token survives model reopen actions.
-    async fn open() -> Self {
-        let token = ProcessLocalDatabaseToken::new("production-vector-lifecycle-state-machine")
-            .expect("vector lifecycle token is valid");
+    async fn open(database: &'static str) -> Self {
+        let token = ProcessLocalDatabaseToken::new(database).expect("vector lifecycle token is valid");
         let db = HelixDB::open(HelixDbSource::InMemoryToken {
             token: token.clone(),
         })
@@ -1258,7 +1257,7 @@ fn public_vector_lifecycle_matches_reference_model() {
 }
 
 async fn public_vector_lifecycle_matches_reference_model_contract() {
-    let mut machine = VectorMachine::open().await;
+    let mut machine = VectorMachine::open("production-vector-lifecycle-state-machine").await;
     for action in [
         VectorAction::Insert {
             slot: VectorSlot::First,
@@ -1316,7 +1315,8 @@ fn public_invalid_vector_updates_are_atomic_across_reopen_and_rebuild() {
                 .build()
                 .expect("invalid-vector runtime should build")
                 .block_on(async {
-                    let mut machine = VectorMachine::open().await;
+                    let mut machine =
+                        VectorMachine::open("production-vector-invalid-update-state-machine").await;
                     machine
                         .apply(VectorAction::Insert {
                             slot: VectorSlot::First,
