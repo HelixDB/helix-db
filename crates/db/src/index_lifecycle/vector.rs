@@ -1251,6 +1251,37 @@ mod tests {
         );
         assert!(matches!(zero, Err(HelixDbError::ZeroNormCosineVector)));
 
+        for (vector, invalid_index) in [
+            (vec![f32::NAN, 2.0, 3.0], 0),
+            (vec![1.0, f32::INFINITY, 3.0], 1),
+            (vec![1.0, 2.0, f32::NEG_INFINITY], 2),
+        ] {
+            assert!(matches!(
+                vector_document(
+                    &validated_definition(None, VectorDistanceMetric::Euclidean),
+                    &[
+                        property("$label", PropertyValue::String("Document".to_string())),
+                        property("embedding", PropertyValue::F32Array(vector)),
+                    ],
+                ),
+                Err(HelixDbError::InvalidVectorComponent { index }) if index == invalid_index
+            ));
+        }
+
+        for vector in [vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]] {
+            let actual = vector.len();
+            assert!(matches!(
+                vector_document(
+                    &validated_definition(None, VectorDistanceMetric::Euclidean),
+                    &[
+                        property("$label", PropertyValue::String("Document".to_string())),
+                        property("embedding", PropertyValue::F32Array(vector)),
+                    ],
+                ),
+                Err(HelixDbError::InvalidDimension { expected: 3, got }) if got == actual
+            ));
+        }
+
         let overflow = vector_document(
             &validated_definition(None, VectorDistanceMetric::Euclidean),
             &[
