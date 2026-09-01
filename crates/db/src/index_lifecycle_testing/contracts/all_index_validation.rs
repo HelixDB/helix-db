@@ -2,10 +2,13 @@
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{catalog, context, exec, ir};
+use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::ObjectStore;
 use slatedb::IsolationLevel;
 
 use crate::config::{TextElementType, VectorElementType};
@@ -28,7 +31,7 @@ use crate::index_lifecycle_testing::{
     TextManifestValidationLane,
 };
 use crate::search::{text_index_name, vector_index_name};
-use crate::{HelixDB, HelixDbSource};
+use crate::HelixDB;
 
 use super::{
     allocate_edge_ids, allocate_node_ids, assert_build_delta_count_at_least,
@@ -39,19 +42,25 @@ use super::{
 
 const INDEX_PROPERTY: &str = "value";
 const TENANT_PROPERTY: &str = "tenant";
-const TENANT_VALUE: &str = "tenant-a";
+const TENANT_A: &str = "tenant-a";
+const TENANT_B: &str = "tenant-b";
+const TENANT_C: &str = "tenant-c";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SecondaryLatePoint {
+    Scan,
+    CatchUp,
     Validate,
     Activate,
 }
 
 impl SecondaryLatePoint {
-    const ALL: [Self; 2] = [Self::Validate, Self::Activate];
+    const ALL: [Self; 4] = [Self::Scan, Self::CatchUp, Self::Validate, Self::Activate];
 
     const fn stage(self) -> IndexOperationStage {
         match self {
+            Self::Scan => IndexOperationStage::Scan,
+            Self::CatchUp => IndexOperationStage::CatchUp,
             Self::Validate => IndexOperationStage::Validate,
             Self::Activate => IndexOperationStage::Activate,
         }
@@ -60,15 +69,24 @@ impl SecondaryLatePoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VectorLatePoint {
+    Scan,
+    CatchUp,
     ValidateDescriptor,
     Activate,
 }
 
 impl VectorLatePoint {
-    const ALL: [Self; 2] = [Self::ValidateDescriptor, Self::Activate];
+    const ALL: [Self; 4] = [
+        Self::Scan,
+        Self::CatchUp,
+        Self::ValidateDescriptor,
+        Self::Activate,
+    ];
 
     const fn stage(self) -> IndexOperationStage {
         match self {
+            Self::Scan => IndexOperationStage::Scan,
+            Self::CatchUp => IndexOperationStage::CatchUp,
             Self::ValidateDescriptor => IndexOperationStage::ValidateDescriptor,
             Self::Activate => IndexOperationStage::Activate,
         }
@@ -119,11 +137,12 @@ impl TextLatePoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FixtureValue {
     Initial(u8),
+    Intermediate,
     Updated,
     Inserted,
 }
 
-/// Runs 182 exact tenant-scope races: 14 secondary, 24 vector, and 144 text.
+/// Runs 220 exact tenant-scope races: 28 secondary, 48 vector, and 144 text.
 pub(super) async fn run() {
     let mut ordinal = 0usize;
     let mut secondary_cases = 0usize;
@@ -155,12 +174,15 @@ pub(super) async fn run() {
         }
     }
     assert_eq!(
-        secondary_cases, 14,
-        "every secondary shape and late stage runs"
+        secondary_cases, 28,
+        "every secondary shape and lifecycle stage runs"
     );
-    assert_eq!(vector_cases, 24, "every vector shape and late stage runs");
+    assert_eq!(
+        vector_cases, 48,
+        "every vector shape and lifecycle stage runs"
+    );
     assert_eq!(text_cases, 144, "every text shape and late stage runs");
-    assert_eq!(ordinal, 182, "the complete all-index race matrix runs");
+    assert_eq!(ordinal, 220, "the complete all-index race matrix runs");
 }
 
 async fn run_case(
@@ -172,10 +194,11 @@ async fn run_case(
     let scope = DataScope::Tenant(TenantId::from_u128(
         0xFD00_0000_0000_0000_0000_0000_1000_0000 + ordinal as u128,
     ));
-    let db = HelixDB::open_for_index_lifecycle_testing(
-        HelixDbSource::InMemory {
-            database: format!("index-lifecycle-all-index-validation-{ordinal}"),
-        },
+    let database = format!("index-lifecycle-all-index-validation-{ordinal}");
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+        &database,
+        Arc::clone(&object_store),
         crate::DbConfig::new(),
         crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
     )
@@ -215,7 +238,9 @@ async fn run_case(
         panic!("fresh all-index validation build must enqueue");
     };
 
-    if matches!(definition, ValidatedDynamicIndexDefinition::Secondary(_)) {
+    if matches!(definition, ValidatedDynamicIndexDefinition::Secondary(_))
+        && stage != IndexOperationStage::Scan
+    {
         drive_until_exact_stage(
             &db,
             &controller,
@@ -264,13 +289,37 @@ async fn run_case(
     if element_kind == IndexElementKind::Edge {
         put_edge_endpoints(&db, scope, inserted_id).await;
     }
+    let partitioned_vector = matches!(
+        &definition,
+        ValidatedDynamicIndexDefinition::Vector(definition)
+            if definition.tenant_property().is_some()
+    );
+    let intermediate_tenant = partitioned_vector.then_some(TENANT_B);
+    let final_tenant = partitioned_vector.then_some(TENANT_C);
     mutate_entity(
         &db,
         scope,
         &definition,
         updated_id,
         &fixture_properties(&definition, FixtureValue::Initial(0)),
-        &fixture_properties(&definition, FixtureValue::Updated),
+        &fixture_properties_with_tenant(
+            &definition,
+            FixtureValue::Intermediate,
+            intermediate_tenant,
+        ),
+    )
+    .await;
+    mutate_entity(
+        &db,
+        scope,
+        &definition,
+        updated_id,
+        &fixture_properties_with_tenant(
+            &definition,
+            FixtureValue::Intermediate,
+            intermediate_tenant,
+        ),
+        &fixture_properties_with_tenant(&definition, FixtureValue::Updated, final_tenant),
     )
     .await;
     mutate_entity(
@@ -279,6 +328,23 @@ async fn run_case(
         &definition,
         deleted_id,
         &fixture_properties(&definition, FixtureValue::Initial(1)),
+        &fixture_properties_with_tenant(
+            &definition,
+            FixtureValue::Intermediate,
+            intermediate_tenant,
+        ),
+    )
+    .await;
+    mutate_entity(
+        &db,
+        scope,
+        &definition,
+        deleted_id,
+        &fixture_properties_with_tenant(
+            &definition,
+            FixtureValue::Intermediate,
+            intermediate_tenant,
+        ),
         &[],
     )
     .await;
@@ -288,10 +354,51 @@ async fn run_case(
         &definition,
         inserted_id,
         &[],
-        &fixture_properties(&definition, FixtureValue::Inserted),
+        &fixture_properties_with_tenant(
+            &definition,
+            FixtureValue::Intermediate,
+            intermediate_tenant,
+        ),
+    )
+    .await;
+    mutate_entity(
+        &db,
+        scope,
+        &definition,
+        inserted_id,
+        &fixture_properties_with_tenant(
+            &definition,
+            FixtureValue::Intermediate,
+            intermediate_tenant,
+        ),
+        &fixture_properties_with_tenant(&definition, FixtureValue::Inserted, final_tenant),
     )
     .await;
     assert_build_delta_count_at_least(&db, scope, &definition, 3).await;
+
+    if !matches!(definition, ValidatedDynamicIndexDefinition::Text(_)) {
+        db.close()
+            .await
+            .expect("secondary/vector writer closes with pending deltas");
+        db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+            &database,
+            Arc::clone(&object_store),
+            crate::DbConfig::new(),
+            crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
+        )
+        .await
+        .expect("secondary/vector writer reopens with pending deltas");
+        assert_build_delta_count_at_least(&db, scope, &definition, 3).await;
+        assert_eq!(
+            db.get_index_operation(scope, operation_id)
+                .await
+                .expect("reopened operation remains readable")
+                .common()
+                .stage,
+            stage,
+            "{definition:?} must preserve {stage:?} while pending deltas survive a cold reopen"
+        );
+    }
 
     let evidence = controller
         .advance(
@@ -304,15 +411,20 @@ async fn run_case(
         .await
         .expect("late validation mutation re-entry step succeeds");
     assert_monotonic_step(&evidence);
-    let reentered = db
-        .get_index_operation(scope, operation_id)
-        .await
-        .expect("re-entered operation remains readable");
-    assert_eq!(
-        reentered.common().stage,
-        IndexOperationStage::CatchUp,
-        "{definition:?} must leave {stage:?} for catch-up after late mutations"
-    );
+    if !matches!(
+        stage,
+        IndexOperationStage::Scan | IndexOperationStage::CatchUp
+    ) {
+        let reentered = db
+            .get_index_operation(scope, operation_id)
+            .await
+            .expect("re-entered operation remains readable");
+        assert_eq!(
+            reentered.common().stage,
+            IndexOperationStage::CatchUp,
+            "{definition:?} must leave {stage:?} for catch-up after late mutations"
+        );
+    }
 
     let terminal = drive_to_terminal(&db, &controller, scope, operation_id).await;
     assert!(
@@ -545,6 +657,14 @@ fn fixture_properties(
     definition: &ValidatedDynamicIndexDefinition,
     value: FixtureValue,
 ) -> Vec<Property> {
+    fixture_properties_with_tenant(definition, value, None)
+}
+
+fn fixture_properties_with_tenant(
+    definition: &ValidatedDynamicIndexDefinition,
+    value: FixtureValue,
+    tenant: Option<&str>,
+) -> Vec<Property> {
     let mut properties = vec![Property::string(
         "$label",
         definition.identity().label().as_str(),
@@ -554,6 +674,7 @@ fn fixture_properties(
             INDEX_PROPERTY,
             match value {
                 FixtureValue::Initial(ordinal) => format!("initial-{ordinal}"),
+                FixtureValue::Intermediate => "intermediate".to_string(),
                 FixtureValue::Updated => "updated".to_string(),
                 FixtureValue::Inserted => "inserted".to_string(),
             },
@@ -564,6 +685,7 @@ fn fixture_properties(
                 FixtureValue::Initial(0) => vec![1.0, 0.1, 0.1],
                 FixtureValue::Initial(1) => vec![0.1, 1.0, 0.1],
                 FixtureValue::Initial(_) => vec![0.1, 0.1, 1.0],
+                FixtureValue::Intermediate => vec![-0.2, 0.1, 1.0],
                 FixtureValue::Updated => vec![-1.0, 0.2, 0.1],
                 FixtureValue::Inserted => vec![0.2, -1.0, 0.1],
             },
@@ -574,6 +696,7 @@ fn fixture_properties(
                 FixtureValue::Initial(ordinal) => {
                     format!("initialvalidationtoken{ordinal}")
                 }
+                FixtureValue::Intermediate => "intermediatevalidationtoken".to_string(),
                 FixtureValue::Updated => "updatedvalidationtoken".to_string(),
                 FixtureValue::Inserted => "insertedvalidationtoken".to_string(),
             },
@@ -588,7 +711,10 @@ fn fixture_properties(
         ValidatedDynamicIndexDefinition::Text(definition) => definition.tenant_property().is_some(),
     };
     if partitioned {
-        properties.push(Property::string(TENANT_PROPERTY, TENANT_VALUE));
+        properties.push(Property::string(
+            TENANT_PROPERTY,
+            tenant.unwrap_or(TENANT_A),
+        ));
     }
     properties
 }
@@ -748,7 +874,17 @@ async fn assert_source_rows(
             .expect("authoritative source row remains present");
         assert_eq!(
             decode_properties(&stored).expect("authoritative source properties decode"),
-            fixture_properties(definition, expected)
+            fixture_properties_with_tenant(
+                definition,
+                expected,
+                matches!(
+                    definition,
+                    ValidatedDynamicIndexDefinition::Vector(definition)
+                        if definition.tenant_property().is_some()
+                            && matches!(expected, FixtureValue::Updated | FixtureValue::Inserted)
+                )
+                .then_some(TENANT_C),
+            )
         );
     }
     assert!(
@@ -775,11 +911,17 @@ async fn assert_active_results(
                 .await;
         }
         ValidatedDynamicIndexDefinition::Vector(_) => {
+            let partitioned = matches!(
+                definition,
+                ValidatedDynamicIndexDefinition::Vector(definition)
+                    if definition.tenant_property().is_some()
+            );
+            let final_tenant = if partitioned { TENANT_C } else { TENANT_A };
             assert_search_results(
                 db,
                 scope,
                 definition,
-                SearchFixture::Vector(FixtureValue::Updated),
+                SearchFixture::Vector(FixtureValue::Updated, final_tenant),
                 [updated_id],
             )
             .await;
@@ -787,18 +929,45 @@ async fn assert_active_results(
                 db,
                 scope,
                 definition,
-                SearchFixture::Vector(FixtureValue::Inserted),
+                SearchFixture::Vector(FixtureValue::Inserted, final_tenant),
                 [inserted_id],
             )
             .await;
-            assert_search_results(
-                db,
-                scope,
-                definition,
-                SearchFixture::VectorAll,
-                [updated_id, stable_id, inserted_id],
-            )
-            .await;
+            if partitioned {
+                assert_search_results(
+                    db,
+                    scope,
+                    definition,
+                    SearchFixture::VectorAll(TENANT_A),
+                    [stable_id],
+                )
+                .await;
+                assert_search_results(
+                    db,
+                    scope,
+                    definition,
+                    SearchFixture::VectorAll(TENANT_B),
+                    [],
+                )
+                .await;
+                assert_search_results(
+                    db,
+                    scope,
+                    definition,
+                    SearchFixture::VectorAll(TENANT_C),
+                    [updated_id, inserted_id],
+                )
+                .await;
+            } else {
+                assert_search_results(
+                    db,
+                    scope,
+                    definition,
+                    SearchFixture::VectorAll(TENANT_A),
+                    [updated_id, stable_id, inserted_id],
+                )
+                .await;
+            }
         }
         ValidatedDynamicIndexDefinition::Text(_) => {
             assert_search_results(
@@ -904,9 +1073,18 @@ async fn assert_secondary_results(
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SearchFixture {
-    Vector(FixtureValue),
-    VectorAll,
+    Vector(FixtureValue, &'static str),
+    VectorAll(&'static str),
     Text(&'static str),
+}
+
+impl SearchFixture {
+    const fn tenant(self) -> &'static str {
+        match self {
+            Self::Vector(_, tenant) | Self::VectorAll(tenant) => tenant,
+            Self::Text(_) => TENANT_A,
+        }
+    }
 }
 
 async fn assert_search_results<const N: usize>(
@@ -950,12 +1128,12 @@ fn search_plan(
     definition: &ValidatedDynamicIndexDefinition,
     fixture: SearchFixture,
 ) -> exec::ExecutablePlan {
-    let index = search_index_plan(definition);
+    let index = search_index_plan(definition, fixture.tenant());
     let access = match (definition, fixture) {
-        (ValidatedDynamicIndexDefinition::Vector(definition), SearchFixture::Vector(value)) => {
+        (ValidatedDynamicIndexDefinition::Vector(definition), SearchFixture::Vector(value, _)) => {
             search_access_vector(definition, index, vector_value(value), NonZeroUsize::MIN)
         }
-        (ValidatedDynamicIndexDefinition::Vector(definition), SearchFixture::VectorAll) => {
+        (ValidatedDynamicIndexDefinition::Vector(definition), SearchFixture::VectorAll(_)) => {
             search_access_vector(
                 definition,
                 index,
@@ -1060,7 +1238,10 @@ fn search_access_vector(
     }
 }
 
-fn search_index_plan(definition: &ValidatedDynamicIndexDefinition) -> ir::SearchIndexPlan {
+fn search_index_plan(
+    definition: &ValidatedDynamicIndexDefinition,
+    tenant_value: &str,
+) -> ir::SearchIndexPlan {
     let (index_id, tenant_property) = match definition {
         ValidatedDynamicIndexDefinition::Vector(definition) => (
             vector_index_name(
@@ -1092,7 +1273,7 @@ fn search_index_plan(definition: &ValidatedDynamicIndexDefinition) -> ir::Search
         ir::SearchTenantPlan::ScopedValue {
             property: public_name(property.as_str()),
             value: ir::SearchTenantValuePlan::new(ir::PropertyInputPlan::Value(
-                AstPropertyValue::String(TENANT_VALUE.to_string()),
+                AstPropertyValue::String(tenant_value.to_string()),
             ))
             .expect("validation tenant value is non-null"),
         }
@@ -1108,6 +1289,7 @@ fn vector_value(value: FixtureValue) -> Vec<f32> {
         FixtureValue::Initial(0) => vec![1.0, 0.1, 0.1],
         FixtureValue::Initial(1) => vec![0.1, 1.0, 0.1],
         FixtureValue::Initial(_) => vec![0.1, 0.1, 1.0],
+        FixtureValue::Intermediate => vec![-0.2, 0.1, 1.0],
         FixtureValue::Updated => vec![-1.0, 0.2, 0.1],
         FixtureValue::Inserted => vec![0.2, -1.0, 0.1],
     }

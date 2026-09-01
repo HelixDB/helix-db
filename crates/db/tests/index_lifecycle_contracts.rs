@@ -47,7 +47,7 @@ fn index_lifecycle_backfill_mutations_and_unique_retry_converge() {
         .expect("lifecycle mutation test thread should not panic");
 }
 
-/// Proves every managed index shape catches up after late validation mutations.
+/// Proves every shape converges after repeated mutations at each build boundary.
 #[test]
 fn index_lifecycle_all_index_shapes_reenter_catch_up_before_activation() {
     std::thread::Builder::new()
