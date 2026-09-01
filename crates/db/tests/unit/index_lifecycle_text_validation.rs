@@ -66,6 +66,289 @@ fn entity_progress(counters: OperationCounters) -> TextManifestValidationProgres
     })
 }
 
+fn build_delta_row(
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    entity: index_keys::IndexEntity,
+) -> (Bytes, Bytes) {
+    let key = scoped_key(
+        scope,
+        index_keys::ScopedKey::BuildDelta(index_keys::IndexEntityStateKey {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+            entity,
+        }),
+    );
+    let value = index_values::encode_build_delta(&work::CoalescedBuildDeltaValue {
+        index_id: operation.index_id(),
+        generation: operation.generation(),
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+    });
+    (key, value)
+}
+
+fn assert_catch_up_with_counters(result: IndexOperationStepResult, expected: OperationCounters) {
+    let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+        TextBuildProgress::Constructing(TextBuildStage::CatchUp(progress)),
+    )) = result
+    else {
+        panic!("pending build delta must preempt manifest validation")
+    };
+    assert!(progress.cursor.is_none());
+    assert_eq!(progress.counters, expected);
+}
+
+#[tokio::test]
+async fn pending_delta_preempts_every_validation_lane_and_preserves_counters() {
+    let db = Db::open(
+        "text-validation-pending-delta-lanes",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let operation = test_support::operation();
+    let definition = definition();
+    let scope = DataScope::LegacyUnscoped;
+    let counters = OperationCounters {
+        entities: 7,
+        input_bytes: 11,
+        output_operations: 13,
+        output_bytes: 17,
+    };
+    let entity = index_keys::IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(19),
+    };
+    let (delta_key, delta_value) = build_delta_row(scope, &operation, entity);
+    transaction.put(delta_key, delta_value).unwrap();
+
+    for progress in [
+        TextManifestValidationProgress::Pages(TextManifestPageValidationProgress::initial(
+            counters,
+        )),
+        root_progress(counters),
+        entity_progress(counters),
+    ] {
+        let ValidationSelection::Database(prepared) = select(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &progress,
+            test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX),
+        )
+        .await
+        .unwrap() else {
+            panic!("pending build delta selects a database-only catch-up transition")
+        };
+        assert_catch_up_with_counters(prepared.stage(&transaction).await.unwrap(), counters);
+    }
+}
+
+#[tokio::test]
+async fn live_state_with_absent_marker_catches_up_only_when_a_delta_explains_it() {
+    let db = Db::open(
+        "text-validation-live-absent-delta",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let operation = test_support::operation();
+    let definition = definition();
+    let scope = DataScope::LegacyUnscoped;
+    let partition = TextPartition::Unpartitioned;
+    let (root_typed, root_key) = root_key(scope, &operation, &partition);
+    transaction
+        .put(root_key, root_value(&operation, partition.clone(), 1, 1))
+        .unwrap();
+    let entity = index_keys::IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(23),
+    };
+    let state_key = scoped_key(
+        scope,
+        index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+            root: root_typed,
+            entity,
+        }),
+    );
+    let state = work::TextEntityStateValue {
+        index_id: operation.index_id(),
+        generation: operation.generation(),
+        partition,
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+        logical_version: TextLogicalVersion::initial(),
+        live: true,
+    };
+    transaction
+        .put(state_key, index_values::encode_text_entity_state(&state))
+        .unwrap();
+    let marker_key = scoped_key(
+        scope,
+        index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+            entity,
+        }),
+    );
+    let marker = work::TextStatisticsEntityValue {
+        index_id: operation.index_id(),
+        generation: operation.generation(),
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+        contribution: work::TextStatisticsContribution::Absent,
+    };
+    transaction
+        .put(marker_key, index_values::encode_statistics_entity(&marker))
+        .unwrap();
+    let progress = entity_progress(OperationCounters::default());
+    let limits = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+
+    let ValidationSelection::Database(unexplained) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &progress,
+        limits,
+    )
+    .await
+    .unwrap() else {
+        panic!("entity-state validation is database-only")
+    };
+    assert!(matches!(
+        unexplained.stage(&transaction).await.unwrap(),
+        IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
+    ));
+
+    let (delta_key, delta_value) = build_delta_row(scope, &operation, entity);
+    transaction.put(delta_key, delta_value).unwrap();
+    let ValidationSelection::Database(explained) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &progress,
+        limits,
+    )
+    .await
+    .unwrap() else {
+        panic!("explained marker mismatch selects database-only catch-up")
+    };
+    assert_catch_up_with_counters(
+        explained.stage(&transaction).await.unwrap(),
+        OperationCounters::default(),
+    );
+}
+
+#[tokio::test]
+async fn delta_inserted_after_preparation_invalidates_database_selection() {
+    let db = Db::open(
+        "text-validation-concurrent-delta-fence",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let operation = test_support::operation();
+    let definition = definition();
+    let scope = DataScope::LegacyUnscoped;
+    let limits = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+
+    let ValidationSelection::Database(database) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &TextManifestValidationProgress::Pages(TextManifestPageValidationProgress::initial(
+            OperationCounters::default(),
+        )),
+        limits,
+    )
+    .await
+    .unwrap() else {
+        panic!("empty page lane selects a database transition")
+    };
+
+    let entity = index_keys::IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(37),
+    };
+    let (delta_key, delta_value) = build_delta_row(scope, &operation, entity);
+    transaction.put(delta_key, delta_value).unwrap();
+    assert!(matches!(
+        database.stage(&transaction).await.unwrap(),
+        IndexOperationStepResult::TransientFailure
+    ));
+}
+
+#[tokio::test]
+async fn delta_inserted_after_preparation_invalidates_page_selection() {
+    let db = Db::open(
+        "text-validation-concurrent-delta-page-fence",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let operation = test_support::operation();
+    let definition = definition();
+    let scope = DataScope::LegacyUnscoped;
+    let limits = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+    let partition = TextPartition::Unpartitioned;
+    let (root_typed, root_key) = root_key(scope, &operation, &partition);
+    let page_key = scoped_key(
+        scope,
+        index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
+            root: root_typed,
+            page: 0,
+        }),
+    );
+    let page = work::TextManifestPageValue::try_new(
+        operation.index_id(),
+        operation.generation(),
+        partition.clone(),
+        0,
+        vec![test_support::split(31, 128)],
+    )
+    .unwrap();
+    transaction
+        .put(root_key, root_value(&operation, partition, 1, 1))
+        .unwrap();
+    transaction
+        .put(page_key, index_values::encode_manifest_page(&page))
+        .unwrap();
+    let ValidationSelection::Page(page) = select(
+        &transaction,
+        scope,
+        &operation,
+        &definition,
+        &TextManifestValidationProgress::Pages(TextManifestPageValidationProgress::initial(
+            OperationCounters::default(),
+        )),
+        limits,
+    )
+    .await
+    .unwrap() else {
+        panic!("valid manifest page selects external validation")
+    };
+
+    let entity = index_keys::IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(37),
+    };
+    let (delta_key, delta_value) = build_delta_row(scope, &operation, entity);
+    transaction.put(delta_key, delta_value).unwrap();
+    assert!(matches!(
+        page.stage(&transaction).await.unwrap(),
+        IndexOperationStepResult::TransientFailure
+    ));
+}
+
 #[tokio::test]
 async fn prepared_database_revalidation_rejects_missing_changed_and_appended_rows() {
     let db = Db::open("text-validation-stale-ranges", Arc::new(InMemory::new()))
