@@ -25,7 +25,7 @@ use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
 use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::encode_build_delta;
 use crate::error::{HelixDbError, Result};
-use crate::index_lifecycle::work::CoalescedBuildDeltaValue;
+use crate::index_lifecycle::work::{CoalescedBuildDeltaState, CoalescedBuildDeltaValue};
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::index_lifecycle::IndexStateV2;
 use crate::index_lifecycle::{
@@ -511,6 +511,7 @@ async fn prepare_text_build_deltas_from(
             generation: target.generation,
             entity_kind: entity.entity_kind,
             entity_id: entity.entity_id,
+            state: CoalescedBuildDeltaState::Marker,
         };
         if !destination_keys.insert(key.clone()) {
             return Err(corruption(
@@ -935,6 +936,7 @@ mod tests {
             generation,
             entity_kind: entity.kind,
             entity_id: entity.id,
+            state: CoalescedBuildDeltaState::Marker,
         });
 
         let original = db

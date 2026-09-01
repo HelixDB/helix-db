@@ -13,8 +13,10 @@ use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{decode_properties, encode_properties, Property};
 use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 use crate::encoding::v2::keys::{
-    IndexEntity, IndexEntityStateKey, ManagedIndexKey, RecordKind, ScopedKey,
+    DataKey, DataKeyKind, EdgeEndpointsKey, IndexEntity, IndexEntityStateKey, ManagedIndexKey,
+    RecordKind, ScopedKey,
 };
+use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
 use crate::execution::interpreter::{ExecutionScalar, ExecutionValue};
 use crate::index_lifecycle::{
     ActiveIndexHandle, IndexDefinitionFamily, IndexElementKind, IndexOperationId,
@@ -194,7 +196,10 @@ async fn run_case(
         );
         match element_kind {
             IndexElementKind::Node => put_source(&db, scope, entity_id, &properties).await,
-            IndexElementKind::Edge => put_edge_source(&db, scope, entity_id, &properties).await,
+            IndexElementKind::Edge => {
+                put_edge_source(&db, scope, entity_id, &properties).await;
+                put_edge_endpoints(&db, scope, entity_id).await;
+            }
         }
     }
     let crate::index_lifecycle::IndexDdlReceipt::Accepted { operation_id, .. } = controller
@@ -256,6 +261,9 @@ async fn run_case(
         IndexElementKind::Node => allocate_node_ids(&db, 1).await.start,
         IndexElementKind::Edge => allocate_edge_ids(&db, 1).await.start,
     };
+    if element_kind == IndexElementKind::Edge {
+        put_edge_endpoints(&db, scope, inserted_id).await;
+    }
     mutate_entity(
         &db,
         scope,
@@ -583,6 +591,21 @@ fn fixture_properties(
         properties.push(Property::string(TENANT_PROPERTY, TENANT_VALUE));
     }
     properties
+}
+
+async fn put_edge_endpoints(db: &HelixDB, scope: DataScope, entity_id: u64) {
+    db.lifecycle_test_writer_db()
+        .expect("edge endpoint fixture has writer storage")
+        .put(
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::EdgeEndpoints(EdgeEndpointsKey::new(entity_id)),
+            }
+            .to_bytes(),
+            EdgeEndpointsValue::new(0, 1).encode(),
+        )
+        .await
+        .expect("edge endpoint fixture commits");
 }
 
 async fn mutate_entity(
@@ -916,7 +939,11 @@ async fn assert_search_results<const N: usize>(
             },
         )
         .collect::<BTreeSet<_>>();
-    assert_eq!(actual, expected.into_iter().collect());
+    assert_eq!(
+        actual,
+        expected.into_iter().collect(),
+        "search result differs for {definition:?} fixture {fixture:?}"
+    );
 }
 
 fn search_plan(

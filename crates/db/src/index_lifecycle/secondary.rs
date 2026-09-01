@@ -63,7 +63,8 @@ use crate::index_lifecycle::outbox::{
 };
 use crate::index_lifecycle::repository::ReaderStorageCompatibility;
 use crate::index_lifecycle::work::{
-    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, SecondaryEntryValue,
+    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaState,
+    CoalescedBuildDeltaValue, SecondaryEntryValue,
 };
 #[cfg(any(
     test,
@@ -427,21 +428,14 @@ impl SecondaryMutationRuntime {
                 .ok_or_else(|| corruption("pending secondary mutation lost its catalog target"))?;
             match target.mode {
                 SecondaryMutationMode::RecordBuildDelta => {
-                    let key = scoped_index_key(
+                    stage_secondary_build_delta(
+                        transaction,
                         change.scope,
-                        ScopedKey::BuildDelta(IndexEntityStateKey {
-                            index_id: target.index_id,
-                            generation: target.generation,
-                            entity: change.entity,
-                        }),
-                    );
-                    let value = CoalescedBuildDeltaValue {
-                        index_id: target.index_id,
-                        generation: target.generation,
-                        entity_kind: change.entity.kind,
-                        entity_id: change.entity.id,
-                    };
-                    transaction.put(key, encode_build_delta(&value))?;
+                        target,
+                        change.entity,
+                        change.old_value,
+                    )
+                    .await?;
                 }
                 SecondaryMutationMode::MaintainActive => {
                     if definition_uses_equality_bitmap(&target.definition) {
@@ -669,24 +663,41 @@ pub(crate) async fn maintain_entity(
                     kind: entity_kind,
                     id: entity_id,
                 };
-                let key = scoped_index_key(
-                    scope,
-                    ScopedKey::BuildDelta(IndexEntityStateKey {
-                        index_id: target.index_id,
-                        generation: target.generation,
-                        entity,
-                    }),
-                );
-                let value = CoalescedBuildDeltaValue {
-                    index_id: target.index_id,
-                    generation: target.generation,
-                    entity_kind,
-                    entity_id,
-                };
-                transaction.put(key, encode_build_delta(&value))?;
+                stage_secondary_build_delta(transaction, scope, target, entity, old_value).await?;
             }
         }
     }
+    Ok(())
+}
+
+/// Preserves the original secondary value across repeated coalesced mutations.
+async fn stage_secondary_build_delta(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    target: &SecondaryMutationTarget,
+    entity: IndexEntity,
+    initial_before: Option<CanonicalSecondaryValue>,
+) -> Result<()> {
+    let key = scoped_index_key(
+        scope,
+        ScopedKey::BuildDelta(IndexEntityStateKey {
+            index_id: target.index_id,
+            generation: target.generation,
+            entity,
+        }),
+    );
+    let state = match transaction.get(&key).await? {
+        Some(existing) => decode_delta(scope, &key, &existing)?.1.state,
+        None => CoalescedBuildDeltaState::SecondaryBefore(initial_before),
+    };
+    let value = CoalescedBuildDeltaValue {
+        index_id: target.index_id,
+        generation: target.generation,
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+        state,
+    };
+    transaction.put(key, encode_build_delta(&value))?;
     Ok(())
 }
 
@@ -1331,6 +1342,7 @@ async fn catch_up(
             operation.generation(),
             definition,
             entity.id,
+            &value.state,
             next_value,
         )
         .await?
@@ -1434,17 +1446,18 @@ async fn catch_up_exact(
             delta_key,
             entity,
             u64::try_from(delta_value.len()).unwrap_or(u64::MAX),
+            value.state,
         ));
     }
 
     let property_keys = decoded
         .iter()
-        .map(|(_, entity, _)| authoritative_property_key(scope, *entity))
+        .map(|(_, entity, _, _)| authoritative_property_key(scope, *entity))
         .collect::<Vec<_>>();
     let property_values = transaction.multi_get(&property_keys).await?;
     let applied_keys = decoded
         .iter()
-        .map(|(_, entity, _)| {
+        .map(|(_, entity, _, _)| {
             scoped_index_key(
                 scope,
                 ScopedKey::AppliedState(IndexEntityStateKey {
@@ -1458,12 +1471,14 @@ async fn catch_up_exact(
     let applied_values = transaction.multi_get(&applied_keys).await?;
     let mut rows = Vec::with_capacity(decoded.len());
     let mut unique_keys = Vec::new();
-    for ((((delta_key, entity, delta_value_bytes), property_key), property_value), applied_pair) in
-        decoded
-            .into_iter()
-            .zip(property_keys)
-            .zip(property_values)
-            .zip(applied_keys.into_iter().zip(applied_values))
+    for (
+        (((delta_key, entity, delta_value_bytes, delta_state), property_key), property_value),
+        applied_pair,
+    ) in decoded
+        .into_iter()
+        .zip(property_keys)
+        .zip(property_values)
+        .zip(applied_keys.into_iter().zip(applied_values))
     {
         let next_value = match property_value.as_ref() {
             Some(properties) => {
@@ -1483,13 +1498,14 @@ async fn catch_up_exact(
             None => None,
         };
         let (applied_key, applied_value) = applied_pair;
-        let previous_value = decode_previous_applied(
+        let previous_value = reconciliation_previous_value(
             scope,
             operation.index_id(),
             operation.generation(),
             entity,
             &applied_key,
             applied_value.as_deref(),
+            &delta_state,
         )?;
         let mut unique_entry_keys = Vec::new();
         if definition.unique() && previous_value != next_value {
@@ -2281,6 +2297,7 @@ async fn reconciliation_plan(
     generation: IndexGenerationId,
     definition: &ValidatedSecondaryIndexDefinition,
     entity_id: IndexEntityId,
+    delta_state: &CoalescedBuildDeltaState,
     next_value: Option<CanonicalSecondaryValue>,
 ) -> Result<ReconciliationPlan> {
     let entity = IndexEntity {
@@ -2296,13 +2313,14 @@ async fn reconciliation_plan(
         }),
     );
     let applied_value = transaction.get(&applied_key).await?;
-    let previous = decode_previous_applied(
+    let previous = reconciliation_previous_value(
         scope,
         index_id,
         generation,
         entity,
         &applied_key,
         applied_value.as_deref(),
+        delta_state,
     )?;
     let mut unique_entries = BTreeMap::new();
     if definition.unique() && previous != next_value {
@@ -2333,6 +2351,36 @@ async fn reconciliation_plan(
         next_value,
         &unique_entries,
     )
+}
+
+fn reconciliation_previous_value(
+    scope: DataScope,
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    entity: IndexEntity,
+    applied_key: &[u8],
+    applied_value: Option<&[u8]>,
+    delta_state: &CoalescedBuildDeltaState,
+) -> Result<Option<CanonicalSecondaryValue>> {
+    if applied_value.is_some() {
+        return decode_previous_applied(
+            scope,
+            index_id,
+            generation,
+            entity,
+            applied_key,
+            applied_value,
+        );
+    }
+    match delta_state {
+        CoalescedBuildDeltaState::SecondaryBefore(previous) => Ok(previous.clone()),
+        CoalescedBuildDeltaState::Marker => Err(corruption(
+            "secondary build delta has no original value after applied-state release",
+        )),
+        CoalescedBuildDeltaState::VectorBefore(_) => Err(corruption(
+            "secondary build delta contains vector recovery state",
+        )),
+    }
 }
 
 fn decode_previous_applied(

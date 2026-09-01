@@ -224,6 +224,10 @@ impl<'a> ValueDecoder<'a> {
         }
     }
 
+    pub(super) const fn is_finished(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
     pub(super) fn finish(self) -> Result<(), EncodingError> {
         if !self.remaining.is_empty() {
             return Err(EncodingError::Custom(format!(

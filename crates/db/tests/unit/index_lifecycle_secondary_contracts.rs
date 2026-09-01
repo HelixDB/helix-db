@@ -77,6 +77,93 @@ fn encoded_owner(
 }
 
 #[tokio::test]
+async fn repeated_build_deltas_preserve_the_first_secondary_value() {
+    let db = tests::test_db("secondary-build-delta-first-value").await;
+    let scope = DataScope::LegacyUnscoped;
+    let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
+    let target = SecondaryMutationTarget {
+        index_id: IndexId::initial(),
+        generation: IndexGenerationId::initial(),
+        definition,
+        mode: SecondaryMutationMode::RecordBuildDelta,
+    };
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+
+    for (entity_id, first, second) in [
+        (
+            IndexEntityId::new(7),
+            Some(equality("original@example.com")),
+            Some(equality("intermediate@example.com")),
+        ),
+        (
+            IndexEntityId::new(8),
+            None,
+            Some(equality("created@example.com")),
+        ),
+    ] {
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: entity_id,
+        };
+        stage_secondary_build_delta(&transaction, scope, &target, entity, first.clone())
+            .await
+            .unwrap();
+        stage_secondary_build_delta(&transaction, scope, &target, entity, second)
+            .await
+            .unwrap();
+
+        let key = scoped_index_key(
+            scope,
+            ScopedKey::BuildDelta(IndexEntityStateKey {
+                index_id: target.index_id,
+                generation: target.generation,
+                entity,
+            }),
+        );
+        let (_, delta) =
+            decode_delta(scope, &key, &transaction.get(&key).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            delta.state,
+            CoalescedBuildDeltaState::SecondaryBefore(first)
+        );
+    }
+
+    transaction.rollback();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_secondary_marker_without_applied_state_fails_closed() {
+    let db = tests::test_db("secondary-legacy-marker-fails-closed").await;
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
+
+    assert!(matches!(
+        reconciliation_plan(
+            &transaction,
+            DataScope::LegacyUnscoped,
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            &definition,
+            IndexEntityId::new(7),
+            &CoalescedBuildDeltaState::Marker,
+            Some(equality("current@example.com")),
+        )
+        .await,
+        Err(HelixDbError::IndexCatalogCorruption(_))
+    ));
+
+    transaction.rollback();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let db = tests::test_db("secondary-reconciliation-bitmap-contracts").await;
     let transaction = db
@@ -95,6 +182,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         IndexGenerationId::initial(),
         &definition,
         entity_id,
+        &CoalescedBuildDeltaState::SecondaryBefore(None),
         Some(value.clone()),
     )
     .await
@@ -116,6 +204,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         IndexGenerationId::initial(),
         &definition,
         entity_id,
+        &CoalescedBuildDeltaState::Marker,
         Some(value),
     )
     .await
@@ -132,6 +221,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         IndexGenerationId::initial(),
         &definition,
         entity_id,
+        &CoalescedBuildDeltaState::Marker,
         None,
     )
     .await
@@ -200,6 +290,7 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
         IndexGenerationId::initial(),
         &definition,
         entity_id,
+        &CoalescedBuildDeltaState::Marker,
         Some(next.clone()),
     )
     .await
@@ -225,6 +316,7 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
         IndexGenerationId::initial(),
         &definition,
         entity_id,
+        &CoalescedBuildDeltaState::Marker,
         Some(next),
     )
     .await
@@ -915,6 +1007,7 @@ fn typed_secondary_decoders_reject_wrong_kind_family_and_ownership() {
         generation: IndexGenerationId::initial(),
         entity_kind: entity.kind,
         entity_id: entity.id,
+        state: CoalescedBuildDeltaState::SecondaryBefore(None),
     };
     assert_eq!(
         decode_delta(scope, &delta_key, &encode_build_delta(&delta))

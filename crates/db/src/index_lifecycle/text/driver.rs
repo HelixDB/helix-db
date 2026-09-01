@@ -511,6 +511,38 @@ impl PreparedTextOperationStep {
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<IndexOperationStepResult> {
+        let late_boundary_counters = match operation.progress() {
+            IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                TextBuildStage::Compact(progress) | TextBuildStage::PrepareManifests(progress),
+            )) => Some(progress.counters),
+            IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                TextBuildStage::ValidateManifests(progress),
+            )) => Some(progress.counters()),
+            IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(
+                    TextBuildStage::ScanSource(_)
+                    | TextBuildStage::ScanPartitions(_)
+                    | TextBuildStage::CatchUp(_)
+                    | TextBuildStage::Activate(_),
+                )
+                | TextBuildProgress::Aborting(_),
+            )
+            | IndexOperationProgress::SecondaryBuild(_)
+            | IndexOperationProgress::VectorBuild(_)
+            | IndexOperationProgress::SecondaryCleanup(_)
+            | IndexOperationProgress::VectorCleanup(_)
+            | IndexOperationProgress::TextCleanup(_) => None,
+        };
+        if let Some(counters) = late_boundary_counters
+            && generation_has_rows(transaction, scope, RecordKind::BuildDelta, operation).await?
+        {
+            return Ok(progressed_build(TextBuildStage::CatchUp(
+                PrefixScanProgress {
+                    cursor: None,
+                    counters,
+                },
+            )));
+        }
         match self {
             Self::Repository(prepared) => {
                 if operation != &prepared.source_operation {
@@ -3738,6 +3770,7 @@ mod tests {
                     generation: operation.generation(),
                     entity_kind: entity().kind,
                     entity_id: entity().id,
+                    state: work::CoalescedBuildDeltaState::Marker,
                 }),
             )
             .unwrap();
@@ -3820,6 +3853,7 @@ mod tests {
                     generation: operation.generation(),
                     entity_kind: entity().kind,
                     entity_id: entity().id,
+                    state: work::CoalescedBuildDeltaState::Marker,
                 }),
             )
             .unwrap();

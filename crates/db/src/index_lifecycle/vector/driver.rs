@@ -1954,7 +1954,7 @@ async fn catch_up<D: Distance>(
             }
             break;
         }
-        let previous = load_applied(
+        let mut previous = load_applied(
             transaction,
             scope,
             operation.index_id(),
@@ -1963,6 +1963,23 @@ async fn catch_up<D: Distance>(
             entity.id,
         )
         .await?;
+        if previous.is_none() {
+            previous = match &delta.state {
+                crate::index_lifecycle::work::CoalescedBuildDeltaState::VectorBefore(previous) => {
+                    previous.clone()
+                }
+                crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker => {
+                    return Err(corruption(
+                        "vector build delta has no original partition after applied-state release",
+                    ));
+                }
+                crate::index_lifecycle::work::CoalescedBuildDeltaState::SecondaryBefore(_) => {
+                    return Err(corruption(
+                        "vector build delta contains secondary recovery state",
+                    ));
+                }
+            };
+        }
         let properties = read_authoritative_properties(transaction, scope, entity).await?;
         let next = match properties {
             Some(properties) => match vector_document(definition, &properties) {
@@ -2096,10 +2113,8 @@ async fn plan_and_apply<D: Distance>(
         Some(partition)
             if Some(partition) != next_document.map(VectorIndexedDocument::partition) =>
         {
-            Some(
-                resolve_build_physical(transaction, scope, operation, record, partition, false)
-                    .await?,
-            )
+            resolve_existing_build_physical(transaction, scope, operation, record, partition)
+                .await?
         }
         Some(_) | None => None,
     };
@@ -2347,6 +2362,52 @@ async fn resolve_build_physical(
         (VectorPhysicalLayout::Unpartitioned { .. }, TextPartition::TenantValue(_))
         | (VectorPhysicalLayout::Partitioned, TextPartition::Unpartitioned) => Err(corruption(
             "vector build document partition disagrees with physical layout",
+        )),
+    }
+}
+
+async fn resolve_existing_build_physical(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    record: &IndexRecordV2,
+    partition: &TextPartition,
+) -> Result<Option<BuildPhysicalResolution>> {
+    let IndexStateVectorPhysical { layout } = IndexStateVectorPhysical::from_record(record)?;
+    match (layout, partition) {
+        (
+            VectorPhysicalLayout::Unpartitioned { physical_index_id },
+            TextPartition::Unpartitioned,
+        ) => Ok(Some(BuildPhysicalResolution {
+            scope,
+            layout,
+            physical_index_id,
+            mapping_is_new: false,
+        })),
+        (VectorPhysicalLayout::Partitioned, TextPartition::TenantValue(_)) => {
+            let tenant = VectorTenantPartition::try_from_partition(partition.clone())
+                .map_err(|error| corruption(error.to_string()))?;
+            Ok(
+                crate::index_lifecycle::repository::load_vector_partition_mapping(
+                    transaction,
+                    scope,
+                    operation.index_id(),
+                    operation.generation(),
+                    layout,
+                    &tenant,
+                )
+                .await?
+                .map(|physical_index_id| BuildPhysicalResolution {
+                    scope,
+                    layout,
+                    physical_index_id,
+                    mapping_is_new: false,
+                }),
+            )
+        }
+        (VectorPhysicalLayout::Unpartitioned { .. }, TextPartition::TenantValue(_))
+        | (VectorPhysicalLayout::Partitioned, TextPartition::Unpartitioned) => Err(corruption(
+            "vector build recovery partition disagrees with physical layout",
         )),
     }
 }
@@ -4772,6 +4833,7 @@ mod tests {
             generation,
             entity_kind: entity.kind,
             entity_id: entity.id,
+            state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
         };
         let applied_value = AppliedEntityStateValue {
             index_id,

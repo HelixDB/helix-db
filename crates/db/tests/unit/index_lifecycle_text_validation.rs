@@ -678,6 +678,7 @@ fn build_delta_row(
         generation: operation.generation(),
         entity_kind: entity.kind,
         entity_id: entity.id,
+        state: work::CoalescedBuildDeltaState::Marker,
     });
     (key, value)
 }

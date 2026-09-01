@@ -617,6 +617,7 @@ mod tests {
             generation: generation(),
             entity_kind: entity.kind,
             entity_id: entity.id,
+            state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
         });
         let encoded_pointer = encoded.as_ptr();
         let migrated =

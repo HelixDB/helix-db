@@ -293,13 +293,25 @@ impl SplitRef {
     }
 }
 
+/// Family-specific recovery state carried by one coalesced build delta.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CoalescedBuildDeltaState {
+    /// The owning family reconciles from durable builder state or authoritative data.
+    Marker,
+    /// Original secondary value before the first still-pending mutation.
+    SecondaryBefore(Option<CanonicalSecondaryValue>),
+    /// Original vector partition before the first still-pending mutation.
+    VectorBefore(Option<TextPartition>),
+}
+
 /// Coalesced build delta body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CoalescedBuildDeltaValue {
     pub(crate) index_id: IndexId,
     pub(crate) generation: IndexGenerationId,
     pub(crate) entity_kind: IndexElementKind,
     pub(crate) entity_id: IndexEntityId,
+    pub(crate) state: CoalescedBuildDeltaState,
 }
 
 /// Family-specific authoritative state last applied by a builder.
