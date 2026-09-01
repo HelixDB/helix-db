@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::{stream, StreamExt};
 use slatedb::object_store::{ObjectStore, ObjectStoreExt};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
@@ -61,6 +62,17 @@ struct TextStorageRuntime {
     object_store: Arc<dyn ObjectStore>,
     db_path: String,
     compaction_limits: TextBackfillCompactionLimits,
+}
+
+/// Fixed upper bound for immutable manifest metadata requests.
+const MANIFEST_VALIDATION_HEAD_CONCURRENCY: usize = 8;
+
+/// Complete classification of one immutable manifest blob metadata proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestBlobMetadataProof {
+    Valid,
+    InvariantViolation,
+    TransientFailure,
 }
 
 /// Family driver for durable text build checkpoints.
@@ -1570,23 +1582,45 @@ async fn prepare_validation_step(
         super::validation::ValidationSelection::Page(prepared) => prepared,
     };
 
-    let mut external_result = None;
-    for blob in prepared.blobs().iter().copied() {
-        let location = crate::search::text::blob_object_store_path(&runtime.db_path, *blob.hash());
-        match runtime.object_store.head(&location).await {
-            Ok(metadata) if metadata.size == blob.size() => {}
-            Ok(_) | Err(slatedb::object_store::Error::NotFound { .. }) => {
-                external_result = Some(IndexOperationStepResult::Blocked(
-                    IndexOperationBlocker::InvariantViolation,
-                ));
-                break;
+    let mut proofs = stream::iter(prepared.blobs().iter().copied())
+        .map(|blob| async move {
+            let location =
+                crate::search::text::blob_object_store_path(&runtime.db_path, *blob.hash());
+            match runtime.object_store.head(&location).await {
+                Ok(metadata) if metadata.size == blob.size() => ManifestBlobMetadataProof::Valid,
+                Ok(_) | Err(slatedb::object_store::Error::NotFound { .. }) => {
+                    ManifestBlobMetadataProof::InvariantViolation
+                }
+                Err(_) => ManifestBlobMetadataProof::TransientFailure,
             }
-            Err(_) => {
-                external_result = Some(IndexOperationStepResult::TransientFailure);
-                break;
+        })
+        .buffer_unordered(MANIFEST_VALIDATION_HEAD_CONCURRENCY);
+    let mut aggregate = ManifestBlobMetadataProof::Valid;
+    while let Some(proof) = proofs.next().await {
+        aggregate = match (aggregate, proof) {
+            (ManifestBlobMetadataProof::InvariantViolation, _)
+            | (_, ManifestBlobMetadataProof::InvariantViolation) => {
+                ManifestBlobMetadataProof::InvariantViolation
             }
-        }
+            (ManifestBlobMetadataProof::TransientFailure, _)
+            | (_, ManifestBlobMetadataProof::TransientFailure) => {
+                ManifestBlobMetadataProof::TransientFailure
+            }
+            (ManifestBlobMetadataProof::Valid, ManifestBlobMetadataProof::Valid) => {
+                ManifestBlobMetadataProof::Valid
+            }
+        };
     }
+    drop(proofs);
+    let external_result = match aggregate {
+        ManifestBlobMetadataProof::Valid => None,
+        ManifestBlobMetadataProof::InvariantViolation => Some(IndexOperationStepResult::Blocked(
+            IndexOperationBlocker::InvariantViolation,
+        )),
+        ManifestBlobMetadataProof::TransientFailure => {
+            Some(IndexOperationStepResult::TransientFailure)
+        }
+    };
     if let Some(result) = external_result {
         return Ok(PreparedTextOperationStep::Validation(Box::new(
             PreparedTextValidationStep::Database {

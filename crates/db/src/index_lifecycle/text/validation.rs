@@ -107,6 +107,37 @@ struct PreparedValidationRange {
     rows: Vec<(Bytes, Bytes)>,
 }
 
+/// One bounded prefix scan whose admitted prefix can become an exact fence.
+#[derive(Debug)]
+struct PreparedValidationScan {
+    prefix: Bytes,
+    start: Bound<Bytes>,
+    rows: Vec<(Bytes, Bytes)>,
+}
+
+impl PreparedValidationScan {
+    /// Retains exactly the first `count` rows, excluding every deferred row.
+    fn range_through(&self, count: usize) -> PreparedValidationRange {
+        assert!(
+            count <= self.rows.len(),
+            "validation range exceeds selected rows"
+        );
+        let selected = self.rows[..count].to_vec();
+        let end = selected.last().map_or(Bound::Unbounded, |(key, _)| {
+            let suffix = key
+                .strip_prefix(self.prefix.as_ref())
+                .expect("scan_prefix returns only keys with the requested prefix");
+            Bound::Included(Bytes::copy_from_slice(suffix))
+        });
+        PreparedValidationRange {
+            prefix: self.prefix.clone(),
+            start: self.start.clone(),
+            end,
+            rows: selected,
+        }
+    }
+}
+
 impl PreparedValidationRange {
     /// Replays one selected or exhausted interval inside the commit transaction.
     async fn is_current(&self, transaction: &DbTransaction) -> Result<bool> {
@@ -170,7 +201,7 @@ pub(super) async fn select(
     Ok(selection)
 }
 
-/// Validates one immutable page and its exact root relationship.
+/// Validates one bounded batch of immutable pages and exact root relationships.
 async fn select_page(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -179,8 +210,15 @@ async fn select_page(
     limits: SearchIndexBatchLimits,
 ) -> Result<ValidationSelection> {
     let prefix = generation_prefix(scope, index_keys::RecordKind::TextManifestPage, operation);
-    let (range, row) = select_one(transaction, prefix, progress.cursor()).await?;
-    let Some((row_key, row_value)) = row else {
+    let scan = select_many(
+        transaction,
+        prefix,
+        progress.cursor(),
+        limits.max_entities().get(),
+        limits.max_input_bytes().get(),
+    )
+    .await?;
+    if scan.rows.is_empty() {
         let result = if progress.partition().is_some() {
             IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
         } else {
@@ -192,129 +230,160 @@ async fn select_page(
             ))
         };
         return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-            ranges: vec![range],
+            ranges: vec![scan.range_through(0)],
             observations: Vec::new(),
             result,
         }));
-    };
-
-    let page_key = match ManagedIndexKey::parse_from_slice(scope, &row_key) {
-        Ok(ManagedIndexKey::Data {
-            kind: index_keys::ScopedKey::TextManifestPage(key),
-            ..
-        }) => key,
-        Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
-            return Ok(blocked_database(vec![range], Vec::new()));
-        }
-    };
-    let Ok(page) = index_values::decode_manifest_page(&row_value) else {
-        return Ok(blocked_database(vec![range], Vec::new()));
-    };
-    let root_key = scoped_key(
-        scope,
-        index_keys::ScopedKey::TextManifestRoot(page_key.root),
-    );
-    let root_value = transaction.get(&root_key).await?;
-    let observations = vec![RowObservation {
-        key: root_key,
-        value: root_value.clone(),
-    }];
-    let Some(root_value) = root_value.as_ref() else {
-        return Ok(blocked_database(vec![range], observations));
-    };
-    let Ok(root) = index_values::decode_manifest_root(root_value) else {
-        return Ok(blocked_database(vec![range], observations));
-    };
-
-    let minimum_revision = u64::from(root.page_count()).saturating_add(1);
-    if page_key.root.index_id != operation.index_id()
-        || page_key.root.generation != operation.generation()
-        || page.index_id() != operation.index_id()
-        || page.generation() != operation.generation()
-        || page_key.root.partition != page.partition().fingerprint()
-        || page_key.page != page.page()
-        || root.index_id() != operation.index_id()
-        || root.generation() != operation.generation()
-        || page_key.root.partition != root.partition().fingerprint()
-        || root.partition() != page.partition()
-        || root.page_count() == 0
-        || root.split_count() == 0
-        || root.revision().get() < minimum_revision
-        || page_key.page >= root.page_count()
-    {
-        return Ok(blocked_database(vec![range], observations));
     }
 
-    let observed_before = match progress.partition() {
-        Some(partition)
-            if partition.partition_fingerprint() == page_key.root.partition.as_bytes()
-                && partition.root_revision() == root.revision()
-                && partition.page_count() == root.page_count()
-                && partition.split_count() == root.split_count()
-                && partition.next_page() == page_key.page =>
-        {
-            partition.observed_split_count()
-        }
-        None if page_key.page == 0 => 0,
-        Some(_) | None => return Ok(blocked_database(vec![range], observations)),
-    };
-    let page_split_count =
-        u64::try_from(page.entries().len()).expect("bounded manifest-page length fits u64");
-    // Both values are bounded by a valid root's page count times MAX_ENTRIES.
-    let observed_split_count = observed_before + page_split_count;
-    // `page < root.page_count <= u32::MAX` proves this addition cannot overflow.
-    let next_page = page_key.page + 1;
-    let next_partition = if next_page == root.page_count() {
-        if observed_split_count != root.split_count() {
-            return Ok(blocked_database(vec![range], observations));
-        }
-        None
-    } else {
-        let Ok(partition) = TextManifestPartitionValidation::try_new(
-            *page_key.root.partition.as_bytes(),
-            root.revision(),
-            root.page_count(),
-            root.split_count(),
-            next_page,
-            observed_split_count,
-        ) else {
-            return Ok(blocked_database(vec![range], observations));
+    let mut admitted_rows = 0;
+    let mut input_bytes = 0_u64;
+    let mut observations = Vec::new();
+    let mut blobs = Vec::new();
+    let mut distinct_blobs = HashSet::new();
+    let mut next_partition = progress.partition().cloned();
+    for (index, (row_key, row_value)) in scan.rows.iter().enumerate() {
+        let range = || vec![scan.range_through(index + 1)];
+        let page_key = match ManagedIndexKey::parse_from_slice(scope, row_key) {
+            Ok(ManagedIndexKey::Data {
+                kind: index_keys::ScopedKey::TextManifestPage(key),
+                ..
+            }) => key,
+            Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
+                return Ok(blocked_database(range(), observations));
+            }
         };
-        Some(partition)
-    };
+        let Ok(page) = index_values::decode_manifest_page(row_value) else {
+            return Ok(blocked_database(range(), observations));
+        };
+        let root_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestRoot(page_key.root),
+        );
+        let root_value = transaction.get(&root_key).await?;
+        let row_observations = vec![RowObservation {
+            key: root_key,
+            value: root_value.clone(),
+        }];
+        let Some(root_value) = root_value.as_ref() else {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        };
+        let Ok(root) = index_values::decode_manifest_root(root_value) else {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        };
 
-    let mut blobs = Vec::with_capacity(page.entries().len());
-    let mut distinct_blobs = HashSet::with_capacity(page.entries().len());
-    for split in page.entries().iter().copied() {
-        let blob = split.blob();
-        if !crate::search::text::split_reference_layout_is_exact(
-            split.footer_offset(),
-            split.footer_length(),
-            split.hot_cache_length(),
-            split.total_size(),
-        ) || !distinct_blobs.insert(blob)
+        let minimum_revision = u64::from(root.page_count()).saturating_add(1);
+        if page_key.root.index_id != operation.index_id()
+            || page_key.root.generation != operation.generation()
+            || page.index_id() != operation.index_id()
+            || page.generation() != operation.generation()
+            || page_key.root.partition != page.partition().fingerprint()
+            || page_key.page != page.page()
+            || root.index_id() != operation.index_id()
+            || root.generation() != operation.generation()
+            || page_key.root.partition != root.partition().fingerprint()
+            || root.partition() != page.partition()
+            || root.page_count() == 0
+            || root.split_count() == 0
+            || root.revision().get() < minimum_revision
+            || page_key.page >= root.page_count()
         {
-            return Ok(blocked_database(vec![range], observations));
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
         }
-        blobs.push(blob);
-    }
 
-    let input_bytes = row_bytes(&row_key, Some(&row_value)).saturating_add(
-        observations.iter().fold(0_u64, |bytes, observation| {
-            bytes.saturating_add(row_bytes(&observation.key, observation.value.as_ref()))
-        }),
-    );
-    if input_bytes > limits.max_input_bytes().get() {
-        return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-            ranges: vec![range],
-            observations,
-            result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
-                partition: page.partition().clone(),
-                observed: input_bytes,
-                limit: limits.max_input_bytes().get(),
+        let observed_before = match next_partition.as_ref() {
+            Some(partition)
+                if partition.partition_fingerprint() == page_key.root.partition.as_bytes()
+                    && partition.root_revision() == root.revision()
+                    && partition.page_count() == root.page_count()
+                    && partition.split_count() == root.split_count()
+                    && partition.next_page() == page_key.page =>
+            {
+                partition.observed_split_count()
+            }
+            None if page_key.page == 0 => 0,
+            Some(_) | None => {
+                observations.extend(row_observations);
+                return Ok(blocked_database(range(), observations));
+            }
+        };
+        let page_split_count =
+            u64::try_from(page.entries().len()).expect("bounded manifest-page length fits u64");
+        let observed_split_count = observed_before + page_split_count;
+        let next_page = page_key.page + 1;
+        let candidate_partition = if next_page == root.page_count() {
+            if observed_split_count != root.split_count() {
+                observations.extend(row_observations);
+                return Ok(blocked_database(range(), observations));
+            }
+            None
+        } else {
+            let Ok(partition) = TextManifestPartitionValidation::try_new(
+                *page_key.root.partition.as_bytes(),
+                root.revision(),
+                root.page_count(),
+                root.split_count(),
+                next_page,
+                observed_split_count,
+            ) else {
+                observations.extend(row_observations);
+                return Ok(blocked_database(range(), observations));
+            };
+            Some(partition)
+        };
+
+        let mut page_blobs = Vec::with_capacity(page.entries().len());
+        let mut page_distinct_blobs = HashSet::with_capacity(page.entries().len());
+        for split in page.entries().iter().copied() {
+            let blob = split.blob();
+            if !crate::search::text::split_reference_layout_is_exact(
+                split.footer_offset(),
+                split.footer_length(),
+                split.hot_cache_length(),
+                split.total_size(),
+            ) || !page_distinct_blobs.insert(blob)
+            {
+                observations.extend(row_observations);
+                return Ok(blocked_database(range(), observations));
+            }
+            page_blobs.push(blob);
+        }
+
+        let row_input_bytes = row_bytes(row_key, Some(row_value)).saturating_add(
+            row_observations.iter().fold(0_u64, |bytes, observation| {
+                bytes.saturating_add(row_bytes(&observation.key, observation.value.as_ref()))
             }),
-        }));
+        );
+        if admitted_rows == 0 && row_input_bytes > limits.max_input_bytes().get() {
+            observations.extend(row_observations);
+            return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+                ranges: range(),
+                observations,
+                result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
+                    partition: page.partition().clone(),
+                    observed: row_input_bytes,
+                    limit: limits.max_input_bytes().get(),
+                }),
+            }));
+        }
+        if input_bytes.saturating_add(row_input_bytes) > limits.max_input_bytes().get() {
+            break;
+        }
+
+        input_bytes = input_bytes.saturating_add(row_input_bytes);
+        observations.extend(row_observations);
+        for blob in page_blobs {
+            if distinct_blobs.insert(blob) {
+                blobs.push(blob);
+            }
+        }
+        next_partition = candidate_partition;
+        admitted_rows += 1;
     }
+    assert!(admitted_rows != 0, "a non-empty page scan admits one row");
     let Some(input_bytes) = progress.counters().input_bytes.checked_add(input_bytes) else {
         return Err(corruption(
             "text manifest-validation input counter overflowed",
@@ -324,13 +393,13 @@ async fn select_page(
         input_bytes,
         ..progress.counters()
     };
-    let cursor = IndexCursor::try_new(row_key)
+    let cursor = IndexCursor::try_new(scan.rows[admitted_rows - 1].0.clone())
         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
     let next = TextManifestPageValidationProgress::try_new(Some(cursor), next_partition, counters)
         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
     Ok(ValidationSelection::Page(PreparedPageValidation {
         database: PreparedDatabaseValidation {
-            ranges: vec![range],
+            ranges: vec![scan.range_through(admitted_rows)],
             observations,
             result: progressed(TextBuildStage::ValidateManifests(
                 TextManifestValidationProgress::Pages(next),
@@ -340,7 +409,7 @@ async fn select_page(
     }))
 }
 
-/// Validates one manifest root, including the canonical empty representation.
+/// Validates one bounded batch of roots, including canonical empty roots.
 async fn select_root(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -350,10 +419,17 @@ async fn select_root(
     limits: SearchIndexBatchLimits,
 ) -> Result<ValidationSelection> {
     let prefix = generation_prefix(scope, index_keys::RecordKind::TextManifestRoot, operation);
-    let (range, row) = select_one(transaction, prefix, progress.cursor.as_ref()).await?;
-    let Some((row_key, row_value)) = row else {
+    let scan = select_many(
+        transaction,
+        prefix,
+        progress.cursor.as_ref(),
+        limits.max_entities().get(),
+        limits.max_input_bytes().get(),
+    )
+    .await?;
+    if scan.rows.is_empty() {
         return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-            ranges: vec![range],
+            ranges: vec![scan.range_through(0)],
             observations: Vec::new(),
             result: progressed(TextBuildStage::ValidateManifests(
                 TextManifestValidationProgress::EntityStates(PrefixScanProgress {
@@ -362,103 +438,122 @@ async fn select_root(
                 }),
             )),
         }));
-    };
-    let root_key = match ManagedIndexKey::parse_from_slice(scope, &row_key) {
-        Ok(ManagedIndexKey::Data {
-            kind: index_keys::ScopedKey::TextManifestRoot(key),
-            ..
-        }) => key,
-        Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
-            return Ok(blocked_database(vec![range], Vec::new()));
-        }
-    };
-    let Ok(root) = index_values::decode_manifest_root(&row_value) else {
-        return Ok(blocked_database(vec![range], Vec::new()));
-    };
-    let partition_mode_is_valid = match (definition.tenant_property(), root.partition()) {
-        (None, TextPartition::Unpartitioned) | (Some(_), TextPartition::TenantValue(_)) => true,
-        (None, TextPartition::TenantValue(_)) | (Some(_), TextPartition::Unpartitioned) => false,
-    };
-    let revision_is_valid = if root.page_count() == 0 {
-        root.split_count() == 0
-    } else {
-        root.revision().get() >= u64::from(root.page_count()).saturating_add(1)
-            && root.split_count() != 0
-    };
-    if root_key.index_id != operation.index_id()
-        || root_key.generation != operation.generation()
-        || root.index_id() != operation.index_id()
-        || root.generation() != operation.generation()
-        || root_key.partition != root.partition().fingerprint()
-        || !partition_mode_is_valid
-        || !revision_is_valid
-    {
-        return Ok(blocked_database(vec![range], Vec::new()));
     }
 
-    let corpus_key = super::statistics::corpus_key(
-        scope,
-        operation.index_id(),
-        operation.generation(),
-        root.partition(),
-    );
-    let corpus_value = transaction.get(&corpus_key).await?;
-    let mut observations = vec![RowObservation {
-        key: corpus_key,
-        value: corpus_value.clone(),
-    }];
-    if super::statistics::validate_manifest_corpus(
-        corpus_value.as_deref(),
-        operation.index_id(),
-        operation.generation(),
-        root.partition(),
-        root.split_count(),
-    )
-    .is_err()
-    {
-        return Ok(blocked_database(vec![range], observations));
-    }
-    if root.page_count() != 0 {
-        let page_key = scoped_key(
+    let mut admitted_rows = 0;
+    let mut input_bytes = 0_u64;
+    let mut observations = Vec::new();
+    for (index, (row_key, row_value)) in scan.rows.iter().enumerate() {
+        let range = || vec![scan.range_through(index + 1)];
+        let root_key = match ManagedIndexKey::parse_from_slice(scope, row_key) {
+            Ok(ManagedIndexKey::Data {
+                kind: index_keys::ScopedKey::TextManifestRoot(key),
+                ..
+            }) => key,
+            Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
+                return Ok(blocked_database(range(), observations));
+            }
+        };
+        let Ok(root) = index_values::decode_manifest_root(row_value) else {
+            return Ok(blocked_database(range(), observations));
+        };
+        let partition_mode_is_valid = match (definition.tenant_property(), root.partition()) {
+            (None, TextPartition::Unpartitioned) | (Some(_), TextPartition::TenantValue(_)) => true,
+            (None, TextPartition::TenantValue(_)) | (Some(_), TextPartition::Unpartitioned) => {
+                false
+            }
+        };
+        let revision_is_valid = if root.page_count() == 0 {
+            root.split_count() == 0
+        } else {
+            root.revision().get() >= u64::from(root.page_count()).saturating_add(1)
+                && root.split_count() != 0
+        };
+        if root_key.index_id != operation.index_id()
+            || root_key.generation != operation.generation()
+            || root.index_id() != operation.index_id()
+            || root.generation() != operation.generation()
+            || root_key.partition != root.partition().fingerprint()
+            || !partition_mode_is_valid
+            || !revision_is_valid
+        {
+            return Ok(blocked_database(range(), observations));
+        }
+
+        let corpus_key = super::statistics::corpus_key(
             scope,
-            index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
-                root: root_key,
-                page: 0,
+            operation.index_id(),
+            operation.generation(),
+            root.partition(),
+        );
+        let corpus_value = transaction.get(&corpus_key).await?;
+        let mut row_observations = vec![RowObservation {
+            key: corpus_key,
+            value: corpus_value.clone(),
+        }];
+        if super::statistics::validate_manifest_corpus(
+            corpus_value.as_deref(),
+            operation.index_id(),
+            operation.generation(),
+            root.partition(),
+            root.split_count(),
+        )
+        .is_err()
+        {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        }
+        if root.page_count() != 0 {
+            let page_key = scoped_key(
+                scope,
+                index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
+                    root: root_key,
+                    page: 0,
+                }),
+            );
+            let page_value = transaction.get(&page_key).await?;
+            let exact_page_zero = page_value.as_ref().is_some_and(|value| {
+                index_values::decode_manifest_page(value).is_ok_and(|page| {
+                    page.index_id() == operation.index_id()
+                        && page.generation() == operation.generation()
+                        && page.partition() == root.partition()
+                        && page.page() == 0
+                })
+            });
+            row_observations.push(RowObservation {
+                key: page_key,
+                value: page_value,
+            });
+            if !exact_page_zero {
+                observations.extend(row_observations);
+                return Ok(blocked_database(range(), observations));
+            }
+        }
+        let row_input_bytes = row_bytes(row_key, Some(row_value)).saturating_add(
+            row_observations.iter().fold(0_u64, |bytes, observation| {
+                bytes.saturating_add(row_bytes(&observation.key, observation.value.as_ref()))
             }),
         );
-        let page_value = transaction.get(&page_key).await?;
-        let exact_page_zero = page_value.as_ref().is_some_and(|value| {
-            index_values::decode_manifest_page(value).is_ok_and(|page| {
-                page.index_id() == operation.index_id()
-                    && page.generation() == operation.generation()
-                    && page.partition() == root.partition()
-                    && page.page() == 0
-            })
-        });
-        observations.push(RowObservation {
-            key: page_key,
-            value: page_value,
-        });
-        if !exact_page_zero {
-            return Ok(blocked_database(vec![range], observations));
+        if admitted_rows == 0 && row_input_bytes > limits.max_input_bytes().get() {
+            observations.extend(row_observations);
+            return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+                ranges: range(),
+                observations,
+                result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
+                    partition: root.partition().clone(),
+                    observed: row_input_bytes,
+                    limit: limits.max_input_bytes().get(),
+                }),
+            }));
         }
+        if input_bytes.saturating_add(row_input_bytes) > limits.max_input_bytes().get() {
+            break;
+        }
+        input_bytes = input_bytes.saturating_add(row_input_bytes);
+        observations.extend(row_observations);
+        admitted_rows += 1;
     }
-    let input_bytes = row_bytes(&row_key, Some(&row_value)).saturating_add(
-        observations.iter().fold(0_u64, |bytes, observation| {
-            bytes.saturating_add(row_bytes(&observation.key, observation.value.as_ref()))
-        }),
-    );
-    if input_bytes > limits.max_input_bytes().get() {
-        return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-            ranges: vec![range],
-            observations,
-            result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
-                partition: root.partition().clone(),
-                observed: input_bytes,
-                limit: limits.max_input_bytes().get(),
-            }),
-        }));
-    }
+    assert!(admitted_rows != 0, "a non-empty root scan admits one row");
     let Some(input_bytes) = progress.counters.input_bytes.checked_add(input_bytes) else {
         return Err(corruption("text root-validation input counter overflowed"));
     };
@@ -467,12 +562,12 @@ async fn select_root(
         ..progress.counters
     };
     Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-        ranges: vec![range],
+        ranges: vec![scan.range_through(admitted_rows)],
         observations,
         result: progressed(TextBuildStage::ValidateManifests(
             TextManifestValidationProgress::Roots(PrefixScanProgress {
                 cursor: Some(
-                    IndexCursor::try_new(row_key)
+                    IndexCursor::try_new(scan.rows[admitted_rows - 1].0.clone())
                         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?,
                 ),
                 counters,
@@ -481,7 +576,7 @@ async fn select_root(
     }))
 }
 
-/// Validates one entity-state row against its exact owning root revision.
+/// Validates one bounded entity-state batch against exact owning roots.
 async fn select_entity_state(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -490,143 +585,175 @@ async fn select_entity_state(
     limits: SearchIndexBatchLimits,
 ) -> Result<ValidationSelection> {
     let prefix = generation_prefix(scope, index_keys::RecordKind::TextEntityState, operation);
-    let (range, row) = select_one(transaction, prefix, progress.cursor.as_ref()).await?;
-    let Some((row_key, row_value)) = row else {
+    let scan = select_many(
+        transaction,
+        prefix,
+        progress.cursor.as_ref(),
+        limits.max_entities().get(),
+        limits.max_input_bytes().get(),
+    )
+    .await?;
+    if scan.rows.is_empty() {
         return select_activation_prerequisites(
             transaction,
             scope,
             operation,
             progress.counters,
-            range,
+            scan.range_through(0),
         )
         .await;
-    };
-    let state_key = match ManagedIndexKey::parse_from_slice(scope, &row_key) {
-        Ok(ManagedIndexKey::Data {
-            kind: index_keys::ScopedKey::TextEntityState(key),
-            ..
-        }) => key,
-        Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
-            return Ok(blocked_database(vec![range], Vec::new()));
-        }
-    };
-    let Ok(state) = index_values::decode_text_entity_state(&row_value) else {
-        return Ok(blocked_database(vec![range], Vec::new()));
-    };
-    let root_key = scoped_key(
-        scope,
-        index_keys::ScopedKey::TextManifestRoot(state_key.root),
-    );
-    let root_value = transaction.get(&root_key).await?;
-    let mut observations = vec![RowObservation {
-        key: root_key,
-        value: root_value.clone(),
-    }];
-    let Some(root_value) = root_value.as_ref() else {
-        return Ok(blocked_database(vec![range], observations));
-    };
-    let Ok(root) = index_values::decode_manifest_root(root_value) else {
-        return Ok(blocked_database(vec![range], observations));
-    };
-    if state_key.root.index_id != operation.index_id()
-        || state_key.root.generation != operation.generation()
-        || state.index_id != operation.index_id()
-        || state.generation != operation.generation()
-        || state_key.root.partition != state.partition.fingerprint()
-        || state_key.entity.kind != state.entity_kind
-        || state_key.entity.id != state.entity_id
-        || root.index_id() != operation.index_id()
-        || root.generation() != operation.generation()
-        || root.partition() != &state.partition
-        || state.logical_version.get() > root.revision().get()
-        || (state.live && root.page_count() == 0)
-    {
-        return Ok(blocked_database(vec![range], observations));
     }
-    let marker_key = scoped_key(
-        scope,
-        index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
-            index_id: operation.index_id(),
-            generation: operation.generation(),
-            entity: state_key.entity,
-        }),
-    );
-    let marker_value = transaction.get(&marker_key).await?;
-    observations.push(RowObservation {
-        key: marker_key,
-        value: marker_value.clone(),
-    });
-    let Some(marker_value) = marker_value.as_ref() else {
-        return Ok(blocked_database(vec![range], observations));
-    };
-    let Ok(marker) = index_values::decode_statistics_entity(marker_value) else {
-        return Ok(blocked_database(vec![range], observations));
-    };
-    if marker.index_id != operation.index_id()
-        || marker.generation != operation.generation()
-        || marker.entity_kind != state_key.entity.kind
-        || marker.entity_id != state_key.entity.id
-    {
-        return Ok(blocked_database(vec![range], observations));
-    }
-    let marker_matches = match (&marker.contribution, state.live) {
-        (work::TextStatisticsContribution::Present { partition, .. }, true) => {
-            partition == &state.partition
-        }
-        (work::TextStatisticsContribution::Absent, false) => true,
-        (work::TextStatisticsContribution::Present { partition, .. }, false)
-            if partition != &state.partition =>
+
+    let mut admitted_rows = 0;
+    let mut input_bytes = 0_u64;
+    let mut observations = Vec::new();
+    for (index, (row_key, row_value)) in scan.rows.iter().enumerate() {
+        let range = || vec![scan.range_through(index + 1)];
+        let state_key = match ManagedIndexKey::parse_from_slice(scope, row_key) {
+            Ok(ManagedIndexKey::Data {
+                kind: index_keys::ScopedKey::TextEntityState(key),
+                ..
+            }) => key,
+            Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
+                return Ok(blocked_database(range(), observations));
+            }
+        };
+        let Ok(state) = index_values::decode_text_entity_state(row_value) else {
+            return Ok(blocked_database(range(), observations));
+        };
+        let root_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestRoot(state_key.root),
+        );
+        let root_value = transaction.get(&root_key).await?;
+        let mut row_observations = vec![RowObservation {
+            key: root_key,
+            value: root_value.clone(),
+        }];
+        let Some(root_value) = root_value.as_ref() else {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        };
+        let Ok(root) = index_values::decode_manifest_root(root_value) else {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        };
+        if state_key.root.index_id != operation.index_id()
+            || state_key.root.generation != operation.generation()
+            || state.index_id != operation.index_id()
+            || state.generation != operation.generation()
+            || state_key.root.partition != state.partition.fingerprint()
+            || state_key.entity.kind != state.entity_kind
+            || state_key.entity.id != state.entity_id
+            || root.index_id() != operation.index_id()
+            || root.generation() != operation.generation()
+            || root.partition() != &state.partition
+            || state.logical_version.get() > root.revision().get()
+            || (state.live && root.page_count() == 0)
         {
-            let live_key = scoped_key(
-                scope,
-                index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
-                    root: index_keys::TextManifestRootKey {
-                        index_id: operation.index_id(),
-                        generation: operation.generation(),
-                        partition: partition.fingerprint(),
-                    },
-                    entity: state_key.entity,
-                }),
-            );
-            let live_value = transaction.get(&live_key).await?;
-            let exact_live_state = live_value.as_ref().is_some_and(|value| {
-                index_values::decode_text_entity_state(value).is_ok_and(|live| {
-                    live.index_id == operation.index_id()
-                        && live.generation == operation.generation()
-                        && live.partition == *partition
-                        && live.entity_kind == state_key.entity.kind
-                        && live.entity_id == state_key.entity.id
-                        && live.live
-                })
-            });
-            observations.push(RowObservation {
-                key: live_key,
-                value: live_value,
-            });
-            exact_live_state
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
         }
-        (work::TextStatisticsContribution::Absent, true)
-        | (work::TextStatisticsContribution::Present { .. }, false) => false,
-    };
-    if !marker_matches {
-        return Ok(blocked_database(vec![range], observations));
-    }
-    let input_bytes = row_bytes(&row_key, Some(&row_value)).saturating_add(
-        observations.iter().fold(0_u64, |bytes, observation| {
-            bytes.saturating_add(row_bytes(&observation.key, observation.value.as_ref()))
-        }),
-    );
-    if input_bytes > limits.max_input_bytes().get() {
-        return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-            ranges: vec![range],
-            observations,
-            result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
-                partition: state.partition,
-                observed: input_bytes,
-                limit: limits.max_input_bytes().get(),
+        let marker_key = scoped_key(
+            scope,
+            index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity: state_key.entity,
             }),
-        }));
+        );
+        let marker_value = transaction.get(&marker_key).await?;
+        row_observations.push(RowObservation {
+            key: marker_key,
+            value: marker_value.clone(),
+        });
+        let Some(marker_value) = marker_value.as_ref() else {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        };
+        let Ok(marker) = index_values::decode_statistics_entity(marker_value) else {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        };
+        if marker.index_id != operation.index_id()
+            || marker.generation != operation.generation()
+            || marker.entity_kind != state_key.entity.kind
+            || marker.entity_id != state_key.entity.id
+        {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        }
+        let marker_matches = match (&marker.contribution, state.live) {
+            (work::TextStatisticsContribution::Present { partition, .. }, true) => {
+                partition == &state.partition
+            }
+            (work::TextStatisticsContribution::Absent, false) => true,
+            (work::TextStatisticsContribution::Present { partition, .. }, false)
+                if partition != &state.partition =>
+            {
+                let live_key = scoped_key(
+                    scope,
+                    index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+                        root: index_keys::TextManifestRootKey {
+                            index_id: operation.index_id(),
+                            generation: operation.generation(),
+                            partition: partition.fingerprint(),
+                        },
+                        entity: state_key.entity,
+                    }),
+                );
+                let live_value = transaction.get(&live_key).await?;
+                let exact_live_state = live_value.as_ref().is_some_and(|value| {
+                    index_values::decode_text_entity_state(value).is_ok_and(|live| {
+                        live.index_id == operation.index_id()
+                            && live.generation == operation.generation()
+                            && live.partition == *partition
+                            && live.entity_kind == state_key.entity.kind
+                            && live.entity_id == state_key.entity.id
+                            && live.live
+                    })
+                });
+                row_observations.push(RowObservation {
+                    key: live_key,
+                    value: live_value,
+                });
+                exact_live_state
+            }
+            (work::TextStatisticsContribution::Absent, true)
+            | (work::TextStatisticsContribution::Present { .. }, false) => false,
+        };
+        if !marker_matches {
+            observations.extend(row_observations);
+            return Ok(blocked_database(range(), observations));
+        }
+        let row_input_bytes = row_bytes(row_key, Some(row_value)).saturating_add(
+            row_observations.iter().fold(0_u64, |bytes, observation| {
+                bytes.saturating_add(row_bytes(&observation.key, observation.value.as_ref()))
+            }),
+        );
+        if admitted_rows == 0 && row_input_bytes > limits.max_input_bytes().get() {
+            observations.extend(row_observations);
+            return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+                ranges: range(),
+                observations,
+                result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
+                    partition: state.partition,
+                    observed: row_input_bytes,
+                    limit: limits.max_input_bytes().get(),
+                }),
+            }));
+        }
+        if input_bytes.saturating_add(row_input_bytes) > limits.max_input_bytes().get() {
+            break;
+        }
+        input_bytes = input_bytes.saturating_add(row_input_bytes);
+        observations.extend(row_observations);
+        admitted_rows += 1;
     }
+    assert!(
+        admitted_rows != 0,
+        "a non-empty entity-state scan admits one row"
+    );
     let Some(input_bytes) = progress.counters.input_bytes.checked_add(input_bytes) else {
         return Err(corruption(
             "text entity-state validation input counter overflowed",
@@ -637,12 +764,12 @@ async fn select_entity_state(
         ..progress.counters
     };
     Ok(ValidationSelection::Database(PreparedDatabaseValidation {
-        ranges: vec![range],
+        ranges: vec![scan.range_through(admitted_rows)],
         observations,
         result: progressed(TextBuildStage::ValidateManifests(
             TextManifestValidationProgress::EntityStates(PrefixScanProgress {
                 cursor: Some(
-                    IndexCursor::try_new(row_key)
+                    IndexCursor::try_new(scan.rows[admitted_rows - 1].0.clone())
                         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?,
                 ),
                 counters,
@@ -683,23 +810,44 @@ async fn select_activation_prerequisites(
     }))
 }
 
+/// Selects at most `max_rows` exact rows from one typed prefix.
+async fn select_many(
+    transaction: &DbTransaction,
+    prefix: Bytes,
+    cursor: Option<&IndexCursor>,
+    max_rows: usize,
+    max_input_bytes: u64,
+) -> Result<PreparedValidationScan> {
+    let start = validation_start(&prefix, cursor)?;
+    let bounds = (start.clone(), Bound::<Bytes>::Unbounded);
+    let mut source = transaction.scan_prefix(&prefix, bounds).await?;
+    let mut rows = Vec::new();
+    let mut input_bytes = 0_u64;
+    while rows.len() < max_rows {
+        let Some(row) = source.next().await? else {
+            break;
+        };
+        let row_input_bytes = row_bytes(&row.key, Some(&row.value));
+        if !rows.is_empty() && input_bytes.saturating_add(row_input_bytes) > max_input_bytes {
+            break;
+        }
+        input_bytes = input_bytes.saturating_add(row_input_bytes);
+        rows.push((row.key, row.value));
+    }
+    Ok(PreparedValidationScan {
+        prefix,
+        start,
+        rows,
+    })
+}
+
 /// Selects one exact row or one exact exhausted suffix from a typed prefix.
 async fn select_one(
     transaction: &DbTransaction,
     prefix: Bytes,
     cursor: Option<&IndexCursor>,
 ) -> Result<(PreparedValidationRange, Option<(Bytes, Bytes)>)> {
-    let start = match cursor {
-        Some(cursor) => {
-            let Some(suffix) = cursor.as_bytes().strip_prefix(prefix.as_ref()) else {
-                return Err(corruption(
-                    "text manifest-validation cursor is outside its exact prefix",
-                ));
-            };
-            Bound::Excluded(Bytes::copy_from_slice(suffix))
-        }
-        None => Bound::Unbounded,
-    };
+    let start = validation_start(&prefix, cursor)?;
     let bounds = (start.clone(), Bound::<Bytes>::Unbounded);
     let mut rows = transaction.scan_prefix(&prefix, bounds).await?;
     let Some(row) = rows.next().await? else {
@@ -728,6 +876,21 @@ async fn select_one(
         },
         Some(selected),
     ))
+}
+
+/// Derives the exact suffix boundary represented by one optional cursor.
+fn validation_start(prefix: &Bytes, cursor: Option<&IndexCursor>) -> Result<Bound<Bytes>> {
+    Ok(match cursor {
+        Some(cursor) => {
+            let Some(suffix) = cursor.as_bytes().strip_prefix(prefix.as_ref()) else {
+                return Err(corruption(
+                    "text manifest-validation cursor is outside its exact prefix",
+                ));
+            };
+            Bound::Excluded(Bytes::copy_from_slice(suffix))
+        }
+        None => Bound::Unbounded,
+    })
 }
 
 /// Constructs a range-fenced durable invariant blocker.
