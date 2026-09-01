@@ -47,6 +47,8 @@ use super::{
     LifecycleTestScheduling, LifecycleWorkTarget,
 };
 
+mod all_index_validation;
+
 const MAXIMUM_CONTROLLER_TURNS: usize = 4_096;
 
 /// Runs all deterministic DDL shape and convergence contracts.
@@ -1215,6 +1217,11 @@ pub(super) async fn run_mutations() {
     run_secondary_edge_mutation_interleaving().await;
     run_every_family_public_mutation_interleaving().await;
     run_partitioned_search_edge_tenant_moves().await;
+}
+
+/// Runs late insert, update, and delete races at every family validation boundary.
+pub(super) async fn run_all_index_validation_mutations() {
+    all_index_validation::run().await;
 }
 
 /// Interleaves source changes with two builds and proves unique repair/retry.

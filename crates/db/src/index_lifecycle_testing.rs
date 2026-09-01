@@ -156,6 +156,12 @@ pub async fn run_deterministic_lifecycle_mutation_contracts() {
     contracts::run_mutations().await;
 }
 
+/// Runs late-mutation convergence for every supported managed index shape.
+pub async fn run_deterministic_all_index_validation_contracts() {
+    let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
+    contracts::run_all_index_validation_mutations().await;
+}
+
 /// Runs retry-safe concurrent CREATE convergence for every family.
 pub async fn run_deterministic_lifecycle_race_contracts() {
     let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;

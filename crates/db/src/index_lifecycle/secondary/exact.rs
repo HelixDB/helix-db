@@ -264,11 +264,19 @@ trait ExactRangeAccumulator {
     fn finish(self) -> Self::Output;
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 #[derive(Default)]
 struct ExactRangeOwners(Vec<u64>);
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 impl ExactRangeAccumulator for ExactRangeOwners {
     type Output = Vec<u64>;
 
@@ -308,7 +316,11 @@ impl ExactRangeAccumulator for ExactRangeCount {
 ///
 /// Bitmap membership is evaluated in executable-plan order and `limit` is an
 /// accepted-owner threshold, not a storage-row limit.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn scan_active_range_generation_with_membership(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,

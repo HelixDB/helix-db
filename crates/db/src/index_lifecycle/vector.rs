@@ -27,7 +27,7 @@ use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
 use crate::encoding::v2::legacy::vector::transaction_guard::{
     decode_active_txn_guard, LegacyVectorTxnGuardKey,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::encode_build_delta;
 use crate::encoding::v2::values::property::encode_index_partition_value;
@@ -40,7 +40,7 @@ use crate::search::vector::{
 
 use super::repository;
 use super::work::{CoalescedBuildDeltaValue, VectorTenantPartition};
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use super::IndexStateV2;
 use super::{
     ActiveIndexHandle, IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
@@ -103,7 +103,11 @@ pub(crate) struct VectorEntityMutation<'a> {
 
 impl<'a> VectorEntityMutation<'a> {
     /// Binds one entity to its complete before/after property snapshots.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(
+        test,
+        feature = "production-coverage",
+        feature = "index-lifecycle-testing"
+    ))]
     pub(crate) const fn new(
         entity_kind: IndexElementKind,
         entity_id: u64,
@@ -173,7 +177,7 @@ impl VectorMutationSet {
 /// The canonical record scan is part of the caller's serializable graph
 /// transaction. Activation/drop revisions therefore conflict with the graph
 /// commit rather than allowing writes to cross a lifecycle boundary.
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -231,7 +235,11 @@ pub(crate) async fn load_mutation_set(
 /// `before` and `after` are complete authoritative property sets. Partition
 /// moves therefore become a typed remove-plus-upsert, and hidden builds receive
 /// one coalesced reconciliation marker for any semantic document change.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn maintain_entity_with_runtime(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -355,7 +363,11 @@ pub(crate) async fn maintain_routed_entity_with_runtime(
 }
 
 /// Preserves the isolated per-entity contract as a differential-test oracle.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn maintain_entity(
     transaction: &DbTransaction,
     scope: DataScope,

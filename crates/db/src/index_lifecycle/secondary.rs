@@ -85,7 +85,7 @@ use super::IndexScopeGates;
 mod exact;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) use exact::scan_active_range_generation_with_membership;
 pub(crate) use exact::{
     count_active_range_generation_with_membership,
@@ -2832,7 +2832,11 @@ fn property_value_type_name(value: &PropertyValue) -> &'static str {
 /// with `handle`. Unique entries and V4 non-unique bitmaps each use one point
 /// read. Authoritative-null lookup remains a graph scan because nulls are not
 /// physically indexed.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn lookup_active_equality_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -5775,6 +5779,125 @@ mod tests {
             }
         );
         db.close().await.expect("edge bitmap database closes");
+    }
+
+    #[tokio::test]
+    async fn bitmap_reconciliation_persists_physical_and_applied_state_together() {
+        let db = test_db("secondary-bitmap-reconciliation-state").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "status")
+                .expect("node equality definition validates"),
+        );
+        let ValidatedDynamicIndexDefinition::Secondary(definition) = definition else {
+            unreachable!("secondary fixture is type-checked")
+        };
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::initial(),
+        };
+        let applied_key = scoped_index_key(
+            scope,
+            ScopedKey::AppliedState(IndexEntityStateKey {
+                index_id: IndexId::initial(),
+                generation: IndexGenerationId::initial(),
+                entity,
+            }),
+        );
+        let next = CanonicalSecondaryValue::equality_string("ready");
+        let ReconciliationPlan::Writes(plan) = reconciliation_plan_from_observations(
+            scope,
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            &definition,
+            entity,
+            applied_key.clone(),
+            None,
+            Some(next.clone()),
+            &BTreeMap::new(),
+        )
+        .expect("bitmap reconciliation plan validates") else {
+            panic!("fresh bitmap membership cannot be blocked")
+        };
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("bitmap reconciliation transaction begins");
+        plan.stage(&transaction)
+            .await
+            .expect("bitmap reconciliation stages");
+        transaction
+            .commit()
+            .await
+            .expect("bitmap reconciliation commits");
+
+        assert!(db
+            .get(&applied_key)
+            .await
+            .expect("applied state is readable")
+            .is_some());
+        let bitmap_key = secondary_entry_key(
+            scope,
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            &definition,
+            next,
+            entity.id,
+        )
+        .expect("bitmap key validates");
+        assert_eq!(
+            SecondaryEqualityBitmapValue::decode(
+                &db.get(bitmap_key)
+                    .await
+                    .expect("bitmap is readable")
+                    .expect("bitmap exists"),
+            )
+            .expect("bitmap decodes")
+            .ids()
+            .iter()
+            .collect::<Vec<_>>(),
+            vec![entity.id.get()]
+        );
+        db.close()
+            .await
+            .expect("bitmap reconciliation database closes");
+    }
+
+    #[tokio::test]
+    async fn bitmap_source_scan_retains_applied_state_for_catch_up() {
+        let db = test_db("secondary-bitmap-source-scan-state").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "status")
+                .expect("node equality definition validates"),
+        );
+        put_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &[
+                Property::string("$label", "User"),
+                Property::string("status", "ready"),
+            ],
+        )
+        .await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Progressed
+        );
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation,)
+                .await
+                .len(),
+            1
+        );
+        db.close()
+            .await
+            .expect("bitmap source scan database closes");
     }
 
     #[tokio::test]

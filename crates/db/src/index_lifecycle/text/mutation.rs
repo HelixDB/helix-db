@@ -18,15 +18,15 @@ use slatedb::DbTransaction;
 use crate::encoding::property::Property;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey;
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::encoding::v2::keys::RecordKind;
 use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::encode_build_delta;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::work::CoalescedBuildDeltaValue;
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::index_lifecycle::IndexStateV2;
 use crate::index_lifecycle::{
     IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, ValidatedDynamicIndexDefinition,
@@ -93,7 +93,7 @@ impl TextBuildDeltaMeasurements {
 /// Private rows ensure downstream code cannot substitute unmeasured deltas or
 /// stage them before request-level admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PreparedTextBuildDeltas {
+pub(crate) struct PreparedTextBuildDeltas {
     rows: Vec<PreparedTextBuildDelta>,
     measurements: TextBuildDeltaMeasurements,
 }
@@ -131,8 +131,8 @@ impl PreparedTextBuildDeltas {
 
 /// Revalidated hidden-build rows ready for infallible staging.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)]
-pub(super) struct ValidatedTextBuildDeltas {
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) struct ValidatedTextBuildDeltas {
     rows: Vec<PreparedTextBuildDelta>,
 }
 
@@ -337,7 +337,7 @@ impl TextMutationSet {
 /// Building generations become coalesced-delta targets. Active generations
 /// become definition-bearing handles consumed only by the complete request
 /// orchestrator.
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -397,8 +397,8 @@ pub(crate) async fn load_mutation_set(
 /// property therefore creates no lifecycle work. Every source row is observed
 /// once here and once during validation, and every canonical replacement row is
 /// measured without staging.
-#[cfg(test)]
-pub(super) async fn prepare_text_build_deltas(
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) async fn prepare_text_build_deltas(
     transaction: &DbTransaction,
     scope: DataScope,
     mutations: &TextMutationSet,
@@ -640,8 +640,8 @@ pub(super) fn stage_prepared_text_build_delta_rows(
 }
 
 /// Revalidates every hidden-build delta source without staging any write.
-#[cfg(test)]
-pub(super) async fn validate_text_build_deltas(
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) async fn validate_text_build_deltas(
     transaction: &DbTransaction,
     prepared: &PreparedTextBuildDeltas,
 ) -> Result<ValidatedTextBuildDeltas> {
@@ -669,8 +669,8 @@ pub(super) async fn validate_text_build_deltas(
 }
 
 /// Stages hidden-build rows only after the complete request has validated.
-#[cfg(test)]
-pub(super) fn stage_validated_text_build_deltas(
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) fn stage_validated_text_build_deltas(
     transaction: &DbTransaction,
     validated: ValidatedTextBuildDeltas,
 ) -> Result<()> {
