@@ -68,6 +68,23 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 
 `HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image.
 
+To route only WAL objects through another S3-compatible client, set at least one
+of `WAL_S3_BUCKET`, `WAL_AWS_ENDPOINT`, or `WAL_AWS_ENDPOINT_URL_S3`:
+
+| Variable | Purpose |
+| --- | --- |
+| `WAL_S3_BUCKET` | WAL bucket; defaults to `S3_BUCKET`. |
+| `WAL_S3_REGION` | WAL region; defaults to the resolved main S3 region. |
+| `WAL_AWS_ENDPOINT` | WAL endpoint; `WAL_AWS_ENDPOINT_URL_S3` is the fallback, then the main endpoint. |
+| `WAL_AWS_ALLOW_HTTP` | WAL HTTP policy; defaults to `AWS_ALLOW_HTTP`. |
+
+The WAL client uses the standard AWS credential variables and the same `DB_PATH`.
+For a cache or write-through proxy over the main bucket, set only a WAL endpoint;
+the main `S3_BUCKET` and path are inherited. The proxy must expose the existing WAL
+objects at that path because HelixDB does not migrate them. A WAL endpoint without
+`S3_BUCKET` or `WAL_S3_BUCKET` is rejected. WAL region or HTTP overrides without a
+WAL bucket or endpoint are also rejected.
+
 ## Test
 
 After loading a native image, run the full packaging and runtime suite:

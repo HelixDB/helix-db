@@ -117,17 +117,40 @@ if not isinstance(value, (list, dict)) or len(value) == 0:
 PY
 }
 
-assert_minio_objects_present() {
-  local objects
-  objects=$(docker run --rm \
+list_minio_bucket() {
+  local bucket=$1
+  docker run --rm \
     --platform "$platform" \
     --network "${project}_default" \
     --entrypoint /bin/sh \
     "$mc_image" \
-    -c 'until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do sleep 1; done; mc ls --recursive local/helix-db')
-  if [[ "$objects" != *"db/manifest/"* ]]; then
-    printf '%s\n' "$objects" >&2
-    printf 'expected MinIO to contain db/manifest objects\n' >&2
+    -c 'until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do sleep 1; done; mc ls --recursive "local/$1"' \
+    _ "$bucket"
+}
+
+assert_minio_object_placement() {
+  local main_objects
+  local wal_objects
+  main_objects=$(list_minio_bucket helix-db)
+  wal_objects=$(list_minio_bucket helix-wal)
+  if [[ "$main_objects" != *"db/manifest/"* ]]; then
+    printf '%s\n' "$main_objects" >&2
+    printf 'expected the main bucket to contain db/manifest objects\n' >&2
+    exit 1
+  fi
+  if [[ "$main_objects" == *"db/wal/"* ]]; then
+    printf '%s\n' "$main_objects" >&2
+    printf 'expected the main bucket not to contain db/wal objects\n' >&2
+    exit 1
+  fi
+  if [[ "$wal_objects" != *"db/wal/"* ]]; then
+    printf '%s\n' "$wal_objects" >&2
+    printf 'expected the WAL bucket to contain db/wal objects\n' >&2
+    exit 1
+  fi
+  if [[ "$wal_objects" == *"db/manifest/"* || "$wal_objects" == *"db/compacted/"* || "$wal_objects" == *"db/compactions/"* ]]; then
+    printf '%s\n' "$wal_objects" >&2
+    printf 'expected the WAL bucket not to contain main-store objects\n' >&2
     exit 1
   fi
 }
@@ -138,7 +161,7 @@ wait_for_http "http://127.0.0.1:${port}/healthz"
 wait_for_http "http://127.0.0.1:${port}/readyz"
 post_json dynamic-write.json true >/dev/null
 assert_users_nonempty "$(post_json dynamic-read.json)"
-assert_minio_objects_present
+assert_minio_object_placement
 
 log "Replacing Helix while preserving MinIO"
 compose up -d --force-recreate helix >/dev/null
@@ -150,4 +173,5 @@ compose down >/dev/null
 compose up -d >/dev/null
 wait_for_http "http://127.0.0.1:${port}/readyz"
 assert_users_nonempty "$(post_json dynamic-read.json)"
+assert_minio_object_placement
 log "S3-compatible Compose smoke test passed"

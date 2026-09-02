@@ -231,6 +231,7 @@ run_native_disk_test() {
 run_invalid_configuration_tests() {
   local bad_address="helixdb-image-bad-address-$resource_suffix"
   local conflicting_storage="helixdb-image-conflicting-storage-$resource_suffix"
+  local partial_wal="helixdb-image-partial-wal-$resource_suffix"
 
   log "Testing invalid startup configuration"
   start_container "$bad_address" "$((base_port + 4))" -e HELIX_HTTP_ADDR=not-an-address
@@ -242,10 +243,14 @@ run_invalid_configuration_tests() {
     -e S3_BUCKET=conflict
   wait_for_exit "$conflicting_storage"
   assert_nonzero_exit "$conflicting_storage"
+
+  start_container "$partial_wal" "$((base_port + 6))" -e WAL_S3_REGION=us-east-1
+  wait_for_exit "$partial_wal"
+  assert_nonzero_exit "$partial_wal"
 }
 
 run_signal_test() {
-  local port=$((base_port + 6))
+  local port=$((base_port + 7))
   local container="helixdb-image-sigterm-$resource_suffix"
   local exit_code
 

@@ -118,7 +118,7 @@ S3-compatible storage and is interpreted as a real bucket name.
 
 ## Run with MinIO persistence
 
-This Compose configuration creates a bucket and stores HelixDB objects in the
+This Compose configuration creates separate main and WAL buckets in the same
 `minio-data` volume:
 
 ```yaml docker-compose.yaml expandable
@@ -144,6 +144,7 @@ services:
       - |
         until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
         mc mb --ignore-existing local/helix-db
+        mc mb --ignore-existing local/helix-wal
 
   helix:
     image: ghcr.io/helixdb/helixdb:v0.0.4
@@ -155,6 +156,7 @@ services:
       - "6969:8080"
     environment:
       S3_BUCKET: helix-db
+      WAL_S3_BUCKET: helix-wal
       S3_REGION: us-east-1
       DB_PATH: db/
       AWS_ACCESS_KEY_ID: minioadmin
@@ -182,6 +184,21 @@ omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
 | `AWS_SESSION_TOKEN` | Optional temporary-credential token |
 | `AWS_ENDPOINT` or `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint |
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
+| `WAL_S3_BUCKET` | Optional WAL bucket; falls back to `S3_BUCKET` |
+| `WAL_S3_REGION` | Optional WAL region; falls back to the resolved main region |
+| `WAL_AWS_ENDPOINT` or `WAL_AWS_ENDPOINT_URL_S3` | Optional WAL endpoint; falls back to the main endpoint |
+| `WAL_AWS_ALLOW_HTTP` | Optional WAL HTTP policy; falls back to `AWS_ALLOW_HTTP` |
+
+Set a WAL bucket or WAL endpoint to enable the separate client. It uses the standard
+AWS credential variables and always shares `DB_PATH` with the main store. To put a
+cache or write-through proxy in front of existing WAL objects, set only the WAL
+endpoint; the main bucket, region, and path are inherited. The proxy must expose the
+existing WAL objects because HelixDB does not migrate them. A WAL endpoint without a
+main or WAL bucket is rejected. WAL region or HTTP overrides without a WAL bucket or
+endpoint are also rejected.
+
+These WAL variables configure the standalone server image only. The local CLI and
+`helix.toml` do not expose separate WAL storage.
 
 The endpoint must be reachable from inside the container; container `localhost` is not
 the host machine. `DB_PATH` is not a host filesystem path, and mounting a volume at
