@@ -924,9 +924,9 @@ impl HelixDB {
 
     /// Opens a database for a transport server that owns its metrics recorder.
     #[doc(hidden)]
-    pub async fn open_for_server(source: HelixDbSource) -> Result<Self> {
+    pub async fn open_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
-        Self::open_writer_inner(path, object_store, DbConfig::new()).await
+        Self::open_writer_inner(path, object_store, config).await
     }
 
     #[cfg(test)]
@@ -1049,6 +1049,12 @@ impl HelixDB {
                     .slate()
                     .to_writer_settings(config.cache().object_store_cache()),
             );
+        match config.wal_object_store() {
+            Some(wal_object_store) => {
+                builder = builder.with_wal_object_store(Arc::clone(wal_object_store));
+            }
+            None => {}
+        }
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
@@ -1269,6 +1275,12 @@ impl HelixDB {
                     .slate()
                     .to_reader_options(config.cache().object_store_cache()),
             );
+        match config.wal_object_store() {
+            Some(wal_object_store) => {
+                builder = builder.with_wal_object_store(Arc::clone(wal_object_store));
+            }
+            None => {}
+        }
         match config.cache().mode() {
             CacheMode::VectorMemoryOnly => builder = builder.with_db_cache_disabled(),
             CacheMode::Memory { .. } | CacheMode::Hybrid { .. } => {
@@ -3086,6 +3098,19 @@ mod tests {
     use helix_ast::traversal::g;
     use helix_ast::value::PropertyInput;
 
+    async fn object_paths(object_store: &Arc<dyn ObjectStore>) -> Vec<String> {
+        object_store
+            .list(None)
+            .map(|result| {
+                result
+                    .expect("object listing should succeed")
+                    .location
+                    .to_string()
+            })
+            .collect()
+            .await
+    }
+
     fn tenant_scope(value: &str) -> DataScope {
         DataScope::Tenant(TenantId::from_ulid_str(value).expect("valid tenant"))
     }
@@ -3378,6 +3403,150 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(reader.object_store(), &expected_store,));
         reader.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_writer_keeps_wal_objects_in_the_main_store() {
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let database = "facade-default-wal-object-store";
+        let writer = HelixDB::open_with_object_store_and_config(
+            database,
+            Arc::clone(&main_object_store),
+            DbConfig::new(),
+        )
+        .await
+        .expect("writer opens with the default WAL store");
+        writer
+            .inner_db()
+            .put(b"default-wal-key", b"default-wal-value")
+            .await
+            .expect("WAL-backed write succeeds");
+
+        let paths = object_paths(&main_object_store).await;
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.starts_with(&format!("{database}/wal/"))),
+            "default WAL objects should use the main store: {paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.starts_with(&format!("{database}/manifest/"))),
+            "manifests should use the main store: {paths:?}"
+        );
+        writer.close().await.expect("writer closes");
+    }
+
+    #[tokio::test]
+    async fn configured_writer_routes_only_wal_objects_to_the_wal_store() {
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let database = "facade-separate-wal-object-store";
+        let writer = HelixDB::open_with_object_store_and_config(
+            database,
+            Arc::clone(&main_object_store),
+            DbConfig::new().with_wal_object_store(Arc::clone(&wal_object_store)),
+        )
+        .await
+        .expect("writer opens with a separate WAL store");
+        writer
+            .inner_db()
+            .put(b"separate-wal-key", b"separate-wal-value")
+            .await
+            .expect("separate WAL write succeeds");
+        writer
+            .inner_db()
+            .flush_with_options(slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            })
+            .await
+            .expect("memtable flush succeeds");
+
+        let main_paths = object_paths(&main_object_store).await;
+        let wal_paths = object_paths(&wal_object_store).await;
+        assert!(
+            main_paths
+                .iter()
+                .any(|path| path.starts_with(&format!("{database}/manifest/"))),
+            "manifests should use the main store: {main_paths:?}"
+        );
+        assert!(
+            main_paths
+                .iter()
+                .any(|path| path.starts_with(&format!("{database}/compacted/"))),
+            "compacted SSTs should use the main store: {main_paths:?}"
+        );
+        assert!(
+            main_paths
+                .iter()
+                .all(|path| !path.starts_with(&format!("{database}/wal/"))),
+            "WAL objects must not use the main store: {main_paths:?}"
+        );
+        assert!(
+            wal_paths
+                .iter()
+                .any(|path| path.starts_with(&format!("{database}/wal/"))),
+            "WAL objects should use the separate store: {wal_paths:?}"
+        );
+        assert!(
+            wal_paths.iter().all(|path| {
+                !path.starts_with(&format!("{database}/manifest/"))
+                    && !path.starts_with(&format!("{database}/compacted/"))
+            }),
+            "non-WAL objects must not use the separate store: {wal_paths:?}"
+        );
+        writer.close().await.expect("writer closes");
+    }
+
+    #[tokio::test]
+    async fn reader_replays_unflushed_rows_from_the_configured_wal_store() {
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let database = "facade-reader-separate-wal-object-store";
+        let config = DbConfig::new().with_wal_object_store(Arc::clone(&wal_object_store));
+        let writer = HelixDB::open_with_object_store_and_config(
+            database,
+            Arc::clone(&main_object_store),
+            config.clone(),
+        )
+        .await
+        .expect("writer opens with a separate WAL store");
+        writer
+            .inner_db()
+            .put(b"wal-only-key", b"reader-visible-value")
+            .await
+            .expect("unflushed WAL write succeeds");
+
+        let main_paths = object_paths(&main_object_store).await;
+        assert!(
+            main_paths
+                .iter()
+                .all(|path| !path.starts_with(&format!("{database}/wal/"))),
+            "the row WAL must exist only in the separate store: {main_paths:?}"
+        );
+
+        let reader = HelixDB::open_reader_with_object_store_and_config(
+            database,
+            Arc::clone(&main_object_store),
+            config,
+        )
+        .await
+        .expect("reader opens with the same separate WAL store");
+        let HelixStorage::Reader(raw_reader) = reader.storage() else {
+            panic!("reader handle should expose reader storage");
+        };
+        assert_eq!(
+            raw_reader
+                .get(b"wal-only-key")
+                .await
+                .expect("reader lookup succeeds")
+                .as_deref(),
+            Some(b"reader-visible-value".as_slice())
+        );
+
+        reader.close().await.expect("reader closes");
+        writer.close().await.expect("writer closes");
     }
 
     #[test]

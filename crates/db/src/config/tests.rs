@@ -1,5 +1,7 @@
 //! Contract tests for database, cache, and index configuration validation.
 
+use std::sync::Arc;
+
 use super::{
     scoped_secondary_index_property, CacheConfig, CacheMode, CacheWarmMode, DbConfig,
     DiskCacheConfig, EdgeEncoding, EdgeUpdatePolicy, FtsHybridCacheConfig, FtsMemoryCacheConfig,
@@ -18,6 +20,7 @@ use crate::index_lifecycle::{
 };
 use crate::search::vector::{VectorDistanceMetric, SIMHASH_BITS};
 use helix_planner::{catalog, ir};
+use slatedb::object_store::{memory::InMemory, ObjectStore};
 
 fn v2_secondary(definition: SecondaryIndexDefinition) -> ValidatedDynamicIndexDefinition {
     ValidatedDynamicIndexDefinition::try_from(definition).unwrap()
@@ -195,6 +198,31 @@ fn db_config_accepts_nonzero_id_lease_size_type_directly() {
     let config = DbConfig::new().with_id_lease_size(lease_size);
 
     assert_eq!(config.id_lease_size(), 17);
+}
+
+#[test]
+fn db_config_wal_object_store_is_optional_cloned_and_redacted() {
+    let default = DbConfig::new();
+    assert!(default.wal_object_store().is_none());
+
+    let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let config = default.with_wal_object_store(Arc::clone(&wal_object_store));
+    let configured_store = config
+        .wal_object_store()
+        .expect("WAL object store should be configured");
+    assert!(Arc::ptr_eq(configured_store, &wal_object_store));
+
+    let cloned = config.clone();
+    assert!(Arc::ptr_eq(
+        cloned
+            .wal_object_store()
+            .expect("cloned WAL object store should be configured"),
+        &wal_object_store,
+    ));
+
+    let debug = format!("{config:?}");
+    assert!(debug.contains("wal_object_store: Some(<redacted>)"));
+    assert!(!debug.contains("InMemory"));
 }
 
 #[test]

@@ -83,7 +83,7 @@ where
 /// Open the configured database and run all transports until Ctrl-C.
 pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
     let db_source = config.db_source();
-    let db = Arc::new(HelixDB::open_for_server(db_source).await?);
+    let db = Arc::new(HelixDB::open_for_server(db_source, db::DbConfig::new()).await?);
     run_open_database_until_shutdown(config, db, async {
         tokio::signal::ctrl_c().await?;
         Ok(())
@@ -116,7 +116,7 @@ pub async fn run_with_shutdown(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> ServerResult<()> {
     let db_source = config.db_source();
-    let db = Arc::new(HelixDB::open_for_server(db_source).await?);
+    let db = Arc::new(HelixDB::open_for_server(db_source, db::DbConfig::new()).await?);
     run_open_database_until_shutdown(config, db, async move {
         shutdown.await;
         Ok(())
