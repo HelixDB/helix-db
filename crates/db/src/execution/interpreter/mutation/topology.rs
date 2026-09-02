@@ -10,10 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use bytes::Bytes;
 use slatedb::DbTransaction;
 
-use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
-use crate::encoding::indexes::{
-    hash_property_name, hash_property_value, EdgeDirection, PropertyIndexKey,
-};
+use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey, NodeLabelKey};
+use crate::encoding::indexes::{CanonicalLabel, EdgeDirection, PropertyIndexKey};
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey};
 use crate::encoding::v2::values::{adjacency as edges, indexes as secondary};
@@ -28,11 +26,11 @@ enum MembershipMutation {
 
 /// Logical identity for one shared bitmap row. Physical keys are encoded once
 /// when the coalesced epoch is flushed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum BitmapRow {
     NodeLabel {
         scope: DataScope,
-        label_hash: [u8; 8],
+        label: CanonicalLabel,
     },
     EdgePair {
         scope: DataScope,
@@ -43,49 +41,46 @@ enum BitmapRow {
         scope: DataScope,
         direction: EdgeDirection,
         node: u64,
-        label_hash: [u8; 8],
+        label: CanonicalLabel,
     },
     GlobalEdgeLabel {
         scope: DataScope,
-        label_hash: [u8; 8],
+        label: CanonicalLabel,
     },
 }
 
 impl BitmapRow {
-    fn to_bytes(self) -> Bytes {
+    fn to_bytes(&self) -> Bytes {
         match self {
-            Self::NodeLabel { scope, label_hash } => DataKey::Data {
-                scope,
-                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-                    crate::encoding::indexes::equality::EqualityIndexKey::new(
-                        hash_property_name("$label"),
-                        label_hash,
-                    ),
+            Self::NodeLabel { scope, label } => DataKey::Data {
+                scope: *scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+                    NodeLabelKey::from_canonical(label.clone()),
                 )),
             }
             .to_bytes(),
             Self::EdgePair { scope, from, to } => DataKey::Data {
-                scope,
-                kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(from, to)),
+                scope: *scope,
+                kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(*from, *to)),
             }
             .to_bytes(),
             Self::EdgeLabelNeighbor {
                 scope,
                 direction,
                 node,
-                label_hash,
+                label,
             } => DataKey::Data {
-                scope,
+                scope: *scope,
                 kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                    EdgeLabelNeighborKey::new(direction, node, label_hash),
+                    EdgeLabelNeighborKey::from_canonical(*direction, *node, label.clone()),
                 )),
             }
             .to_bytes(),
-            Self::GlobalEdgeLabel { scope, label_hash } => DataKey::Data {
-                scope,
-                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                    label_hash,
-                ))),
+            Self::GlobalEdgeLabel { scope, label } => DataKey::Data {
+                scope: *scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+                    EdgeLabelKey::from_canonical(label.clone()),
+                )),
             }
             .to_bytes(),
         }
@@ -154,7 +149,7 @@ impl TopologyMutationRuntime {
         self.record_bitmap(
             BitmapRow::NodeLabel {
                 scope,
-                label_hash: hash_property_value(label),
+                label: CanonicalLabel::from_label(label)?,
             },
             node_id,
             MembershipMutation::Present,
@@ -171,7 +166,7 @@ impl TopologyMutationRuntime {
         self.record_bitmap(
             BitmapRow::NodeLabel {
                 scope,
-                label_hash: hash_property_value(label),
+                label: CanonicalLabel::from_label(label)?,
             },
             node_id,
             MembershipMutation::Absent,
@@ -217,12 +212,13 @@ impl TopologyMutationRuntime {
         label: &str,
         edge_id: u64,
     ) -> Result<()> {
+        let label = CanonicalLabel::from_label(label)?;
         self.record_bitmap(
             BitmapRow::EdgeLabelNeighbor {
                 scope,
                 direction: EdgeDirection::Out,
                 node: from,
-                label_hash: hash_property_value(label),
+                label: label.clone(),
             },
             to,
             MembershipMutation::Present,
@@ -232,16 +228,13 @@ impl TopologyMutationRuntime {
                 scope,
                 direction: EdgeDirection::In,
                 node: to,
-                label_hash: hash_property_value(label),
+                label: label.clone(),
             },
             from,
             MembershipMutation::Present,
         )?;
         self.record_bitmap(
-            BitmapRow::GlobalEdgeLabel {
-                scope,
-                label_hash: hash_property_value(label),
-            },
+            BitmapRow::GlobalEdgeLabel { scope, label },
             edge_id,
             MembershipMutation::Present,
         )
@@ -257,7 +250,7 @@ impl TopologyMutationRuntime {
         self.record_bitmap(
             BitmapRow::GlobalEdgeLabel {
                 scope,
-                label_hash: hash_property_value(label),
+                label: CanonicalLabel::from_label(label)?,
             },
             edge_id,
             MembershipMutation::Absent,
@@ -272,12 +265,13 @@ impl TopologyMutationRuntime {
         to: u64,
         label: &str,
     ) -> Result<()> {
+        let label = CanonicalLabel::from_label(label)?;
         self.record_bitmap(
             BitmapRow::EdgeLabelNeighbor {
                 scope,
                 direction: EdgeDirection::Out,
                 node: from,
-                label_hash: hash_property_value(label),
+                label: label.clone(),
             },
             to,
             MembershipMutation::Absent,
@@ -287,7 +281,7 @@ impl TopologyMutationRuntime {
                 scope,
                 direction: EdgeDirection::In,
                 node: to,
-                label_hash: hash_property_value(label),
+                label,
             },
             from,
             MembershipMutation::Absent,
@@ -552,11 +546,8 @@ impl TopologyMutationRuntime {
 pub(super) fn node_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-            crate::encoding::indexes::equality::EqualityIndexKey::new(
-                hash_property_name("$label"),
-                hash_property_value(label),
-            ),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+            NodeLabelKey::from_label(label).expect("test labels are valid canonical labels"),
         )),
     }
     .to_bytes()
@@ -581,7 +572,8 @@ pub(super) fn edge_label_neighbor_key(
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(direction, node, hash_property_value(label)),
+            EdgeLabelNeighborKey::from_label(direction, node, label)
+                .expect("test labels are valid canonical labels"),
         )),
     }
     .to_bytes()
@@ -591,9 +583,9 @@ pub(super) fn edge_label_neighbor_key(
 pub(super) fn global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
-        ))),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+            EdgeLabelKey::from_label(label).expect("test labels are valid canonical labels"),
+        )),
     }
     .to_bytes()
 }

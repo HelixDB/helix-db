@@ -18,6 +18,7 @@ pub(crate) enum IndexPrefix {
     Equality,
     Range(RangeIndexDirection),
     EdgeEquality,
+    NodeLabel,
     EdgeLabel,
     EdgeLabelNeighbor(EdgeDirection),
     EdgeRange(EdgeRangeIndexDirection, EdgeDirection),
@@ -34,6 +35,7 @@ impl IndexPrefix {
                 RangeIndexDirection::Desc => &[0x05],
             },
             IndexPrefix::EdgeEquality => &[0x02],
+            IndexPrefix::NodeLabel => &[0x07],
             IndexPrefix::EdgeLabel => &[0x04],
             IndexPrefix::EdgeLabelNeighbor(direction) => match direction {
                 EdgeDirection::Out => &[0x10, 0x00],
@@ -87,6 +89,7 @@ impl IndexPrefix {
             0x01 => Ok(IndexPrefix::Range(RangeIndexDirection::Asc)),
             0x05 => Ok(IndexPrefix::Range(RangeIndexDirection::Desc)),
             0x02 => Ok(IndexPrefix::EdgeEquality),
+            0x07 => Ok(IndexPrefix::NodeLabel),
             0x04 => Ok(IndexPrefix::EdgeLabel),
             0x08 => Ok(IndexPrefix::GlobalEdgeEquality),
             0x09 => Ok(IndexPrefix::GlobalEdgeRange(RangeIndexDirection::Asc)),
@@ -140,7 +143,9 @@ pub(crate) fn exclusive_prefix_end_bound(prefix: &Bytes) -> Option<Bytes> {
 mod tests {
     use super::super::direction::EdgeDirection as RangeEdgeDirection;
     use super::super::equality::{scans::*, EdgeDirection as EqualityEdgeDirection};
-    use super::super::label::{EdgeLabelNeighborScanPrefix, EdgeLabelScanPrefix};
+    use super::super::label::{
+        EdgeLabelNeighborScanPrefix, EdgeLabelScanPrefix, NodeLabelScanPrefix,
+    };
     use super::super::range::scans::*;
     use super::*;
     use crate::encoding::indexes::{PropertyHash, ValueHash};
@@ -290,14 +295,18 @@ mod tests {
     }
 
     #[test]
-    fn edge_label_prefixes_encode_label_hash_layouts() {
+    fn edge_label_prefixes_encode_digest_accelerators_not_identity() {
         let node_id = 0x0102_0304_0506_0708u64;
+        assert_eq!(
+            NodeLabelScanPrefix::Index.to_bytes().as_ref(),
+            &[0x03, 0x07]
+        );
         assert_eq!(
             EdgeLabelScanPrefix::Index.to_bytes().as_ref(),
             &[0x03, 0x04]
         );
         assert_eq!(
-            EdgeLabelScanPrefix::Label { label_hash: VALUE }
+            EdgeLabelScanPrefix::Digest { digest: VALUE }
                 .to_bytes()
                 .as_ref(),
             &[0x03, 0x04, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -329,10 +338,10 @@ mod tests {
 
         endpoint.extend_from_slice(&VALUE);
         assert_eq!(
-            EdgeLabelNeighborScanPrefix::Label {
+            EdgeLabelNeighborScanPrefix::Digest {
                 direction: RangeEdgeDirection::In,
                 node_id,
-                label_hash: VALUE,
+                digest: VALUE,
             }
             .to_bytes()
             .as_ref(),

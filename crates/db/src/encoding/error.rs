@@ -45,6 +45,10 @@ pub enum EncodingError {
     #[error("Canonical equality digest does not match canonical bytes")]
     CanonicalEqualityDigestMismatch,
 
+    /// Persisted graph-label digest does not match its canonical UTF-8 bytes.
+    #[error("Canonical label digest does not match canonical bytes")]
+    CanonicalLabelDigestMismatch,
+
     /// Invalid range index direction
     #[error("Invalid range index direction: {0}")]
     InvalidRangeIndexDirection(u8),

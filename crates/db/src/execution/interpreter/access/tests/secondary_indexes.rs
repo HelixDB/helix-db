@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use super::support::*;
 use crate::config::SecondaryIndexDefinition;
 use crate::encoding::indexes::equality::{EqualityIndexKey, GlobalEdgeEqualityIndexKey};
+use crate::encoding::indexes::label::NodeLabelKey;
 use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDirection;
 use crate::encoding::indexes::{hash_property_name, hash_property_value, PropertyIndexKey};
 use crate::encoding::v2::keys::scope::DataScope;
@@ -2062,10 +2063,9 @@ async fn dynamic_equality_ignores_legacy_bitmaps_while_builtin_label_scan_remain
     for key in [
         DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
-                hash_property_name("$label"),
-                hash_property_value("User"),
-            ))),
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+                NodeLabelKey::from_label("User").expect("test labels are valid canonical labels"),
+            )),
         }
         .to_bytes(),
         DataKey::Data {

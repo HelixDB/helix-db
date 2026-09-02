@@ -156,6 +156,7 @@ impl<'a> EdgeRangeIndexKey<'a> {
             IndexPrefix::Equality
             | IndexPrefix::Range(_)
             | IndexPrefix::EdgeEquality
+            | IndexPrefix::NodeLabel
             | IndexPrefix::EdgeLabel
             | IndexPrefix::EdgeLabelNeighbor(_)
             | IndexPrefix::GlobalEdgeEquality
@@ -360,6 +361,7 @@ impl<'a> GlobalEdgeRangeIndexKey<'a> {
             IndexPrefix::Equality
             | IndexPrefix::Range(_)
             | IndexPrefix::EdgeEquality
+            | IndexPrefix::NodeLabel
             | IndexPrefix::EdgeLabel
             | IndexPrefix::EdgeLabelNeighbor(_)
             | IndexPrefix::EdgeRange(..)

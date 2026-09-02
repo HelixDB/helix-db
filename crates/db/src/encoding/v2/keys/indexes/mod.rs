@@ -7,6 +7,7 @@ use crate::encoding::v2::values::property::equality_index_value::CanonicalEquali
 use crate::encoding::v2::values::property::range_index_value::CanonicalRangeValue;
 use crate::index_lifecycle::{IndexEntityId, IndexGenerationId, IndexId};
 
+pub(crate) mod canonical_label;
 pub(crate) mod direction;
 pub(crate) mod equality;
 pub(crate) mod label;
@@ -17,6 +18,7 @@ pub(crate) mod secondary;
 pub(crate) mod text;
 pub(crate) mod vector;
 
+pub(crate) use canonical_label::CanonicalLabel;
 pub(crate) use direction::EdgeDirection;
 pub(crate) use prefix::IndexPrefix;
 pub(crate) use property::{
