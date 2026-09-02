@@ -1087,6 +1087,51 @@ fn sanitize_docker_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn runtime_for(project_name: &str) -> LocalRuntime {
+        LocalRuntime {
+            runtime: ContainerRuntime::Docker,
+            project_name: project_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn container_name_sanitizes_characters_the_daemon_rejects() {
+        assert_eq!(
+            runtime_for("My Project").container_name("dev"),
+            "helix-My-Project-dev"
+        );
+        assert_eq!(
+            runtime_for("hélix (wörld)!").container_name("dev"),
+            "helix-h-lix--w-rld---dev"
+        );
+    }
+
+    #[test]
+    fn container_name_sanitizes_instance_names_too() {
+        assert_eq!(
+            runtime_for("demo").container_name("my dev"),
+            "helix-demo-my-dev"
+        );
+    }
+
+    #[test]
+    fn container_name_keeps_valid_names_unchanged() {
+        assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
+    }
+
+    #[test]
+    fn container_name_stays_valid_when_every_character_is_rejected() {
+        assert_eq!(runtime_for("!!!").container_name("dev"), "helix-----dev");
+    }
+
+    #[test]
+    fn disk_resources_inherit_the_sanitized_base_name() {
+        let resources = runtime_for("My Project").disk_resources("dev");
+        assert_eq!(resources.minio_container, "helix-My-Project-dev-minio");
+        assert_eq!(resources.network, "helix-My-Project-dev-net");
+        assert_eq!(resources.volume, "helix-My-Project-dev-minio-data");
+    }
+
     #[cfg(unix)]
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
