@@ -175,7 +175,12 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        sanitize_docker_name(&format!("helix-{}-{}", self.project_name, instance_name))
+        let name = format!("helix-{}-{}", self.project_name, instance_name);
+        let sanitized = sanitize_docker_name(&name);
+        if sanitized == name {
+            return sanitized;
+        }
+        format!("{sanitized}-{:08x}", fnv1a32(&name))
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -1083,6 +1088,15 @@ fn sanitize_docker_name(name: &str) -> String {
         .collect()
 }
 
+fn fnv1a32(value: &str) -> u32 {
+    value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+        }) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,23 +1109,35 @@ mod tests {
     }
 
     #[test]
-    fn container_name_sanitizes_characters_the_daemon_rejects() {
+    fn container_name_sanitizes_and_tags_names_the_daemon_rejects() {
         assert_eq!(
             runtime_for("My Project").container_name("dev"),
-            "helix-My-Project-dev"
+            "helix-My-Project-dev-7a878e3f"
         );
         assert_eq!(
             runtime_for("hélix (wörld)!").container_name("dev"),
-            "helix-h-lix--w-rld---dev"
+            "helix-h-lix--w-rld---dev-abe3c485"
+        );
+    }
+
+    #[test]
+    fn colliding_spellings_get_distinct_container_names() {
+        assert_eq!(runtime_for("a-b").container_name("dev"), "helix-a-b-dev");
+        assert_ne!(
+            runtime_for("a b").container_name("dev"),
+            runtime_for("a-b").container_name("dev")
+        );
+        assert_eq!(
+            runtime_for("a b").container_name("dev"),
+            "helix-a-b-dev-e5e7279d"
         );
     }
 
     #[test]
     fn container_name_sanitizes_instance_names_too() {
-        assert_eq!(
-            runtime_for("demo").container_name("my dev"),
-            "helix-demo-my-dev"
-        );
+        assert!(runtime_for("demo")
+            .container_name("my dev")
+            .starts_with("helix-demo-my-dev-"));
     }
 
     #[test]
@@ -1121,15 +1147,18 @@ mod tests {
 
     #[test]
     fn container_name_stays_valid_when_every_character_is_rejected() {
-        assert_eq!(runtime_for("!!!").container_name("dev"), "helix-----dev");
+        assert!(runtime_for("!!!")
+            .container_name("dev")
+            .starts_with("helix-----dev-"));
     }
 
     #[test]
     fn disk_resources_inherit_the_sanitized_base_name() {
+        let base = runtime_for("My Project").container_name("dev");
         let resources = runtime_for("My Project").disk_resources("dev");
-        assert_eq!(resources.minio_container, "helix-My-Project-dev-minio");
-        assert_eq!(resources.network, "helix-My-Project-dev-net");
-        assert_eq!(resources.volume, "helix-My-Project-dev-minio-data");
+        assert_eq!(resources.minio_container, format!("{base}-minio"));
+        assert_eq!(resources.network, format!("{base}-net"));
+        assert_eq!(resources.volume, format!("{base}-minio-data"));
     }
 
     #[cfg(unix)]
