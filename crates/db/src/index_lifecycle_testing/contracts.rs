@@ -11,6 +11,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use helix_ast::index::RangeIndexDirection as AstRangeIndexDirection;
 use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
 use slatedb::object_store::memory::InMemory;
@@ -35,7 +36,8 @@ use crate::execution::interpreter::{
 use crate::index_lifecycle::{
     ActiveIndexHandle, IndexDdlReceipt, IndexDefinitionFamily, IndexElementKind,
     IndexOperationStage, IndexOperationStatus, IndexStateV2, PhysicalGeneration,
-    ValidatedDynamicIndexDefinition, VectorPhysicalLayout,
+    ValidatedDynamicIndexDefinition, ValidatedSecondaryIndexDefinition,
+    ValidatedVectorIndexDefinition, VectorPhysicalLayout,
 };
 use crate::search::vector::distance::Cosine;
 use crate::search::vector::{ValidatedVectorGenerationHandle, VectorDistanceMetric, VectorIndex};
@@ -184,15 +186,31 @@ pub(super) async fn run_tenant_reopen_recovery() {
 
 /// Runs public secondary/vector writes at every exact build boundary.
 pub(super) async fn run_secondary_vector_public_boundaries() {
-    for (family_ordinal, family) in [
-        PublicMutationFamily::Secondary,
-        PublicMutationFamily::Vector,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let shapes = family_shapes()
+        .into_iter()
+        .filter_map(PublicBoundaryShape::from_definition)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shapes
+            .iter()
+            .filter(|shape| shape.family() == PublicMutationFamily::Secondary)
+            .count(),
+        7,
+        "every secondary shape uses the public write boundary"
+    );
+    assert_eq!(
+        shapes
+            .iter()
+            .filter(|shape| shape.family() == PublicMutationFamily::Vector)
+            .count(),
+        12,
+        "every vector shape uses the public write boundary"
+    );
+
+    let mut case_count = 0usize;
+    for (shape_ordinal, shape) in shapes.into_iter().enumerate() {
         for (boundary_ordinal, boundary) in PublicMutationBoundary::ALL.into_iter().enumerate() {
-            let ordinal = family_ordinal * PublicMutationBoundary::ALL.len() + boundary_ordinal;
+            let ordinal = shape_ordinal * PublicMutationBoundary::ALL.len() + boundary_ordinal;
             let db = HelixDB::open_for_index_lifecycle_testing(
                 HelixDbSource::InMemory {
                     database: format!("index-lifecycle-public-boundary-{ordinal}"),
@@ -204,17 +222,37 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
             .expect("public-boundary writer opens");
             let controller = LifecycleTestController::new();
             let scope = DataScope::LegacyUnscoped;
-            controller
-                .seed_node_property_rows(
-                    &db,
-                    scope,
-                    NonZeroU64::new(3).expect("public-boundary seed count is positive"),
-                    NonZeroUsize::MIN,
-                    |entity_id| family.source_properties(entity_id),
-                )
-                .await
-                .expect("public-boundary source rows seed");
-            let definition = family.definition();
+            let edge_endpoints = match shape.element_kind() {
+                IndexElementKind::Node => None,
+                IndexElementKind::Edge => {
+                    let endpoints = controller
+                        .seed_node_property_rows(
+                            &db,
+                            scope,
+                            NonZeroU64::new(2).expect("public-boundary endpoint count is positive"),
+                            NonZeroUsize::MIN,
+                            |_| vec![Property::string("$label", "PublicBoundaryEndpoint")],
+                        )
+                        .await
+                        .expect("public-boundary endpoint rows seed");
+                    Some((endpoints.start, endpoints.end - 1))
+                }
+            };
+            let mut seeded = Vec::new();
+            for seed_ordinal in 0..3 {
+                let seed_ordinal =
+                    u64::try_from(seed_ordinal).expect("public-boundary seed ordinal fits u64");
+                let (plan, bindings) =
+                    public_boundary_add_plan(&shape, seed_ordinal, edge_endpoints);
+                let result = execute_write_with_bindings_retry(&db, &plan, bindings)
+                    .await
+                    .expect("public-boundary source row seeds through the interpreter");
+                seeded.push((
+                    seed_ordinal,
+                    public_created_entity_id(result, shape.element_kind()),
+                ));
+            }
+            let definition = shape.definition();
             let IndexDdlReceipt::Accepted { operation_id, .. } = controller
                 .create_index(
                     &db,
@@ -227,20 +265,40 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
             else {
                 panic!("fresh public-boundary build must enqueue");
             };
-            let stage = boundary.stage(family);
+            let stage = boundary.stage(shape.family());
             drive_until_stage(&db, &controller, scope, operation_id, stage).await;
 
-            let first_ordinal =
-                u64::try_from(ordinal * 2).expect("public-boundary first ordinal fits u64");
+            let first_ordinal = 3;
             let second_ordinal = first_ordinal + 1;
-            let first_plan = public_add_node_plan(family, first_ordinal);
-            let second_plan = public_add_node_plan(family, second_ordinal);
+            let (first_plan, first_bindings) =
+                public_boundary_add_plan(&shape, first_ordinal, edge_endpoints);
+            let (second_plan, second_bindings) =
+                public_boundary_add_plan(&shape, second_ordinal, edge_endpoints);
             let (first, second) = tokio::join!(
-                execute_write_with_retry(&db, &first_plan),
-                execute_write_with_retry(&db, &second_plan),
+                execute_write_with_bindings_retry(&db, &first_plan, first_bindings),
+                execute_write_with_bindings_retry(&db, &second_plan, second_bindings),
             );
-            first.expect("first exact-boundary public write commits");
-            second.expect("second exact-boundary public write commits");
+            let first_id = public_created_entity_id(
+                first.expect("first exact-boundary public write commits"),
+                shape.element_kind(),
+            );
+            let second_id = public_created_entity_id(
+                second.expect("second exact-boundary public write commits"),
+                shape.element_kind(),
+            );
+            if let Some(tenant_property) = shape.tenant_property() {
+                execute_write_with_bindings_retry(
+                    &db,
+                    &public_boundary_set_tenant_plan(
+                        shape.element_kind(),
+                        tenant_property,
+                        "tenant-moved",
+                    ),
+                    public_boundary_entity_binding(shape.element_kind(), first_id),
+                )
+                .await
+                .expect("partitioned vector moves through the public mutation boundary");
+            }
             assert_build_delta_count_at_least(&db, scope, &definition, 2).await;
 
             let evidence = controller
@@ -267,7 +325,7 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                         .common()
                         .stage,
                     IndexOperationStage::CatchUp,
-                    "{family:?} must re-enter CatchUp after a public write at {stage:?}"
+                    "{shape:?} must re-enter CatchUp after a public write at {stage:?}"
                 );
             }
             assert!(matches!(
@@ -276,11 +334,22 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
             ));
             assert_identity_active(&db, scope, &definition).await;
             assert_build_deltas_empty(&db, scope, &definition).await;
-            assert_public_indexed_read(&db, family, first_ordinal).await;
-            assert_public_indexed_read(&db, family, second_ordinal).await;
+            assert_public_boundary_results(
+                &db,
+                &shape,
+                &seeded,
+                (first_ordinal, first_id),
+                (second_ordinal, second_id),
+            )
+            .await;
             db.close().await.expect("public-boundary writer closes");
+            case_count += 1;
         }
     }
+    assert_eq!(
+        case_count, 76,
+        "nineteen public shapes run at four exact lifecycle boundaries"
+    );
 }
 
 fn one_row_lifecycle_config() -> DbConfig {
@@ -2086,6 +2155,82 @@ const PUBLIC_MUTATION_LABEL: &str = "LifecycleMutation";
 const PUBLIC_MUTATION_PROPERTY: &str = "value";
 const PUBLIC_MUTATION_TENANT: &str = "tenant";
 
+/// Secondary/vector shape whose public mutation path must cross every build boundary.
+#[derive(Debug, Clone, PartialEq)]
+enum PublicBoundaryShape {
+    Secondary(ValidatedSecondaryIndexDefinition),
+    Vector(ValidatedVectorIndexDefinition),
+}
+
+impl PublicBoundaryShape {
+    /// Retains only the two families covered by the public boundary matrix.
+    fn from_definition(definition: ValidatedDynamicIndexDefinition) -> Option<Self> {
+        match definition {
+            ValidatedDynamicIndexDefinition::Secondary(definition) => {
+                Some(Self::Secondary(definition))
+            }
+            ValidatedDynamicIndexDefinition::Vector(definition) => Some(Self::Vector(definition)),
+            ValidatedDynamicIndexDefinition::Text(_) => None,
+        }
+    }
+
+    const fn family(&self) -> PublicMutationFamily {
+        match self {
+            Self::Secondary(_) => PublicMutationFamily::Secondary,
+            Self::Vector(_) => PublicMutationFamily::Vector,
+        }
+    }
+
+    fn definition(&self) -> ValidatedDynamicIndexDefinition {
+        match self {
+            Self::Secondary(definition) => {
+                ValidatedDynamicIndexDefinition::Secondary(definition.clone())
+            }
+            Self::Vector(definition) => ValidatedDynamicIndexDefinition::Vector(definition.clone()),
+        }
+    }
+
+    const fn element_kind(&self) -> IndexElementKind {
+        match self {
+            Self::Secondary(definition) => definition.element_kind(),
+            Self::Vector(definition) => definition.element_kind(),
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::Secondary(definition) => definition.label().as_str(),
+            Self::Vector(definition) => definition.label().as_str(),
+        }
+    }
+
+    fn property(&self) -> &str {
+        match self {
+            Self::Secondary(definition) => definition.property().as_str(),
+            Self::Vector(definition) => definition.property().as_str(),
+        }
+    }
+
+    fn tenant_property(&self) -> Option<&str> {
+        match self {
+            Self::Secondary(_) => None,
+            Self::Vector(definition) => definition
+                .tenant_property()
+                .map(crate::index_lifecycle::IndexComponent::as_str),
+        }
+    }
+
+    fn value(&self, ordinal: u64) -> AstPropertyValue {
+        match self {
+            Self::Secondary(_) => AstPropertyValue::String(format!("public-boundary-{ordinal:03}")),
+            Self::Vector(_) => {
+                let ordinal = ordinal as f32;
+                AstPropertyValue::F32Array(vec![1.0, ordinal + 1.0, ordinal.mul_add(ordinal, 1.0)])
+            }
+        }
+    }
+}
+
 /// Family-refined public write/read fixture used by the mutation matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublicMutationFamily {
@@ -2537,6 +2682,106 @@ async fn assert_build_delta_count_at_least(
         count >= minimum,
         "Building public writes must retain at least {minimum} coalesced deltas, observed {count}"
     );
+}
+
+/// Verifies every public-boundary shape through its production indexed-read path.
+async fn assert_public_boundary_results(
+    db: &HelixDB,
+    shape: &PublicBoundaryShape,
+    seeded: &[(u64, u64)],
+    first: (u64, u64),
+    second: (u64, u64),
+) {
+    match shape {
+        PublicBoundaryShape::Secondary(
+            ValidatedSecondaryIndexDefinition::NodeEquality { .. }
+            | ValidatedSecondaryIndexDefinition::EdgeEquality { .. },
+        ) => {
+            assert_eq!(
+                public_boundary_indexed_ids(db, shape, first.0, "tenant-initial").await,
+                vec![first.1],
+                "public equality lookup returns the first late entity"
+            );
+            assert_eq!(
+                public_boundary_indexed_ids(db, shape, second.0, "tenant-initial").await,
+                vec![second.1],
+                "public equality lookup returns the second late entity"
+            );
+        }
+        PublicBoundaryShape::Secondary(
+            ValidatedSecondaryIndexDefinition::NodeRange { direction, .. }
+            | ValidatedSecondaryIndexDefinition::EdgeRange { direction, .. },
+        ) => {
+            let mut expected = seeded.to_vec();
+            expected.extend([first, second]);
+            expected.sort_unstable_by_key(|(ordinal, _)| *ordinal);
+            if *direction == crate::config::RangeIndexDirection::Desc {
+                expected.reverse();
+            }
+            assert_eq!(
+                public_boundary_indexed_ids(db, shape, first.0, "tenant-initial").await,
+                expected
+                    .into_iter()
+                    .map(|(_, entity_id)| entity_id)
+                    .collect::<Vec<_>>(),
+                "public range scan preserves {direction:?} value order"
+            );
+        }
+        PublicBoundaryShape::Vector(definition) => {
+            let first_tenant = if definition.tenant_property().is_some() {
+                "tenant-moved"
+            } else {
+                "tenant-initial"
+            };
+            let first_results = public_boundary_indexed_ids(db, shape, first.0, first_tenant).await;
+            assert_eq!(
+                first_results.first(),
+                Some(&first.1),
+                "public vector search returns the exact first late vector"
+            );
+            let second_results =
+                public_boundary_indexed_ids(db, shape, second.0, "tenant-initial").await;
+            assert_eq!(
+                second_results.first(),
+                Some(&second.1),
+                "public vector search returns the exact second late vector"
+            );
+            if definition.tenant_property().is_some() {
+                assert!(
+                    !public_boundary_indexed_ids(db, shape, first.0, "tenant-initial")
+                        .await
+                        .contains(&first.1),
+                    "public partition move removes the vector from its previous tenant"
+                );
+            }
+        }
+    }
+}
+
+async fn public_boundary_indexed_ids(
+    db: &HelixDB,
+    shape: &PublicBoundaryShape,
+    ordinal: u64,
+    tenant: &str,
+) -> Vec<u64> {
+    let result = db
+        .execute(
+            &public_boundary_read_plan(shape, ordinal, tenant),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("public-boundary indexed read succeeds");
+    let Some(ExecutionValue::Scalars(values)) = result.last else {
+        panic!("public-boundary indexed read returns projected IDs");
+    };
+    values
+        .into_iter()
+        .map(|value| match (shape.element_kind(), value) {
+            (IndexElementKind::Node, ExecutionScalar::NodeId(entity_id))
+            | (IndexElementKind::Edge, ExecutionScalar::EdgeId(entity_id)) => entity_id,
+            _ => panic!("public-boundary indexed read returns the expected entity kind"),
+        })
+        .collect()
 }
 
 /// Verifies one Building/Active mutation through the public indexed read path.
@@ -3958,6 +4203,334 @@ fn public_executable(
         exec::PlannerMetrics::default(),
     )
     .expect("public lifecycle fixture dependencies form an executable plan")
+}
+
+/// Builds one shape-specific entity insert through the production interpreter boundary.
+fn public_boundary_add_plan(
+    shape: &PublicBoundaryShape,
+    ordinal: u64,
+    edge_endpoints: Option<(u64, u64)>,
+) -> (exec::ExecutablePlan, context::ParamBindings) {
+    let mut properties = vec![(
+        public_name(shape.property()),
+        ir::PropertyInputPlan::Value(shape.value(ordinal)),
+    )];
+    if let Some(tenant_property) = shape.tenant_property() {
+        properties.push((
+            public_name(tenant_property),
+            ir::PropertyInputPlan::Value(AstPropertyValue::String("tenant-initial".to_string())),
+        ));
+    }
+    let properties = ir::PropertyAssignments::try_from_vec(properties)
+        .expect("public-boundary properties are unique");
+    match shape.element_kind() {
+        IndexElementKind::Node => (
+            public_executable(
+                ir::PlanKind::Write,
+                vec![public_step(
+                    1,
+                    Vec::new(),
+                    exec::ExecOp::Mutation {
+                        plan: exec::ExecMutationPlan::AddNodeSource {
+                            label: public_name(shape.label()),
+                            properties,
+                        },
+                    },
+                )],
+                1,
+            ),
+            context::ParamBindings::default(),
+        ),
+        IndexElementKind::Edge => {
+            let Some((from, to)) = edge_endpoints else {
+                panic!("public edge boundary fixture requires two endpoints");
+            };
+            let access_id =
+                exec::ExecStepId::new(1).expect("public-boundary edge access ID is positive");
+            (
+                public_executable(
+                    ir::PlanKind::Write,
+                    vec![
+                        public_step(
+                            1,
+                            Vec::new(),
+                            exec::ExecOp::Access {
+                                plan: Box::new(exec::ExecAccessPlan::Node(
+                                    exec::ExecNodeAccessPlan::FromParam {
+                                        param: public_name("from"),
+                                    },
+                                )),
+                            },
+                        ),
+                        public_step(
+                            2,
+                            vec![access_id],
+                            exec::ExecOp::Mutation {
+                                plan: exec::ExecMutationPlan::AddEdge {
+                                    label: public_name(shape.label()),
+                                    to: ir::NodeTargetPlan::PointIds {
+                                        ids: ir::ElementIds::new(ir::AtLeast::<_, 1>::from_one(to))
+                                            .expect("public-boundary edge target is non-empty"),
+                                    },
+                                    properties,
+                                },
+                            },
+                        ),
+                    ],
+                    2,
+                ),
+                context::ParamBindings::default().with_value(
+                    public_name("from"),
+                    AstPropertyValue::I64(
+                        i64::try_from(from).expect("public-boundary endpoint ID fits i64"),
+                    ),
+                ),
+            )
+        }
+    }
+}
+
+/// Builds one public tenant-partition move for a node or edge.
+fn public_boundary_set_tenant_plan(
+    element_kind: IndexElementKind,
+    tenant_property: &str,
+    tenant: &str,
+) -> exec::ExecutablePlan {
+    let access_id = exec::ExecStepId::new(1).expect("public-boundary tenant access ID is positive");
+    let access = match element_kind {
+        IndexElementKind::Node => exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::FromParam {
+            param: public_name("entity"),
+        }),
+        IndexElementKind::Edge => exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::FromParam {
+            param: public_name("entity"),
+        }),
+    };
+    public_executable(
+        ir::PlanKind::Write,
+        vec![
+            public_step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(access),
+                },
+            ),
+            public_step(
+                2,
+                vec![access_id],
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::SetProperty {
+                        name: public_name(tenant_property),
+                        value: ir::PropertyInputPlan::Value(AstPropertyValue::String(
+                            tenant.to_string(),
+                        )),
+                    },
+                },
+            ),
+        ],
+        2,
+    )
+}
+
+fn public_boundary_entity_binding(
+    element_kind: IndexElementKind,
+    entity_id: u64,
+) -> context::ParamBindings {
+    let value = match element_kind {
+        IndexElementKind::Node | IndexElementKind::Edge => AstPropertyValue::I64(
+            i64::try_from(entity_id).expect("public-boundary entity ID fits i64"),
+        ),
+    };
+    context::ParamBindings::default().with_value(public_name("entity"), value)
+}
+
+fn public_created_entity_id(result: ExecutionResult, element_kind: IndexElementKind) -> u64 {
+    let Some(ExecutionValue::Stream(rows)) = result.last else {
+        panic!("public-boundary insert returns its created row");
+    };
+    let Some(row) = rows.first() else {
+        panic!("public-boundary insert returns one created row");
+    };
+    match (element_kind, row.current.as_ref()) {
+        (IndexElementKind::Node, Some(ElementRef::Node(entity_id)))
+        | (IndexElementKind::Edge, Some(ElementRef::Edge(entity_id))) => *entity_id,
+        _ => panic!("public-boundary insert returns the expected entity kind"),
+    }
+}
+
+const fn public_ast_range_direction(
+    direction: crate::config::RangeIndexDirection,
+) -> AstRangeIndexDirection {
+    match direction {
+        crate::config::RangeIndexDirection::Asc => AstRangeIndexDirection::Asc,
+        crate::config::RangeIndexDirection::Desc => AstRangeIndexDirection::Desc,
+    }
+}
+
+fn public_boundary_read_plan(
+    shape: &PublicBoundaryShape,
+    ordinal: u64,
+    tenant: &str,
+) -> exec::ExecutablePlan {
+    match shape {
+        PublicBoundaryShape::Secondary(definition) => match definition {
+            ValidatedSecondaryIndexDefinition::NodeEquality { unique, .. } => {
+                let index = catalog::NodeEqualityIndexMeta::new(public_name(&format!(
+                    "node_eq:{}:{}",
+                    shape.label(),
+                    shape.property()
+                )))
+                .with_uniqueness(if *unique {
+                    catalog::IndexUniqueness::Unique
+                } else {
+                    catalog::IndexUniqueness::NonUnique
+                });
+                public_boundary_node_read_plan(exec::ExecNodeAccessPlan::exact_equality(
+                    index,
+                    catalog::ScopedPropertyKey::try_new(shape.label(), shape.property())
+                        .expect("public-boundary node equality key validates"),
+                    ir::IndexValue::Literal(
+                        ir::SecondaryIndexLiteral::new(shape.value(ordinal))
+                            .expect("public-boundary equality value is indexable"),
+                    ),
+                ))
+            }
+            ValidatedSecondaryIndexDefinition::EdgeEquality { .. } => {
+                public_boundary_edge_read_plan(exec::ExecEdgeAccessPlan::exact_equality(
+                    catalog::EdgeEqualityIndexMeta::new(public_name(&format!(
+                        "edge_eq:{}:{}",
+                        shape.label(),
+                        shape.property()
+                    ))),
+                    catalog::ScopedPropertyKey::try_new(shape.label(), shape.property())
+                        .expect("public-boundary edge equality key validates"),
+                    ir::IndexValue::Literal(
+                        ir::SecondaryIndexLiteral::new(shape.value(ordinal))
+                            .expect("public-boundary equality value is indexable"),
+                    ),
+                ))
+            }
+            ValidatedSecondaryIndexDefinition::NodeRange { direction, .. } => {
+                let key = catalog::ScopedPropertyDirectionKey::try_new(
+                    shape.label(),
+                    shape.property(),
+                    public_ast_range_direction(*direction),
+                )
+                .expect("public-boundary node range key validates");
+                public_boundary_node_read_plan(exec::ExecNodeAccessPlan::RangeIndex {
+                    index: catalog::NodeRangeIndexMeta::new(public_name(&format!(
+                        "node_range:{key}"
+                    ))),
+                    key,
+                    range: ir::IndexRange::All,
+                })
+            }
+            ValidatedSecondaryIndexDefinition::EdgeRange { direction, .. } => {
+                let key = catalog::ScopedPropertyDirectionKey::try_new(
+                    shape.label(),
+                    shape.property(),
+                    public_ast_range_direction(*direction),
+                )
+                .expect("public-boundary edge range key validates");
+                public_boundary_edge_read_plan(exec::ExecEdgeAccessPlan::RangeIndex {
+                    index: catalog::EdgeRangeIndexMeta::new(public_name(&format!(
+                        "edge_range:{key}"
+                    ))),
+                    key,
+                    range: ir::IndexRange::All,
+                })
+            }
+        },
+        PublicBoundaryShape::Vector(definition) => {
+            let AstPropertyValue::F32Array(query) = shape.value(ordinal) else {
+                unreachable!("public-boundary vector shape returns a vector");
+            };
+            let tenant = match definition.tenant_property() {
+                Some(property) => ir::SearchTenantPlan::ScopedValue {
+                    property: public_name(property.as_str()),
+                    value: ir::SearchTenantValuePlan::new(ir::PropertyInputPlan::Value(
+                        AstPropertyValue::String(tenant.to_string()),
+                    ))
+                    .expect("public-boundary tenant is non-null"),
+                },
+                None => ir::SearchTenantPlan::Unscoped,
+            };
+            let query_vector = ir::VectorQueryInputPlan::Vector(
+                ir::SearchVector::new(query)
+                    .expect("public-boundary vector query is finite and non-empty"),
+            );
+            let k = ir::SearchLimitPlan::Literal(
+                NonZeroUsize::new(10).expect("public-boundary vector limit is positive"),
+            );
+            match definition.element_kind() {
+                IndexElementKind::Node => {
+                    public_boundary_node_read_plan(exec::ExecNodeAccessPlan::VectorSearch {
+                        key: catalog::NodeSearchIndexKey::try_new(shape.label(), shape.property())
+                            .expect("public-boundary node vector key validates"),
+                        index: ir::SearchIndexPlan {
+                            index_id: public_name(&vector_index_name(
+                                VectorElementType::Node,
+                                shape.label(),
+                                shape.property(),
+                            )),
+                            tenant,
+                        },
+                        query_vector,
+                        k,
+                    })
+                }
+                IndexElementKind::Edge => {
+                    public_boundary_edge_read_plan(exec::ExecEdgeAccessPlan::VectorSearch {
+                        key: catalog::EdgeSearchIndexKey::try_new(shape.label(), shape.property())
+                            .expect("public-boundary edge vector key validates"),
+                        index: ir::SearchIndexPlan {
+                            index_id: public_name(&vector_index_name(
+                                VectorElementType::Edge,
+                                shape.label(),
+                                shape.property(),
+                            )),
+                            tenant,
+                        },
+                        query_vector,
+                        k,
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn public_boundary_node_read_plan(access: exec::ExecNodeAccessPlan) -> exec::ExecutablePlan {
+    public_boundary_projected_read_plan(exec::ExecAccessPlan::Node(access))
+}
+
+fn public_boundary_edge_read_plan(access: exec::ExecEdgeAccessPlan) -> exec::ExecutablePlan {
+    public_boundary_projected_read_plan(exec::ExecAccessPlan::Edge(access))
+}
+
+fn public_boundary_projected_read_plan(access: exec::ExecAccessPlan) -> exec::ExecutablePlan {
+    let access_id =
+        exec::ExecStepId::new(1).expect("public-boundary indexed access ID is positive");
+    public_executable(
+        ir::PlanKind::Read,
+        vec![
+            public_step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(access),
+                },
+            ),
+            public_step(
+                2,
+                vec![access_id],
+                exec::ExecOp::Project {
+                    projection: ir::ProjectionPlan::Id,
+                },
+            ),
+        ],
+        2,
+    )
 }
 
 /// Builds one public node insert for the selected physical family.
