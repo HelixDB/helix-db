@@ -19,7 +19,7 @@ use state::ServerState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-pub use config::{ServerConfig, ServerConfigError, StorageConfig};
+pub use config::{ServerConfig, ServerConfigError, StorageConfig, WalStorageConfig};
 
 /// Boxed error returned by the server runtime.
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync + 'static>>;
@@ -83,7 +83,8 @@ where
 /// Open the configured database and run all transports until Ctrl-C.
 pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
     let db_source = config.db_source();
-    let db = Arc::new(HelixDB::open_for_server(db_source, db::DbConfig::new()).await?);
+    let db_config = config.db_config()?;
+    let db = Arc::new(HelixDB::open_for_server(db_source, db_config).await?);
     run_open_database_until_shutdown(config, db, async {
         tokio::signal::ctrl_c().await?;
         Ok(())
@@ -107,6 +108,7 @@ pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
 ///     grpc_addr: "127.0.0.1:0".parse().unwrap(),
 ///     db_path: "server-shutdown-example".to_string(),
 ///     storage: StorageConfig::Memory,
+///     wal_storage: None,
 /// };
 /// server::run_with_shutdown(config, async {}).await.unwrap();
 /// # });
@@ -116,7 +118,8 @@ pub async fn run_with_shutdown(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> ServerResult<()> {
     let db_source = config.db_source();
-    let db = Arc::new(HelixDB::open_for_server(db_source, db::DbConfig::new()).await?);
+    let db_config = config.db_config()?;
+    let db = Arc::new(HelixDB::open_for_server(db_source, db_config).await?);
     run_open_database_until_shutdown(config, db, async move {
         shutdown.await;
         Ok(())

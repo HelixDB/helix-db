@@ -1049,12 +1049,12 @@ impl HelixDB {
                     .slate()
                     .to_writer_settings(config.cache().object_store_cache()),
             );
-        match config.wal_object_store() {
-            Some(wal_object_store) => {
-                builder = builder.with_wal_object_store(Arc::clone(wal_object_store));
-            }
-            None => {}
-        }
+        builder = config
+            .wal_object_store()
+            .into_iter()
+            .fold(builder, |builder, wal_object_store| {
+                builder.with_wal_object_store(Arc::clone(wal_object_store))
+            });
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
@@ -1275,12 +1275,12 @@ impl HelixDB {
                     .slate()
                     .to_reader_options(config.cache().object_store_cache()),
             );
-        match config.wal_object_store() {
-            Some(wal_object_store) => {
-                builder = builder.with_wal_object_store(Arc::clone(wal_object_store));
-            }
-            None => {}
-        }
+        builder = config
+            .wal_object_store()
+            .into_iter()
+            .fold(builder, |builder, wal_object_store| {
+                builder.with_wal_object_store(Arc::clone(wal_object_store))
+            });
         match config.cache().mode() {
             CacheMode::VectorMemoryOnly => builder = builder.with_db_cache_disabled(),
             CacheMode::Memory { .. } | CacheMode::Hybrid { .. } => {
