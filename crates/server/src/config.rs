@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::net::{AddrParseError, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -91,6 +92,14 @@ impl ServerConfig {
             .endpoint
             .iter()
             .fold(builder, |builder, endpoint| builder.with_endpoint(endpoint));
+        builder = wal_storage
+            .credentials
+            .iter()
+            .fold(builder, |builder, credentials| {
+                builder
+                    .with_access_key_id(credentials.access_key_id.clone())
+                    .with_secret_access_key(credentials.secret_access_key.clone())
+            });
         let wal_object_store: Arc<dyn object_store::ObjectStore> = Arc::new(
             builder
                 .build()
@@ -111,6 +120,20 @@ pub struct WalStorageConfig {
     pub endpoint: Option<String>,
     /// Whether HTTP endpoints are allowed.
     pub allow_http: bool,
+    /// Optional WAL-specific credentials.
+    credentials: Option<WalStorageCredentials>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct WalStorageCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+}
+
+impl fmt::Debug for WalStorageCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
 }
 
 impl WalStorageConfig {
@@ -122,9 +145,22 @@ impl WalStorageConfig {
         let endpoint = lookup("WAL_AWS_ENDPOINT").or_else(|| lookup("WAL_AWS_ENDPOINT_URL_S3"));
         let region_override = lookup("WAL_S3_REGION");
         let allow_http_override = lookup("WAL_AWS_ALLOW_HTTP");
+        let credentials = match (
+            lookup("WAL_AWS_ACCESS_KEY_ID"),
+            lookup("WAL_AWS_SECRET_ACCESS_KEY"),
+        ) {
+            (Some(access_key_id), Some(secret_access_key)) => Some(WalStorageCredentials {
+                access_key_id,
+                secret_access_key,
+            }),
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ServerConfigError::IncompleteWalCredentials);
+            }
+        };
 
         if bucket.is_none() && endpoint.is_none() {
-            if region_override.is_some() || allow_http_override.is_some() {
+            if region_override.is_some() || allow_http_override.is_some() || credentials.is_some() {
                 return Err(ServerConfigError::WalOverridesWithoutStorage);
             }
             return Ok(None);
@@ -169,6 +205,7 @@ impl WalStorageConfig {
             region,
             endpoint,
             allow_http,
+            credentials,
         }))
     }
 }
@@ -266,9 +303,12 @@ pub enum ServerConfigError {
     ConflictingStorageConfiguration,
     /// WAL-only overrides were supplied without enabling separate WAL storage.
     #[error(
-        "WAL_S3_REGION and WAL_AWS_ALLOW_HTTP require WAL_S3_BUCKET, WAL_AWS_ENDPOINT, or WAL_AWS_ENDPOINT_URL_S3"
+        "WAL region, HTTP, and credential overrides require WAL_S3_BUCKET, WAL_AWS_ENDPOINT, or WAL_AWS_ENDPOINT_URL_S3"
     )]
     WalOverridesWithoutStorage,
+    /// WAL-specific credentials must be configured as a complete pair.
+    #[error("WAL_AWS_ACCESS_KEY_ID and WAL_AWS_SECRET_ACCESS_KEY must be set together")]
+    IncompleteWalCredentials,
     /// A WAL endpoint needs a bucket, either explicit or inherited from main S3 storage.
     #[error("a WAL endpoint requires WAL_S3_BUCKET or S3_BUCKET")]
     WalEndpointWithoutBucket,
@@ -384,6 +424,8 @@ mod tests {
             ("WAL_AWS_ENDPOINT", "http://wal-primary:9000"),
             ("WAL_AWS_ENDPOINT_URL_S3", "http://wal-fallback:9000"),
             ("WAL_AWS_ALLOW_HTTP", "false"),
+            ("WAL_AWS_ACCESS_KEY_ID", "wal-access-key-id"),
+            ("WAL_AWS_SECRET_ACCESS_KEY", "wal-secret-access-key"),
         ]);
         let config =
             ServerConfig::from_lookup(|name| values.get(name).map(|value| (*value).to_string()))
@@ -396,8 +438,16 @@ mod tests {
                 region: "wal-region".to_string(),
                 endpoint: Some("http://wal-primary:9000".to_string()),
                 allow_http: false,
+                credentials: Some(WalStorageCredentials {
+                    access_key_id: "wal-access-key-id".to_string(),
+                    secret_access_key: "wal-secret-access-key".to_string(),
+                }),
             })
         );
+        let debug = format!("{config:?}");
+        assert!(debug.contains("credentials: Some(<redacted>)"));
+        assert!(!debug.contains("wal-access-key-id"));
+        assert!(!debug.contains("wal-secret-access-key"));
         assert!(config.db_config().unwrap().wal_object_store().is_some());
     }
 
@@ -419,6 +469,7 @@ mod tests {
                 region: "eu-west-1".to_string(),
                 endpoint: Some("http://wal-cache:9000".to_string()),
                 allow_http: false,
+                credentials: None,
             })
         );
     }
@@ -443,6 +494,7 @@ mod tests {
                 region: "ap-southeast-2".to_string(),
                 endpoint: Some("http://main-store:9000".to_string()),
                 allow_http: true,
+                credentials: None,
             })
         );
     }
@@ -467,6 +519,7 @@ mod tests {
                     region: "us-west-2".to_string(),
                     endpoint: Some("http://wal-store:9000".to_string()),
                     allow_http: true,
+                    credentials: None,
                 })
             );
         }
@@ -495,6 +548,36 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(error, ServerConfigError::WalEndpointWithoutBucket));
+    }
+
+    #[test]
+    fn wal_credentials_must_be_a_complete_pair() {
+        for variable in ["WAL_AWS_ACCESS_KEY_ID", "WAL_AWS_SECRET_ACCESS_KEY"] {
+            let error = ServerConfig::from_lookup(|name| match name {
+                "WAL_S3_BUCKET" => Some("wal-bucket".to_string()),
+                name if name == variable => Some("wal-credential".to_string()),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(matches!(error, ServerConfigError::IncompleteWalCredentials));
+        }
+    }
+
+    #[test]
+    fn wal_credentials_without_storage_are_rejected() {
+        let error = ServerConfig::from_lookup(|name| match name {
+            "WAL_AWS_ACCESS_KEY_ID" => Some("wal-access-key-id".to_string()),
+            "WAL_AWS_SECRET_ACCESS_KEY" => Some("wal-secret-access-key".to_string()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ServerConfigError::WalOverridesWithoutStorage
+        ));
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("wal-access-key-id"));
+        assert!(!debug.contains("wal-secret-access-key"));
     }
 
     #[test]

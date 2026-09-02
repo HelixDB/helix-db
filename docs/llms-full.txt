@@ -467,17 +467,22 @@ omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
 | `WAL_S3_REGION` | Optional WAL region; falls back to the resolved main region |
 | `WAL_AWS_ENDPOINT` or `WAL_AWS_ENDPOINT_URL_S3` | Optional WAL endpoint; falls back to the main endpoint |
 | `WAL_AWS_ALLOW_HTTP` | Optional WAL HTTP policy; falls back to `AWS_ALLOW_HTTP` |
+| `WAL_AWS_ACCESS_KEY_ID` | Optional WAL-specific access key; must be set with `WAL_AWS_SECRET_ACCESS_KEY` |
+| `WAL_AWS_SECRET_ACCESS_KEY` | Optional WAL-specific secret key; must be set with `WAL_AWS_ACCESS_KEY_ID` |
 
 By default, WAL objects use the main `S3_BUCKET`. Leave all `WAL_*` variables unset
 to keep this behavior.
 
-Set a WAL bucket or WAL endpoint to enable the separate client. It uses the standard
-AWS credential variables and always shares `DB_PATH` with the main store. To put a
+Set a WAL bucket or WAL endpoint to enable the separate client. It uses the WAL-specific
+credential pair when both variables are set; otherwise, it uses the standard AWS
+credential provider chain. Inject credentials at runtime from a secret manager and
+do not commit them to configuration files. The WAL client always shares `DB_PATH`
+with the main store. To put a
 cache or write-through proxy in front of existing WAL objects, set only the WAL
 endpoint; the main bucket, region, and path are inherited. The proxy must expose the
 existing WAL objects because HelixDB does not migrate them. A WAL endpoint without a
 main or WAL bucket is rejected. WAL region or HTTP overrides without a WAL bucket or
-endpoint are also rejected.
+endpoint are also rejected. Supplying only one WAL credential variable is rejected.
 
 These WAL variables configure the standalone server image only. The local CLI and
 `helix.toml` do not expose separate WAL storage.

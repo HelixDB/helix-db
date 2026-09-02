@@ -40,6 +40,8 @@ services:
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_ENDPOINT: http://minio:9000
       AWS_ALLOW_HTTP: "true"
+      WAL_AWS_ACCESS_KEY_ID: minioadmin
+      WAL_AWS_SECRET_ACCESS_KEY: minioadmin
 
 volumes:
   minio-data:
