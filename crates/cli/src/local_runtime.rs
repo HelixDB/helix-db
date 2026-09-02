@@ -175,7 +175,7 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        format!("helix-{}-{}", self.project_name, instance_name)
+        sanitize_docker_name(&format!("helix-{}-{}", self.project_name, instance_name))
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -1069,6 +1069,18 @@ fn missing_resource(stderr: &str) -> bool {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn sanitize_docker_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
