@@ -68,6 +68,9 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 
 `HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image.
 
+By default, WAL objects use the main object store. Leave all `WAL_*` variables unset
+to keep this behavior.
+
 To route only WAL objects through another S3-compatible client, set at least one
 of `WAL_S3_BUCKET`, `WAL_AWS_ENDPOINT`, or `WAL_AWS_ENDPOINT_URL_S3`:
 

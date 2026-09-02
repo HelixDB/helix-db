@@ -118,7 +118,7 @@ S3-compatible storage and is interpreted as a real bucket name.
 
 ## Run with MinIO persistence
 
-This Compose configuration creates separate main and WAL buckets in the same
+This Compose configuration creates a bucket and stores HelixDB objects in the
 `minio-data` volume:
 
 ```yaml docker-compose.yaml expandable
@@ -144,7 +144,6 @@ services:
       - |
         until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
         mc mb --ignore-existing local/helix-db
-        mc mb --ignore-existing local/helix-wal
 
   helix:
     image: ghcr.io/helixdb/helixdb:v0.0.4
@@ -156,7 +155,6 @@ services:
       - "6969:8080"
     environment:
       S3_BUCKET: helix-db
-      WAL_S3_BUCKET: helix-wal
       S3_REGION: us-east-1
       DB_PATH: db/
       AWS_ACCESS_KEY_ID: minioadmin
@@ -188,6 +186,9 @@ omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
 | `WAL_S3_REGION` | Optional WAL region; falls back to the resolved main region |
 | `WAL_AWS_ENDPOINT` or `WAL_AWS_ENDPOINT_URL_S3` | Optional WAL endpoint; falls back to the main endpoint |
 | `WAL_AWS_ALLOW_HTTP` | Optional WAL HTTP policy; falls back to `AWS_ALLOW_HTTP` |
+
+By default, WAL objects use the main `S3_BUCKET`. Leave all `WAL_*` variables unset
+to keep this behavior.
 
 Set a WAL bucket or WAL endpoint to enable the separate client. It uses the standard
 AWS credential variables and always shares `DB_PATH` with the main store. To put a
