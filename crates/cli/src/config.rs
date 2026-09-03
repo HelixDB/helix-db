@@ -520,6 +520,15 @@ impl HelixConfig {
                     path: relative_path.clone(),
                 });
             }
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(ConfigError::InvalidInstanceName {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                });
+            }
         }
 
         for (name, config) in &self.local {
@@ -723,6 +732,30 @@ name = "demo"
         // Lenient validation (used by `helix add`) accepts it so the first
         // instance can be re-added after the last one was deleted.
         assert!(config.validate(path, false).is_ok());
+    }
+
+    #[test]
+    fn instance_name_with_path_traversal_characters_is_rejected() {
+        // Instance names are joined onto `.helix/` to build each instance's state
+        // directory (see `ProjectContext::instance_workspace`), which `prune`/`delete`
+        // then recursively remove. A name containing `..` or `/` must never reach
+        // that join unsanitized, so it's rejected here at config-validation time
+        // instead of at every path-building call site.
+        let config: HelixConfig = toml::from_str(
+            r#"
+[project]
+name = "demo"
+
+[local."../../evil"]
+"#,
+        )
+        .expect("TOML allows arbitrary quoted table keys");
+
+        let path = Path::new("helix.toml");
+        assert!(matches!(
+            config.validate(path, true),
+            Err(ConfigError::InvalidInstanceName { .. })
+        ));
     }
 
     #[test]

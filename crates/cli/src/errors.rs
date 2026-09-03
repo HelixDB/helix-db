@@ -184,6 +184,10 @@ pub enum ConfigError {
     #[error("instance name cannot be empty in {path}")]
     EmptyInstanceName { path: PathBuf },
     #[error(
+        "instance name '{name}' in {path} must contain only ASCII letters, digits, '-', or '_'"
+    )]
+    InvalidInstanceName { name: String, path: PathBuf },
+    #[error(
         "local instance '{name}' uses s3 storage but has no [local.{name}.s3] config in {path}"
     )]
     MissingS3Config { name: String, path: PathBuf },
@@ -268,6 +272,15 @@ impl ConfigError {
                 "instance name cannot be empty in {}",
                 path.display()
             )),
+            ConfigError::InvalidInstanceName { name, path } => CliError::new(format!(
+                "instance name '{}' in {} must contain only ASCII letters, digits, '-', or '_'",
+                name,
+                path.display()
+            ))
+            .with_hint(
+                "instance names are used to build container names and local state directory \
+                 paths, so characters like '/', '.', and '\\' aren't allowed",
+            ),
             ConfigError::MissingS3Config { name, path } => CliError::new(format!(
                 "local instance '{}' uses s3 storage but has no [local.{}.s3] config in {}",
                 name,
@@ -456,6 +469,10 @@ mod tests {
             ConfigError::EmptyProjectName { path: path.clone() },
             ConfigError::MissingInstances { path: path.clone() },
             ConfigError::EmptyInstanceName { path: path.clone() },
+            ConfigError::InvalidInstanceName {
+                name: "../evil".into(),
+                path: path.clone(),
+            },
             ConfigError::MissingS3Config {
                 name: "dev".into(),
                 path: path.clone(),

@@ -100,6 +100,24 @@ impl LocalRuntime {
             .into())
     }
 
+    /// Returns `Err` if the runtime binary isn't on `PATH`. Unlike `check_available`,
+    /// this never spawns or auto-starts the daemon — it's for read-only commands
+    /// (`logs`, `status`) where starting a daemon as a side effect of a read would
+    /// be surprising.
+    fn check_installed(runtime: ContainerRuntime) -> Result<()> {
+        Self::check_installed_with(runtime, command_exists)
+    }
+
+    fn check_installed_with(
+        runtime: ContainerRuntime,
+        is_installed: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        if is_installed(runtime.binary()) {
+            return Ok(());
+        }
+        Err(not_installed_error(runtime, "binary not found on PATH", is_installed).into())
+    }
+
     /// Returns `true` if the runtime daemon answers a bounded `info` probe.
     ///
     /// The probe never tries to auto-start the daemon. A wedged runtime client
@@ -343,6 +361,7 @@ impl LocalRuntime {
     }
 
     pub fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
+        Self::check_installed(self.runtime)?;
         let name = self.container_name(instance_name);
         let mut command = self.runtime_command();
         command.arg("logs");
@@ -373,6 +392,7 @@ impl LocalRuntime {
     }
 
     pub fn status(&self, instance_name: &str) -> Result<Option<LocalStatus>> {
+        Self::check_installed(self.runtime)?;
         let name = self.container_name(instance_name);
         let output = self
             .runtime_command()
@@ -1368,5 +1388,20 @@ mod tests {
         let hint = err.hint.expect("hint should be set");
         assert!(hint.contains("get.docker.com"));
         assert!(hint.contains("sandboxes"));
+    }
+
+    #[test]
+    fn check_installed_passes_when_binary_present() {
+        assert!(LocalRuntime::check_installed_with(ContainerRuntime::Docker, |_| true).is_ok());
+    }
+
+    #[test]
+    fn check_installed_names_missing_binary_without_probing_daemon() {
+        let err =
+            LocalRuntime::check_installed_with(ContainerRuntime::Docker, |bin| bin == "podman")
+                .unwrap_err();
+
+        assert!(err.to_string().contains("Docker is not installed"));
+        assert!(err.to_string().contains("docker"));
     }
 }
