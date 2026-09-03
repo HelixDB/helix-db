@@ -108,12 +108,20 @@ impl LocalRuntime {
         Self::check_installed_with(runtime, command_exists)
     }
 
+    /// Checks whether the binary that `runtime_command` would actually spawn is
+    /// present, not necessarily the literal `docker`/`podman` name: the
+    /// `HELIX_TEST_CONTAINER_RUNTIME_BIN` seam lets tests point `runtime_command`
+    /// at a fixture executable, and this must agree with that or `logs`/`status`
+    /// would report "not installed" for a runtime the fixture stands in for.
     fn check_installed_with(
         runtime: ContainerRuntime,
         is_installed: impl Fn(&str) -> bool,
     ) -> Result<()> {
-        if is_installed(runtime.binary()) {
-            return Ok(());
+        match resolved_runtime_binary(runtime).to_str() {
+            Some(binary) if is_installed(binary) => return Ok(()),
+            // A path we cannot inspect is not evidence the runtime is absent.
+            None => return Ok(()),
+            Some(_) => {}
         }
         Err(not_installed_error(runtime, "binary not found on PATH", is_installed).into())
     }
@@ -1092,6 +1100,12 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[cfg(test)]
+/// Serializes tests that set `HELIX_TEST_CONTAINER_RUNTIME_BIN`, since it's a
+/// process-global environment variable and `cargo test` runs this file's tests
+/// on multiple threads.
+static TEST_RUNTIME_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1393,6 +1407,33 @@ mod tests {
     #[test]
     fn check_installed_passes_when_binary_present() {
         assert!(LocalRuntime::check_installed_with(ContainerRuntime::Docker, |_| true).is_ok());
+    }
+
+    #[test]
+    fn check_installed_with_uses_the_test_runtime_bin_override() {
+        // Regression test: `check_installed` used to check `command_exists(runtime.binary())`
+        // directly, i.e. the literal "docker"/"podman", ignoring
+        // `HELIX_TEST_CONTAINER_RUNTIME_BIN`. That disagreed with `runtime_command`
+        // (which does honor the override), so `logs`/`status` would report a runtime
+        // as "not installed" even when the fixture binary the override points at was
+        // right there and would have run fine.
+        let _guard = TEST_RUNTIME_BIN_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by TEST_RUNTIME_BIN_ENV_LOCK against every other test in
+        // this module that reads or writes HELIX_TEST_CONTAINER_RUNTIME_BIN; the
+        // variable is removed before this function returns.
+        unsafe {
+            std::env::set_var(TEST_CONTAINER_RUNTIME_BIN_ENV, "helix-fixture-runtime");
+        }
+
+        let result = LocalRuntime::check_installed_with(ContainerRuntime::Docker, |bin| {
+            bin == "helix-fixture-runtime"
+        });
+
+        unsafe {
+            std::env::remove_var(TEST_CONTAINER_RUNTIME_BIN_ENV);
+        }
+
+        assert!(result.is_ok());
     }
 
     #[test]
