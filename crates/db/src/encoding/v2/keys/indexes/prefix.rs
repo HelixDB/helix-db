@@ -372,7 +372,7 @@ mod tests {
 
         let inclusive_end =
             RangeScanValuePrefix::new(RangeIndexDirection::Asc, PROP, "a").inclusive_end_bound();
-        let mut expected = vec![0x03, 0x01, 1, 2, 3, 4, b'a'];
+        let mut expected = vec![0x03, 0x01, 1, 2, 3, 4, b'a', 0x00, 0x00];
         expected.extend_from_slice(&u64::MAX.to_be_bytes());
         expected.push(0);
         assert_eq!(inclusive_end.as_ref(), expected.as_slice());
@@ -414,7 +414,7 @@ mod tests {
         let inclusive_end =
             GlobalEdgeRangeScanValuePrefix::new(RangeIndexDirection::Asc, PROP, "a")
                 .inclusive_end_bound();
-        let mut expected = vec![0x03, 0x09, 1, 2, 3, 4, b'a'];
+        let mut expected = vec![0x03, 0x09, 1, 2, 3, 4, b'a', 0x00, 0x00];
         expected.extend_from_slice(&u64::MAX.to_be_bytes());
         expected.push(0);
         assert_eq!(inclusive_end.as_ref(), expected.as_slice());
@@ -465,6 +465,7 @@ mod tests {
         value_expected.extend_from_slice(&endpoint.to_be_bytes());
         value_expected.extend_from_slice(&PROP);
         value_expected.push(b'a');
+        value_expected.extend_from_slice(&[0x00, 0x00]);
         let value_prefix = EdgeRangeScanValuePrefix::new(
             RangeEdgeDirection::In,
             EdgeRangeIndexDirection::Asc,
