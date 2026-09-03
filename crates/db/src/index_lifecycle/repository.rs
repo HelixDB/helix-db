@@ -229,7 +229,13 @@ fn validate_bootstrap_values(
     }
     match version.get() {
         0x0002 | 0x0003 => Ok(ValidatedReaderBootstrap::LegacyEqualityUnion),
-        0x0004 | 0x0005 => Ok(ValidatedReaderBootstrap::Current),
+        0x0004 | 0x0005 => Err(HelixDbError::WriterMigrationRequired {
+            requirement: WriterMigrationRequirement::StorageVersion {
+                found: version.get(),
+                target: IndexStorageVersion::CURRENT.get(),
+            },
+        }),
+        0x0006 => Ok(ValidatedReaderBootstrap::Current),
         _ => unreachable!("unsupported storage versions returned before compatibility dispatch"),
     }
 }
@@ -1142,8 +1148,8 @@ mod tests {
     use crate::migrations::startup::bootstrap_writer;
 
     #[test]
-    fn storage_versions_with_v4_equality_are_current() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0004);
+    fn storage_versions_with_canonical_labels_are_current() {
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0006);
         let logical = encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
             LogicalIndexIdWatermark {
                 next_id: IndexId::initial(),
@@ -1154,16 +1160,27 @@ mod tests {
                 next_id: VectorPhysicalIndexId::initial(),
             },
         ));
-        for current in [
+        let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
             IndexStorageVersion::CURRENT,
-            IndexStorageVersion::DISJOINT_MEMBERSHIP,
-        ] {
-            let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(current));
-            assert_eq!(
-                validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
-                    .expect("storage with V4 equality encoding is accepted"),
-                ValidatedReaderBootstrap::Current
-            );
+        ));
+        assert_eq!(
+            validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
+                .expect("canonical-label storage is reader-current"),
+            ValidatedReaderBootstrap::Current
+        );
+        for found in [0x0004, 0x0005] {
+            let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                IndexStorageVersion::new(found).unwrap(),
+            ));
+            assert!(matches!(
+                validate_bootstrap_values(&marker, Some(&logical), Some(&vector)),
+                Err(HelixDbError::WriterMigrationRequired {
+                    requirement: WriterMigrationRequirement::StorageVersion {
+                        found: refused,
+                        target: 0x0006,
+                    },
+                }) if refused == found
+            ));
         }
         for legacy in [0x0002, 0x0003] {
             let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
@@ -1232,8 +1249,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0006,
-                supported: 0x0005,
+                found: 0x0007,
+                supported: 0x0006,
             })
         ));
     }
@@ -1278,7 +1295,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_writer_preflight_preserves_every_byte() {
-        for rejected_state in ["malformed", "partial", "v1", "v5"] {
+        for rejected_state in ["malformed", "partial", "v1", "unsupported"] {
             let db = Db::builder(
                 format!("writer-preflight-preserves-{rejected_state}"),
                 Arc::new(InMemory::new()),
@@ -1320,8 +1337,13 @@ mod tests {
                 "v1" => {
                     put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0001).unwrap()).await;
                 }
-                "v5" => {
-                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0005).unwrap()).await;
+                "unsupported" => {
+                    put_bootstrap_tuple(
+                        &db,
+                        IndexStorageVersion::new(IndexStorageVersion::MAX_SUPPORTED.get() + 1)
+                            .unwrap(),
+                    )
+                    .await;
                 }
                 _ => unreachable!(),
             }

@@ -4,7 +4,7 @@ use crate::encoding::{
     error::EncodingError,
     indexes::{
         equality::{EdgeEqualityIndexKey, EqualityIndexKey, GlobalEdgeEqualityIndexKey},
-        label::{EdgeLabelKey, EdgeLabelNeighborKey},
+        label::{EdgeLabelKey, EdgeLabelNeighborKey, NodeLabelKey},
         range::{
             EdgeRangeIndexDirection, EdgeRangeIndexKey, GlobalEdgeRangeIndexKey,
             RangeIndexDirection, RangeIndexKey,
@@ -16,9 +16,11 @@ use crate::encoding::{
 use bytes::BufMut;
 
 #[cfg(test)]
+use super::direction::EdgeDirection;
+#[cfg(test)]
 use crate::encoding::keys::KeyPrefix;
 
-use super::{direction::EdgeDirection, prefix::IndexPrefix};
+use super::prefix::IndexPrefix;
 
 pub type PropertyHash = [u8; 4];
 pub type ValueHash = [u8; 8];
@@ -63,17 +65,24 @@ pub(crate) enum PropertyIndexKey<'a> {
     /// ```
     EdgeEquality(EdgeEqualityIndexKey),
 
+    /// Builtin node-label index: label -> set of NodeIds
+    /// ```text
+    /// Key: [0x03][0x07][digest:8][u32 len][utf8]
+    /// Value: RoaringTreemap<NodeId>
+    /// ```
+    NodeLabel(NodeLabelKey),
+
     /// Edge label index: label -> set of EdgeIds
     /// ```text
-    /// Key: [0x03][0x04][label_hash:8]
+    /// Key: [0x03][0x04][digest:8][u32 len][utf8]
     /// Value: RoaringTreemap<EdgeId>
     /// ```
     EdgeLabel(EdgeLabelKey),
 
     /// Edge-label neighbor index: endpoint+label -> set of opposite NodeIds
     /// ```text
-    /// Out: [0x03][0x10][0x00][source:8][label_hash:8]
-    /// In:  [0x03][0x10][0x01][target:8][label_hash:8]
+    /// Out: [0x03][0x10][0x00][source:8][digest:8][u32 len][utf8]
+    /// In:  [0x03][0x10][0x01][target:8][digest:8][u32 len][utf8]
     /// Value: RoaringTreemap<NodeId>
     /// ```
     EdgeLabelNeighbor(EdgeLabelNeighborKey),
@@ -123,6 +132,7 @@ impl<'a> PropertyIndexKey<'a> {
                 range_direction, ..
             }) => IndexPrefix::Range(*range_direction),
             PropertyIndexKey::EdgeEquality(_) => IndexPrefix::EdgeEquality,
+            PropertyIndexKey::NodeLabel(_) => IndexPrefix::NodeLabel,
             PropertyIndexKey::EdgeLabel(_) => IndexPrefix::EdgeLabel,
             PropertyIndexKey::EdgeLabelNeighbor(key) => key.index_prefix_for_key(),
             PropertyIndexKey::GlobalEdgeEquality(_) => IndexPrefix::GlobalEdgeEquality,
@@ -144,6 +154,7 @@ impl<'a> PropertyIndexKey<'a> {
             PropertyIndexKey::Equality(_) => EqualityIndexKey::key_prefix(),
             PropertyIndexKey::Range(_) => RangeIndexKey::key_prefix(),
             PropertyIndexKey::EdgeEquality(_) => EdgeEqualityIndexKey::key_prefix(),
+            PropertyIndexKey::NodeLabel(_) => NodeLabelKey::key_prefix(),
             PropertyIndexKey::EdgeLabel(_) => EdgeLabelKey::key_prefix(),
             PropertyIndexKey::EdgeLabelNeighbor(_) => EdgeLabelNeighborKey::key_prefix(),
             PropertyIndexKey::EdgeRange(_) => EdgeRangeIndexKey::key_prefix(),
@@ -159,6 +170,7 @@ impl<'a> PropertyIndexKey<'a> {
             PropertyIndexKey::Equality(_) => EqualityIndexKey::index_prefix(),
             PropertyIndexKey::Range(key) => key.index_prefix(),
             PropertyIndexKey::EdgeEquality(_) => EdgeEqualityIndexKey::index_prefix(),
+            PropertyIndexKey::NodeLabel(_) => NodeLabelKey::index_prefix(),
             PropertyIndexKey::EdgeLabel(_) => EdgeLabelKey::index_prefix(),
             PropertyIndexKey::EdgeLabelNeighbor(key) => key.index_prefix_for_key(),
             PropertyIndexKey::EdgeRange(key) => key.index_prefix(),
@@ -178,6 +190,9 @@ impl<'a> PropertyIndexKey<'a> {
             )?)),
             IndexPrefix::EdgeEquality => Ok(PropertyIndexKey::EdgeEquality(
                 EdgeEqualityIndexKey::parse_from_slice(slice)?,
+            )),
+            IndexPrefix::NodeLabel => Ok(PropertyIndexKey::NodeLabel(
+                NodeLabelKey::parse_from_slice(slice)?,
             )),
             IndexPrefix::EdgeLabel => Ok(PropertyIndexKey::EdgeLabel(
                 EdgeLabelKey::parse_from_slice(slice)?,
@@ -236,14 +251,9 @@ impl<'a> PropertyIndexKey<'a> {
                     + PROPERTY_HASH_MAX_LEN
                     + VALUE_HASH_MAX_LEN
             }
-            PropertyIndexKey::EdgeLabel(_) => PREFIX_LEN + INDEX_PREFIX_LEN + VALUE_HASH_MAX_LEN,
-            PropertyIndexKey::EdgeLabelNeighbor(_) => {
-                PREFIX_LEN
-                    + INDEX_PREFIX_LEN
-                    + size_of::<EdgeDirection>()
-                    + NODE_ID_MAX_LEN
-                    + VALUE_HASH_MAX_LEN
-            }
+            PropertyIndexKey::NodeLabel(key) => key.encoded_len(),
+            PropertyIndexKey::EdgeLabel(key) => key.encoded_len(),
+            PropertyIndexKey::EdgeLabelNeighbor(key) => key.encoded_len(),
             PropertyIndexKey::GlobalEdgeEquality(_) => {
                 PREFIX_LEN + INDEX_PREFIX_LEN + PROPERTY_HASH_MAX_LEN + VALUE_HASH_MAX_LEN
             }
@@ -300,6 +310,7 @@ impl<'a> PropertyIndexKey<'a> {
             PropertyIndexKey::Equality(key) => key.encode_into(buf),
             PropertyIndexKey::Range(key) => key.encode_into(buf),
             PropertyIndexKey::EdgeEquality(key) => key.encode_into(buf),
+            PropertyIndexKey::NodeLabel(key) => key.encode_into(buf),
             PropertyIndexKey::EdgeLabel(key) => key.encode_into(buf),
             PropertyIndexKey::EdgeLabelNeighbor(key) => key.encode_into(buf),
             PropertyIndexKey::EdgeRange(key) => key.encode_into(buf),
@@ -315,7 +326,7 @@ mod tests {
     use crate::encoding::indexes::equality::{
         self as equality_index, EdgeEqualityIndexKey, EqualityIndexKey, GlobalEdgeEqualityIndexKey,
     };
-    use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
+    use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey, NodeLabelKey};
     use crate::encoding::indexes::range::{
         EdgeRangeIndexKey, GlobalEdgeRangeIndexKey, RangeIndexKey,
     };
@@ -341,6 +352,7 @@ mod tests {
             &[0x05]
         );
         assert_eq!(IndexPrefix::EdgeEquality.as_slice(), &[0x02]);
+        assert_eq!(IndexPrefix::NodeLabel.as_slice(), &[0x07]);
         assert_eq!(IndexPrefix::EdgeLabel.as_slice(), &[0x04]);
         assert_eq!(
             IndexPrefix::EdgeLabelNeighbor(EdgeDirection::Out).as_slice(),
@@ -427,6 +439,10 @@ mod tests {
             IndexPrefix::EdgeEquality
         );
         assert_eq!(
+            IndexPrefix::from_slice(&[0x03, 0x07]).unwrap(),
+            IndexPrefix::NodeLabel
+        );
+        assert_eq!(
             IndexPrefix::from_slice(&[0x03, 0x04]).unwrap(),
             IndexPrefix::EdgeLabel
         );
@@ -487,12 +503,11 @@ mod tests {
             [3, 4, 5, 6],
             [8; 8],
         ));
-        let edge_label = PropertyIndexKey::EdgeLabel(EdgeLabelKey::new([9; 8]));
-        let edge_label_neighbor = PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
-            EdgeDirection::In,
-            17,
-            [10; 8],
-        ));
+        let edge_label = PropertyIndexKey::EdgeLabel(EdgeLabelKey::from_label("FOLLOWS").unwrap());
+        let edge_label_neighbor = PropertyIndexKey::EdgeLabelNeighbor(
+            EdgeLabelNeighborKey::from_label(EdgeDirection::In, 17, "FOLLOWS").unwrap(),
+        );
+        let node_label = PropertyIndexKey::NodeLabel(NodeLabelKey::from_label("User").unwrap());
         let global_edge_equality = PropertyIndexKey::GlobalEdgeEquality(
             GlobalEdgeEqualityIndexKey::new([11, 12, 13, 14], [15; 8]),
         );
@@ -519,6 +534,7 @@ mod tests {
             equality,
             range,
             edge_equality,
+            node_label,
             edge_label,
             edge_label_neighbor,
             global_edge_equality,

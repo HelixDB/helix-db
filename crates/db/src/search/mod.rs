@@ -35,7 +35,9 @@ use crate::encoding::indexes::equality::{
     scans::{EdgeEqualityScanPrefix, EqualityScanPrefix, GlobalEdgeEqualityScanPrefix},
     EdgeDirection as EdgeEqualityDirection, EdgeEqualityIndexKey, EqualityIndexKey,
 };
-use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey, EdgeLabelScanPrefix};
+use crate::encoding::indexes::label::{
+    EdgeLabelKey, EdgeLabelNeighborKey, EdgeLabelScanPrefix, NodeLabelKey, NodeLabelScanPrefix,
+};
 use crate::encoding::indexes::prefix::exclusive_prefix_end_bound;
 use crate::encoding::indexes::range::{
     scans::{
@@ -68,6 +70,57 @@ use slatedb::DbReadOps;
 fn bounded_prefix_end(prefix: &Bytes) -> Bytes {
     exclusive_prefix_end_bound(prefix)
         .expect("typed index prefixes always have a finite lexicographic successor")
+}
+
+const NODE_LABEL_PROPERTY: &str = "$label";
+
+fn node_label_data_key(scope: DataScope, label: &str) -> Result<Bytes, HelixDbError> {
+    Ok(DataKey::Data {
+        scope,
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(NodeLabelKey::from_label(
+            label,
+        )?)),
+    }
+    .to_bytes())
+}
+
+fn equality_data_key(scope: DataScope, property: &str, value: &str) -> Result<Bytes, HelixDbError> {
+    if property == NODE_LABEL_PROPERTY {
+        return node_label_data_key(scope, value);
+    }
+    Ok(DataKey::Data {
+        scope,
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
+            hash_property_name(property),
+            hash_property_value(value),
+        ))),
+    }
+    .to_bytes())
+}
+
+fn edge_label_data_key(scope: DataScope, label: &str) -> Result<Bytes, HelixDbError> {
+    Ok(DataKey::Data {
+        scope,
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::from_label(
+            label,
+        )?)),
+    }
+    .to_bytes())
+}
+
+fn edge_label_neighbor_data_key(
+    scope: DataScope,
+    direction: EdgeRangeDirection,
+    node: NodeId,
+    label: &str,
+) -> Result<Bytes, HelixDbError> {
+    Ok(DataKey::Data {
+        scope,
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
+            EdgeLabelNeighborKey::from_label(direction, node, label)?,
+        )),
+    }
+    .to_bytes())
 }
 
 /// Build a deterministic vector index name from element type, label, and property.
@@ -408,7 +461,6 @@ pub fn migration_parity_graph_hash_contract(
 ) -> BTreeMap<String, Vec<u8>> {
     let property_hash = hash_property_name(property);
     let value_hash = hash_property_value(value);
-    let label_hash = hash_property_value(label);
     let mut rows = BTreeMap::new();
     rows.insert("property_name_hash".to_string(), property_hash.to_vec());
     rows.insert("property_value_hash".to_string(), value_hash.to_vec());
@@ -484,9 +536,9 @@ pub fn migration_parity_graph_hash_contract(
         "global_edge_label_key".to_string(),
         DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                label_hash,
-            ))),
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+                EdgeLabelKey::from_label(label).expect("parity labels are valid canonical labels"),
+            )),
         }
         .to_bytes()
         .to_vec(),
@@ -500,7 +552,8 @@ pub fn migration_parity_graph_hash_contract(
             DataKey::Data {
                 scope: DataScope::LegacyUnscoped,
                 kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                    EdgeLabelNeighborKey::new(direction, endpoint, label_hash),
+                    EdgeLabelNeighborKey::from_label(direction, endpoint, label)
+                        .expect("parity labels are valid canonical labels"),
                 )),
             }
             .to_bytes()
@@ -679,14 +732,7 @@ pub async fn add_to_equality_index_scoped(
     node_id: NodeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
-            hash_property_name(property),
-            hash_property_value(value),
-        ))),
-    }
-    .to_bytes();
+    let key = equality_data_key(tenant_scope, property, value)?;
 
     stage_shared_bitmap_membership(txn, &key, node_id, true).await
 }
@@ -709,14 +755,7 @@ pub async fn remove_from_equality_index_scoped(
     node_id: NodeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
-            hash_property_name(property),
-            hash_property_value(value),
-        ))),
-    }
-    .to_bytes();
+    let key = equality_data_key(tenant_scope, property, value)?;
 
     stage_shared_bitmap_membership(txn, &key, node_id, false).await
 }
@@ -736,14 +775,7 @@ pub async fn lookup_equality_index_scoped(
     value: &str,
     tenant_scope: DataScope,
 ) -> Result<Vec<NodeId>, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
-            hash_property_name(property),
-            hash_property_value(value),
-        ))),
-    }
-    .to_bytes();
+    let key = equality_data_key(tenant_scope, property, value)?;
 
     match txn.get(&key).await? {
         Some(data) => {
@@ -769,14 +801,7 @@ pub async fn lookup_equality_index_set_scoped(
     value: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
-            hash_property_name(property),
-            hash_property_value(value),
-        ))),
-    }
-    .to_bytes();
+    let key = equality_data_key(tenant_scope, property, value)?;
 
     match txn.get(&key).await? {
         Some(data) => decode_roaring_treemap(&data),
@@ -823,10 +848,14 @@ pub async fn scan_equality_index_property_prefix_limited_filtered_scoped(
         return Ok(RoaringTreemap::new());
     }
 
-    let prefix = EqualityScanPrefix::Property {
-        property_hash: hash_property_name(property),
-    }
-    .to_bytes();
+    let prefix = if property == NODE_LABEL_PROPERTY {
+        NodeLabelScanPrefix::Index.to_bytes()
+    } else {
+        EqualityScanPrefix::Property {
+            property_hash: hash_property_name(property),
+        }
+        .to_bytes()
+    };
     let mut iter = txn
         .scan_prefix(DataKey::data_prefix(tenant_scope, prefix), ..)
         .await?;
@@ -1629,26 +1658,10 @@ pub async fn add_to_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let label_hash = hash_property_value(label);
-
-    // Update outgoing index: from + label -> to
-    let out_key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, from, label_hash),
-        )),
-    }
-    .to_bytes();
+    let out_key = edge_label_neighbor_data_key(tenant_scope, EdgeRangeDirection::Out, from, label)?;
     stage_shared_bitmap_membership(txn, &out_key, to, true).await?;
 
-    // Update incoming index: to + label -> from
-    let in_key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, to, label_hash),
-        )),
-    }
-    .to_bytes();
+    let in_key = edge_label_neighbor_data_key(tenant_scope, EdgeRangeDirection::In, to, label)?;
     stage_shared_bitmap_membership(txn, &in_key, from, true).await
 }
 
@@ -1669,26 +1682,10 @@ pub async fn remove_from_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let label_hash = hash_property_value(label);
-
-    // Update outgoing index
-    let out_key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, from, label_hash),
-        )),
-    }
-    .to_bytes();
+    let out_key = edge_label_neighbor_data_key(tenant_scope, EdgeRangeDirection::Out, from, label)?;
     stage_shared_bitmap_membership(txn, &out_key, to, false).await?;
 
-    // Update incoming index
-    let in_key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, to, label_hash),
-        )),
-    }
-    .to_bytes();
+    let in_key = edge_label_neighbor_data_key(tenant_scope, EdgeRangeDirection::In, to, label)?;
     stage_shared_bitmap_membership(txn, &in_key, from, false).await
 }
 
@@ -1709,13 +1706,7 @@ pub async fn lookup_out_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, source, hash_property_value(label)),
-        )),
-    }
-    .to_bytes();
+    let key = edge_label_neighbor_data_key(tenant_scope, EdgeRangeDirection::Out, source, label)?;
     match txn.get(&key).await? {
         Some(data) => decode_roaring_treemap(&data),
         None => Ok(RoaringTreemap::new()),
@@ -1739,13 +1730,7 @@ pub async fn lookup_in_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, target, hash_property_value(label)),
-        )),
-    }
-    .to_bytes();
+    let key = edge_label_neighbor_data_key(tenant_scope, EdgeRangeDirection::In, target, label)?;
     match txn.get(&key).await? {
         Some(data) => decode_roaring_treemap(&data),
         None => Ok(RoaringTreemap::new()),
@@ -2007,13 +1992,7 @@ pub async fn add_to_global_edge_label_index_scoped(
     edge_id: EdgeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
-        ))),
-    }
-    .to_bytes();
+    let key = edge_label_data_key(tenant_scope, label)?;
     stage_shared_bitmap_membership(txn, &key, edge_id, true).await
 }
 
@@ -2032,13 +2011,7 @@ pub async fn remove_from_global_edge_label_index_scoped(
     edge_id: EdgeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
-        ))),
-    }
-    .to_bytes();
+    let key = edge_label_data_key(tenant_scope, label)?;
     stage_shared_bitmap_membership(txn, &key, edge_id, false).await
 }
 
@@ -2055,13 +2028,7 @@ pub async fn lookup_global_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
-        ))),
-    }
-    .to_bytes();
+    let key = edge_label_data_key(tenant_scope, label)?;
     match txn.get(&key).await? {
         Some(data) => decode_roaring_treemap(&data),
         None => Ok(RoaringTreemap::new()),
@@ -2175,12 +2142,9 @@ pub async fn remove_from_edge_pair_index_scoped(
     stage_shared_bitmap_membership(txn, &key, edge_id, false).await
 }
 
-/// Delete all node `$label` equality-index entries before a full rebuild.
+/// Delete all builtin node-label index entries before a full rebuild.
 pub async fn clear_node_label_indexes(txn: &DbTransaction) -> Result<(), HelixDbError> {
-    let prefix = EqualityScanPrefix::Property {
-        property_hash: hash_property_name("$label"),
-    }
-    .to_bytes();
+    let prefix = NodeLabelScanPrefix::Index.to_bytes();
     let mut iter = txn.scan_prefix(prefix, ..).await?;
     let mut keys = Vec::new();
     while let Some(kv) = iter.next().await? {
@@ -5001,9 +4965,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edge_label_indexes_use_hashed_encoding_keys() {
+    async fn edge_label_indexes_use_canonical_encoding_keys() {
         let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
-            database: "search-edge-label-hashed-keys".to_string(),
+            database: "search-edge-label-canonical-keys".to_string(),
         })
         .await
         .expect("db opens");
@@ -5012,7 +4976,6 @@ mod tests {
             .begin(IsolationLevel::Snapshot)
             .await
             .expect("transaction starts");
-        let label_hash = hash_property_value("FOLLOWS");
 
         add_to_edge_label_index(&txn, 1, 2, "FOLLOWS")
             .await
@@ -5021,36 +4984,35 @@ mod tests {
             .await
             .expect("global label index write succeeds");
 
-        let out_key = DataKey::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, 1, label_hash),
-            )),
-        }
-        .to_bytes();
-        let in_key = DataKey::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                EdgeLabelNeighborKey::new(EdgeRangeDirection::In, 2, label_hash),
-            )),
-        }
-        .to_bytes();
-        let global_key = DataKey::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                label_hash,
-            ))),
-        }
-        .to_bytes();
+        let out_key = edge_label_neighbor_data_key(
+            DataScope::LegacyUnscoped,
+            EdgeRangeDirection::Out,
+            1,
+            "FOLLOWS",
+        )
+        .expect("canonical neighbor key encodes");
+        let in_key = edge_label_neighbor_data_key(
+            DataScope::LegacyUnscoped,
+            EdgeRangeDirection::In,
+            2,
+            "FOLLOWS",
+        )
+        .expect("canonical neighbor key encodes");
+        let global_key = edge_label_data_key(DataScope::LegacyUnscoped, "FOLLOWS")
+            .expect("canonical global key encodes");
 
         let mut expected_out_key = vec![0x03, 0x10, 0x00];
         expected_out_key.extend_from_slice(&1u64.to_be_bytes());
-        expected_out_key.extend_from_slice(&label_hash);
+        let mut label_frame = Vec::new();
+        crate::encoding::indexes::CanonicalLabel::from_label("FOLLOWS")
+            .unwrap()
+            .encode_into(&mut label_frame);
+        expected_out_key.extend_from_slice(&label_frame);
         let mut expected_in_key = vec![0x03, 0x10, 0x01];
         expected_in_key.extend_from_slice(&2u64.to_be_bytes());
-        expected_in_key.extend_from_slice(&label_hash);
+        expected_in_key.extend_from_slice(&label_frame);
         let mut expected_global_key = vec![0x03, 0x04];
-        expected_global_key.extend_from_slice(&label_hash);
+        expected_global_key.extend_from_slice(&label_frame);
 
         assert_eq!(out_key.as_ref(), expected_out_key.as_slice());
         assert_eq!(in_key.as_ref(), expected_in_key.as_slice());
@@ -5148,5 +5110,99 @@ mod tests {
                 .expect("tenant a global lookup succeeds after clear")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn digest_colliding_labels_keep_distinct_bitmaps() {
+        let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+            database: "search-label-digest-collision".to_string(),
+        })
+        .await
+        .expect("db opens");
+        let digest = [0xA5; crate::encoding::indexes::canonical_label::LABEL_DIGEST_LEN];
+        let first =
+            crate::encoding::indexes::CanonicalLabel::with_test_digest_unchecked("alpha", digest);
+        let second =
+            crate::encoding::indexes::CanonicalLabel::with_test_digest_unchecked("beta", digest);
+        let first_key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+                EdgeLabelKey::from_canonical(first),
+            )),
+        }
+        .to_bytes();
+        let second_key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+                EdgeLabelKey::from_canonical(second),
+            )),
+        }
+        .to_bytes();
+        assert_ne!(first_key, second_key);
+
+        db.inner_db()
+            .put(
+                first_key.clone(),
+                SecondaryEqualityValue::encode_ids(&RoaringTreemap::from_iter([1u64])),
+            )
+            .await
+            .expect("first colliding label persists");
+        db.inner_db()
+            .put(
+                second_key.clone(),
+                SecondaryEqualityValue::encode_ids(&RoaringTreemap::from_iter([2u64])),
+            )
+            .await
+            .expect("second colliding label persists");
+
+        let first_ids = decode_roaring_treemap(
+            &db.inner_db()
+                .get(&first_key)
+                .await
+                .expect("first get succeeds")
+                .expect("first bitmap exists"),
+        )
+        .expect("first bitmap decodes");
+        let second_ids = decode_roaring_treemap(
+            &db.inner_db()
+                .get(&second_key)
+                .await
+                .expect("second get succeeds")
+                .expect("second bitmap exists"),
+        )
+        .expect("second bitmap decodes");
+        assert!(first_ids.contains(1) && !first_ids.contains(2));
+        assert!(second_ids.contains(2) && !second_ids.contains(1));
+    }
+
+    #[tokio::test]
+    async fn hash_only_node_label_equality_keys_are_not_read() {
+        let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+            database: "search-label-hash-only-unread".to_string(),
+        })
+        .await
+        .expect("db opens");
+        let txn = db
+            .inner_db()
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("transaction starts");
+        let stale = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
+                hash_property_name("$label"),
+                hash_property_value("User"),
+            ))),
+        }
+        .to_bytes();
+        txn.put(
+            &stale,
+            SecondaryEqualityValue::encode_ids(&RoaringTreemap::from_iter([7u64])),
+        )
+        .expect("stale hash-only label row stages");
+        assert!(lookup_equality_index(&txn, "$label", "User")
+            .await
+            .expect("canonical label lookup succeeds")
+            .is_empty());
     }
 }

@@ -333,11 +333,12 @@ mod tests {
                         scope: keys::scope::DataScope::LegacyUnscoped,
                         kind: keys::DataKeyKind::PropertyIndex(
                             indexes::PropertyIndexKey::EdgeLabelNeighbor(
-                                indexes::label::EdgeLabelNeighborKey::new(
+                                indexes::label::EdgeLabelNeighborKey::from_label(
                                     index_direction,
                                     7,
-                                    indexes::hash_property_value(label.as_ref()),
-                                ),
+                                    label.as_ref(),
+                                )
+                                .expect("test labels are valid canonical labels"),
                             ),
                         ),
                     }

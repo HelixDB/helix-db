@@ -22,9 +22,7 @@ use slatedb::{Db, DbReadOps, IsolationLevel};
 use super::*;
 use crate::config::{DbConfig, TextIndexDefinition};
 use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
-use crate::encoding::indexes::{
-    hash_property_name, hash_property_value, EdgeDirection, PropertyIndexKey,
-};
+use crate::encoding::indexes::{EdgeDirection, PropertyIndexKey};
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::encoding::property::Property;
 use crate::encoding::v2::keys as index_keys;
@@ -1264,11 +1262,9 @@ pub(crate) async fn run_request_read_view_guards() {
 fn topology_node_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-            crate::encoding::indexes::equality::EqualityIndexKey::new(
-                hash_property_name("$label"),
-                hash_property_value(label),
-            ),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+            crate::encoding::indexes::label::NodeLabelKey::from_label(label)
+                .expect("test labels are valid canonical labels"),
         )),
     }
     .to_bytes()
@@ -1299,7 +1295,8 @@ fn topology_edge_label_neighbor_key(
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(direction, node, hash_property_value(label)),
+            EdgeLabelNeighborKey::from_label(direction, node, label)
+                .expect("test labels are valid canonical labels"),
         )),
     }
     .to_bytes()
@@ -1308,9 +1305,9 @@ fn topology_edge_label_neighbor_key(
 fn topology_global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
-        ))),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+            EdgeLabelKey::from_label(label).expect("test labels are valid canonical labels"),
+        )),
     }
     .to_bytes()
 }

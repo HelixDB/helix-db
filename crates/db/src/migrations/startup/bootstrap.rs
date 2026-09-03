@@ -27,14 +27,40 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
 
     match plan {
         WriterBootstrapPlan::Initialize => initialize_writer_bootstrap(db).await,
-        WriterBootstrapPlan::MigrateToCurrent => {
-            super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await
-        }
+        WriterBootstrapPlan::MigrateToCurrent => migrate_to_current(db).await,
         WriterBootstrapPlan::CleanupCurrent => {
             super::super::indexes::equality_bitmap::cleanup_v3_nonunique_equality_rows(db).await
         }
         WriterBootstrapPlan::Ready => Ok(()),
     }
+}
+
+async fn migrate_to_current(db: &Db) -> Result<()> {
+    let version = read_writer_storage_version(db).await?;
+    if version < IndexStorageVersion::EQUALITY_BITMAP {
+        return super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await;
+    }
+    if version < IndexStorageVersion::CURRENT {
+        return super::super::indexes::labels::migrate_hash_labels_to_canonical(db).await;
+    }
+    Ok(())
+}
+
+async fn read_writer_storage_version(db: &Db) -> Result<IndexStorageVersion> {
+    let marker = db
+        .get(&global_key(GlobalKey::StorageVersion))
+        .await?
+        .ok_or_else(|| HelixDbError::MigrationRequired {
+            reason: "V2 storage marker disappeared after writer preflight".to_string(),
+        })?;
+    let IndexV2MetadataValue::StorageVersion(version) =
+        metadata_or_migration_required(&marker, "storage marker")?
+    else {
+        return Err(HelixDbError::MigrationRequired {
+            reason: "V2 storage marker contains the wrong value kind".to_string(),
+        });
+    };
+    Ok(version)
 }
 
 /// Initializes a pristine managed database without entering a migration path.
@@ -85,16 +111,17 @@ pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
         });
     };
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
+    if version < IndexStorageVersion::EQUALITY_BITMAP && cleanup_ready {
+        transaction.rollback();
+        return Err(HelixDbError::MigrationRequired {
+            reason: format!(
+                "index storage V4 cleanup is marked complete beside storage version {}",
+                version.get()
+            ),
+        });
+    }
     if version < IndexStorageVersion::CURRENT {
         transaction.rollback();
-        if cleanup_ready {
-            return Err(HelixDbError::MigrationRequired {
-                reason: format!(
-                    "index storage V4 cleanup is marked complete beside storage version {}",
-                    version.get()
-                ),
-            });
-        }
         return Err(HelixDbError::WriterMigrationRequired {
             requirement: WriterMigrationRequirement::StorageVersion {
                 found: version.get(),
@@ -170,7 +197,7 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
         });
     };
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
-    if version < IndexStorageVersion::CURRENT && cleanup_ready {
+    if version < IndexStorageVersion::EQUALITY_BITMAP && cleanup_ready {
         return Err(HelixDbError::MigrationRequired {
             reason: format!(
                 "index storage V4 cleanup is marked complete beside storage version {}",
