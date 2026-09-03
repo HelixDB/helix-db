@@ -178,6 +178,8 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
     trip(EqualityBitmapMigrationFailpoint::VerificationBefore)?;
     trip(EqualityBitmapMigrationFailpoint::VerificationAfter)?;
 
+    super::labels::rewrite_and_verify_canonical_labels(db).await?;
+
     trip(EqualityBitmapMigrationFailpoint::PublicationBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     transaction.put(
@@ -192,7 +194,8 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
     transaction.commit().await?;
     trip(EqualityBitmapMigrationFailpoint::PublicationAfter)?;
 
-    cleanup_v3_nonunique_equality_rows(db).await
+    cleanup_v3_nonunique_equality_rows(db).await?;
+    super::labels::cleanup_hash_only_label_keys(db).await
 }
 
 pub(crate) async fn cleanup_v3_nonunique_equality_rows(db: &Db) -> Result<()> {

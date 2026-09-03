@@ -67,7 +67,9 @@ pub(crate) fn decode_write_mode(
         {
             Ok(MembershipDeltaWriteMode::LegacyExclusive)
         }
-        (MembershipDeltaWriteMode::DisjointV2, Some(IndexStorageVersion::DISJOINT_MEMBERSHIP)) => {
+        (MembershipDeltaWriteMode::DisjointV2, Some(version))
+            if version >= IndexStorageVersion::DISJOINT_MEMBERSHIP =>
+        {
             Ok(MembershipDeltaWriteMode::DisjointV2)
         }
         _ => Err(HelixDbError::MigrationRequired {
@@ -134,13 +136,6 @@ pub(crate) async fn activate(db: &Db) -> Result<()> {
                 )),
                 &no_expiry,
             )?;
-            transaction.put_with_options(
-                version_key,
-                encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-                    IndexStorageVersion::DISJOINT_MEMBERSHIP,
-                )),
-                &no_expiry,
-            )?;
         }
         MembershipDeltaWriteMode::DisjointV2 => {}
     }
@@ -185,7 +180,7 @@ mod tests {
         let version = db.get(storage_version_key()).await.unwrap().unwrap();
         assert_eq!(
             decode_metadata_value(&version).unwrap(),
-            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::DISJOINT_MEMBERSHIP)
+            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
         );
     }
 
@@ -204,6 +199,14 @@ mod tests {
             write_mode_key(),
             encode_metadata_value(&IndexV2MetadataValue::MembershipDeltaWriteMode(
                 MembershipDeltaWriteMode::DisjointV2,
+            )),
+        )
+        .await
+        .unwrap();
+        db.put(
+            storage_version_key(),
+            encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                IndexStorageVersion::EQUALITY_BITMAP,
             )),
         )
         .await

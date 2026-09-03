@@ -6,19 +6,24 @@ use super::{
     IndexGenerationId, IndexId, IndexOperationId, IndexOperationRevision, VectorPhysicalIndexId,
 };
 
-/// Canonical V2 index format number written by this implementation.
-pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0004;
+/// First storage format whose managed equality indexes are V4 bitmaps.
+pub(crate) const EQUALITY_BITMAP_INDEX_STORAGE_VERSION: u16 = 0x0004;
 /// First storage format that permits persisted disjoint membership operands.
 pub(crate) const DISJOINT_MEMBERSHIP_INDEX_STORAGE_VERSION: u16 = 0x0005;
+/// First storage format whose graph `$label` indexes use exact canonical labels.
+pub(crate) const CANONICAL_LABEL_INDEX_STORAGE_VERSION: u16 = 0x0006;
+/// Canonical V2 index format number written by this implementation.
+pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = CANONICAL_LABEL_INDEX_STORAGE_VERSION;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct IndexStorageVersion(u16);
 
 impl IndexStorageVersion {
-    pub(crate) const CURRENT: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
+    pub(crate) const EQUALITY_BITMAP: Self = Self(EQUALITY_BITMAP_INDEX_STORAGE_VERSION);
     pub(crate) const DISJOINT_MEMBERSHIP: Self = Self(DISJOINT_MEMBERSHIP_INDEX_STORAGE_VERSION);
-    pub(crate) const MAX_SUPPORTED: Self = Self::DISJOINT_MEMBERSHIP;
+    pub(crate) const CURRENT: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
+    pub(crate) const MAX_SUPPORTED: Self = Self::CURRENT;
 
     pub(crate) fn new(value: u16) -> Result<Self, crate::encoding::error::EncodingError> {
         if value == 0 {
