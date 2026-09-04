@@ -187,6 +187,12 @@ pub enum ConfigError {
         "instance name '{name}' in {path} must contain only ASCII letters, digits, '-', or '_'"
     )]
     InvalidInstanceName { name: String, path: PathBuf },
+    #[error("instance name '{name}' in {path} must be at most {max_len} characters")]
+    InstanceNameTooLong {
+        name: String,
+        path: PathBuf,
+        max_len: usize,
+    },
     #[error(
         "local instance '{name}' uses s3 storage but has no [local.{name}.s3] config in {path}"
     )]
@@ -224,6 +230,8 @@ pub enum ProjectError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{path} is a symlink or an existing non-directory")]
+    UnsafeHelixDir { path: PathBuf },
     #[error(transparent)]
     Config(Box<ConfigError>),
 }
@@ -281,6 +289,16 @@ impl ConfigError {
                 "instance names are used to build container names and local state directory \
                  paths, so characters like '/', '.', and '\\' aren't allowed",
             ),
+            ConfigError::InstanceNameTooLong {
+                name,
+                path,
+                max_len,
+            } => CliError::new(format!(
+                "instance name '{}' in {} must be at most {} characters",
+                name,
+                path.display(),
+                max_len
+            )),
             ConfigError::MissingS3Config { name, path } => CliError::new(format!(
                 "local instance '{}' uses s3 storage but has no [local.{}.s3] config in {}",
                 name,
@@ -343,6 +361,16 @@ impl ProjectError {
                 CliError::new(format!("failed to create directory at {}", path.display()))
                     .with_caused_by(source.to_string())
             }
+            ProjectError::UnsafeHelixDir { path } => CliError::new(format!(
+                "{} is a symlink or an existing non-directory",
+                path.display()
+            ))
+            .with_hint(
+                "helix stores per-instance runtime state under .helix/<instance>; refusing to \
+                 create or remove paths under it while it isn't a plain directory, since a \
+                 symlink there could point outside the project. Remove or replace it with a \
+                 real directory.",
+            ),
             ProjectError::Config(config_error) => config_error.to_cli_error(),
         }
     }

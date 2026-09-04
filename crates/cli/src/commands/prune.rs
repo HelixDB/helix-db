@@ -33,6 +33,10 @@ async fn prune_one(project: &ProjectContext, instance: &str) -> Result<()> {
     // or `/` must be rejected here, before it's joined onto `.helix/` and recursively
     // deleted.
     crate::config::validate_instance_name(instance).map_err(|message| eyre!(message))?;
+    // A valid instance name isn't enough on its own: `.helix` itself could be a
+    // repository-tracked symlink to somewhere outside the project, in which case
+    // even `.helix/dev` would resolve outside it. See `assert_safe_helix_dir`.
+    project.assert_safe_helix_dir()?;
 
     let op = Operation::new("Pruning", instance);
     let removed_container = LocalRuntime::new(project).prune_instance(instance)?;
@@ -118,5 +122,37 @@ mod tests {
         };
 
         assert!(prune_one(&project, "").await.is_err());
+    }
+
+    // A charset-valid instance name is not enough on its own: a repository can track
+    // `.helix` itself as a symlink to a directory outside the project, in which case
+    // `.helix/<valid name>` still resolves outside it. `symlink` is Unix-only in
+    // `std::os`; the equivalent Windows primitive requires elevated privileges to
+    // create, so this regression is covered on Unix only, matching how the rest of
+    // the suite handles platform-specific filesystem primitives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prune_one_rejects_a_symlinked_helix_dir_before_touching_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        // The external directory a malicious `.helix` symlink points at. If the
+        // symlink were followed, `remove_dir_all` would delete `external/dev`.
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(external.join("dev")).unwrap();
+        let helix_dir = dir.path().join(".helix");
+        std::os::unix::fs::symlink(&external, &helix_dir).unwrap();
+
+        let project = ProjectContext {
+            root: dir.path().to_path_buf(),
+            config: HelixConfig::default_config("test-project"),
+            helix_dir,
+        };
+
+        let result = prune_one(&project, "dev").await;
+
+        assert!(result.is_err());
+        assert!(
+            external.join("dev").exists(),
+            "directory outside the project must survive"
+        );
     }
 }

@@ -11,6 +11,15 @@ pub const DEFAULT_LOCAL_IMAGE_TAG: &str = "v0.0.4";
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
 pub const DEFAULT_S3_PREFIX: &str = "db/";
 
+/// The single length cap on an instance name, everywhere one is accepted:
+/// interactively (`prompts::input_name`), on the command line (`prune`, `add
+/// --name`, `init --name`), and loaded from `helix.toml`
+/// ([`HelixConfig::validate`]). One shared constant so those can't drift apart —
+/// a name the CLI validator accepts but the interactive prompt would have
+/// rejected (or vice versa) can be saved to `helix.toml` and then fail later
+/// during directory or container creation instead of at input time.
+pub const MAX_INSTANCE_NAME_LEN: usize = 32;
+
 /// Whether `name` uses only characters safe to build a container name or a
 /// `.helix/<name>` state directory from: ASCII letters, digits, `-`, and `_`.
 ///
@@ -25,14 +34,22 @@ pub fn has_valid_instance_name_charset(name: &str) -> bool {
 }
 
 /// Validates a name supplied directly on the command line (`prune <name>`,
-/// `add --name <name>`, `init --name <name>`) against the same charset
-/// [`HelixConfig::validate`] enforces on names loaded from `helix.toml`.
+/// `add --name <name>`, `init --name <name>`) against the same charset and
+/// length limit [`HelixConfig::validate`] enforces on names loaded from
+/// `helix.toml`, and that the interactive prompt (`prompts::input_name`) enforces
+/// on typed input. All three go through this one function (or its charset/length
+/// primitives) so none of them can drift out of agreement with the others.
 ///
 /// Returns a human-readable message on failure; commands wrap it in whatever
 /// error type they use (`eyre`, `CliError`, ...).
 pub fn validate_instance_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("instance name cannot be empty".to_string());
+    }
+    if name.len() > MAX_INSTANCE_NAME_LEN {
+        return Err(format!(
+            "instance name '{name}' must be at most {MAX_INSTANCE_NAME_LEN} characters"
+        ));
     }
     if !has_valid_instance_name_charset(name) {
         return Err(format!(
@@ -555,6 +572,13 @@ impl HelixConfig {
                 return Err(ConfigError::InvalidInstanceName {
                     name: name.clone(),
                     path: relative_path.clone(),
+                });
+            }
+            if name.len() > MAX_INSTANCE_NAME_LEN {
+                return Err(ConfigError::InstanceNameTooLong {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                    max_len: MAX_INSTANCE_NAME_LEN,
                 });
             }
         }
