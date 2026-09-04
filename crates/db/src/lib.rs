@@ -908,11 +908,11 @@ impl HelixDB {
     ///
     /// ```
     /// # tokio_test::block_on(async {
-    /// use std::num::NonZeroU64;
     /// use db::{DbConfig, HelixDB, HelixDbSource};
     ///
     /// let config = DbConfig::new()
-    ///     .with_id_lease_size(NonZeroU64::new(20_000).unwrap())
+    ///     .try_with_id_lease_size(20_000)
+    ///     .unwrap()
     ///     .with_id_lease_refill_threshold(8_000);
     /// let db = HelixDB::open_with_config(
     ///     HelixDbSource::InMemory {
@@ -4464,6 +4464,32 @@ mod tests {
             Some(&serde_json::json!(0))
         );
         assert!(db.query_json(b"not-json").await.is_err());
+        db.close().await.expect("writer closes");
+    }
+
+    #[tokio::test]
+    async fn open_with_config_applies_lease_size_to_both_id_allocators() {
+        let config = DbConfig::new()
+            .try_with_id_lease_size(7)
+            .expect("nonzero lease size is valid")
+            .with_id_lease_refill_threshold(3);
+        let db = HelixDB::open_with_config(
+            HelixDbSource::InMemory {
+                database: "configured-id-lease-size".to_string(),
+            },
+            config,
+        )
+        .await
+        .expect("writer opens with custom ID leasing");
+        let HelixStorage::Writer(writer) = db.storage() else {
+            panic!("writer handle expected")
+        };
+
+        assert_eq!(writer.node_ids().allocate().await.unwrap(), 0);
+        assert_eq!(writer.edge_ids().allocate().await.unwrap(), 0);
+        assert_eq!(writer.node_ids().remaining_in_lease(), 6);
+        assert_eq!(writer.edge_ids().remaining_in_lease(), 6);
+
         db.close().await.expect("writer closes");
     }
 

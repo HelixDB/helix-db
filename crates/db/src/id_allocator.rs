@@ -253,7 +253,9 @@ impl IdAllocator {
     /// Persist enough whole lease chunks to cover claims and refill headroom.
     ///
     /// The caller must hold `extend_lock` and provide the greatest currently
-    /// durable watermark observed under that lock.
+    /// durable watermark observed under that lock. Extending the exclusive
+    /// watermark never changes `next_id`, so unused IDs in the current lease
+    /// remain the next IDs returned after a proactive refill.
     async fn persist_lease_extension(&self, current_lease_end: u64) -> Result<()> {
         let next = self.next_id.load(Ordering::Acquire);
         let new_lease_end = Self::extension_target(
@@ -1112,6 +1114,28 @@ mod tests {
             RefillLifecycle::load(&alloc.refill_lifecycle),
             RefillLifecycle::Closed
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proactive_refill_preserves_the_next_contiguous_id() {
+        let db = test_db().await;
+        let key = Bytes::from_static(b"proactive-contiguous");
+        let alloc = IdAllocator::new_with_refill_threshold(Arc::clone(&db), key.clone(), 10, 5);
+
+        assert_eq!(alloc.allocate_batch(4).await.unwrap(), 0..4);
+        let extension_guard = alloc.extend_lock.lock().await;
+        assert_eq!(alloc.allocate().await.unwrap(), 4);
+        wait_for_refill_lifecycle(&alloc, RefillLifecycle::InFlight).await;
+        assert_eq!(alloc.next_id.load(Ordering::Acquire), 5);
+        assert_eq!(read_stored_hwm(&db, &key).await, 10);
+
+        drop(extension_guard);
+        wait_for_refill_lifecycle(&alloc, RefillLifecycle::Idle).await;
+        assert_eq!(read_stored_hwm(&db, &key).await, 20);
+        assert_eq!(alloc.next_id.load(Ordering::Acquire), 5);
+        assert_eq!(alloc.allocate_batch(5).await.unwrap(), 5..10);
+
+        alloc.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

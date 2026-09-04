@@ -193,6 +193,8 @@ pub struct DbConfig {
     /// Number of IDs to lease at a time for automatic ID allocation
     ///
     /// Higher values reduce storage operations but may "waste" IDs on restart.
+    /// The configured size is applied independently to both node and edge ID
+    /// allocators whenever a writer is opened.
     /// Default: 10,000
     id_lease_size: NonZeroU64,
 
@@ -429,6 +431,8 @@ impl DbConfig {
     ///
     /// Higher values reduce storage operations but may "waste" IDs when
     /// the database is closed before the lease is exhausted.
+    /// The configured size is applied independently to both node and edge ID
+    /// allocators whenever a writer is opened.
     ///
     /// Default: 10,000
     pub fn with_id_lease_size(mut self, size: NonZeroU64) -> Self {
