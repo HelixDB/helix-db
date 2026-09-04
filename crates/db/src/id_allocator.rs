@@ -1139,6 +1139,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_open_error_drains_an_inflight_refill_before_closing_storage() {
+        let db = test_db().await;
+        let writer = Arc::new(crate::HelixWriter::new(Arc::clone(&db), 4, 2));
+
+        assert_eq!(writer.node_ids().allocate().await.unwrap(), 0);
+        let extension_guard = writer.node_ids().0.extend_lock.lock().await;
+        assert_eq!(writer.node_ids().allocate().await.unwrap(), 1);
+        wait_for_refill_lifecycle(&writer.node_ids().0, RefillLifecycle::InFlight).await;
+
+        let closing = {
+            let writer = Arc::clone(&writer);
+            tokio::spawn(async move {
+                let result: crate::Result<()> = Err(crate::HelixDbError::Config(
+                    "injected writer open failure".to_string(),
+                ));
+                writer.close_on_open_error(result).await
+            })
+        };
+        wait_for_refill_lifecycle(&writer.node_ids().0, RefillLifecycle::ClosingInFlight).await;
+        assert!(!closing.is_finished());
+
+        drop(extension_guard);
+        let error = closing.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            crate::HelixDbError::Config(reason) if reason == "injected writer open failure"
+        ));
+        assert_eq!(
+            RefillLifecycle::load(&writer.node_ids().0.refill_lifecycle),
+            RefillLifecycle::Closed
+        );
+        assert_eq!(
+            RefillLifecycle::load(&writer.edge_ids().0.refill_lifecycle),
+            RefillLifecycle::Closed
+        );
+        assert!(db.get(b"closed-after-open-error").await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn batch_can_skip_past_threshold_without_waiting() {
         let db = test_db().await;
         let key = Bytes::from_static(b"batch-proactive");

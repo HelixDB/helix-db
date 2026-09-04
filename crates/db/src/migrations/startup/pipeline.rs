@@ -22,13 +22,18 @@ pub(crate) async fn prepare_writer(db: Arc<Db>, config: &DbConfig) -> Result<Hel
         config.id_lease_size(),
         config.id_lease_refill_threshold(),
     );
-    super::super::run_blocking_startup_migration(&writer, config.migrations()).await?;
-    crate::index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
-        writer.db(),
-        DataScope::LegacyUnscoped,
-    )
-    .await?;
-    crate::index_lifecycle::outbox::reconcile_operation_queue(writer.db()).await?;
+    let prepare_result: Result<()> = async {
+        super::super::run_blocking_startup_migration(&writer, config.migrations()).await?;
+        crate::index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
+            writer.db(),
+            DataScope::LegacyUnscoped,
+        )
+        .await?;
+        crate::index_lifecycle::outbox::reconcile_operation_queue(writer.db()).await?;
+        Ok(())
+    }
+    .await;
+    writer.close_on_open_error(prepare_result).await?;
     Ok(writer)
 }
 
