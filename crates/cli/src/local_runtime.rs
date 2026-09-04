@@ -175,12 +175,14 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        let name = format!("helix-{}-{}", self.project_name, instance_name);
-        let sanitized = sanitize_docker_name(&name);
-        if sanitized == name {
-            return sanitized;
-        }
-        format!("{sanitized}-{:08x}", fnv1a32(&name))
+        let identity = format!(
+            "{}:{}/{}",
+            self.project_name.len(),
+            self.project_name,
+            instance_name
+        );
+        let sanitized = sanitize_docker_name(&format!("{}-{}", self.project_name, instance_name));
+        format!("helix-{sanitized}-{:016x}", fnv1a64(&identity))
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -1088,13 +1090,13 @@ fn sanitize_docker_name(name: &str) -> String {
         .collect()
 }
 
-fn fnv1a32(value: &str) -> u32 {
+fn fnv1a64(value: &str) -> u64 {
     value
         .as_bytes()
         .iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
-        }) as u32
+        })
 }
 
 #[cfg(test)]
@@ -1109,27 +1111,34 @@ mod tests {
     }
 
     #[test]
-    fn container_name_sanitizes_and_tags_names_the_daemon_rejects() {
+    fn container_name_always_carries_a_deterministic_suffix() {
         assert_eq!(
             runtime_for("My Project").container_name("dev"),
-            "helix-My-Project-dev-7a878e3f"
+            "helix-My-Project-dev-1b9b89f3d40309b1"
         );
         assert_eq!(
             runtime_for("hélix (wörld)!").container_name("dev"),
-            "helix-h-lix--w-rld---dev-abe3c485"
+            "helix-h-lix--w-rld---dev-d1519c02ba6ec451"
+        );
+        assert_eq!(
+            runtime_for("demo").container_name("dev"),
+            "helix-demo-dev-5e601ab7912ede24"
         );
     }
 
     #[test]
-    fn colliding_spellings_get_distinct_container_names() {
-        assert_eq!(runtime_for("a-b").container_name("dev"), "helix-a-b-dev");
+    fn suffixed_names_do_not_collide_with_valid_names() {
         assert_ne!(
             runtime_for("a b").container_name("dev"),
-            runtime_for("a-b").container_name("dev")
+            runtime_for("a-b").container_name("dev-e5e7279d")
         );
-        assert_eq!(
-            runtime_for("a b").container_name("dev"),
-            "helix-a-b-dev-e5e7279d"
+    }
+
+    #[test]
+    fn container_names_separate_project_and_instance_boundaries() {
+        assert_ne!(
+            runtime_for("a-b").container_name("c"),
+            runtime_for("a").container_name("b-c")
         );
     }
 
@@ -1138,11 +1147,6 @@ mod tests {
         assert!(runtime_for("demo")
             .container_name("my dev")
             .starts_with("helix-demo-my-dev-"));
-    }
-
-    #[test]
-    fn container_name_keeps_valid_names_unchanged() {
-        assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
     }
 
     #[test]
