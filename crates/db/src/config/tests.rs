@@ -146,6 +146,7 @@ fn db_config_builders_preserve_checked_runtime_contracts() {
         .expect("legacy adaptive policy byte is valid")
         .try_with_id_lease_size(42)
         .expect("positive lease size is valid")
+        .with_id_lease_refill_threshold(21)
         .with_wal(false)
         .with_adaptive_updates(2048)
         .with_cache(cache.clone())
@@ -170,6 +171,7 @@ fn db_config_builders_preserve_checked_runtime_contracts() {
         EdgeUpdatePolicy::Adaptive.as_u8()
     );
     assert_eq!(config.id_lease_size(), 42);
+    assert_eq!(config.id_lease_refill_threshold(), 21);
     assert!(!config.enable_wal);
     assert_eq!(config.high_degree_threshold, 2048);
     assert_eq!(config.cache(), &cache);
@@ -204,6 +206,12 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
         DbConfig::default().id_lease_size(),
         crate::id_allocator::DEFAULT_LEASE_SIZE
     );
+    assert_eq!(DbConfig::default().id_lease_size(), 10_000);
+    assert_eq!(
+        DbConfig::default().id_lease_refill_threshold(),
+        crate::id_allocator::DEFAULT_LEASE_REFILL_THRESHOLD
+    );
+    assert_eq!(DbConfig::default().id_lease_refill_threshold(), 5_000);
     assert_eq!(
         super::SlateRuntimeConfig::default()
             .to_reader_options(None)
@@ -227,6 +235,10 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
     assert_eq!(
         default.id_lease_size(),
         crate::id_allocator::DEFAULT_LEASE_SIZE
+    );
+    assert_eq!(
+        default.id_lease_refill_threshold(),
+        crate::id_allocator::DEFAULT_LEASE_REFILL_THRESHOLD
     );
     assert!(matches!(default.cache().mode(), CacheMode::Memory { .. }));
     assert_eq!(

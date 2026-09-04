@@ -7981,7 +7981,11 @@ pub(crate) mod production_contracts {
     ) -> MigrationJob {
         let raw = Arc::new(raw(database, store).await);
         let config = one_row_config();
-        let writer = crate::HelixWriter::new(Arc::clone(&raw), config.id_lease_size());
+        let writer = crate::HelixWriter::new(
+            Arc::clone(&raw),
+            config.id_lease_size(),
+            config.id_lease_refill_threshold(),
+        );
         let target = recovery_stage.migration_stage();
         let target_rank = recovery_stage
             .stage_rank(target)

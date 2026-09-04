@@ -448,11 +448,19 @@ pub(crate) struct HelixWriter {
 }
 
 impl HelixWriter {
-    pub(crate) fn new(db: Arc<Db>, lease_size: u64) -> Self {
+    pub(crate) fn new(db: Arc<Db>, lease_size: u64, refill_threshold: u64) -> Self {
         Self {
             db: Arc::clone(&db),
-            node_ids: Arc::new(NodeIdAllocator::new(Arc::clone(&db), lease_size)),
-            edge_ids: Arc::new(EdgeIdAllocator::new(db, lease_size)),
+            node_ids: Arc::new(NodeIdAllocator::new_with_refill_threshold(
+                Arc::clone(&db),
+                lease_size,
+                refill_threshold,
+            )),
+            edge_ids: Arc::new(EdgeIdAllocator::new_with_refill_threshold(
+                db,
+                lease_size,
+                refill_threshold,
+            )),
         }
     }
 
@@ -466,6 +474,12 @@ impl HelixWriter {
 
     pub(crate) fn edge_ids(&self) -> &EdgeIdAllocator {
         self.edge_ids.as_ref()
+    }
+
+    async fn close(&self) -> Result<()> {
+        tokio::join!(self.node_ids.shutdown(), self.edge_ids.shutdown());
+        self.db.close().await?;
+        Ok(())
     }
 }
 
@@ -889,6 +903,26 @@ impl HelixDB {
     }
 
     /// Open a read/write database handle with explicit tuning config.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use std::num::NonZeroU64;
+    /// use db::{DbConfig, HelixDB, HelixDbSource};
+    ///
+    /// let config = DbConfig::new()
+    ///     .with_id_lease_size(NonZeroU64::new(20_000).unwrap())
+    ///     .with_id_lease_refill_threshold(8_000);
+    /// let db = HelixDB::open_with_config(
+    ///     HelixDbSource::InMemory {
+    ///         database: "custom-id-leasing".to_string(),
+    ///     },
+    ///     config,
+    /// ).await.unwrap();
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
     pub async fn open_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
         let db = Self::open_writer_inner(path, object_store, config).await?;
@@ -1104,7 +1138,11 @@ impl HelixDB {
             }
         }
         log_stage("storage_contract_validation", stage_started);
-        let writer = HelixWriter::new(Arc::clone(&db), config.id_lease_size());
+        let writer = HelixWriter::new(
+            Arc::clone(&db),
+            config.id_lease_size(),
+            config.id_lease_refill_threshold(),
+        );
         let stage_started = Instant::now();
         let migration_authorized = matches!(
             &open_mode,
