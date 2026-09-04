@@ -15,7 +15,7 @@ use crate::encoding::v2::values::adjacency::{
     EDGE_UPDATE_ADAPTIVE, EDGE_UPDATE_EAGER, EDGE_UPDATE_LAZY, ENCODING_TYPE_EFP,
     ENCODING_TYPE_NONE,
 };
-use crate::id_allocator::DEFAULT_LEASE_SIZE;
+use crate::id_allocator::{DEFAULT_LEASE_REFILL_THRESHOLD, DEFAULT_LEASE_SIZE};
 
 const MIB: u64 = 1024 * 1024;
 const EMBEDDED_VECTOR_MEMORY_BYTES: u64 = 64 * MIB;
@@ -193,8 +193,16 @@ pub struct DbConfig {
     /// Number of IDs to lease at a time for automatic ID allocation
     ///
     /// Higher values reduce storage operations but may "waste" IDs on restart.
-    /// Default: 1000
+    /// The configured size is applied independently to both node and edge ID
+    /// allocators whenever a writer is opened.
+    /// Default: 10,000
     id_lease_size: NonZeroU64,
+
+    /// Remaining durable IDs at which a proactive lease refill begins.
+    ///
+    /// This is an absolute count and does not scale with `id_lease_size`.
+    /// Default: 5,000
+    id_lease_refill_threshold: u64,
 
     /// SlateDB runtime settings.
     slate: SlateRuntimeConfig,
@@ -230,6 +238,7 @@ impl DbConfig {
             high_degree_threshold: 1000, // Vertices with >1000 edges use lazy updates
             id_lease_size: NonZeroU64::new(DEFAULT_LEASE_SIZE)
                 .expect("default lease size is nonzero"),
+            id_lease_refill_threshold: DEFAULT_LEASE_REFILL_THRESHOLD,
             slate: SlateRuntimeConfig::new(),
             cache: CacheConfig::default(),
             secondary_index_lifecycle: SecondaryIndexLifecycleTuning::default(),
@@ -310,6 +319,11 @@ impl DbConfig {
     /// Number of IDs to lease at a time for automatic ID allocation.
     pub const fn id_lease_size(&self) -> u64 {
         self.id_lease_size.get()
+    }
+
+    /// Remaining durable IDs at which a proactive lease refill begins.
+    pub const fn id_lease_refill_threshold(&self) -> u64 {
+        self.id_lease_refill_threshold
     }
 
     /// SlateDB runtime settings.
@@ -417,8 +431,10 @@ impl DbConfig {
     ///
     /// Higher values reduce storage operations but may "waste" IDs when
     /// the database is closed before the lease is exhausted.
+    /// The configured size is applied independently to both node and edge ID
+    /// allocators whenever a writer is opened.
     ///
-    /// Default: 1000
+    /// Default: 10,000
     pub fn with_id_lease_size(mut self, size: NonZeroU64) -> Self {
         self.id_lease_size = size;
         self
@@ -429,6 +445,17 @@ impl DbConfig {
         self.id_lease_size = NonZeroU64::new(size)
             .ok_or_else(|| ConfigError::new("id lease size must be nonzero"))?;
         Ok(self)
+    }
+
+    /// Set the absolute remaining-ID threshold for proactive lease refill.
+    ///
+    /// A threshold of zero starts renewal after the final ID in the current
+    /// lease is claimed. Thresholds larger than the lease size are supported;
+    /// the allocator reserves enough whole lease chunks to restore the
+    /// requested headroom.
+    pub fn with_id_lease_refill_threshold(mut self, remaining_ids: u64) -> Self {
+        self.id_lease_refill_threshold = remaining_ids;
+        self
     }
 }
 

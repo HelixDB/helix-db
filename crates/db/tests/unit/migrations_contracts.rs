@@ -557,7 +557,11 @@ async fn empty_migration_controller_executes_every_stage_and_catalog_family_to_c
         .unwrap(),
     );
     let config = crate::config::DbConfig::default();
-    let writer = crate::HelixWriter::new(Arc::clone(&raw), config.id_lease_size());
+    let writer = crate::HelixWriter::new(
+        Arc::clone(&raw),
+        config.id_lease_size(),
+        config.id_lease_refill_threshold(),
+    );
     let scope = DataScope::LegacyUnscoped;
 
     assert!(

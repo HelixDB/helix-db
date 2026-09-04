@@ -448,11 +448,19 @@ pub(crate) struct HelixWriter {
 }
 
 impl HelixWriter {
-    pub(crate) fn new(db: Arc<Db>, lease_size: u64) -> Self {
+    pub(crate) fn new(db: Arc<Db>, lease_size: u64, refill_threshold: u64) -> Self {
         Self {
             db: Arc::clone(&db),
-            node_ids: Arc::new(NodeIdAllocator::new(Arc::clone(&db), lease_size)),
-            edge_ids: Arc::new(EdgeIdAllocator::new(db, lease_size)),
+            node_ids: Arc::new(NodeIdAllocator::new_with_refill_threshold(
+                Arc::clone(&db),
+                lease_size,
+                refill_threshold,
+            )),
+            edge_ids: Arc::new(EdgeIdAllocator::new_with_refill_threshold(
+                db,
+                lease_size,
+                refill_threshold,
+            )),
         }
     }
 
@@ -466,6 +474,29 @@ impl HelixWriter {
 
     pub(crate) fn edge_ids(&self) -> &EdgeIdAllocator {
         self.edge_ids.as_ref()
+    }
+
+    async fn close(&self) -> Result<()> {
+        tokio::join!(self.node_ids.shutdown(), self.edge_ids.shutdown());
+        self.db.close().await?;
+        Ok(())
+    }
+
+    /// Preserve a writer-open error after draining allocators and closing storage.
+    pub(crate) async fn close_on_open_error<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(open_error) => {
+                if let Err(close_error) = self.close().await {
+                    tracing::warn!(
+                        error = %close_error,
+                        original_error = %open_error,
+                        "failed to close SlateDB after writer open failed"
+                    );
+                }
+                Err(open_error)
+            }
+        }
     }
 }
 
@@ -853,6 +884,23 @@ enum CloseState {
 }
 
 impl HelixDB {
+    /// Preserve a runtime-open error after stopping tasks and closing storage.
+    async fn close_on_open_error<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(open_error) => {
+                if let Err(close_error) = self.close().await {
+                    tracing::warn!(
+                        error = %close_error,
+                        original_error = %open_error,
+                        "failed to close database runtime after writer open failed"
+                    );
+                }
+                Err(open_error)
+            }
+        }
+    }
+
     /// Open a read/write database handle.
     pub async fn open(source: HelixDbSource) -> Result<Self> {
         let config = source.embedded_default_config();
@@ -889,6 +937,26 @@ impl HelixDB {
     }
 
     /// Open a read/write database handle with explicit tuning config.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource};
+    ///
+    /// let config = DbConfig::new()
+    ///     .try_with_id_lease_size(20_000)
+    ///     .unwrap()
+    ///     .with_id_lease_refill_threshold(8_000);
+    /// let db = HelixDB::open_with_config(
+    ///     HelixDbSource::InMemory {
+    ///         database: "custom-id-leasing".to_string(),
+    ///     },
+    ///     config,
+    /// ).await.unwrap();
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
     pub async fn open_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
         let db = Self::open_writer_inner(path, object_store, config).await?;
@@ -968,11 +1036,18 @@ impl HelixDB {
                 .await?,
         );
         let writer = migrations::startup::prepare_writer(Arc::clone(&db), &config).await?;
-        let loaded_catalog =
-            index_lifecycle::repository::load_scope_catalog(db.as_ref(), DataScope::LegacyUnscoped)
-                .await?;
+        let runtime_inputs: Result<_> = async {
+            let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
+                db.as_ref(),
+                DataScope::LegacyUnscoped,
+            )
+            .await?;
+            let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+            Ok((loaded_catalog, fts_cache))
+        }
+        .await;
+        let (loaded_catalog, fts_cache) = writer.close_on_open_error(runtime_inputs).await?;
         let storage = HelixStorage::Writer(Arc::new(writer));
-        let fts_cache = build_fts_cache(&path, &object_store, &config)?;
         let db = Self::from_storage(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
@@ -981,7 +1056,8 @@ impl HelixDB {
             fts_cache,
             index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
-        migrations::startup::finish_writer(&db).await?;
+        let finish_result = migrations::startup::finish_writer(&db).await;
+        db.close_on_open_error(finish_result).await?;
         db.start_background_migration_worker().await;
         Ok(db)
     }
@@ -1104,46 +1180,58 @@ impl HelixDB {
             }
         }
         log_stage("storage_contract_validation", stage_started);
-        let writer = HelixWriter::new(Arc::clone(&db), config.id_lease_size());
-        let stage_started = Instant::now();
-        let migration_authorized = matches!(
-            &open_mode,
-            WriterOpenMode::Embedded
-                | WriterOpenMode::Managed {
-                    intent: ManagedWriterOpenIntent::ControlledMigration(_),
-                    ..
-                }
+        let writer = HelixWriter::new(
+            Arc::clone(&db),
+            config.id_lease_size(),
+            config.id_lease_refill_threshold(),
         );
-        if migration_authorized {
-            migrations::run_blocking_startup_migration(&writer, config.migrations()).await?;
-            index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
-                &db,
+        let runtime_inputs: Result<_> = async {
+            let stage_started = Instant::now();
+            let migration_authorized = matches!(
+                &open_mode,
+                WriterOpenMode::Embedded
+                    | WriterOpenMode::Managed {
+                        intent: ManagedWriterOpenIntent::ControlledMigration(_),
+                        ..
+                    }
+            );
+            if migration_authorized {
+                migrations::run_blocking_startup_migration(&writer, config.migrations()).await?;
+                index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
+                    &db,
+                    DataScope::LegacyUnscoped,
+                )
+                .await?;
+            }
+            tracing::info!(
+                stage = "startup_migration",
+                open_intent,
+                writer_epoch,
+                migration_authorized,
+                elapsed_ms = u64::try_from(stage_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                total_elapsed_ms =
+                    u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "HelixDB writer open stage completed"
+            );
+            let stage_started = Instant::now();
+            index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+            log_stage("operation_queue_reconciliation", stage_started);
+            let stage_started = Instant::now();
+            let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
+                db.as_ref(),
                 DataScope::LegacyUnscoped,
             )
             .await?;
+            log_stage("catalog_load", stage_started);
+            let stage_started = Instant::now();
+            let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+            log_stage("fts_cache_construction", stage_started);
+            Ok((migration_authorized, loaded_catalog, fts_cache))
         }
-        tracing::info!(
-            stage = "startup_migration",
-            open_intent,
-            writer_epoch,
-            migration_authorized,
-            elapsed_ms = u64::try_from(stage_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            total_elapsed_ms =
-                u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "HelixDB writer open stage completed"
-        );
-        let stage_started = Instant::now();
-        index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
-        log_stage("operation_queue_reconciliation", stage_started);
-        let stage_started = Instant::now();
-        let loaded_catalog =
-            index_lifecycle::repository::load_scope_catalog(db.as_ref(), DataScope::LegacyUnscoped)
-                .await?;
-        log_stage("catalog_load", stage_started);
+        .await;
+        let (migration_authorized, loaded_catalog, fts_cache) =
+            writer.close_on_open_error(runtime_inputs).await?;
         let storage = HelixStorage::Writer(Arc::new(writer));
-        let stage_started = Instant::now();
-        let fts_cache = build_fts_cache(&path, &object_store, &config)?;
-        log_stage("fts_cache_construction", stage_started);
         let stage_started = Instant::now();
         let db = Self::from_storage_with_index_scheduling(
             HelixStorageParts::new(path, object_store, storage),
@@ -1155,21 +1243,25 @@ impl HelixDB {
             index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
         log_stage("runtime_construction", stage_started);
-        let stage_started = Instant::now();
-        if migration_authorized && let Err(error) = migrations::startup::finish_writer(&db).await {
-            let _ = db.close().await;
-            return Err(error);
+        let finish_result: Result<()> = async {
+            let stage_started = Instant::now();
+            if migration_authorized {
+                migrations::startup::finish_writer(&db).await?;
+            }
+            log_stage("legacy_migration_cleanup", stage_started);
+            let allow_blocking_warm = matches!(&open_mode, WriterOpenMode::Embedded);
+            let stage_started = Instant::now();
+            db.run_configured_startup_cache_warm(allow_blocking_warm)
+                .await?;
+            log_stage("startup_cache_warm", stage_started);
+            let stage_started = Instant::now();
+            db.run_configured_vector_memory_warm(vector_memory_settings, allow_blocking_warm)
+                .await?;
+            log_stage("vector_memory_warm", stage_started);
+            Ok(())
         }
-        log_stage("legacy_migration_cleanup", stage_started);
-        let allow_blocking_warm = matches!(&open_mode, WriterOpenMode::Embedded);
-        let stage_started = Instant::now();
-        db.run_configured_startup_cache_warm(allow_blocking_warm)
-            .await?;
-        log_stage("startup_cache_warm", stage_started);
-        let stage_started = Instant::now();
-        db.run_configured_vector_memory_warm(vector_memory_settings, allow_blocking_warm)
-            .await?;
-        log_stage("vector_memory_warm", stage_started);
+        .await;
+        db.close_on_open_error(finish_result).await?;
         if migration_authorized {
             db.start_background_migration_worker().await;
         }
@@ -4426,6 +4518,32 @@ mod tests {
             Some(&serde_json::json!(0))
         );
         assert!(db.query_json(b"not-json").await.is_err());
+        db.close().await.expect("writer closes");
+    }
+
+    #[tokio::test]
+    async fn open_with_config_applies_lease_size_to_both_id_allocators() {
+        let config = DbConfig::new()
+            .try_with_id_lease_size(7)
+            .expect("nonzero lease size is valid")
+            .with_id_lease_refill_threshold(3);
+        let db = HelixDB::open_with_config(
+            HelixDbSource::InMemory {
+                database: "configured-id-lease-size".to_string(),
+            },
+            config,
+        )
+        .await
+        .expect("writer opens with custom ID leasing");
+        let HelixStorage::Writer(writer) = db.storage() else {
+            panic!("writer handle expected")
+        };
+
+        assert_eq!(writer.node_ids().allocate().await.unwrap(), 0);
+        assert_eq!(writer.edge_ids().allocate().await.unwrap(), 0);
+        assert_eq!(writer.node_ids().remaining_in_lease(), 6);
+        assert_eq!(writer.edge_ids().remaining_in_lease(), 6);
+
         db.close().await.expect("writer closes");
     }
 
