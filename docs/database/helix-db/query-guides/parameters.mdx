@@ -32,7 +32,7 @@ fn find_users(tenant_id: String, limit: i64) -> ReadBatch {
         .returning(["users"])
 }
 
-let request = find_users("acme".to_string(), 25);
+let request = find_users("acme".to_string(), 25)?;
 ```
 
 ```ts TypeScript

@@ -4,21 +4,29 @@ on:
   pull_request:
     paths:
       - ".github/workflows/sdk-query-parity.yml"
+      - "README.md"
       - "bindings/uniffi/**"
       - "bindings/uniffi-bindgen/**"
       - "crates/ast/**"
       - "crates/db/**"
       - "crates/server/**"
+      - "docs/database/helix-db/start-here/sdk-setup/rust-project-setup.mdx"
+      - "docs/database/helix-db/core-concepts/overview.mdx"
+      - "docs/database/helix-db/query-guides/parameters.mdx"
       - "sdks/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/sdk-query-parity.yml"
+      - "README.md"
       - "bindings/uniffi/**"
       - "bindings/uniffi-bindgen/**"
       - "crates/ast/**"
       - "crates/db/**"
       - "crates/server/**"
+      - "docs/database/helix-db/start-here/sdk-setup/rust-project-setup.mdx"
+      - "docs/database/helix-db/core-concepts/overview.mdx"
+      - "docs/database/helix-db/query-guides/parameters.mdx"
       - "sdks/**"
 
 permissions:
@@ -86,6 +94,12 @@ jobs:
       - run: go test ./...
         working-directory: sdks/go
       - run: cargo test --locked --manifest-path sdks/rust/Cargo.toml --lib
+      - run: cargo test --locked --manifest-path sdks/rust/Cargo.toml --doc
+      - name: Compile-test public #[query] README examples
+        run: |
+          cargo check --locked --manifest-path sdks/rust/Cargo.toml --example basic_query
+          cargo check --locked --manifest-path sdks/rust/Cargo.toml --example readme_sdk_query
+          cargo check --locked --manifest-path sdks/rust/Cargo.toml --example readme_macros_query
       - run: cargo test --locked -p helixdb-uniffi
 
   embedded-go-generator:
