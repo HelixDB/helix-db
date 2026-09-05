@@ -118,11 +118,22 @@ impl<'db> ExecutionContext<'db> {
         let tenant_value = self.search_tenant_value(&index.tenant).await?;
         validate_vector_search_tenant(&definition, &index.tenant, tenant_value.as_ref())?;
         let query = self.search_query_vector(query_vector).await?;
-        let (limit, candidates) = match scope {
-            VectorSearchScope::Unrestricted(limit) => (limit, None),
-            VectorSearchScope::Restricted(read) => (read.limit, Some(read.candidates)),
+        // Restricted search has its own reject-based result-count ceiling further
+        // down (`RestrictedResultCount::try_new`), computed against the actual
+        // candidate count rather than the raw request. Applying the unrestricted
+        // path's blanket default-ceiling clamp ahead of that would silently
+        // truncate a request the restricted path is meant to reject outright.
+        // See `effective_restricted_vector_search_limit`.
+        let (k, candidates) = match scope {
+            VectorSearchScope::Unrestricted(limit) => {
+                (self.effective_search_limit(limit).await?, None)
+            }
+            VectorSearchScope::Restricted(read) => (
+                self.effective_restricted_vector_search_limit(read.limit)
+                    .await?,
+                Some(read.candidates),
+            ),
         };
-        let k = self.effective_search_limit(limit).await?;
 
         let raw_results = match definition.metric() {
             VectorDistanceMetric::Cosine => {
