@@ -876,6 +876,41 @@ fn runtime_start_command(
     }
 }
 
+/// Advisory for a runtime that is installed but whose `info` probe did not
+/// succeed.
+///
+/// Reuses `runtime_start_command`, the same launcher table `try_start_runtime`
+/// drives, so the remedy always names the runtime that was actually detected.
+/// When that table has no launcher the runtime has nothing to start (Podman on
+/// Linux is daemonless), so the message says what to check instead of naming a
+/// daemon that does not exist.
+pub(crate) fn runtime_unavailable_hint(runtime: ContainerRuntime) -> String {
+    runtime_unavailable_hint_for(std::env::consts::OS, runtime, command_exists)
+}
+
+/// Pure form of [`runtime_unavailable_hint`], with the OS and installed-probe
+/// injected so it can be unit-tested deterministically.
+fn runtime_unavailable_hint_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    is_installed: impl Fn(&str) -> bool,
+) -> String {
+    match runtime_start_command(os, runtime, is_installed) {
+        Some(start) => format!(
+            "{} is installed but not running. Start it before 'helix start' \u{2014} `{} {}`.",
+            runtime.label(),
+            start.program,
+            start.args.join(" ")
+        ),
+        None => format!(
+            "{} is installed but `{} info` did not succeed. Check it is configured before \
+             'helix start'.",
+            runtime.label(),
+            runtime.binary()
+        ),
+    }
+}
+
 fn helix_run_args(
     name: &str,
     image: &str,
@@ -1075,7 +1110,38 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The launcher table and the advisory must never disagree about which
+    /// runtime is in play. Before this was wired to `runtime_start_command`, a
+    /// Podman user was told to run `open -a Docker` and `systemctl start docker`,
+    /// neither of which starts Podman.
     #[cfg(unix)]
+    #[test]
+    fn unavailable_hint_names_the_detected_runtime_not_another_one() {
+        let podman_macos =
+            runtime_unavailable_hint_for("macos", ContainerRuntime::Podman, |_| false);
+        assert!(podman_macos.contains("podman machine start"));
+        assert!(!podman_macos.to_lowercase().contains("docker"));
+        assert!(!podman_macos.to_lowercase().contains("colima"));
+
+        let docker_linux =
+            runtime_unavailable_hint_for("linux", ContainerRuntime::Docker, |_| false);
+        assert!(docker_linux.contains("systemctl start docker"));
+        assert!(!docker_linux.to_lowercase().contains("podman"));
+
+        let docker_macos_colima =
+            runtime_unavailable_hint_for("macos", ContainerRuntime::Docker, |bin| bin == "colima");
+        assert!(docker_macos_colima.contains("colima start"));
+    }
+
+    /// Podman on Linux is daemonless, so there is nothing to start. The advisory
+    /// has to say what to check rather than name a daemon that does not exist.
+    #[test]
+    fn unavailable_hint_does_not_invent_a_daemon_when_there_is_none() {
+        let hint = runtime_unavailable_hint_for("linux", ContainerRuntime::Podman, |_| false);
+        assert!(hint.contains("podman info"));
+        assert!(!hint.contains("Start it"));
+        assert!(!hint.to_lowercase().contains("docker"));
+    }
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
         let mut command = Command::new("sh");
