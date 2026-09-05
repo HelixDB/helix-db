@@ -104,6 +104,23 @@ jobs:
           name: cli-and-metrics-coverage
           path: target/*-coverage.lcov
 
+  docs-smoke:
+    name: Quickstart CLI smoke test
+    if: github.event_name != 'schedule'
+    # amd64: ghcr.io/helixdb/helixdb:v0.0.4 is pulled by tag with no --platform
+    # override, so this must run on the same architecture as the default
+    # manifest the CLI resolves in the documented (unqualified) workflow.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Run the documented init/start/query/stop journey against Docker
+        run: >-
+          cargo test --locked -p helix-cli --test docs_smoke
+          quickstart_documented_cli_journey_works
+          -- --ignored --exact --nocapture
+
   registry-smoke:
     name: Published TypeScript SDK registry smoke
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
