@@ -1920,6 +1920,9 @@ mod tests {
     #[derive(Clone, Copy)]
     enum FailureMode {
         PrepareCorruption,
+        PrepareObjectStore,
+        StorageUnavailable,
+        StorageCorruption,
         StageCorruption,
         StageInvariant,
         Conflict,
@@ -1945,6 +1948,14 @@ mod tests {
             if matches!(self.mode, FailureMode::PrepareCorruption) {
                 return Err(corruption("prepare fixture"));
             }
+            if matches!(self.mode, FailureMode::PrepareObjectStore) {
+                return Err(HelixDbError::ObjectStore(
+                    slatedb::object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::other("temporarily unavailable").into(),
+                    },
+                ));
+            }
             Ok(Box::new(()))
         }
 
@@ -1965,7 +1976,13 @@ mod tests {
                     HelixDbError::InvariantViolation("stage fixture".into())
                 }
                 FailureMode::Conflict => HelixDbError::TransactionConflict("stage fixture".into()),
-                FailureMode::ObjectStore => {
+                FailureMode::StorageUnavailable => {
+                    HelixDbError::Storage(slatedb::Error::unavailable("fixture".into()))
+                }
+                FailureMode::StorageCorruption => {
+                    HelixDbError::Storage(slatedb::Error::data("fixture".into()))
+                }
+                FailureMode::PrepareObjectStore | FailureMode::ObjectStore => {
                     HelixDbError::ObjectStore(slatedb::object_store::Error::Generic {
                         store: "fixture",
                         source: std::io::Error::other("temporarily unavailable").into(),
@@ -1978,6 +1995,18 @@ mod tests {
     #[tokio::test]
     async fn driver_errors_discard_partial_writes_and_preserve_retry_classification() {
         for (mode, expected) in [
+            (
+                FailureMode::PrepareObjectStore,
+                CommittedOperationStep::TransientFailure,
+            ),
+            (
+                FailureMode::StorageUnavailable,
+                CommittedOperationStep::TransientFailure,
+            ),
+            (
+                FailureMode::StorageCorruption,
+                CommittedOperationStep::Blocked,
+            ),
             (
                 FailureMode::PrepareCorruption,
                 CommittedOperationStep::Blocked,
@@ -2127,23 +2156,26 @@ mod tests {
             .get(scoped_operation_key(scope, operation.operation_id()))
             .await
             .unwrap();
-        assert!(matches!(
-            record_driver_failure(
-                &db,
-                &claimed,
-                HelixDbError::WriterFencedCommitOutcomeUnknown,
-                0,
-                Instant::now()
-            )
-            .await,
-            Err(HelixDbError::WriterFencedCommitOutcomeUnknown)
-        ));
-        assert_eq!(
-            db.get(scoped_operation_key(scope, operation.operation_id()))
-                .await
-                .unwrap(),
-            before
-        );
+        for error in [
+            HelixDbError::WriterFencedCommitOutcomeUnknown,
+            HelixDbError::DatabaseClosed,
+            HelixDbError::Storage(slatedb::Error::closed(
+                "fixture".into(),
+                slatedb::CloseReason::Fenced,
+            )),
+        ] {
+            assert!(
+                record_driver_failure(&db, &claimed, error, 0, Instant::now())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                db.get(scoped_operation_key(scope, operation.operation_id()))
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
         release_transient_claim(&db, &claimed, 0).await.unwrap();
         let advanced = db
             .get(scoped_operation_key(scope, operation.operation_id()))
