@@ -56,7 +56,7 @@ mod production_text_lifecycle_workspace_tests;
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
@@ -3021,6 +3021,19 @@ fn foyer_disk_block_size(disk_capacity_bytes: usize) -> usize {
         )
 }
 
+/// One hybrid cache per disk root, for the lifetime of the process.
+///
+/// The device opens one file per block — 22,528 of them at the managed 352 GiB
+/// profile — and foyer frees them only when its whole task graph drops, which
+/// `close` cannot force because it borrows. Building one per open attempt would
+/// strand a full set every time a reader retried while waiting for bootstrap.
+static SLATE_DB_HYBRID_CACHES: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Arc<dyn DbCache>>>> =
+    OnceLock::new();
+
+fn slate_db_hybrid_caches() -> &'static tokio::sync::Mutex<HashMap<PathBuf, Arc<dyn DbCache>>> {
+    SLATE_DB_HYBRID_CACHES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
 async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
     match config {
         CacheMode::VectorMemoryOnly => Ok(None),
@@ -3043,6 +3056,11 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
             )))
         }
         CacheMode::Hybrid { slate_db, .. } => {
+            let root = slate_db.disk().root().to_path_buf();
+            let mut caches = slate_db_hybrid_caches().lock().await;
+            if let Some(cache) = caches.get(&root) {
+                return Ok(Some(Arc::clone(cache)));
+            }
             let metrics = FoyerHybridCacheMetrics::new();
             let cache = HybridCacheBuilder::new()
                 .with_name("helix-slate-hybrid")
@@ -3069,9 +3087,10 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                 .map_err(|err| {
                     HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
                 })?;
-            Ok(Some(Arc::new(
-                FoyerHybridCache::new_with_cache_and_metrics(cache, metrics),
-            )))
+            let cache: Arc<dyn DbCache> =
+                Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics));
+            caches.insert(root, Arc::clone(&cache));
+            Ok(Some(cache))
         }
     }
 }
