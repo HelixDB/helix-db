@@ -815,6 +815,10 @@ async fn live_state_with_absent_marker_catches_up_only_when_a_delta_explains_it(
     .unwrap() else {
         panic!("entity-state validation is database-only")
     };
+    assert_eq!(
+        unexplained.diagnostic.check,
+        Some("entity_statistics_contribution")
+    );
     assert!(matches!(
         unexplained.stage(&transaction).await.unwrap(),
         IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
@@ -962,6 +966,7 @@ async fn prepared_database_revalidation_rejects_missing_changed_and_appended_row
         .put(second_key.clone(), second_value.clone())
         .unwrap();
     let prepared = PreparedDatabaseValidation {
+        diagnostic: ValidationDiagnostic::new(&test_support::operation()),
         ranges: vec![PreparedValidationRange {
             prefix,
             start: Bound::Unbounded,
@@ -1035,6 +1040,7 @@ async fn page_validation_rejects_malformed_missing_mismatched_and_duplicate_inpu
     .unwrap() else {
         panic!("malformed page is database-blocked");
     };
+    assert_eq!(invalid_page.diagnostic.check, Some("page_value_encoding"));
     assert!(matches!(
         invalid_page.stage(&transaction).await.unwrap(),
         IndexOperationStepResult::Blocked(_)
@@ -1063,6 +1069,7 @@ async fn page_validation_rejects_malformed_missing_mismatched_and_duplicate_inpu
     .unwrap() else {
         panic!("missing root is database-blocked");
     };
+    assert_eq!(missing_root.diagnostic.check, Some("page_root_missing"));
     assert!(matches!(
         missing_root.stage(&transaction).await.unwrap(),
         IndexOperationStepResult::Blocked(_)
@@ -1083,6 +1090,7 @@ async fn page_validation_rejects_malformed_missing_mismatched_and_duplicate_inpu
     .unwrap() else {
         panic!("malformed root is database-blocked");
     };
+    assert_eq!(invalid_root.diagnostic.check, Some("page_root_encoding"));
     assert!(matches!(
         invalid_root.stage(&transaction).await.unwrap(),
         IndexOperationStepResult::Blocked(_)
