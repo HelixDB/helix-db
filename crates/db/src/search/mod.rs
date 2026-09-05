@@ -52,6 +52,8 @@ use crate::encoding::keys::scope::DataScope;
 use crate::encoding::keys::{EdgeEndpointsKey, EdgePropertyByIdKey};
 use crate::encoding::property::property::Property;
 use crate::encoding::property::property_value::PropertyValue;
+#[cfg(test)]
+use crate::encoding::property::sortable_f64_index_string;
 use crate::encoding::property::{decode_properties, encode_properties};
 use crate::encoding::v2::keys::indexes::PropertyIndexKey;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
@@ -569,8 +571,8 @@ pub fn property_value_to_index_string(value: &PropertyValue) -> String {
         PropertyValue::Bool(b) => b.to_string(),
         PropertyValue::I64(n) => format!("{:020}", n),
         PropertyValue::DateTime(n) => PropertyValue::DateTime(*n).to_index_string(),
-        PropertyValue::F64(n) => format!("{:+024.15e}", n),
-        PropertyValue::F32(n) => format!("{:+024.15e}", n),
+        PropertyValue::F64(n) => sortable_f64_index_string(*n),
+        PropertyValue::F32(n) => sortable_f64_index_string(*n),
         PropertyValue::String(s) => s.clone(),
         PropertyValue::Bytes(b) => format!("<bytes:{:?}>", b),
         PropertyValue::I64Array(a) => format!("<i64[{}]>", a.len()),
@@ -3429,11 +3431,11 @@ mod tests {
         );
         assert_eq!(
             property_value_to_index_string(&PropertyValue::F64(1.5)),
-            "+00001.500000000000000e0"
+            "13832806255468478464"
         );
         assert_eq!(
             property_value_to_index_string(&PropertyValue::F32(1.5)),
-            "+00001.500000000000000e0"
+            "13832806255468478464"
         );
         assert_eq!(
             property_value_to_index_string(&PropertyValue::String("hello".to_string())),
