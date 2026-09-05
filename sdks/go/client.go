@@ -226,6 +226,9 @@ func (c *Client) setAPIKey(apiKey string) {
 }
 
 func (c *Client) getAPIKey() string {
+	if c == nil {
+		return ""
+	}
 	c.apiKeyMu.RLock()
 	apiKey := c.apiKey
 	c.apiKeyMu.RUnlock()
