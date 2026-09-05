@@ -16,10 +16,11 @@ impl<'db> ExecutionContext<'db> {
                 let mut keyed = Vec::with_capacity(rows.len());
                 for row in rows {
                     self.check_execution_deadline()?;
+                    let mut resolver = eval::RowValueResolver::new(self);
                     let mut values = Vec::new();
                     for key in keys.as_ref() {
                         self.check_execution_deadline()?;
-                        values.push(self.row_property(&row, &key.property).await?);
+                        values.push(resolver.row_property(&row, &key.property).await?);
                     }
                     keyed.push((values, row));
                 }
@@ -57,7 +58,9 @@ fn compare_order_keys(
 #[cfg(test)]
 mod tests {
     use helix_ast::traversal::Order;
+    use helix_ast::value::PropertyValue;
     use helix_planner::context;
+    use helix_planner::ir::AtLeast;
 
     use super::super::super::test_support;
     use super::*;
@@ -101,6 +104,45 @@ mod tests {
             ),
             Ordering::Greater
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_sort_decodes_each_rows_property_blob_once_regardless_of_key_count() {
+        let db = test_support::open_db("stream-order-explicit-sort-decode-reuse").await;
+        let id = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![
+                ("score", PropertyValue::I64(1)),
+                ("name", PropertyValue::String("ada".to_string())),
+            ],
+        )
+        .await;
+        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let keys = ir::OrderKeys::new(AtLeast::from_one_and_rest(
+            ir::OrderKey {
+                property: ir::NonEmptyString::new("score").expect("valid property"),
+                order: Order::Asc,
+            },
+            vec![ir::OrderKey {
+                property: ir::NonEmptyString::new("name").expect("valid property"),
+                order: Order::Asc,
+            }],
+        ))
+        .expect("distinct sort keys");
+        let plan = ir::OrderPlan::ExplicitSort(keys);
+
+        context
+            .order(ExecutionValue::Stream(vec![row(id)]), &plan)
+            .await
+            .expect("sort over stored properties succeeds");
+
+        // Two sort keys read from the same row's element must not decode its
+        // property blob twice: `RowValueResolver` is shared across the whole
+        // key loop for a row, so one `element_properties` lookup serves both.
+        let snapshot = context.projection_read_snapshot();
+        assert_eq!(snapshot.property_gets, 1);
+        assert_eq!(snapshot.property_decodes, 1);
     }
 
     #[tokio::test]
