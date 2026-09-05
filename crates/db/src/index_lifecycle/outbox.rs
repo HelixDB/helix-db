@@ -988,9 +988,15 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         ));
     }
 
-    let prepared = driver
+    let prepared = match driver
         .prepare_step(db, claimed.scope, &claimed.record, limits)
-        .await?;
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return record_driver_failure(db, claimed, error, now_unix_millis, started).await
+        }
+    };
     if prepared.family() != driver.family() {
         prepared.discard().await?;
         return Err(corruption(
@@ -998,6 +1004,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         ));
     }
 
+    let mut driver_failed = false;
     let staged: Result<Option<StagedOperationStep>> = async {
         let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
         failpoints::trip(IndexOutboxFailpoint::BatchReadBefore)?;
@@ -1019,17 +1026,11 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             .stage(driver, db, &transaction, claimed.scope, &operation, limits)
             .await;
         failpoints::trip(IndexOutboxFailpoint::PhysicalStagingAfter)?;
-        let execution = match step {
-            Ok(execution) => execution,
-            Err(error) => {
-                tracing::warn!(
-                    operation_id = %operation.operation_id().as_uuid(),
-                    error = %error,
-                    "index operation driver returned a transient failure"
-                );
-                return Ok(None);
-            }
-        };
+        // An error can follow staged physical writes. Drop this transaction before
+        // recording a blocker or releasing the claim; never commit a partial step.
+        let execution = step.inspect_err(|_| {
+            driver_failed = true;
+        })?;
         let IndexOperationStepExecution {
             result: step,
             resources,
@@ -1177,6 +1178,9 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         Ok(staged) => staged,
         Err(error) => {
             prepared.discard().await?;
+            if driver_failed {
+                return record_driver_failure(db, claimed, error, now_unix_millis, started).await;
+            }
             return Err(error);
         }
     })
@@ -1212,6 +1216,74 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         before_stage,
         after_stage,
         resources,
+        elapsed_micros: elapsed_micros(started),
+    })
+}
+
+/// Records failures only after failed preparation and staging have been discarded.
+/// The exact claim is rechecked in a fresh serializable transaction so a stale
+/// worker cannot block an operation that another writer or an abort has advanced.
+async fn record_driver_failure(
+    db: &Db,
+    claimed: &ClaimedOperation,
+    error: HelixDbError,
+    now_unix_millis: u64,
+    started: Instant,
+) -> Result<CommittedOperationStepEvidence> {
+    if matches!(
+        error,
+        HelixDbError::DatabaseClosed | HelixDbError::WriterFencedCommitOutcomeUnknown
+    ) || matches!(&error, HelixDbError::Storage(storage) if matches!(storage.kind(), slatedb::ErrorKind::Closed(_)))
+    {
+        return Err(error);
+    }
+    let retryable = error.is_transaction_conflict()
+        || matches!(&error, HelixDbError::Storage(storage) if storage.kind() == slatedb::ErrorKind::Unavailable)
+        || matches!(error, HelixDbError::ObjectStore(_));
+    let status = IndexOperationStatus::from_record(&claimed.record);
+    tracing::warn!(
+        operation_id = %claimed.record.operation_id().as_uuid(),
+        index_id = claimed.record.index_id().get(),
+        generation = claimed.record.generation().get(),
+        stage = ?status.common().stage,
+        error = %error,
+        retryable,
+        "index operation driver failed"
+    );
+    let outcome = if retryable {
+        release_transient_claim(db, claimed, now_unix_millis).await?;
+        CommittedOperationStep::TransientFailure
+    } else {
+        let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let Some((index, operation, _)) =
+            load_exact_link(&transaction, claimed.scope, claimed.record.operation_id()).await?
+        else {
+            return Err(corruption("failed operation disappeared before blocking"));
+        };
+        if operation.operation_revision() != claimed.record.operation_revision()
+            || operation.execution_state() != claimed.record.execution_state()
+        {
+            return Err(HelixDbError::TransactionConflict(
+                "failed index claim has advanced".into(),
+            ));
+        }
+        let next = operation
+            .block(IndexOperationBlocker::InvariantViolation)
+            .map_err(operation_model_error)?;
+        validate_link(claimed.scope, &index, &next, None)?;
+        transaction.put(
+            scoped_operation_key(claimed.scope, next.operation_id()),
+            encode_operation_record(&next),
+        )?;
+        transaction.delete(global_operation_key(next.operation_id()))?;
+        transaction.commit().await?;
+        CommittedOperationStep::Blocked
+    };
+    Ok(CommittedOperationStepEvidence {
+        outcome,
+        before_stage: status.common().stage,
+        after_stage: status.common().stage,
+        resources: StepResourceUsage::default(),
         elapsed_micros: elapsed_micros(started),
     })
 }
@@ -1843,6 +1915,263 @@ mod tests {
         ) -> Result<IndexOperationStepExecution> {
             Ok(IndexOperationStepExecution::new(self.0.clone()))
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FailureMode {
+        PrepareCorruption,
+        StageCorruption,
+        StageInvariant,
+        Conflict,
+        ObjectStore,
+    }
+
+    struct FailingDriver {
+        mode: FailureMode,
+        probe_key: Bytes,
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for FailingDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn acquire_step_permit(
+            &self,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+        ) -> Result<Box<dyn IndexOperationStepPermit>> {
+            if matches!(self.mode, FailureMode::PrepareCorruption) {
+                return Err(corruption("prepare fixture"));
+            }
+            Ok(Box::new(()))
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            transaction: &DbTransaction,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<IndexOperationStepExecution> {
+            transaction.delete(self.probe_key.clone())?;
+            Err(match self.mode {
+                FailureMode::PrepareCorruption | FailureMode::StageCorruption => {
+                    corruption("stage fixture")
+                }
+                FailureMode::StageInvariant => {
+                    HelixDbError::InvariantViolation("stage fixture".into())
+                }
+                FailureMode::Conflict => HelixDbError::TransactionConflict("stage fixture".into()),
+                FailureMode::ObjectStore => {
+                    HelixDbError::ObjectStore(slatedb::object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::other("temporarily unavailable").into(),
+                    })
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn driver_errors_discard_partial_writes_and_preserve_retry_classification() {
+        for (mode, expected) in [
+            (
+                FailureMode::PrepareCorruption,
+                CommittedOperationStep::Blocked,
+            ),
+            (
+                FailureMode::StageCorruption,
+                CommittedOperationStep::Blocked,
+            ),
+            (FailureMode::StageInvariant, CommittedOperationStep::Blocked),
+            (
+                FailureMode::Conflict,
+                CommittedOperationStep::TransientFailure,
+            ),
+            (
+                FailureMode::ObjectStore,
+                CommittedOperationStep::TransientFailure,
+            ),
+        ] {
+            let db = db("outbox-driver-error").await;
+            let (index, operation) = fixture(70);
+            let scope = DataScope::LegacyUnscoped;
+            enqueue_operation(
+                &db,
+                scope,
+                ExpectedCanonicalRevision::Absent,
+                &index,
+                &operation,
+            )
+            .await
+            .unwrap();
+            abort_operation(&db, scope, operation.operation_id())
+                .await
+                .unwrap();
+            let epoch = WriterEpoch::from_bytes([71; 16]).unwrap();
+            let OperationPointerObservation::Eligible(eligible) =
+                observe_operation_pointer(&db, operation.operation_id(), epoch, 0)
+                    .await
+                    .unwrap()
+            else {
+                panic!("queued operation is eligible");
+            };
+            let claimed = claim_operation(
+                &db,
+                &eligible,
+                epoch,
+                ClaimSequence::new(1).unwrap(),
+                0,
+                ClaimPermission::Normal,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let probe_key = scoped_index_key(scope, &index);
+            let before = db.get(&probe_key).await.unwrap();
+            let result = execute_claimed_step(
+                &db,
+                &claimed,
+                &FailingDriver {
+                    mode,
+                    probe_key: probe_key.clone(),
+                },
+                SearchIndexBackfillLimits::default().batch(),
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, expected);
+            assert_eq!(
+                db.get(probe_key).await.unwrap(),
+                before,
+                "failed physical staging must roll back"
+            );
+            let value = db
+                .get(scoped_operation_key(scope, operation.operation_id()))
+                .await
+                .unwrap()
+                .unwrap();
+            let retained = decode_operation_record(&value).unwrap();
+            assert_eq!(retained.progress(), claimed.record.progress());
+            assert_eq!(retained.attempt(), claimed.record.attempt());
+            let pointer = db
+                .get(global_operation_key(operation.operation_id()))
+                .await
+                .unwrap();
+            match expected {
+                CommittedOperationStep::Blocked => {
+                    assert!(matches!(
+                        retained.execution_state(),
+                        IndexOperationExecutionState::Blocked(
+                            IndexOperationBlocker::InvariantViolation
+                        )
+                    ));
+                    assert!(pointer.is_none());
+                    let retried = retry_operation(&db, scope, operation.operation_id())
+                        .await
+                        .unwrap();
+                    assert_eq!(retried.progress(), retained.progress());
+                }
+                CommittedOperationStep::TransientFailure => {
+                    assert!(
+                        matches!(retained.execution_state(), IndexOperationExecutionState::Queued { not_before_unix_millis: Some(deadline) } if *deadline > 0)
+                    );
+                    assert!(pointer.is_some());
+                }
+                CommittedOperationStep::Progressed | CommittedOperationStep::Completed => {
+                    unreachable!()
+                }
+            }
+            db.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_and_unknown_claims_cannot_become_durable_blockers() {
+        let db = db("outbox-stale-failure").await;
+        let (index, operation) = fixture(72);
+        let scope = DataScope::LegacyUnscoped;
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let epoch = WriterEpoch::from_bytes([73; 16]).unwrap();
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, operation.operation_id(), epoch, 0)
+                .await
+                .unwrap()
+        else {
+            panic!("queued operation is eligible");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            epoch,
+            ClaimSequence::new(1).unwrap(),
+            0,
+            ClaimPermission::Normal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let before = db
+            .get(scoped_operation_key(scope, operation.operation_id()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            record_driver_failure(
+                &db,
+                &claimed,
+                HelixDbError::WriterFencedCommitOutcomeUnknown,
+                0,
+                Instant::now()
+            )
+            .await,
+            Err(HelixDbError::WriterFencedCommitOutcomeUnknown)
+        ));
+        assert_eq!(
+            db.get(scoped_operation_key(scope, operation.operation_id()))
+                .await
+                .unwrap(),
+            before
+        );
+        release_transient_claim(&db, &claimed, 0).await.unwrap();
+        let advanced = db
+            .get(scoped_operation_key(scope, operation.operation_id()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            record_driver_failure(
+                &db,
+                &claimed,
+                corruption("stale failure"),
+                0,
+                Instant::now()
+            )
+            .await,
+            Err(HelixDbError::TransactionConflict(_))
+        ));
+        assert_eq!(
+            db.get(scoped_operation_key(scope, operation.operation_id()))
+                .await
+                .unwrap(),
+            advanced
+        );
+        assert!(db
+            .get(global_operation_key(operation.operation_id()))
+            .await
+            .unwrap()
+            .is_some());
+        db.close().await.unwrap();
     }
 
     fn fixture(id_byte: u8) -> (IndexRecordV2, IndexOperationRecord) {
