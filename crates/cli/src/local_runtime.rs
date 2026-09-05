@@ -5,6 +5,7 @@ use crate::project::ProjectContext;
 use crate::utils::command_exists;
 use eyre::{eyre, Result};
 use helix_metrics::cli::{load_metrics_config, MetricsConfig, MetricsLevel};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -175,7 +176,18 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        format!("helix-{}-{}", self.project_name, instance_name)
+        let name = format!("{}-{}", self.project_name, instance_name);
+        let sanitized = sanitize_docker_name(&name);
+        let identity = format!(
+            "{}:{}/{}",
+            self.project_name.len(),
+            self.project_name,
+            instance_name
+        );
+        if sanitized == name && !ends_with_hash_suffix(&sanitized) {
+            return format!("helix-{sanitized}");
+        }
+        format!("helix-{sanitized}-{}", identity_suffix(&identity))
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -1071,9 +1083,113 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn sanitize_docker_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+const HASH_SUFFIX_LEN: usize = 32;
+
+fn ends_with_hash_suffix(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > HASH_SUFFIX_LEN + 1
+        && bytes[bytes.len() - HASH_SUFFIX_LEN - 1] == b'-'
+        && bytes[bytes.len() - HASH_SUFFIX_LEN..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn identity_suffix(identity: &str) -> String {
+    Sha256::digest(identity.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_for(project_name: &str) -> LocalRuntime {
+        LocalRuntime {
+            runtime: ContainerRuntime::Docker,
+            project_name: project_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn container_name_keeps_legacy_names_byte_identical() {
+        assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
+        assert_eq!(
+            runtime_for("demo").container_name("my-dev"),
+            "helix-demo-my-dev"
+        );
+    }
+
+    #[test]
+    fn container_name_suffixed_only_when_sanitization_or_the_suffix_namespace_requires_it() {
+        assert_eq!(
+            runtime_for("My Project").container_name("dev"),
+            "helix-My-Project-dev-028ad0a3ea24fa42ed85d7f07ce24d71"
+        );
+        assert_eq!(
+            runtime_for("a b").container_name("dev"),
+            "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+        assert_eq!(
+            runtime_for("hélix (wörld)!").container_name("dev"),
+            "helix-h-lix--w-rld---dev-9d350e8e981617b49c69ea2afed0cfcb"
+        );
+    }
+
+    #[test]
+    fn crafted_valid_names_do_not_collide_with_suffixed_names() {
+        let suffixed = runtime_for("a b").container_name("dev");
+        let crafted_instance = suffixed.strip_prefix("helix-a-b-").unwrap();
+        assert_ne!(
+            suffixed,
+            runtime_for("a-b").container_name(crafted_instance)
+        );
+    }
+
+    #[test]
+    fn legacy_names_ending_in_a_hash_like_suffix_are_displaced() {
+        assert_ne!(
+            runtime_for("demo").container_name("dev-14527b3cbdf37376ceb9eda41d2afac4"),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+    }
+
+    #[test]
+    fn container_name_sanitizes_instance_names_too() {
+        assert!(runtime_for("demo")
+            .container_name("my dev")
+            .starts_with("helix-demo-my-dev-"));
+    }
+
+    #[test]
+    fn container_name_stays_valid_when_every_character_is_rejected() {
+        assert!(runtime_for("!!!")
+            .container_name("dev")
+            .starts_with("helix-----dev-"));
+    }
+
+    #[test]
+    fn disk_resources_inherit_the_sanitized_base_name() {
+        let base = runtime_for("My Project").container_name("dev");
+        let resources = runtime_for("My Project").disk_resources("dev");
+        assert_eq!(resources.minio_container, format!("{base}-minio"));
+        assert_eq!(resources.network, format!("{base}-net"));
+        assert_eq!(resources.volume, format!("{base}-minio-data"));
+    }
 
     #[cfg(unix)]
     #[test]
