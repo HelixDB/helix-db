@@ -342,6 +342,12 @@ impl LocalRuntime {
         self.run_detached(instance_name, config)
     }
 
+    // No upfront `is_installed`-style preflight here: `spawn_failed_because_runtime_missing`
+    // below already distinguishes a genuinely missing binary (NotFound and absent from
+    // PATH) from a present-but-unspawnable one, and preserves the real OS error as the
+    // cause in either case. A preflight based on PATH presence alone can't make that
+    // distinction and reports "not installed" for a binary that's present but, say, not
+    // executable.
     pub fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
         let name = self.container_name(instance_name);
         let mut command = self.runtime_command();

@@ -38,6 +38,7 @@ pub async fn run(instance: String, yes: bool) -> Result<()> {
         .config
         .save_to_file(&project.root.join("helix.toml"))?;
 
+    project.assert_safe_helix_dir()?;
     let workspace = project.instance_workspace(&instance);
     if workspace.exists() {
         std::fs::remove_dir_all(workspace)?;

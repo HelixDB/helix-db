@@ -68,6 +68,7 @@ pub async fn run(
             s3,
             ..
         } => {
+            validate_name(&name)?;
             // Surface a missing/stopped container runtime before we write any files,
             // so the user can react before the project is scaffolded.
             crate::setup::warn_if_container_runtime_unavailable();
@@ -86,6 +87,7 @@ pub async fn run(
             workspace,
             ..
         } => {
+            validate_name(&name)?;
             let instance_name = name.clone();
             let target =
                 crate::commands::config::resolve_cloud_target(database, project, workspace).await?;
@@ -112,6 +114,15 @@ pub async fn run(
     print_instructions("Next steps:", &next_step_refs);
 
     Ok(())
+}
+
+/// Rejects a `--name`/`-n` the interactive prompt (`prompts::input_name`) would
+/// never let through, before `helix.toml` is written. Without this, `helix init
+/// local --name <bad>` would scaffold a project successfully and then every
+/// subsequent `helix.toml` load would fail `HelixConfig::validate`, locking the
+/// project out until the name was fixed by hand.
+fn validate_name(name: &str) -> Result<()> {
+    crate::config::validate_instance_name(name).map_err(|message| eyre::eyre!(message))
 }
 
 fn local_instance_config(
@@ -411,5 +422,19 @@ mod tests {
         let steps = enterprise_next_steps("production");
 
         assert!(steps[0].contains("helix query production"));
+    }
+
+    #[test]
+    fn validate_name_rejects_disallowed_characters() {
+        assert!(validate_name("my.prod").is_err());
+        assert!(validate_name("../evil").is_err());
+        assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn validate_name_accepts_the_normal_charset() {
+        assert!(validate_name("dev").is_ok());
+        assert!(validate_name("prod-1").is_ok());
+        assert!(validate_name("my_instance").is_ok());
     }
 }
