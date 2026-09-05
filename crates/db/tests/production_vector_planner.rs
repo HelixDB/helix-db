@@ -1831,6 +1831,122 @@ async fn public_restricted_search_deduplicates_and_omits_other_labels() {
 }
 
 #[tokio::test]
+async fn public_restricted_search_rejects_when_the_effective_result_count_exceeds_the_restricted_ceiling(
+) {
+    let db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: ProcessLocalDatabaseToken::new("production-vector-restricted-oversized-count")
+            .expect("fixture token is valid"),
+    })
+    .await
+    .expect("writer opens");
+    execute_ddl_to_success(
+        &db,
+        &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+    )
+    .await;
+
+    let mut candidate_ids = Vec::with_capacity(801);
+    for _ in 0..801 {
+        let id = created_node_id(
+            db.execute(
+                &add_node_plan(
+                    "Doc",
+                    vec![("embedding", PropertyValue::F32Array(vec![1.0, 0.0]))],
+                ),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("candidate node commits"),
+        );
+        candidate_ids.push(i64::try_from(id).expect("fixture node ID fits i64"));
+    }
+
+    let parameter = name("traversal_candidates");
+    let error = db
+        .execute(
+            &restricted_node_vector_search_plan(
+                "Doc",
+                "embedding",
+                vec![1.0, 0.0],
+                parameter.clone(),
+                801,
+            ),
+            context::ParamBindings::default()
+                .with_value(parameter, PropertyValue::I64Array(candidate_ids)),
+        )
+        .await
+        .expect_err("an effective result count above 800 is rejected, not silently clamped");
+
+    assert!(
+        error
+            .to_string()
+            .contains("restricted vector search result count must be at most 800, got 801"),
+        "{error}"
+    );
+    db.close().await.expect("writer closes");
+}
+
+#[tokio::test]
+async fn public_restricted_search_permits_a_large_k_against_a_small_candidate_set() {
+    let db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: ProcessLocalDatabaseToken::new("production-vector-restricted-large-k-small-set")
+            .expect("fixture token is valid"),
+    })
+    .await
+    .expect("writer opens");
+    let nearest = created_node_id(
+        db.execute(
+            &add_node_plan(
+                "Doc",
+                vec![("embedding", PropertyValue::F32Array(vec![1.0, 0.0]))],
+            ),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("nearest node commits"),
+    );
+    let farther = created_node_id(
+        db.execute(
+            &add_node_plan(
+                "Doc",
+                vec![("embedding", PropertyValue::F32Array(vec![0.0, 1.0]))],
+            ),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("farther node commits"),
+    );
+    execute_ddl_to_success(
+        &db,
+        &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+    )
+    .await;
+
+    let parameter = name("traversal_candidates");
+    let candidate_ids = [nearest, farther]
+        .into_iter()
+        .map(|id| i64::try_from(id).expect("fixture node ID fits i64"))
+        .collect();
+    let result = db
+        .execute(
+            &restricted_node_vector_search_plan(
+                "Doc",
+                "embedding",
+                vec![1.0, 0.0],
+                parameter.clone(),
+                10_000,
+            ),
+            context::ParamBindings::default()
+                .with_value(parameter, PropertyValue::I64Array(candidate_ids)),
+        )
+        .await
+        .expect("a k far larger than the candidate set still succeeds once intersected");
+
+    assert_eq!(projected_node_ids(result), vec![nearest, farther]);
+    db.close().await.expect("writer closes");
+}
+
+#[tokio::test]
 async fn public_node_mutations_keep_vector_generation_synchronized() {
     let db = HelixDB::open(HelixDbSource::InMemoryToken {
         token: ProcessLocalDatabaseToken::new("production-vector-node-mutations")
