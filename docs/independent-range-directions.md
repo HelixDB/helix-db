@@ -29,7 +29,10 @@ remains rejected). The controlled migration target schema is 2.
    `kv_migration_ready:range_directions` is a migration-in-progress state.
 4. For each old descending index, atomically move its canonical key and rewrite
    its record and retained operation. Keep all IDs, generations, revisions,
-   progress, execution state and physical data. A transaction contains one pair;
+   progress, execution state and physical data. Obsolete reader-coordination
+   blockers are the exception: requeue them with a new operation revision and
+   queue pointer in the same transaction, so startup cannot lose the retry marker.
+   A transaction contains one pair;
    no database-size transaction or in-memory row collection is needed.
 5. Validate all current range catalog pairs, then publish readiness. A restart
    repeats the scan and skips committed pairs. No index becomes Active as part

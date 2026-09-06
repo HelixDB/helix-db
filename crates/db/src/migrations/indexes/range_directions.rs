@@ -3,7 +3,9 @@
 //! V6 without the readiness marker fences serving before the first metadata
 //! rewrite. Each canonical record and its sole retained operation move in one
 //! serializable transaction. Physical entries, generations, queue pointers and
-//! progress cursors are unchanged. Repeated scans need no persisted cursor.
+//! progress cursors are unchanged, except obsolete reader blockers are requeued
+//! with a new operation revision and queue pointer. Repeated scans need no
+//! persisted cursor.
 
 #[cfg(test)]
 use bytes::Bytes;
@@ -104,13 +106,40 @@ async fn migrate_inner(db: &Db, mut checkpoint: impl FnMut(Boundary) -> Result<(
                 "catalog record disappeared during direction migration",
             ));
         };
-        let (record, operation) = read_pair(&transaction, scope, &row.key, &value, false).await?;
+        let (record, operation, legacy_reader_blocker) =
+            read_pair(&transaction, scope, &row.key, &value, false).await?;
         let destination =
             lifecycle::outbox::scoped_index_key_for_identity(scope, record.identity());
         if destination != row.key {
             if transaction.get(&destination).await?.is_some() {
                 return Err(corruption("direction migration destination already exists"));
             }
+            // Re-encoding must not turn the legacy repair marker into a current
+            // invariant blocker before startup reconciliation can see it.
+            let operation = if legacy_reader_blocker {
+                let operation = operation
+                    .retry()
+                    .map_err(|error| corruption(&error.to_string()))?;
+                let pointer = lifecycle::OperationQueuePointerValue {
+                    scope,
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    record_revision: operation.operation_revision(),
+                };
+                lifecycle::outbox::validate_link(scope, &record, &operation, Some(&pointer))?;
+                transaction.put(
+                    ManagedIndexKey::Global {
+                        kind: GlobalKey::OperationPointer(operation.operation_id()),
+                    }
+                    .to_bytes(),
+                    values::encode_metadata_value(
+                        &lifecycle::IndexV2MetadataValue::OperationQueuePointer(pointer),
+                    ),
+                )?;
+                operation
+            } else {
+                operation
+            };
             transaction.put(destination, values::encode_index_record(&record))?;
             transaction.put(
                 lifecycle::outbox::scoped_operation_key(scope, operation.operation_id()),
@@ -178,7 +207,7 @@ async fn validate_catalog(db: &Db, current: bool) -> Result<()> {
                 if !definition.identity().family().is_range() {
                     continue;
                 }
-                let (record, _) = read_pair(db, scope, &row.key, &row.value, current).await?;
+                let (record, _, _) = read_pair(db, scope, &row.key, &row.value, current).await?;
                 let destination =
                     lifecycle::outbox::scoped_index_key_for_identity(scope, record.identity());
                 if destination != row.key && db.get(&destination).await?.is_some() {
@@ -198,7 +227,7 @@ async fn validate_catalog(db: &Db, current: bool) -> Result<()> {
                 let Some(value) = db.get(&canonical).await? else {
                     return Err(corruption("direction migration found an orphan operation"));
                 };
-                let (_, linked) = read_pair(db, scope, &canonical, &value, current).await?;
+                let (_, linked, _) = read_pair(db, scope, &canonical, &value, current).await?;
                 if linked.operation_id() != operation.operation_id() {
                     return Err(corruption(
                         "direction migration found an unlinked operation",
@@ -216,7 +245,11 @@ async fn read_pair(
     key: &[u8],
     value: &[u8],
     current: bool,
-) -> Result<(lifecycle::IndexRecordV2, lifecycle::IndexOperationRecord)> {
+) -> Result<(
+    lifecycle::IndexRecordV2,
+    lifecycle::IndexOperationRecord,
+    bool,
+)> {
     let record = if current {
         values::decode_index_record(value)?
     } else {
@@ -258,7 +291,8 @@ async fn read_pair(
     let Some(value) = reader.get(operation_key).await? else {
         return Err(corruption("range catalog retained operation is missing"));
     };
-    let operation = values::decode_operation_record(&value)?;
+    let (operation, legacy_reader_blocker) =
+        values::decode_operation_record_with_compatibility(&value)?;
     let operation = if !current
         && key != canonical
         && operation.identity() == &range_identity::undirected(record.identity())
@@ -297,7 +331,7 @@ async fn read_pair(
         Some(_) => return Err(corruption("operation pointer has the wrong value kind")),
     };
     lifecycle::outbox::validate_link(scope, &record, &operation, pointer.as_ref())?;
-    Ok((record, operation))
+    Ok((record, operation, legacy_reader_blocker))
 }
 
 fn corruption(message: &str) -> HelixDbError {
@@ -325,6 +359,7 @@ mod tests {
         Dropping,
         Dropped,
         Blocked,
+        InvariantBlocked,
     }
 
     async fn fixture(
@@ -446,6 +481,11 @@ mod tests {
                 },
                 IndexOperationProgress::SecondaryCleanup(cleanup),
                 IndexOperationExecutionState::Completed(IndexOperationOutcome::DropSucceeded),
+            ),
+            Phase::InvariantBlocked => (
+                record.state().clone(),
+                operation.progress().clone(),
+                IndexOperationExecutionState::Blocked(IndexOperationBlocker::InvariantViolation),
             ),
             Phase::Blocked => (
                 record.state().clone(),
@@ -808,6 +848,7 @@ mod tests {
             Phase::Dropping,
             Phase::Dropped,
             Phase::Blocked,
+            Phase::InvariantBlocked,
         ] {
             for direction in [RangeIndexDirection::Asc, RangeIndexDirection::Desc] {
                 let db = Db::builder("range-state", Arc::new(InMemory::new()))
@@ -831,7 +872,7 @@ mod tests {
                 let value = db.get(&key).await.unwrap().unwrap();
                 assert_eq!(
                     read_pair(&db, scope, &key, &value, true).await.unwrap(),
-                    (record, operation)
+                    (record, operation, false)
                 );
                 assert_eq!(db.get(&source).await.unwrap(), graph);
                 assert_eq!(db.get(&physical).await.unwrap(), physical_value);
