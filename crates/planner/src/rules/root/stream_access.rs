@@ -4,7 +4,11 @@
 //! This rule preserves the wrapper payload while reusing access-family
 //! rewrites before physical lowering chooses a concrete executable pipeline.
 
-use super::super::access::{index_access_filter, simplify_access_filter, AccessFilterRewrite};
+use super::super::access::{
+    access_order_satisfaction, index_access_filter, rewrite_access_order_range_direction,
+    simplify_access_filter, AccessFilterRewrite, AccessOrderRangeDirectionRewrite,
+    AccessOrderSatisfaction,
+};
 use crate::{catalog, context, ir, logical, optimizer, rules};
 
 /// Push access-filter rewrites through root-stream wrappers.
@@ -114,17 +118,50 @@ fn rewrite_access_stream(
             rewrite_filter(filter, indexes, planner_limits, &[])
         }
         logical::AccessStream::Pipeline(pipeline) => {
-            let [logical::StreamPipelineOp::Filter { predicate }, rest @ ..] = pipeline.ops()
-            else {
-                return None;
-            };
-            let filter = logical::AccessFilter::new(pipeline.access().clone(), predicate.clone());
-            rewrite_filter(&filter, indexes, planner_limits, rest)
+            if let [logical::StreamPipelineOp::Filter { predicate }, rest @ ..] = pipeline.ops() {
+                let filter =
+                    logical::AccessFilter::new(pipeline.access().clone(), predicate.clone());
+                if let Some(rewritten) = rewrite_filter(&filter, indexes, planner_limits, rest) {
+                    return Some(rewritten);
+                }
+            }
+            for (position, op) in pipeline.ops().iter().enumerate() {
+                match op {
+                    logical::StreamPipelineOp::Filter { .. } => {}
+                    logical::StreamPipelineOp::Order { ordering } => {
+                        let order =
+                            logical::AccessOrder::new(pipeline.access().clone(), ordering.clone());
+                        let access = rewrite_order(&order, indexes)?;
+                        let mut ops = pipeline.ops()[..position].to_vec();
+                        ops.extend_from_slice(&pipeline.ops()[position + 1..]);
+                        return access_stream_with_suffix(access, &ops);
+                    }
+                    _ => break,
+                }
+            }
+            None
+        }
+        logical::AccessStream::Order(order) => {
+            rewrite_order(order, indexes).map(logical::AccessStream::Path)
         }
         logical::AccessStream::Path(_)
         | logical::AccessStream::Window(_)
-        | logical::AccessStream::Order(_)
         | logical::AccessStream::Distinct(_) => None,
+    }
+}
+
+fn rewrite_order(
+    order: &logical::AccessOrder,
+    indexes: &catalog::IndexCatalogSnapshot,
+) -> Option<logical::AccessPath> {
+    if let AccessOrderRangeDirectionRewrite::Rewritten(access) =
+        rewrite_access_order_range_direction(order, indexes)
+    {
+        return Some(access);
+    }
+    match access_order_satisfaction(order) {
+        AccessOrderSatisfaction::Satisfied(access) => Some(access),
+        AccessOrderSatisfaction::NotSatisfied => None,
     }
 }
 

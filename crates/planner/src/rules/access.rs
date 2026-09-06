@@ -16,6 +16,10 @@ pub(in crate::rules) use self::filter::{
     index_access_filter, label_domain_has_candidate, simplify_access_filter, AccessFilterRewrite,
 };
 pub(crate) use self::filter::{missing_index_candidates, CandidateIndexKind};
+pub(in crate::rules) use self::order::{
+    access_order_satisfaction, rewrite_access_order_range_direction,
+    AccessOrderRangeDirectionRewrite, AccessOrderSatisfaction,
+};
 pub(in crate::rules) use self::sets::{
     access_path_has_contradiction_candidate as access_path_has_contradiction_proof_candidate,
     access_path_has_equality_range_intersection_candidate as access_path_has_equality_range_intersection_proof_candidate,

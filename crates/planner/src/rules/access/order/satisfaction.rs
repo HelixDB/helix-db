@@ -10,18 +10,18 @@ use crate::{catalog, ir, logical};
 /// driver provides that ordering. This prevents order elision from becoming
 /// detached from the driver selected during secondary-set lowering.
 #[derive(Debug, Clone, PartialEq)]
-pub(in crate::rules::access) enum AccessOrderSatisfaction {
+pub(in crate::rules) enum AccessOrderSatisfaction {
     NotSatisfied,
     Satisfied(logical::AccessPath),
 }
 
 impl AccessOrderSatisfaction {
-    pub(in crate::rules::access) fn is_satisfied(&self) -> bool {
+    pub(in crate::rules) fn is_satisfied(&self) -> bool {
         matches!(self, Self::Satisfied(_))
     }
 }
 
-pub(in crate::rules::access) fn access_order_satisfaction(
+pub(in crate::rules) fn access_order_satisfaction(
     order: &logical::AccessOrder,
 ) -> AccessOrderSatisfaction {
     match order.access() {

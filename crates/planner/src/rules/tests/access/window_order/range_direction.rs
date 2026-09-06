@@ -130,3 +130,79 @@ fn access_order_range_direction_rule_declines_missing_or_invalid_candidates() {
         );
     }
 }
+
+#[test]
+fn direction_rewrite_promotes_the_requested_range_out_of_nested_intersections() {
+    let node_leaf = |property| node_range_source("User", property, lower_range(0));
+    let edge_leaf = |property| edge_range_source("LIKES", property, lower_range(0));
+    let node = node_access_order_expr(
+        ir::NodeAccessPlan::Intersect(
+            ir::AtLeast::try_from_vec(vec![
+                node_leaf("score"),
+                ir::NodeAccessSourcePlan::from(ir::NodeAccessPlan::Intersect(
+                    ir::AtLeast::try_from_vec(vec![node_leaf("age"), node_leaf("other")]).unwrap(),
+                )),
+            ])
+            .unwrap(),
+        ),
+        desc_order_keys(),
+    );
+    let edge = edge_access_order_expr(
+        ir::EdgeAccessPlan::Intersect(
+            ir::AtLeast::try_from_vec(vec![
+                edge_leaf("score"),
+                ir::EdgeAccessSourcePlan::from(ir::EdgeAccessPlan::Intersect(
+                    ir::AtLeast::try_from_vec(vec![edge_leaf("weight"), edge_leaf("other")])
+                        .unwrap(),
+                )),
+            ])
+            .unwrap(),
+        ),
+        desc_weight_order_keys(),
+    );
+    let node_key = range_key("User", "age", helix_ast::index::RangeIndexDirection::Desc);
+    let edge_key = range_key(
+        "LIKES",
+        "weight",
+        helix_ast::index::RangeIndexDirection::Desc,
+    );
+    let indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_range(node_key.clone())
+        .with_edge_range(edge_key.clone());
+    let rule = AccessOrderRangeDirectionRule::default();
+    for expr in [node, edge] {
+        let access = logical_access_path(rule.apply(optimizer::RuleInput {
+            expr: &expr,
+            storage: &cost::StorageCostProfile::default(),
+            indexes: &indexes,
+            planner_limits: default_planner_limits(),
+            stats: default_stats(),
+        }));
+        match access {
+            logical::AccessPath::Node(path) => {
+                let ir::NodeAccessPlan::Intersect(children) = path.source().as_ref() else {
+                    panic!("intersection remains")
+                };
+                assert_eq!(children.len(), 3);
+                assert!(
+                    matches!(children[0].as_ref(), ir::NodeAccessPlan::RangeIndex { key, .. } if key == &node_key)
+                );
+                assert!(children
+                    .iter()
+                    .all(|child| matches!(child.as_ref(), ir::NodeAccessPlan::RangeIndex { .. })));
+            }
+            logical::AccessPath::Edge(path) => {
+                let ir::EdgeAccessPlan::Intersect(children) = path.source().as_ref() else {
+                    panic!("intersection remains")
+                };
+                assert_eq!(children.len(), 3);
+                assert!(
+                    matches!(children[0].as_ref(), ir::EdgeAccessPlan::RangeIndex { key, .. } if key == &edge_key)
+                );
+                assert!(children
+                    .iter()
+                    .all(|child| matches!(child.as_ref(), ir::EdgeAccessPlan::RangeIndex { .. })));
+            }
+        }
+    }
+}

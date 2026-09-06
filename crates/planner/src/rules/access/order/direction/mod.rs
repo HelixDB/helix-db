@@ -9,11 +9,11 @@ mod edge;
 mod node;
 mod source;
 
-pub(in crate::rules::access) use contracts::AccessOrderRangeDirectionRewrite;
+pub(in crate::rules) use contracts::AccessOrderRangeDirectionRewrite;
 
 use crate::{catalog, logical};
 
-pub(in crate::rules::access) fn rewrite_access_order_range_direction(
+pub(in crate::rules) fn rewrite_access_order_range_direction(
     order: &logical::AccessOrder,
     indexes: &catalog::IndexCatalogSnapshot,
 ) -> AccessOrderRangeDirectionRewrite {

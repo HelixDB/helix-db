@@ -24,14 +24,28 @@ pub(in crate::logical::access::unary) fn order_has_range_direction_candidate(
 
 fn access_range_direction_candidate(access: &AccessPath, required: &ir::OrderKey) -> bool {
     match access {
-        AccessPath::Node(path) => match path.source().as_ref() {
-            ir::NodeAccessPlan::RangeIndex { key, .. } => range_direction_candidate(key, required),
-            _ => false,
-        },
-        AccessPath::Edge(path) => match path.source().as_ref() {
-            ir::EdgeAccessPlan::RangeIndex { key, .. } => range_direction_candidate(key, required),
-            _ => false,
-        },
+        AccessPath::Node(path) => node_range_direction_candidate(path.source().as_ref(), required),
+        AccessPath::Edge(path) => edge_range_direction_candidate(path.source().as_ref(), required),
+    }
+}
+
+fn node_range_direction_candidate(plan: &ir::NodeAccessPlan, required: &ir::OrderKey) -> bool {
+    match plan {
+        ir::NodeAccessPlan::RangeIndex { key, .. } => range_direction_candidate(key, required),
+        ir::NodeAccessPlan::Intersect(children) if plan.is_secondary_set_eligible() => children
+            .iter()
+            .any(|child| node_range_direction_candidate(child.as_ref(), required)),
+        _ => false,
+    }
+}
+
+fn edge_range_direction_candidate(plan: &ir::EdgeAccessPlan, required: &ir::OrderKey) -> bool {
+    match plan {
+        ir::EdgeAccessPlan::RangeIndex { key, .. } => range_direction_candidate(key, required),
+        ir::EdgeAccessPlan::Intersect(children) if plan.is_secondary_set_eligible() => children
+            .iter()
+            .any(|child| edge_range_direction_candidate(child.as_ref(), required)),
+        _ => false,
     }
 }
 
