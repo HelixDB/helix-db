@@ -390,6 +390,9 @@ impl HelixDB {
 
     /// Converts current equality bitmaps into a complete V2 or V3 fixture.
     ///
+    /// Descending range catalogs are rejected before any writes because their
+    /// current identity cannot be represented by this equality-only downgrade.
+    ///
     /// The caller must stop query admission for the duration. This method is
     /// absent unless the explicit migration-parity feature is enabled.
     pub async fn migration_parity_make_legacy_equality_fixture(

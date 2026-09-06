@@ -23,7 +23,7 @@ Storage V6 is the new serving format (V5 is a retired experimental format and
 remains rejected). The controlled migration target schema is 2.
 
 1. Finish the existing tenant-envelope and V4 equality migration when required.
-2. Validate canonical records, retained operations, pointers and exact cursor
+2. Validate range canonical records, retained operations, pointers and exact cursor
    ownership. Reject missing links, destination conflicts and malformed metadata.
 3. Publish V6 before changing any catalog pair. V6 without
    `kv_migration_ready:range_directions` is a migration-in-progress state.
@@ -31,7 +31,7 @@ remains rejected). The controlled migration target schema is 2.
    its record and retained operation. Keep all IDs, generations, revisions,
    progress, execution state and physical data. A transaction contains one pair;
    no database-size transaction or in-memory row collection is needed.
-5. Validate the complete current catalog, then publish readiness. A restart
+5. Validate all current range catalog pairs, then publish readiness. A restart
    repeats the scan and skips committed pairs. No index becomes Active as part
    of migration. An additional direction still requires normal backfill.
 

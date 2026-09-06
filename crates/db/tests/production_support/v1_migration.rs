@@ -402,7 +402,8 @@ async fn seed_populated_v1(
 fn family_name(family: IndexIdentityFamily) -> &'static str {
     match family {
         IndexIdentityFamily::SecondaryEquality => "secondary_equality",
-        IndexIdentityFamily::SecondaryRange => "secondary_range",
+        IndexIdentityFamily::SecondaryRangeAscending
+        | IndexIdentityFamily::SecondaryRangeDescending => "secondary_range",
         IndexIdentityFamily::Vector => "vector",
         IndexIdentityFamily::Text => "text",
     }

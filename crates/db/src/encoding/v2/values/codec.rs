@@ -1158,7 +1158,7 @@ mod tests {
 
     #[test]
     fn identity_decoder_accepts_every_persisted_family() {
-        for family in [0x01, 0x02, 0x03, 0x04] {
+        for family in [0x01, 0x02, 0x03, 0x04, 0x05] {
             let mut bytes = vec![family, 0x01];
             bytes.extend_from_slice(&1_u32.to_be_bytes());
             bytes.push(b'L');

@@ -116,6 +116,26 @@ fn access_order_range_direction_rule_declines_missing_or_invalid_candidates() {
         multi_key,
         mismatched_property,
         label_scan,
+        node_access_order_expr(
+            ir::NodeAccessPlan::Intersect(
+                ir::AtLeast::try_from_vec(vec![
+                    node_range_source("User", "age", lower_range(0)),
+                    node_range_source("User", "other", lower_range(0)),
+                ])
+                .unwrap(),
+            ),
+            multi_order_keys(),
+        ),
+        edge_access_order_expr(
+            ir::EdgeAccessPlan::Intersect(
+                ir::AtLeast::try_from_vec(vec![
+                    edge_range_source("LIKES", "weight", lower_range(0)),
+                    edge_range_source("LIKES", "other", lower_range(0)),
+                ])
+                .unwrap(),
+            ),
+            multi_order_keys(),
+        ),
         source(properties::ElementKind::Node),
     ] {
         assert_eq!(
@@ -139,7 +159,7 @@ fn direction_rewrite_promotes_the_requested_range_out_of_nested_intersections() 
         ir::NodeAccessPlan::Intersect(
             ir::AtLeast::try_from_vec(vec![
                 node_leaf("score"),
-                ir::NodeAccessSourcePlan::from(ir::NodeAccessPlan::Intersect(
+                ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::Intersect(
                     ir::AtLeast::try_from_vec(vec![node_leaf("age"), node_leaf("other")]).unwrap(),
                 )),
             ])
@@ -151,7 +171,7 @@ fn direction_rewrite_promotes_the_requested_range_out_of_nested_intersections() 
         ir::EdgeAccessPlan::Intersect(
             ir::AtLeast::try_from_vec(vec![
                 edge_leaf("score"),
-                ir::EdgeAccessSourcePlan::from(ir::EdgeAccessPlan::Intersect(
+                ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::Intersect(
                     ir::AtLeast::try_from_vec(vec![edge_leaf("weight"), edge_leaf("other")])
                         .unwrap(),
                 )),
@@ -171,6 +191,16 @@ fn direction_rewrite_promotes_the_requested_range_out_of_nested_intersections() 
         .with_edge_range(edge_key.clone());
     let rule = AccessOrderRangeDirectionRule::default();
     for expr in [node, edge] {
+        assert_eq!(
+            rule.apply(optimizer::RuleInput {
+                expr: &expr,
+                storage: &cost::StorageCostProfile::default(),
+                indexes: empty_indexes(),
+                planner_limits: default_planner_limits(),
+                stats: default_stats(),
+            }),
+            optimizer::RuleResult::NotApplicable
+        );
         let access = logical_access_path(rule.apply(optimizer::RuleInput {
             expr: &expr,
             storage: &cost::StorageCostProfile::default(),

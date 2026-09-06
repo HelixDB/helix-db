@@ -5,6 +5,7 @@
 //! serializable transaction. Physical entries, generations, queue pointers and
 //! progress cursors are unchanged. Repeated scans need no persisted cursor.
 
+#[cfg(test)]
 use bytes::Bytes;
 use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
@@ -16,22 +17,24 @@ use crate::encoding::v2::values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{self as lifecycle, IndexStateV2};
 
-const READY: &[u8] = b"kv_migration_ready:range_directions";
-
 pub(crate) async fn ready(reader: &(impl DbReadOps + Sync)) -> Result<bool> {
     match reader
-        .get(MetadataKey::new(READY).to_bytes())
+        .get(MetadataKey::range_catalog_ready().to_bytes())
         .await?
         .as_deref()
     {
         None => Ok(false),
-        Some(b"1") => Ok(true),
-        Some(_) => Err(corruption("range direction readiness marker is malformed")),
+        Some(value) => values::RangeCatalogReady::decode(value)
+            .map(|_| true)
+            .map_err(Into::into),
     }
 }
 
 pub(crate) fn stage_ready(transaction: &DbTransaction) -> Result<()> {
-    transaction.put(MetadataKey::new(READY).to_bytes(), Bytes::from_static(b"1"))?;
+    transaction.put(
+        MetadataKey::range_catalog_ready().to_bytes(),
+        values::RangeCatalogReady.encode(),
+    )?;
     Ok(())
 }
 
@@ -71,7 +74,7 @@ async fn migrate_inner(db: &Db, mut checkpoint: impl FnMut(Boundary) -> Result<(
         }
         return Ok(());
     }
-    // Validate every linked pair and detect orphan operations before fencing.
+    // Validate every range pair and detect orphan range operations before fencing.
     validate_catalog(db, false).await?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     transaction.put(
@@ -88,7 +91,7 @@ async fn migrate_inner(db: &Db, mut checkpoint: impl FnMut(Boundary) -> Result<(
 
     let mut rows = db.scan(..).await?;
     while let Some(row) = rows.next().await? {
-        let Some((scope, ScopedKey::IndexRecord(_))) = catalog_key(&row.key)? else {
+        let Some((scope, CatalogRow::Index)) = catalog_key(&row.key)? else {
             continue;
         };
         let definition = values::decode_pre_direction_index_record(&row.value)?;
@@ -131,7 +134,12 @@ async fn migrate_inner(db: &Db, mut checkpoint: impl FnMut(Boundary) -> Result<(
 }
 
 /// Recognizes catalog rows without treating malformed catalog keys as absence.
-fn catalog_key(key: &[u8]) -> Result<Option<(DataScope, ScopedKey)>> {
+enum CatalogRow {
+    Index,
+    Operation(lifecycle::IndexOperationId),
+}
+
+fn catalog_key(key: &[u8]) -> Result<Option<(DataScope, CatalogRow)>> {
     let (scope, logical) = match DataScope::strip_tenant_envelope(key) {
         Some((tenant, logical)) => (DataScope::Tenant(tenant), logical),
         None => (DataScope::LegacyUnscoped, key),
@@ -141,7 +149,21 @@ fn catalog_key(key: &[u8]) -> Result<Option<(DataScope, ScopedKey)>> {
     {
         return Ok(None);
     }
-    Ok(Some((scope, ScopedKey::parse_from_slice(logical)?)))
+    if logical[1] == 0x01 {
+        let ScopedKey::IndexRecord(_) = ScopedKey::parse_from_slice(logical)? else {
+            return Err(corruption(
+                "index catalog prefix decoded as another key kind",
+            ));
+        };
+        Ok(Some((scope, CatalogRow::Index)))
+    } else {
+        let ScopedKey::Operation(key) = ScopedKey::parse_from_slice(logical)? else {
+            return Err(corruption(
+                "operation catalog prefix decoded as another key kind",
+            ));
+        };
+        Ok(Some((scope, CatalogRow::Operation(key.operation_id))))
+    }
 }
 
 async fn validate_catalog(db: &Db, current: bool) -> Result<()> {
@@ -151,7 +173,7 @@ async fn validate_catalog(db: &Db, current: bool) -> Result<()> {
             continue;
         };
         match key {
-            ScopedKey::IndexRecord(_) => {
+            CatalogRow::Index => {
                 let definition = values::decode_pre_direction_index_record(&row.value)?;
                 if !definition.identity().family().is_range() {
                     continue;
@@ -163,12 +185,12 @@ async fn validate_catalog(db: &Db, current: bool) -> Result<()> {
                     return Err(corruption("direction migration destination already exists"));
                 }
             }
-            ScopedKey::Operation(key) => {
+            CatalogRow::Operation(operation_id) => {
                 let operation = values::decode_operation_record(&row.value)?;
                 if !operation.identity().family().is_range() {
                     continue;
                 }
-                if key.operation_id != operation.operation_id() {
+                if operation_id != operation.operation_id() {
                     return Err(corruption("operation key differs from its record"));
                 }
                 let canonical =
@@ -183,7 +205,6 @@ async fn validate_catalog(db: &Db, current: bool) -> Result<()> {
                     ));
                 }
             }
-            _ => unreachable!("catalog_key only accepts index and operation prefixes"),
         }
     }
     Ok(())
@@ -208,6 +229,11 @@ async fn read_pair(
     );
     if key != canonical && (current || key != legacy) {
         return Err(corruption("range catalog key differs from its definition"));
+    }
+    if key == canonical && canonical != legacy {
+        // A committed move rewrites the key and value together. A directed key
+        // with an old value is corruption, not a valid restart boundary.
+        values::decode_index_record(value)?;
     }
     let operation_id = match record.state() {
         IndexStateV2::Building {
@@ -289,12 +315,25 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
     use std::sync::Arc;
 
+    #[derive(Clone, Copy, Debug)]
+    enum Phase {
+        Building,
+        Active,
+        Aborting,
+        Aborted,
+        Claimed,
+        Dropping,
+        Dropped,
+        Blocked,
+    }
+
     async fn fixture(
         db: &Db,
         scope: DataScope,
         edge: bool,
         direction: RangeIndexDirection,
-    ) -> (IndexRecordV2, IndexOperationRecord, Bytes) {
+        phase: Phase,
+    ) -> (IndexRecordV2, IndexOperationRecord, Bytes, Bytes) {
         let definition: ValidatedDynamicIndexDefinition = if edge {
             SecondaryIndexDefinition::edge_range_with_direction("Item", "value", direction).unwrap()
         } else {
@@ -344,10 +383,113 @@ mod tests {
             },
         )
         .unwrap();
+        let physical = PhysicalGeneration::Secondary {
+            generation: record.state().generation(),
+        };
+        let cleanup = SecondaryCleanupProgress::Finalize(NoCursorProgress::default());
+        let (state, progress, execution) = match phase {
+            Phase::Building => (
+                record.state().clone(),
+                operation.progress().clone(),
+                operation.execution_state().clone(),
+            ),
+            Phase::Active => (
+                IndexStateV2::Active {
+                    physical,
+                    completed_build_operation_id: op_id,
+                },
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                    SecondaryBuildStage::Activate(NoCursorProgress::default()),
+                )),
+                IndexOperationExecutionState::Completed(IndexOperationOutcome::Build(
+                    BuildOperationOutcome::Succeeded,
+                )),
+            ),
+            Phase::Aborting => (
+                IndexStateV2::Aborting {
+                    physical,
+                    build_operation_id: op_id,
+                },
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(cleanup)),
+                operation.execution_state().clone(),
+            ),
+            Phase::Aborted => (
+                IndexStateV2::Dropped {
+                    last_generation: record.state().generation(),
+                    completed_operation_id: op_id,
+                },
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(cleanup)),
+                IndexOperationExecutionState::Completed(IndexOperationOutcome::Build(
+                    BuildOperationOutcome::Aborted,
+                )),
+            ),
+            Phase::Claimed => (
+                record.state().clone(),
+                operation.progress().clone(),
+                IndexOperationExecutionState::Claimed(OperationClaim {
+                    writer_epoch: WriterEpoch::from_bytes([9; 16]).unwrap(),
+                    sequence: ClaimSequence::new(8).unwrap(),
+                }),
+            ),
+            Phase::Dropping => (
+                IndexStateV2::Dropping {
+                    physical,
+                    drop_operation_id: op_id,
+                },
+                IndexOperationProgress::SecondaryCleanup(cleanup),
+                operation.execution_state().clone(),
+            ),
+            Phase::Dropped => (
+                IndexStateV2::Dropped {
+                    last_generation: record.state().generation(),
+                    completed_operation_id: op_id,
+                },
+                IndexOperationProgress::SecondaryCleanup(cleanup),
+                IndexOperationExecutionState::Completed(IndexOperationOutcome::DropSucceeded),
+            ),
+            Phase::Blocked => (
+                record.state().clone(),
+                operation.progress().clone(),
+                IndexOperationExecutionState::Blocked(IndexOperationBlocker::InvalidSourceData {
+                    entity_kind: record.identity().element_kind(),
+                    entity_id: IndexEntityId::new(8),
+                }),
+            ),
+        };
+        let record = IndexRecordV2::try_new(
+            record.index_id(),
+            record.identity().clone(),
+            record.definition().clone(),
+            record.revision(),
+            state,
+        )
+        .unwrap();
+        let operation = IndexOperationRecord::try_new(
+            op_id,
+            record.index_id(),
+            record.identity().clone(),
+            record.state().generation(),
+            record.revision(),
+            operation.operation_revision(),
+            progress.kind(),
+            operation.family(),
+            progress,
+            operation.attempt(),
+            execution,
+        )
+        .unwrap();
         // Frozen pre-V6 framing: version/kind, ID, undirected family. The
         // definition's direction remains in place. No migration encoder is used.
         let mut old_record = values::encode_index_record(&record).to_vec();
         old_record[2 + core::mem::size_of::<u64>()] = 0x02;
+        assert_eq!(
+            values::decode_index_record(&old_record).is_ok(),
+            direction == RangeIndexDirection::Asc
+        );
+        assert_eq!(
+            values::decode_pre_direction_index_record(&old_record).unwrap(),
+            record
+        );
         let mut old_operation = values::encode_operation_record(&operation).to_vec();
         old_operation[2 + 16 + core::mem::size_of::<u64>()] = 0x02;
         let key = lifecycle::outbox::scoped_index_key_for_identity(
@@ -364,21 +506,26 @@ mod tests {
             Bytes::from(old_operation),
         )
         .unwrap();
-        tx.put(
-            ManagedIndexKey::Global {
-                kind: GlobalKey::OperationPointer(op_id),
-            }
-            .to_bytes(),
-            values::encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(
-                OperationQueuePointerValue {
-                    scope,
-                    index_id: record.index_id(),
-                    generation: record.state().generation(),
-                    record_revision: operation.operation_revision(),
-                },
-            )),
-        )
-        .unwrap();
+        if matches!(
+            operation.execution_state(),
+            IndexOperationExecutionState::Queued { .. } | IndexOperationExecutionState::Claimed(_)
+        ) {
+            tx.put(
+                ManagedIndexKey::Global {
+                    kind: GlobalKey::OperationPointer(op_id),
+                }
+                .to_bytes(),
+                values::encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(
+                    OperationQueuePointerValue {
+                        scope,
+                        index_id: record.index_id(),
+                        generation: record.state().generation(),
+                        record_revision: operation.operation_revision(),
+                    },
+                )),
+            )
+            .unwrap();
+        }
         tx.put(
             ManagedIndexKey::Global {
                 kind: GlobalKey::StorageVersion,
@@ -415,10 +562,44 @@ mod tests {
         .unwrap();
         crate::migrations::stage_current_storage_schema_ready(&tx).unwrap();
         crate::migrations::stage_index_storage_v4_cleanup_ready(&tx).unwrap();
+        use crate::encoding::v2::keys;
+        let lane = match (edge, direction) {
+            (false, RangeIndexDirection::Asc) => keys::SecondaryEntryLane::NodeRangeAscending,
+            (false, RangeIndexDirection::Desc) => keys::SecondaryEntryLane::NodeRangeDescending,
+            (true, RangeIndexDirection::Asc) => keys::SecondaryEntryLane::EdgeRangeAscending,
+            (true, RangeIndexDirection::Desc) => keys::SecondaryEntryLane::EdgeRangeDescending,
+        };
+        let physical = ManagedIndexKey::Data {
+            scope,
+            kind: ScopedKey::SecondaryEntry(
+                keys::SecondaryEntryKey::try_new(
+                    record.index_id(),
+                    record.state().generation(),
+                    lane,
+                    keys::CanonicalSecondaryValue::range_string(
+                        lane.range_direction().unwrap(),
+                        "frozen",
+                    ),
+                    Some(IndexEntityId::new(8)),
+                )
+                .unwrap(),
+            ),
+        }
+        .to_bytes();
+        tx.put(
+            physical.clone(),
+            values::encode_secondary_entry(&crate::index_lifecycle::work::SecondaryEntryValue {
+                index_id: record.index_id(),
+                generation: record.state().generation(),
+                lane,
+                entity_id: IndexEntityId::new(8),
+            }),
+        )
+        .unwrap();
         tx.put(source.clone(), Bytes::from_static(b"graph bytes unchanged"))
             .unwrap();
         tx.commit().await.unwrap();
-        (record, operation, key)
+        (record, operation, key, physical)
     }
 
     #[tokio::test]
@@ -440,12 +621,14 @@ mod tests {
                         .build()
                         .await
                         .unwrap();
-                    let (record, operation, old_key) =
-                        fixture(&db, scope, edge, RangeIndexDirection::Desc).await;
+                    let (record, operation, old_key, physical) =
+                        fixture(&db, scope, edge, RangeIndexDirection::Desc, Phase::Building).await;
                     assert!(matches!(
                         lifecycle::repository::require_reader_bootstrap_or_legacy(&db).await,
                         Err(HelixDbError::WriterMigrationRequired { .. })
                     ));
+                    let physical_value = db.get(&physical).await.unwrap();
+                    assert!(physical_value.is_some());
                     let result = migrate_inner(&db, |at| {
                         if at == boundary {
                             Err(corruption("simulated process failure"))
@@ -465,6 +648,7 @@ mod tests {
                         .unwrap();
                     assert!(ready(&db).await.unwrap());
                     assert!(db.get(&old_key).await.unwrap().is_none());
+                    assert_eq!(db.get(&physical).await.unwrap(), physical_value);
                     let key =
                         lifecycle::outbox::scoped_index_key_for_identity(scope, record.identity());
                     let value = db.get(&key).await.unwrap().unwrap();
@@ -493,15 +677,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_preserves_every_retained_ddl_state_and_direction() {
+        for phase in [
+            Phase::Building,
+            Phase::Active,
+            Phase::Aborting,
+            Phase::Aborted,
+            Phase::Claimed,
+            Phase::Dropping,
+            Phase::Dropped,
+            Phase::Blocked,
+        ] {
+            for direction in [RangeIndexDirection::Asc, RangeIndexDirection::Desc] {
+                let db = Db::builder("range-state", Arc::new(InMemory::new()))
+                    .build()
+                    .await
+                    .unwrap();
+                let scope = DataScope::Tenant(TenantId::from_u128(7));
+                let (record, operation, _, physical) =
+                    fixture(&db, scope, true, direction, phase).await;
+                let source = DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(8)),
+                }
+                .to_bytes();
+                let graph = db.get(&source).await.unwrap();
+                let physical_value = db.get(&physical).await.unwrap();
+                assert!(physical_value.is_some());
+                migrate(&db).await.unwrap();
+                let key =
+                    lifecycle::outbox::scoped_index_key_for_identity(scope, record.identity());
+                let value = db.get(&key).await.unwrap().unwrap();
+                assert_eq!(
+                    read_pair(&db, scope, &key, &value, true).await.unwrap(),
+                    (record, operation)
+                );
+                assert_eq!(db.get(&source).await.unwrap(), graph);
+                assert_eq!(db.get(&physical).await.unwrap(), physical_value);
+                db.close().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_cannot_override_an_old_or_malformed_storage_version() {
+        for marker in [
+            None,
+            Some(values::encode_metadata_value(
+                &IndexV2MetadataValue::StorageVersion(IndexStorageVersion::new(4).unwrap()),
+            )),
+            Some(Bytes::from_static(b"malformed")),
+            Some(values::encode_metadata_value(
+                &IndexV2MetadataValue::LogicalIndexIdWatermark(LogicalIndexIdWatermark {
+                    next_id: IndexId::initial(),
+                }),
+            )),
+        ] {
+            let db = Db::builder("range-readiness", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap();
+            let tx = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            stage_ready(&tx).unwrap();
+            marker
+                .into_iter()
+                .try_for_each(|marker| {
+                    tx.put(
+                        ManagedIndexKey::Global {
+                            kind: GlobalKey::StorageVersion,
+                        }
+                        .to_bytes(),
+                        marker,
+                    )
+                })
+                .unwrap();
+            tx.commit().await.unwrap();
+            let before = db.snapshot().await.unwrap().seq();
+            assert!(migrate(&db).await.is_err());
+            assert_eq!(db.snapshot().await.unwrap().seq(), before);
+            db.close().await.unwrap();
+        }
+    }
+
+    #[cfg(feature = "migration-parity")]
+    #[tokio::test]
+    async fn legacy_equality_fixture_rejects_directed_catalogs_without_writes() {
+        let db = Db::builder("range-parity", Arc::new(InMemory::new()))
+            .build()
+            .await
+            .unwrap();
+        fixture(
+            &db,
+            DataScope::LegacyUnscoped,
+            false,
+            RangeIndexDirection::Desc,
+            Phase::Active,
+        )
+        .await;
+        migrate(&db).await.unwrap();
+        let before = db.snapshot().await.unwrap().seq();
+        assert!(crate::migrations::make_legacy_equality_fixture(&db, 3)
+            .await
+            .is_err());
+        assert_eq!(db.snapshot().await.unwrap().seq(), before);
+        assert!(ready(&db).await.unwrap());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn malformed_and_conflicting_catalogs_fail_before_any_migration_write() {
-        for damage in 0..4 {
+        for damage in 0..8 {
             let db = Db::builder("range-corruption", Arc::new(InMemory::new()))
                 .build()
                 .await
                 .unwrap();
             let scope = DataScope::LegacyUnscoped;
-            let (record, operation, old_key) =
-                fixture(&db, scope, false, RangeIndexDirection::Desc).await;
+            let (record, operation, old_key, _physical) = fixture(
+                &db,
+                scope,
+                false,
+                RangeIndexDirection::Desc,
+                Phase::Building,
+            )
+            .await;
             let tx = db
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
@@ -528,6 +829,73 @@ mod tests {
                         .to_bytes(),
                     )
                     .unwrap(),
+                4 => tx.delete(old_key).unwrap(),
+                5 => {
+                    use crate::encoding::v2::keys;
+                    let wrong_cursor = ManagedIndexKey::Data {
+                        scope,
+                        kind: ScopedKey::SecondaryEntry(
+                            keys::SecondaryEntryKey::try_new(
+                                record.index_id(),
+                                record.state().generation(),
+                                keys::SecondaryEntryLane::NodeRangeAscending,
+                                keys::CanonicalSecondaryValue::range_string(
+                                    crate::encoding::indexes::range::RangeIndexDirection::Asc,
+                                    "wrong",
+                                ),
+                                Some(IndexEntityId::new(8)),
+                            )
+                            .unwrap(),
+                        ),
+                    }
+                    .to_bytes();
+                    let wrong = IndexOperationRecord::try_new(
+                        operation.operation_id(),
+                        operation.index_id(),
+                        operation.identity().clone(),
+                        operation.generation(),
+                        operation.index_record_revision(),
+                        operation.operation_revision(),
+                        operation.kind(),
+                        operation.family(),
+                        IndexOperationProgress::SecondaryBuild(
+                            SecondaryBuildProgress::Constructing(SecondaryBuildStage::Validate(
+                                PrefixScanProgress {
+                                    cursor: Some(IndexCursor::try_new(wrong_cursor).unwrap()),
+                                    counters: OperationCounters::default(),
+                                },
+                            )),
+                        ),
+                        operation.attempt(),
+                        operation.execution_state().clone(),
+                    )
+                    .unwrap();
+                    tx.put(
+                        lifecycle::outbox::scoped_operation_key(scope, operation.operation_id()),
+                        values::encode_operation_record(&wrong),
+                    )
+                    .unwrap();
+                }
+                6 => tx
+                    .put(
+                        ManagedIndexKey::Global {
+                            kind: GlobalKey::OperationPointer(operation.operation_id()),
+                        }
+                        .to_bytes(),
+                        values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                            IndexStorageVersion::CURRENT,
+                        )),
+                    )
+                    .unwrap(),
+                7 => {
+                    let value = tx.get(&old_key).await.unwrap().unwrap();
+                    tx.delete(old_key).unwrap();
+                    tx.put(
+                        lifecycle::outbox::scoped_index_key_for_identity(scope, record.identity()),
+                        value,
+                    )
+                    .unwrap();
+                }
                 _ => unreachable!(),
             }
             tx.commit().await.unwrap();

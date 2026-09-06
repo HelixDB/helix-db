@@ -5335,12 +5335,16 @@ pub(crate) mod production_contracts {
                 .await
                 .expect("legacy storage marker writes");
             let before = all_rows(&fixture).await;
-            assert_eq!(
+            assert!(matches!(
                 crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(&fixture)
-                    .await
-                    .expect("complete versions two and three are explicitly reader-compatible"),
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::LegacyEqualityUnion
-            );
+                    .await,
+                Err(HelixDbError::WriterMigrationRequired {
+                    requirement: crate::error::WriterMigrationRequirement::StorageVersion {
+                        found,
+                        target: 6,
+                    },
+                }) if found == legacy_version
+            ));
             assert_eq!(all_rows(&fixture).await, before);
         }
         fixture.close().await.expect("fixture closes");

@@ -21,6 +21,11 @@ pub(crate) struct MetadataKey<'a> {
 }
 
 impl<'a> MetadataKey<'a> {
+    /// Completion marker for direction-aware range catalog identities.
+    pub(crate) const fn range_catalog_ready() -> Self {
+        Self::new(b"kv_migration_ready:range_directions")
+    }
+
     pub(crate) const fn new(name: &'a [u8]) -> Self {
         Self { name }
     }

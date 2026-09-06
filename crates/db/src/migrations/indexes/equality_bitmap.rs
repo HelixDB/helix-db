@@ -237,6 +237,21 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
         ));
     }
 
+    // The old format cannot represent a directed DESC catalog key. Reject
+    // these sources before this test-only downgrade can copy or publish rows.
+    let mut rows = db.scan(..).await?;
+    while let Some(row) = rows.next().await? {
+        if !index_record_candidates(&row.key)?.is_empty()
+            && decode_pre_direction_index_record(&row.value)?
+                .identity()
+                .family()
+                == index_lifecycle::IndexIdentityFamily::SecondaryRangeDescending
+        {
+            return Err(corruption(
+                "legacy equality fixtures cannot contain descending range indexes",
+            ));
+        }
+    }
     let catalog = discover_catalog(db).await?;
     if !catalog.building.is_empty() {
         return Err(corruption(
@@ -248,6 +263,9 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
     }
 
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    transaction.delete(
+        crate::encoding::v2::keys::metadata::MetadataKey::range_catalog_ready().to_bytes(),
+    )?;
     transaction.delete(Bytes::from_static(
         b"\xFFkv_migration_ready:index_storage_v4_cleanup",
     ))?;
@@ -1258,6 +1276,9 @@ mod tests {
             transaction.commit().await.unwrap();
             migrate_v3_to_v4(&db).await.unwrap();
 
+            crate::migrations::range_directions::migrate(&db)
+                .await
+                .unwrap();
             make_legacy_equality_fixture(&db, version).await.unwrap();
             db.flush().await.unwrap();
             assert!(!db
@@ -1287,29 +1308,25 @@ mod tests {
                 .unwrap()
                 .is_none());
 
+            assert!(matches!(
+                crate::HelixDB::open_reader_with_object_store_for_tests(
+                    database.clone(),
+                    Arc::clone(&store),
+                )
+                .await,
+                Err(HelixDbError::WriterMigrationRequired { .. })
+            ));
+            crate::migrations::startup::bootstrap_writer(&db)
+                .await
+                .unwrap();
+            db.flush().await.unwrap();
             let reader = crate::HelixDB::open_reader_with_object_store_for_tests(
                 database,
                 Arc::clone(&store),
             )
             .await
-            .expect("converted V2/V3 fixture is reader-compatible");
+            .expect("migrated fixture is reader-compatible");
             assert_reader_queries(&reader).await;
-
-            migrate_v3_to_v4(&db).await.unwrap();
-            db.flush().await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                loop {
-                    assert_reader_queries(&reader).await;
-                    if reader.reader_storage_compatibility_for_tests()
-                        == ReaderStorageCompatibility::Current
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("the fixture reader switches to current after migration publication");
             assert_active_migrated(&db, &generation).await;
 
             reader.close().await.unwrap();

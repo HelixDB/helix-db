@@ -9,7 +9,10 @@ pub(crate) fn undirected(identity: &IndexIdentity) -> IndexIdentity {
         IndexIdentityFamily::SecondaryRangeDescending => {
             IndexIdentityFamily::SecondaryRangeAscending
         }
-        family => family,
+        family @ (IndexIdentityFamily::SecondaryEquality
+        | IndexIdentityFamily::SecondaryRangeAscending
+        | IndexIdentityFamily::Vector
+        | IndexIdentityFamily::Text) => family,
     };
     IndexIdentity::new(
         family,

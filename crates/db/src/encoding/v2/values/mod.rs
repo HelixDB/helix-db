@@ -27,4 +27,5 @@ pub(crate) use lifecycle::{
     decode_applied_state, decode_build_delta, decode_index_record, decode_operation_record,
     decode_operation_record_with_compatibility, decode_pre_direction_index_record,
     encode_applied_state, encode_build_delta, encode_index_record, encode_operation_record,
+    RangeCatalogReady,
 };

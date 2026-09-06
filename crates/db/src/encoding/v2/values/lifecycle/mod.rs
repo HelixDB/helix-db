@@ -17,3 +17,6 @@ pub(crate) use operation_record::{
 };
 
 pub(super) use super::*;
+
+mod range_catalog;
+pub(crate) use range_catalog::RangeCatalogReady;

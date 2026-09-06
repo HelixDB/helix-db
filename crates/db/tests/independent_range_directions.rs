@@ -251,35 +251,36 @@ async fn run_contract() {
                     }
                 }
             }
-            // The actual planner sees both catalog directions. Intersect
-            // lowering must drive from value DESC for this order request.
-            let predicate = Predicate::and(vec![
-                Predicate::eq("group", "keep"),
-                Predicate::gte("value", 0),
-                Predicate::gte("before", 0),
-            ]);
-            let read = if edge {
-                traversal::g()
-                    .e_with_label_where("Item", predicate)
-                    .order_by("value", Order::Desc)
-                    .limit(5)
-                    .id()
-            } else {
-                traversal::g()
-                    .n_with_label_where("Item", predicate)
-                    .order_by("value", Order::Desc)
-                    .limit(5)
-                    .id()
-            };
-            let read = batch::read_batch().var_as("ids", read).returning(["ids"]);
-            let ctx = db
-                .planner_context_scoped(context::ParamBindings::default(), scope)
-                .await
-                .unwrap();
-            let plan = planning::plan_read_batch(&read, &ctx).unwrap();
-            let debug = format!("{plan:?}");
-            assert!(debug.contains("direction: Desc"), "{debug}");
-            assert!(!debug.contains("Sort"), "{debug}");
+            // The selected direct range driver must supply the requested order.
+            for order in [Order::Asc, Order::Desc] {
+                let predicate = Predicate::and(vec![
+                    Predicate::eq("group", "keep"),
+                    Predicate::gte("value", 0),
+                    Predicate::gte("before", 0),
+                ]);
+                let read = if edge {
+                    traversal::g()
+                        .e_with_label_where("Item", predicate)
+                        .order_by("value", order)
+                        .limit(5)
+                        .id()
+                } else {
+                    traversal::g()
+                        .n_with_label_where("Item", predicate)
+                        .order_by("value", order)
+                        .limit(5)
+                        .id()
+                };
+                let read = batch::read_batch().var_as("ids", read).returning(["ids"]);
+                let ctx = db
+                    .planner_context_scoped(context::ParamBindings::default(), scope)
+                    .await
+                    .unwrap();
+                let plan = planning::plan_read_batch(&read, &ctx).unwrap();
+                let debug = format!("{plan:?}");
+                assert!(debug.contains(&format!("direction: {order:?}")), "{debug}");
+                assert!(!debug.contains("Sort"), "{debug}");
+            }
             let before = ordered_ids(&db, scope, edge, Order::Asc, 0, 30).await;
             ddl(&db, scope, spec(edge, RangeIndexDirection::Desc), true).await;
             assert_eq!(
@@ -343,16 +344,28 @@ fn aborting_one_backfill_preserves_the_other_direction() {
                     .await
                     .unwrap();
                     let controller = LifecycleTestController::new();
-                    for edge in [false, true] {
+                    for (edge, survivor) in [false, true]
+                        .into_iter()
+                        .flat_map(|edge| [Order::Asc, Order::Desc].map(|order| (edge, order)))
+                    {
                         let scope = DataScope::Tenant(
-                            TenantId::from_ulid_str("00000000000000000000000009").unwrap(),
+                            TenantId::from_ulid_str(if survivor == Order::Asc {
+                                "00000000000000000000000009"
+                            } else {
+                                "0000000000000000000000000A"
+                            })
+                            .unwrap(),
                         );
                         add_item(&db, scope, edge, 4, "keep").await;
                         let mut definitions = Vec::new();
-                        for direction in [
+                        let mut directions = [
                             db::config::RangeIndexDirection::Asc,
                             db::config::RangeIndexDirection::Desc,
-                        ] {
+                        ];
+                        if survivor == Order::Desc {
+                            directions.reverse();
+                        }
+                        for direction in directions {
                             let definition: ValidatedDynamicIndexDefinition = if edge {
                                 db::config::SecondaryIndexDefinition::edge_range_with_direction(
                                     "Item", "value", direction,
@@ -406,7 +419,7 @@ fn aborting_one_backfill_preserves_the_other_direction() {
                                 .unwrap(),
                             IndexOperationStatus::Succeeded { .. }
                         ));
-                        // Commit a real descending backfill batch before cancellation.
+                        // Commit a real backfill batch before cancellation.
                         controller
                             .advance(
                                 &db,
@@ -447,18 +460,18 @@ fn aborting_one_backfill_preserves_the_other_direction() {
                                 .unwrap(),
                             IndexOperationStatus::Aborted { .. }
                         ));
-                        let asc = controller
+                        let surviving = controller
                             .definition_snapshot(&db, scope, &definitions[0].0)
                             .await
                             .unwrap();
-                        let desc = controller
+                        let aborted = controller
                             .definition_snapshot(&db, scope, &definitions[1].0)
                             .await
                             .unwrap();
-                        assert_eq!(asc.state, Some("active"));
-                        assert_eq!(desc.state, Some("dropped"));
+                        assert_eq!(surviving.state, Some("active"));
+                        assert_eq!(aborted.state, Some("dropped"));
                         assert_eq!(
-                            ordered_ids(&db, scope, edge, Order::Asc, 0, 10).await.len(),
+                            ordered_ids(&db, scope, edge, survivor, 0, 10).await.len(),
                             1
                         );
                     }
