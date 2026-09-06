@@ -163,7 +163,11 @@ fn compare_secondary(
     if existing.property() != requested.property() {
         differences.insert(DefinitionDifference::Property);
     }
-    if existing.identity_family() != requested.identity_family() {
+    if (existing.identity_family()
+        == crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality)
+        != (requested.identity_family()
+            == crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality)
+    {
         differences.insert(DefinitionDifference::SecondaryKind);
     }
     if existing.unique() != requested.unique() {

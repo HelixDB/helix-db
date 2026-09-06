@@ -7,7 +7,7 @@ use super::{
 };
 
 /// Canonical V2 index format number written by this implementation.
-pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0004;
+pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0006;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -59,8 +59,12 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<usize> {
         let direction = storage_range_direction(key.direction);
         let query = range_query(self, range)?;
-        let identity =
-            secondary_range_identity(element_kind, key.label.as_ref(), key.property.as_ref())?;
+        let identity = secondary_range_identity(
+            element_kind,
+            key.label.as_ref(),
+            key.property.as_ref(),
+            direction,
+        )?;
         if let Some(active) = self.active_write_tx() {
             return count_range_with_membership_in_view(
                 self,
@@ -97,6 +101,7 @@ impl<'db> ExecutionContext<'db> {
             crate::index_lifecycle::IndexElementKind::Node,
             key.label.as_ref(),
             key.property.as_ref(),
+            direction,
         )?;
         if let Some(active) = self.active_write_tx() {
             return scan_node_range_in_view(self, &active.txn, &identity, &query, direction, limit)
@@ -144,6 +149,7 @@ impl<'db> ExecutionContext<'db> {
             crate::index_lifecycle::IndexElementKind::Edge,
             key.label.as_ref(),
             key.property.as_ref(),
+            direction,
         )?;
         if let Some(active) = self.active_write_tx() {
             return scan_edge_range_in_view(self, &active.txn, &identity, &query, direction, limit)
@@ -179,17 +185,22 @@ impl<'db> ExecutionContext<'db> {
     }
 }
 
-/// Constructs the direction-independent identity for one range index.
-///
-/// Direction remains part of the validated definition carried by the Active
-/// handle and is checked against the planner request before physical I/O.
+/// Constructs the exact directional identity requested by the planner.
 fn secondary_range_identity(
     element_kind: crate::index_lifecycle::IndexElementKind,
     label: &str,
     property: &str,
+    direction: StorageRangeIndexDirection,
 ) -> Result<crate::index_lifecycle::IndexIdentity> {
     Ok(crate::index_lifecycle::IndexIdentity::new(
-        crate::index_lifecycle::IndexIdentityFamily::SecondaryRange,
+        match direction {
+            StorageRangeIndexDirection::Asc => {
+                crate::index_lifecycle::IndexIdentityFamily::SecondaryRangeAscending
+            }
+            StorageRangeIndexDirection::Desc => {
+                crate::index_lifecycle::IndexIdentityFamily::SecondaryRangeDescending
+            }
+        },
         element_kind,
         crate::index_lifecycle::IndexComponent::try_new("label", label)?,
         crate::index_lifecycle::IndexComponent::try_new("property", property)?,

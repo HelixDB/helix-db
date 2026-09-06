@@ -379,8 +379,10 @@ async fn managed_secondary_access_uses_active_v2_rows() {
         .unwrap_err();
     assert!(matches!(
         direction_mismatch,
-        HelixDbError::IndexCatalogCorruption(message)
-            if message.contains("direction disagrees")
+        HelixDbError::IndexLifecycleUnavailable {
+            reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
+            ..
+        }
     ));
     assert_eq!(
         run_edge_access(

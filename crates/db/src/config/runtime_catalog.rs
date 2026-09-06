@@ -102,7 +102,7 @@ pub(crate) fn dynamic_index_identity_from_drop_spec(
             key.property.as_ref(),
         ),
         ir::IndexDdlDropSpec::NodeRange { key } => (
-            index_lifecycle::IndexIdentityFamily::SecondaryRange,
+            index_lifecycle::IndexIdentityFamily::range(config_range_direction(key.direction)),
             index_lifecycle::IndexElementKind::Node,
             key.label.as_ref(),
             key.property.as_ref(),
@@ -114,7 +114,7 @@ pub(crate) fn dynamic_index_identity_from_drop_spec(
             key.property.as_ref(),
         ),
         ir::IndexDdlDropSpec::EdgeRange { key } => (
-            index_lifecycle::IndexIdentityFamily::SecondaryRange,
+            index_lifecycle::IndexIdentityFamily::range(config_range_direction(key.direction)),
             index_lifecycle::IndexElementKind::Edge,
             key.label.as_ref(),
             key.property.as_ref(),

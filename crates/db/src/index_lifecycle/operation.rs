@@ -781,7 +781,9 @@ impl IndexOperationFamily {
             (self, identity.family()),
             (
                 Self::Secondary,
-                IndexIdentityFamily::SecondaryEquality | IndexIdentityFamily::SecondaryRange
+                IndexIdentityFamily::SecondaryEquality
+                    | IndexIdentityFamily::SecondaryRangeAscending
+                    | IndexIdentityFamily::SecondaryRangeDescending
             ) | (Self::Vector, IndexIdentityFamily::Vector)
                 | (Self::Text, IndexIdentityFamily::Text)
         )
@@ -2279,7 +2281,7 @@ mod tests {
             base(
                 IndexOperationKind::Build,
                 IndexOperationFamily::Secondary,
-                IndexIdentityFamily::SecondaryRange,
+                IndexIdentityFamily::SecondaryRangeAscending,
                 IndexOperationExecutionState::Completed(IndexOperationOutcome::DropSucceeded),
                 None,
             ),

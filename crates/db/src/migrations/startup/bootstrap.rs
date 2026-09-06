@@ -26,15 +26,16 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
     super::super::tenant::envelope::migrate_all_tenant_keys(db).await?;
 
     match plan {
-        WriterBootstrapPlan::Initialize => initialize_writer_bootstrap(db).await,
+        WriterBootstrapPlan::Initialize => initialize_writer_bootstrap(db).await?,
         WriterBootstrapPlan::MigrateToCurrent => {
-            super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await
+            super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await?;
         }
         WriterBootstrapPlan::CleanupCurrent => {
-            super::super::indexes::equality_bitmap::cleanup_v3_nonunique_equality_rows(db).await
+            super::super::indexes::equality_bitmap::cleanup_v3_nonunique_equality_rows(db).await?;
         }
-        WriterBootstrapPlan::Ready => Ok(()),
+        WriterBootstrapPlan::Ready => {}
     }
+    super::super::range_directions::migrate(db).await
 }
 
 /// Initializes a pristine managed database without entering a migration path.
@@ -86,7 +87,7 @@ pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
     if version < IndexStorageVersion::CURRENT {
         transaction.rollback();
-        if cleanup_ready {
+        if version.get() < 4 && cleanup_ready {
             return Err(HelixDbError::MigrationRequired {
                 reason: format!(
                     "index storage V4 cleanup is marked complete beside storage version {}",
@@ -105,6 +106,7 @@ pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
         super::super::storage_schema_progress(&transaction, DataScope::LegacyUnscoped).await?;
     transaction.rollback();
     if cleanup_ready
+        && super::super::range_directions::ready(db).await?
         && tenant_envelope_ready
         && progress == super::super::StorageSchemaProgress::Complete
     {
@@ -168,7 +170,7 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
         });
     };
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
-    if version < IndexStorageVersion::CURRENT && cleanup_ready {
+    if version.get() < 4 && cleanup_ready {
         return Err(HelixDbError::MigrationRequired {
             reason: format!(
                 "index storage V4 cleanup is marked complete beside storage version {}",
@@ -178,7 +180,7 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
     }
     transaction.rollback();
 
-    Ok(if version < IndexStorageVersion::CURRENT {
+    Ok(if version.get() < 4 {
         WriterBootstrapPlan::MigrateToCurrent
     } else if cleanup_ready && tenant_envelope_ready {
         WriterBootstrapPlan::Ready
@@ -233,6 +235,7 @@ fn stage_writer_bootstrap_initialization(transaction: &DbTransaction) -> Result<
         )),
     )?;
     super::super::stage_index_storage_v4_cleanup_ready(transaction)?;
+    super::super::range_directions::stage_ready(transaction)?;
     Ok(())
 }
 
@@ -272,7 +275,7 @@ fn validate_writer_bootstrap_values(
             ),
         });
     }
-    if version > IndexStorageVersion::MAX_SUPPORTED {
+    if version > IndexStorageVersion::MAX_SUPPORTED || version.get() == 5 {
         return Err(HelixDbError::UnsupportedIndexStorageVersion {
             found: version.get(),
             supported: IndexStorageVersion::MAX_SUPPORTED.get(),

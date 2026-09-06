@@ -17,8 +17,8 @@ use crate::encoding::v2::keys::{GlobalKey, ScopedKey};
 use crate::encoding::v2::legacy::tenant_envelope::LegacyTenantEnvelope;
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_artifact, decode_build_delta, decode_corpus_statistics,
-    decode_index_record, decode_manifest_page, decode_manifest_root, decode_operation_record,
-    decode_partition_mapping, decode_secondary_entry, decode_statistics_entity,
+    decode_manifest_page, decode_manifest_root, decode_operation_record, decode_partition_mapping,
+    decode_pre_direction_index_record, decode_secondary_entry, decode_statistics_entity,
     decode_term_statistics, decode_text_entity_state, encode_operation_record,
     SecondaryEqualityBitmapValue,
 };
@@ -243,7 +243,7 @@ fn parse_logical_key(logical: &[u8], value: &[u8]) -> Result<Option<TenantLogica
 fn validate_managed_value(kind: &ScopedKey, value: &[u8]) -> Result<()> {
     match kind {
         ScopedKey::IndexRecord(_) => {
-            let _ = decode_index_record(value)?;
+            let _ = decode_pre_direction_index_record(value)?;
         }
         ScopedKey::Operation(_) => {
             let _ = decode_operation_record(value)?;
@@ -387,7 +387,7 @@ mod tests {
 
     fn identity(family: IndexOperationFamily) -> IndexIdentity {
         let family = match family {
-            IndexOperationFamily::Secondary => IndexIdentityFamily::SecondaryRange,
+            IndexOperationFamily::Secondary => IndexIdentityFamily::SecondaryRangeAscending,
             IndexOperationFamily::Vector => IndexIdentityFamily::Vector,
             IndexOperationFamily::Text => IndexIdentityFamily::Text,
         };

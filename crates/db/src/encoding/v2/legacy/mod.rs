@@ -5,3 +5,5 @@ pub(crate) mod index_catalog;
 pub(crate) mod tenant_envelope;
 pub(crate) mod text;
 pub(crate) mod vector;
+
+pub(crate) mod range_identity;

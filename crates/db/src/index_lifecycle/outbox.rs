@@ -1607,7 +1607,7 @@ pub(super) async fn load_exact_link(
     Ok(Some((index, operation, pointer)))
 }
 
-pub(super) fn validate_link(
+pub(crate) fn validate_link(
     scope: DataScope,
     index: &IndexRecordV2,
     operation: &IndexOperationRecord,
@@ -1764,7 +1764,7 @@ fn scoped_index_key(scope: DataScope, index: &IndexRecordV2) -> Bytes {
     scoped_index_key_for_identity(scope, index.identity())
 }
 
-pub(super) fn scoped_index_key_for_identity(
+pub(crate) fn scoped_index_key_for_identity(
     scope: DataScope,
     identity: &super::IndexIdentity,
 ) -> Bytes {
@@ -1775,7 +1775,7 @@ pub(super) fn scoped_index_key_for_identity(
     .to_bytes()
 }
 
-pub(super) fn scoped_operation_key(scope: DataScope, operation_id: IndexOperationId) -> Bytes {
+pub(crate) fn scoped_operation_key(scope: DataScope, operation_id: IndexOperationId) -> Bytes {
     ManagedIndexKey::Data {
         scope,
         kind: ScopedKey::operation(operation_id),

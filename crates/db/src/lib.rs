@@ -104,7 +104,7 @@ pub enum HelixDbMode {
 }
 
 /// Durable storage schema understood by managed writer migration authorization.
-pub const MANAGED_STORAGE_SCHEMA_VERSION: u32 = 1;
+pub const MANAGED_STORAGE_SCHEMA_VERSION: u32 = 2;
 
 /// Non-forgeable capability data for one operator-authorized storage migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1676,7 +1676,10 @@ impl HelixDB {
         let identity = runtime_catalog::dynamic_index_identity_from_drop_spec(spec)?;
         let family = match identity.family() {
             index_lifecycle::IndexIdentityFamily::SecondaryEquality
-            | index_lifecycle::IndexIdentityFamily::SecondaryRange => error::IndexFamily::Secondary,
+            | index_lifecycle::IndexIdentityFamily::SecondaryRangeAscending
+            | index_lifecycle::IndexIdentityFamily::SecondaryRangeDescending => {
+                error::IndexFamily::Secondary
+            }
             index_lifecycle::IndexIdentityFamily::Vector => error::IndexFamily::Vector,
             index_lifecycle::IndexIdentityFamily::Text => error::IndexFamily::Text,
         };
@@ -3723,7 +3726,7 @@ mod tests {
                         error,
                         HelixDbError::UnsupportedIndexStorageVersion {
                             found: 5,
-                            supported: 4,
+                            supported: 6,
                         }
                     ),
                     "{role}: {error}"

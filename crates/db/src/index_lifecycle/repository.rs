@@ -101,6 +101,28 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
                     .to_string(),
             });
         }
+        let IndexV2MetadataValue::StorageVersion(version) = decode_metadata_value(&marker)? else {
+            unreachable!("validated storage version")
+        };
+        if progress != crate::migrations::StorageSchemaProgress::Complete || !tenant_envelope_ready
+        {
+            return Err(HelixDbError::WriterMigrationRequired {
+                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+            });
+        }
+        if version < IndexStorageVersion::CURRENT {
+            return Err(HelixDbError::WriterMigrationRequired {
+                requirement: WriterMigrationRequirement::StorageVersion {
+                    found: version.get(),
+                    target: IndexStorageVersion::CURRENT.get(),
+                },
+            });
+        }
+        if !crate::migrations::range_directions::ready(reader).await? {
+            return Err(HelixDbError::WriterMigrationRequired {
+                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+            });
+        }
         return match (bootstrap, progress, tenant_envelope_ready) {
             (
                 ValidatedReaderBootstrap::LegacyEqualityUnion,
@@ -199,7 +221,7 @@ fn validate_bootstrap_values(
             ),
         });
     }
-    if version > IndexStorageVersion::MAX_SUPPORTED {
+    if version > IndexStorageVersion::MAX_SUPPORTED || version.get() == 5 {
         return Err(HelixDbError::UnsupportedIndexStorageVersion {
             found: version.get(),
             supported: IndexStorageVersion::MAX_SUPPORTED.get(),
@@ -228,7 +250,7 @@ fn validate_bootstrap_values(
     }
     match version.get() {
         0x0002 | 0x0003 => Ok(ValidatedReaderBootstrap::LegacyEqualityUnion),
-        0x0004 => Ok(ValidatedReaderBootstrap::Current),
+        0x0004 | 0x0006 => Ok(ValidatedReaderBootstrap::Current),
         _ => unreachable!("unsupported storage versions returned before compatibility dispatch"),
     }
 }
@@ -438,13 +460,21 @@ fn secondary_lane_matches_identity(
             IndexElementKind::Edge,
             SecondaryEntryLane::EdgeEquality,
         ) | (
-            IndexIdentityFamily::SecondaryRange,
+            IndexIdentityFamily::SecondaryRangeAscending,
             IndexElementKind::Node,
-            SecondaryEntryLane::NodeRangeAscending | SecondaryEntryLane::NodeRangeDescending,
+            SecondaryEntryLane::NodeRangeAscending,
         ) | (
-            IndexIdentityFamily::SecondaryRange,
+            IndexIdentityFamily::SecondaryRangeDescending,
+            IndexElementKind::Node,
+            SecondaryEntryLane::NodeRangeDescending,
+        ) | (
+            IndexIdentityFamily::SecondaryRangeAscending,
             IndexElementKind::Edge,
-            SecondaryEntryLane::EdgeRangeAscending | SecondaryEntryLane::EdgeRangeDescending,
+            SecondaryEntryLane::EdgeRangeAscending,
+        ) | (
+            IndexIdentityFamily::SecondaryRangeDescending,
+            IndexElementKind::Edge,
+            SecondaryEntryLane::EdgeRangeDescending,
         )
     )
 }
@@ -1142,7 +1172,7 @@ mod tests {
 
     #[test]
     fn storage_versions_with_v4_equality_are_current() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0004);
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0006);
         let logical = encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
             LogicalIndexIdWatermark {
                 next_id: IndexId::initial(),
@@ -1228,8 +1258,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0005,
-                supported: 0x0004,
+                found: 0x0007,
+                supported: 0x0006,
             })
         ));
     }

@@ -28,8 +28,8 @@ use crate::encoding::v2::values::decode_metadata_value;
 #[cfg(feature = "migration-parity")]
 use crate::encoding::v2::values::encode_secondary_entry;
 use crate::encoding::v2::values::{
-    decode_index_record, decode_operation_record, encode_metadata_value, encode_operation_record,
-    SecondaryEqualityBitmapValue,
+    decode_operation_record, decode_pre_direction_index_record, encode_metadata_value,
+    encode_operation_record, SecondaryEqualityBitmapValue,
 };
 use crate::error::{HelixDbError, Result};
 
@@ -186,7 +186,7 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
         }
         .to_bytes(),
         encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            IndexStorageVersion::CURRENT,
+            IndexStorageVersion::new(4).expect("V4 is nonzero"),
         )),
     )?;
     transaction.commit().await?;
@@ -334,12 +334,15 @@ async fn discover_catalog(db: &Db) -> Result<MigrationCatalog> {
         if candidates.is_empty() {
             continue;
         }
-        let record = decode_index_record(&row.value)?;
+        let record = decode_pre_direction_index_record(&row.value)?;
         let mut matching = candidates.into_iter().filter_map(|(scope, kind)| {
             let ScopedKey::IndexRecord(key) = kind else {
                 return None;
             };
-            (key.identity == *record.identity()).then_some((scope, key))
+            (key.identity == *record.identity()
+                || key.identity
+                    == crate::encoding::v2::legacy::range_identity::undirected(record.identity()))
+            .then_some((scope, key))
         });
         let Some((scope, _)) = matching.next() else {
             return Err(corruption(
@@ -1157,7 +1160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_v2_and_v3_readers_query_legacy_node_and_edge_equality() {
+    async fn pre_direction_readers_wait_for_writer_migration_then_query_both_equality_kinds() {
         for version in [2, 3] {
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let database = format!("reader-compatible-storage-v{version}");
@@ -1197,15 +1200,27 @@ mod tests {
             transaction.commit().await.unwrap();
             db.flush().await.unwrap();
 
+            assert!(matches!(
+                crate::HelixDB::open_reader_with_object_store_for_tests(
+                    database.clone(),
+                    Arc::clone(&store)
+                )
+                .await,
+                Err(HelixDbError::WriterMigrationRequired { .. })
+            ));
+            crate::migrations::startup::bootstrap_writer(&db)
+                .await
+                .unwrap();
+            db.flush().await.unwrap();
             let reader = crate::HelixDB::open_reader_with_object_store_for_tests(
                 database,
                 Arc::clone(&store),
             )
             .await
-            .expect("complete V2/V3 storage opens in explicit union mode");
+            .expect("migrated catalog is reader-compatible");
             assert_eq!(
                 reader.reader_storage_compatibility_for_tests(),
-                ReaderStorageCompatibility::LegacyEqualityUnion
+                ReaderStorageCompatibility::Current
             );
             assert_node_and_edge_reader_queries(&reader).await;
             reader.close().await.unwrap();
@@ -1303,7 +1318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_open_reader_remains_correct_across_every_v3_to_v4_boundary() {
+    async fn readers_remain_gated_until_both_equality_and_direction_migrations_finish() {
         let _guard = TEST_LOCK.lock().await;
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let database = "v4-open-reader-boundaries";
@@ -1329,40 +1344,30 @@ mod tests {
         transaction.commit().await.unwrap();
         db.flush().await.unwrap();
 
+        for boundary in [
+            EqualityBitmapMigrationFailpoint::BatchAfter,
+            EqualityBitmapMigrationFailpoint::PublicationAfter,
+        ] {
+            inject_once(boundary).unwrap();
+            assert!(migrate_v3_to_v4(&db).await.is_err());
+            db.flush().await.unwrap();
+            assert!(matches!(
+                crate::HelixDB::open_reader_with_object_store_for_tests(
+                    database,
+                    Arc::clone(&store)
+                )
+                .await,
+                Err(HelixDbError::WriterMigrationRequired { .. })
+            ));
+        }
+        crate::migrations::startup::bootstrap_writer(&db)
+            .await
+            .unwrap();
+        db.flush().await.unwrap();
         let reader =
             crate::HelixDB::open_reader_with_object_store_for_tests(database, Arc::clone(&store))
                 .await
-                .expect("complete V3 storage opens in union mode");
-        assert_eq!(
-            reader.reader_storage_compatibility_for_tests(),
-            ReaderStorageCompatibility::LegacyEqualityUnion
-        );
-        assert_reader_queries(&reader).await;
-
-        inject_once(EqualityBitmapMigrationFailpoint::BatchAfter).unwrap();
-        assert!(migrate_v3_to_v4(&db).await.is_err());
-        db.flush().await.unwrap();
-        assert_reader_queries(&reader).await;
-
-        inject_once(EqualityBitmapMigrationFailpoint::PublicationAfter).unwrap();
-        assert!(migrate_v3_to_v4(&db).await.is_err());
-        db.flush().await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                assert_reader_queries(&reader).await;
-                if reader.reader_storage_compatibility_for_tests()
-                    == ReaderStorageCompatibility::Current
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the open reader switches monotonically to current storage");
-
-        cleanup_v3_nonunique_equality_rows(&db).await.unwrap();
-        db.flush().await.unwrap();
+                .unwrap();
         assert_reader_queries(&reader).await;
 
         reader.close().await.unwrap();

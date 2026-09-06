@@ -380,7 +380,7 @@ fn valid_stage_cases(scope: DataScope) -> Vec<CursorStageCase> {
             name: "secondary range cleanup",
             operation: operation(
                 4,
-                IndexIdentityFamily::SecondaryRange,
+                IndexIdentityFamily::SecondaryRangeAscending,
                 node,
                 IndexOperationProgress::SecondaryCleanup(SecondaryCleanupProgress::DeleteEntries(
                     prefix(range_entry(VALID_INDEX_ID, VALID_GENERATION)),

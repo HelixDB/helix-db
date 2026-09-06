@@ -1531,7 +1531,7 @@ fn canonical_drop_resolution_preserves_settings_and_validates_every_identity_lan
         ),
         (
             ir::IndexDdlDropSpec::NodeRange { key: range_key() },
-            IndexIdentityFamily::SecondaryRange,
+            IndexIdentityFamily::SecondaryRangeDescending,
             IndexElementKind::Node,
         ),
         (
@@ -1543,7 +1543,7 @@ fn canonical_drop_resolution_preserves_settings_and_validates_every_identity_lan
         ),
         (
             ir::IndexDdlDropSpec::EdgeRange { key: range_key() },
-            IndexIdentityFamily::SecondaryRange,
+            IndexIdentityFamily::SecondaryRangeDescending,
             IndexElementKind::Edge,
         ),
         (

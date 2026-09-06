@@ -255,12 +255,32 @@ pub enum IndexElementKind {
 pub enum IndexIdentityFamily {
     /// Secondary equality lane.
     SecondaryEquality = 0x01,
-    /// Secondary range lane.
-    SecondaryRange = 0x02,
+    /// Ascending secondary range lane (also the pre-V6 undirected tag).
+    SecondaryRangeAscending = 0x02,
+    /// Descending secondary range lane.
+    SecondaryRangeDescending = 0x05,
     /// Vector lane.
     Vector = 0x03,
     /// Text lane.
     Text = 0x04,
+}
+
+impl IndexIdentityFamily {
+    /// Returns whether this identity owns a directional range index.
+    pub const fn is_range(self) -> bool {
+        matches!(
+            self,
+            Self::SecondaryRangeAscending | Self::SecondaryRangeDescending
+        )
+    }
+
+    /// Returns the identity lane for exactly one physical range direction.
+    pub const fn range(direction: RangeIndexDirection) -> Self {
+        match direction {
+            RangeIndexDirection::Asc => Self::SecondaryRangeAscending,
+            RangeIndexDirection::Desc => Self::SecondaryRangeDescending,
+        }
+    }
 }
 
 /// Scoped logical identity used by the canonical index-record key and value.
@@ -361,9 +381,11 @@ impl ValidatedSecondaryIndexDefinition {
                 property,
             ),
             Self::NodeRange {
-                label, property, ..
+                label,
+                property,
+                direction,
             } => (
-                IndexIdentityFamily::SecondaryRange,
+                IndexIdentityFamily::range(*direction),
                 IndexElementKind::Node,
                 label,
                 property,
@@ -375,9 +397,11 @@ impl ValidatedSecondaryIndexDefinition {
                 property,
             ),
             Self::EdgeRange {
-                label, property, ..
+                label,
+                property,
+                direction,
             } => (
-                IndexIdentityFamily::SecondaryRange,
+                IndexIdentityFamily::range(*direction),
                 IndexElementKind::Edge,
                 label,
                 property,
@@ -400,7 +424,9 @@ impl ValidatedSecondaryIndexDefinition {
             Self::NodeEquality { .. } | Self::EdgeEquality { .. } => {
                 IndexIdentityFamily::SecondaryEquality
             }
-            Self::NodeRange { .. } | Self::EdgeRange { .. } => IndexIdentityFamily::SecondaryRange,
+            Self::NodeRange { direction, .. } | Self::EdgeRange { direction, .. } => {
+                IndexIdentityFamily::range(*direction)
+            }
         }
     }
 
@@ -2070,7 +2096,7 @@ mod tests {
 
         let definition = secondary_definition();
         let mismatched_identity = IndexIdentity::new(
-            IndexIdentityFamily::SecondaryRange,
+            IndexIdentityFamily::SecondaryRangeAscending,
             IndexElementKind::Node,
             IndexComponent::try_new("label", "User").unwrap(),
             IndexComponent::try_new("property", "email").unwrap(),

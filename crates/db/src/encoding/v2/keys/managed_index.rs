@@ -483,7 +483,8 @@ pub(crate) fn decode_identity(
 ) -> Result<IndexIdentity, EncodingError> {
     let family = match decoder.take_u8()? {
         0x01 => IndexIdentityFamily::SecondaryEquality,
-        0x02 => IndexIdentityFamily::SecondaryRange,
+        0x02 => IndexIdentityFamily::SecondaryRangeAscending,
+        0x05 => IndexIdentityFamily::SecondaryRangeDescending,
         0x03 => IndexIdentityFamily::Vector,
         0x04 => IndexIdentityFamily::Text,
         unknown => {

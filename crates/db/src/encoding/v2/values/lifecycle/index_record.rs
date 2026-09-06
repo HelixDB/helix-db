@@ -21,6 +21,20 @@ pub(crate) fn encode_index_record(record: &IndexRecordV2) -> Bytes {
 
 /// Decodes and cross-validates a canonical logical index record.
 pub(crate) fn decode_index_record(value: &[u8]) -> Result<IndexRecordV2, EncodingError> {
+    decode_index_record_inner(value, false)
+}
+
+/// Decodes the old identity only at the writer migration boundary.
+pub(crate) fn decode_pre_direction_index_record(
+    value: &[u8],
+) -> Result<IndexRecordV2, EncodingError> {
+    decode_index_record_inner(value, true)
+}
+
+fn decode_index_record_inner(
+    value: &[u8],
+    pre_direction: bool,
+) -> Result<IndexRecordV2, EncodingError> {
     let mut decoder = ValueDecoder::new(value)?;
     if decoder.kind() != INDEX_RECORD_KIND {
         return Err(EncodingError::UnexpectedValueKind {
@@ -31,6 +45,14 @@ pub(crate) fn decode_index_record(value: &[u8]) -> Result<IndexRecordV2, Encodin
     let index_id = take_index_id(&mut decoder)?;
     let identity = take_identity(&mut decoder)?;
     let definition = take_definition(&mut decoder)?;
+    let identity = if pre_direction
+        && identity
+            == crate::encoding::v2::legacy::range_identity::undirected(&definition.identity())
+    {
+        definition.identity()
+    } else {
+        identity
+    };
     let revision = take_revision(&mut decoder)?;
     let state = take_index_state(&mut decoder)?;
     decoder.finish()?;
