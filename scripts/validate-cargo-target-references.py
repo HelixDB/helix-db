@@ -57,6 +57,7 @@ V2_SOURCE_FILES = {
     "legacy/tenant_envelope.rs",
     "legacy/edge_property_pair.rs",
     "legacy/index_catalog.rs",
+    "legacy/range_identity.rs",
     "legacy/text/mod.rs",
     "legacy/text/storage_keys.rs",
     "legacy/text/manifest.rs",
@@ -116,6 +117,7 @@ V2_SOURCE_FILES = {
     "values/lifecycle/entity_state.rs",
     "values/lifecycle/index_record.rs",
     "values/lifecycle/operation_record.rs",
+    "values/lifecycle/range_catalog.rs",
     "values/indexes/mod.rs",
     "values/indexes/secondary_entry.rs",
     "values/indexes/equality.rs",
@@ -569,6 +571,8 @@ def validate_codec_architecture(root: Path) -> list[str]:
             relative_path.startswith("crates/db/src/encoding/v2/legacy/")
             or relative_path.startswith("crates/db/src/encoding/v1/")
             or relative_path in {
+                # The migration-only decoder accepts the old undirected range identity.
+                "crates/db/src/encoding/v2/values/lifecycle/index_record.rs",
                 "crates/db/src/encoding/v2/keys/data.rs",
                 "crates/db/src/encoding/v2/keys/indexes/vector/mod.rs",
                 "crates/db/src/encoding/v2/keys/indexes/vector/storage_prefixes.rs",
