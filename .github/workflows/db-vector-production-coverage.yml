@@ -55,7 +55,16 @@ jobs:
       - name: Enforce DB production coverage
         env:
           CARGO_INCREMENTAL: "0"
+          DB_COVERAGE_FULL_REPORT_PATH: ${{ runner.temp }}/db-production-coverage.json
         run: scripts/db-production-coverage.sh
+      - name: Preserve production coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-production-coverage
+          path: ${{ runner.temp }}/db-production-coverage.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   server-production-coverage:
     name: Transport and query-service thresholds
