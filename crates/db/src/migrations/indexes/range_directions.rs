@@ -603,6 +603,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_reader_blocker_is_requeued_once_across_migration_restarts() {
+        for scope in [
+            DataScope::LegacyUnscoped,
+            DataScope::Tenant(TenantId::from_u128(9)),
+        ] {
+            for edge in [false, true] {
+                for phase in [Phase::Aborting, Phase::Dropping] {
+                    for boundary in [
+                        Boundary::Fenced,
+                        Boundary::PairStaged,
+                        Boundary::PairCommitted,
+                        Boundary::Verified,
+                        Boundary::Ready,
+                    ] {
+                        let store = Arc::new(InMemory::new());
+                        let db = Db::builder("range-legacy-retry", store.clone())
+                            .build()
+                            .await
+                            .unwrap();
+                        let (record, operation, old_key, physical) =
+                            fixture(&db, scope, edge, RangeIndexDirection::Desc, phase).await;
+                        let blocked = operation
+                            .claim(OperationClaim {
+                                writer_epoch: WriterEpoch::from_bytes([9; 16]).unwrap(),
+                                sequence: ClaimSequence::new(1).unwrap(),
+                            })
+                            .unwrap()
+                            .block(IndexOperationBlocker::InvariantViolation)
+                            .unwrap();
+                        let expected = blocked.retry().unwrap();
+                        let operation_key = lifecycle::outbox::scoped_operation_key(
+                            scope,
+                            operation.operation_id(),
+                        );
+                        let pointer_key = ManagedIndexKey::Global {
+                            kind: GlobalKey::OperationPointer(operation.operation_id()),
+                        }
+                        .to_bytes();
+                        let mut legacy = values::encode_operation_record(&blocked).to_vec();
+                        legacy[2 + 16 + core::mem::size_of::<u64>()] = 0x02;
+                        assert_eq!(legacy.last(), Some(&0x07));
+                        *legacy.last_mut().unwrap() = 0x05;
+                        assert!(
+                            values::decode_operation_record_with_compatibility(&legacy)
+                                .unwrap()
+                                .1
+                        );
+                        let transaction = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        transaction
+                            .put(operation_key.clone(), Bytes::from(legacy))
+                            .unwrap();
+                        transaction.delete(pointer_key.clone()).unwrap();
+                        transaction.commit().await.unwrap();
+                        let physical_value = db.get(&physical).await.unwrap();
+                        assert!(migrate_inner(&db, |at| {
+                            if at == boundary {
+                                Err(corruption("simulated process failure"))
+                            } else {
+                                Ok(())
+                            }
+                        })
+                        .await
+                        .is_err());
+                        db.close().await.unwrap();
+                        let db = Db::builder("range-legacy-retry", store)
+                            .build()
+                            .await
+                            .unwrap();
+                        crate::migrations::startup::bootstrap_writer(&db)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
+                                &db, scope
+                            )
+                            .await
+                            .unwrap(),
+                            0
+                        );
+                        let value = db.get(&operation_key).await.unwrap().unwrap();
+                        assert_eq!(
+                            values::decode_operation_record_with_compatibility(&value).unwrap(),
+                            (expected.clone(), false),
+                            "{scope:?} {edge} {phase:?} {boundary:?}"
+                        );
+                        let pointer = lifecycle::OperationQueuePointerValue {
+                            scope,
+                            index_id: expected.index_id(),
+                            generation: expected.generation(),
+                            record_revision: expected.operation_revision(),
+                        };
+                        assert_eq!(
+                            db.get(&pointer_key).await.unwrap(),
+                            Some(values::encode_metadata_value(
+                                &IndexV2MetadataValue::OperationQueuePointer(pointer)
+                            ))
+                        );
+                        let canonical = lifecycle::outbox::scoped_index_key_for_identity(
+                            scope,
+                            record.identity(),
+                        );
+                        assert_eq!(
+                            db.get(&canonical).await.unwrap(),
+                            Some(values::encode_index_record(&record))
+                        );
+                        assert!(db.get(&old_key).await.unwrap().is_none());
+                        assert_eq!(db.get(&physical).await.unwrap(), physical_value);
+                        let before = db.snapshot().await.unwrap().seq();
+                        migrate(&db).await.unwrap();
+                        assert_eq!(db.snapshot().await.unwrap().seq(), before);
+                        db.close().await.unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn every_direction_migration_commit_boundary_resumes_after_reopen() {
         for scope in [
             DataScope::LegacyUnscoped,
