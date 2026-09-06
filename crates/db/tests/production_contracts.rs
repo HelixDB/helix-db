@@ -55,6 +55,40 @@ where
         .expect("production contract thread completes");
 }
 
+/// Concurrent cold allocations must share the lease persisted by the first caller.
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_cold_id_allocations_share_the_initial_lease() {
+    let db = Arc::new(
+        slatedb::Db::builder("production-id-initialization", Arc::new(InMemory::new()))
+            .build()
+            .await
+            .expect("allocator database opens"),
+    );
+    let allocator = db::id_allocator::NodeIdAllocator::new(Arc::clone(&db), 100);
+    let mut first = Box::pin(allocator.allocate());
+    let mut second = Box::pin(allocator.allocate());
+    // Poll both cold allocations before yielding to storage tasks. On this
+    // current-thread runtime, the first still owns the initialization lock
+    // when the second starts, so the waiter must observe the published lease.
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    assert_eq!(first.await.expect("first allocation commits its lease"), 0);
+    assert_eq!(
+        second.await.expect("waiting allocation reuses the lease"),
+        1
+    );
+    drop(allocator);
+    let reopened = db::id_allocator::NodeIdAllocator::new(Arc::clone(&db), 100);
+    assert_eq!(
+        reopened
+            .allocate()
+            .await
+            .expect("reopened allocator respects the persisted lease"),
+        100
+    );
+    db.close().await.expect("allocator database closes");
+}
+
 #[test]
 fn current_layer0_neighbor_bytes_are_stable_through_the_public_codec() {
     let encoded = encode_layer0_neighbors(&[9, 2, 9]);
