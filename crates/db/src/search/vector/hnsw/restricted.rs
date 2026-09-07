@@ -25,14 +25,14 @@ use slatedb::DbReadOps;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 
-use super::configuration::VectorIndexState;
-use super::distance::{ActiveVectorSemantics, Distance};
 use super::index::VectorIndex;
-use super::item::Item;
 use super::model::Candidate;
-use super::storage::{CanonicalVectorRowKey, SimHashDirectoryEntry, VectorRows};
-use super::unaligned_vector::UnalignedVector;
-use super::{
+use crate::search::vector::configuration::VectorIndexState;
+use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
+use crate::search::vector::item::Item;
+use crate::search::vector::storage::{CanonicalVectorRowKey, SimHashDirectoryEntry, VectorRows};
+use crate::search::vector::unaligned_vector::UnalignedVector;
+use crate::search::vector::{
     decode_item_borrowed, ResultCount, SearchParams, SearchResult, ValidatedMetricVector,
     VectorDimension, VectorParameterError,
 };
@@ -293,7 +293,7 @@ struct RestrictedScoringState<'a> {
 }
 
 struct RestrictedBridgeState {
-    simhash_cache: HashMap<NodeId, Option<super::SimHash>>,
+    simhash_cache: HashMap<NodeId, Option<crate::search::vector::SimHash>>,
     queued: HashSet<NodeId>,
     frontier: BinaryHeap<Reverse<(u32, NodeId)>>,
 }
@@ -616,7 +616,7 @@ impl<D: Distance> VectorIndex<D> {
         &self,
         read: &(impl DbReadOps + Send + Sync),
         ids: &[NodeId],
-        simhash_cache: &mut HashMap<NodeId, Option<super::SimHash>>,
+        simhash_cache: &mut HashMap<NodeId, Option<crate::search::vector::SimHash>>,
         context: &'static str,
         stats: &mut RestrictedSearchStats,
     ) -> Result<Vec<(NodeId, CanonicalVectorRowKey)>, HelixDbError> {
@@ -711,7 +711,7 @@ impl<D: Distance> VectorIndex<D> {
     async fn restricted_enqueue_bridges(
         &self,
         read: &(impl DbReadOps + Send + Sync),
-        query_hash: super::SimHash,
+        query_hash: crate::search::vector::SimHash,
         node_ids: impl IntoIterator<Item = NodeId>,
         bridge_state: &mut RestrictedBridgeState,
         stats: &mut RestrictedSearchStats,
@@ -860,7 +860,8 @@ impl<D: Distance> VectorIndex<D> {
             .simhasher()
             .hash_from_slice(query.vector)
             .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
-        let query_order = super::simhash::order_code_from_simhash_bits(query_hash.bits());
+        let query_order =
+            crate::search::vector::simhash::order_code_from_simhash_bits(query_hash.bits());
         let rows = VectorRows::new(read, self.row_keyspace());
         let mut directory_seeds = Vec::<(u32, NodeId, SimHashDirectoryEntry)>::new();
 
@@ -898,7 +899,7 @@ impl<D: Distance> VectorIndex<D> {
                 stats.directory_decoded_bytes = stats.directory_decoded_bytes.saturating_add(
                     windows
                         .iter()
-                        .map(super::storage::SimHashDirectoryWindow::decoded_bytes)
+                        .map(crate::search::vector::storage::SimHashDirectoryWindow::decoded_bytes)
                         .sum::<usize>(),
                 );
                 for window in windows {
@@ -1149,7 +1150,7 @@ impl<D: Distance> VectorIndex<D> {
 }
 
 #[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector/restricted.rs"]
+#[path = "../../../../tests/production_support/vector/restricted.rs"]
 mod contracts;
 
 #[cfg(feature = "production-coverage")]

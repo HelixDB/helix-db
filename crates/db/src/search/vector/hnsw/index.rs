@@ -48,12 +48,6 @@ use crate::error::HelixDbError;
 use crate::search::vector::unaligned_vector::UnalignedVector;
 use slatedb::DbReadOps;
 
-use super::cache::store::{
-    SimHashReadStats, VectorMemoryAccess, VectorMemoryDirtyRows, VectorMemoryPendingDirtyRows,
-    VectorMemoryStore,
-};
-use super::distance::{ActiveVectorSemantics, Distance};
-use super::item::Item;
 #[cfg(test)]
 use super::model::Candidate;
 #[cfg(test)]
@@ -67,37 +61,43 @@ use super::randomness::{LayerSelector, SearchRandomness};
 #[cfg(test)]
 use super::search;
 use super::search::{SearchObserver, SearchSession};
-use super::simhash::{order_code_from_simhash_bits, SimHashCache};
-use super::storage::{
+use crate::search::vector::cache::store::{
+    SimHashReadStats, VectorMemoryAccess, VectorMemoryDirtyRows, VectorMemoryPendingDirtyRows,
+    VectorMemoryStore,
+};
+use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
+use crate::search::vector::item::Item;
+use crate::search::vector::simhash::{order_code_from_simhash_bits, SimHashCache};
+use crate::search::vector::storage::{
     CanonicalVectorDirectoryBackfillOutcome, CanonicalVectorRowKey, LegacyVectorMigrationRead,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
     SimHashDirectoryValidationOutcome, VectorCleanupRow, VectorCleanupScan, VectorRowKeyspace,
     VectorRows, VectorSimHashDirectoryCleanupScan, VectorWriteRows,
 };
-use super::{
+use crate::search::vector::{
     decode_item, encode_item, MeasuredVectorTransaction, SearchParams, SearchResult,
     VectorIndexConfig, VectorIndexMetadata, VectorWriteMeasurement,
 };
 #[cfg(test)]
-use super::{encode_metadata, index_id_from_name, SimHashMode};
+use crate::search::vector::{encode_metadata, index_id_from_name, SimHashMode};
 
 /// Read accounting for one canonical vector payload lookup.
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct VectorFetchReadStats {
+pub(in crate::search::vector) struct VectorFetchReadStats {
     /// SimHash rows consulted to derive the canonical payload key.
-    pub(super) simhash_reads: usize,
+    pub(in crate::search::vector) simhash_reads: usize,
     /// Canonical payload rows consulted after key derivation.
-    pub(super) vector_reads: usize,
+    pub(in crate::search::vector) vector_reads: usize,
     /// Physical batch calls used for SimHash derivation.
-    pub(super) simhash_multi_get_calls: usize,
+    pub(in crate::search::vector) simhash_multi_get_calls: usize,
     /// Time spent fetching the SimHash derivation rows.
-    pub(super) simhash_fetch_ns: u64,
+    pub(in crate::search::vector) simhash_fetch_ns: u64,
 }
 
 impl VectorFetchReadStats {
     /// Returns the combined logical read count for diagnostics.
     #[inline]
-    pub(super) fn total_reads(self) -> usize {
+    pub(in crate::search::vector) fn total_reads(self) -> usize {
         self.simhash_reads.saturating_add(self.vector_reads)
     }
 }
@@ -111,11 +111,11 @@ pub(crate) struct VectorIndex<D: Distance> {
     /// Complete physical identity and tenant namespace for every persisted row.
     rows: VectorRowKeyspace,
     /// Complete managed-generation identity used only by build-session caches.
-    generation_identity: Option<super::VectorGenerationIdentity>,
+    generation_identity: Option<crate::search::vector::VectorGenerationIdentity>,
     /// Bounded owner for deterministic projection tables used by this handle.
-    simhasher_registry: Arc<super::SimHasherRegistry>,
+    simhasher_registry: Arc<crate::search::vector::SimHasherRegistry>,
     /// Descriptor-proven projection identity for managed generations.
-    simhash_identity: Option<super::SimHashIdentity>,
+    simhash_identity: Option<crate::search::vector::SimHashIdentity>,
     /// Complete-generation proof that every vector has a directory row.
     simhash_directory_enabled: bool,
     /// Identity-bound row helper retained after the registry's first admission.
@@ -136,7 +136,7 @@ pub(crate) struct VectorIndex<D: Distance> {
     /// This is write-once because a handle must never decode rows under two
     /// incompatible schemas. Generation publication will supply the same proof
     /// through its validated generation handle without changing item row bytes.
-    dimension: OnceLock<super::VectorDimension>,
+    dimension: OnceLock<crate::search::vector::VectorDimension>,
     /// Phantom data to hold the distance type
     _phantom: PhantomData<D>,
 }
@@ -159,7 +159,7 @@ impl<D: Distance> VectorIndex<D> {
         Self {
             rows: VectorRowKeyspace::new(name, tenant_scope),
             generation_identity: None,
-            simhasher_registry: Arc::new(super::SimHasherRegistry::default()),
+            simhasher_registry: Arc::new(crate::search::vector::SimHasherRegistry::default()),
             simhash_identity: None,
             simhash_directory_enabled: false,
             simhash_cache: OnceLock::new(),
@@ -179,7 +179,7 @@ impl<D: Distance> VectorIndex<D> {
         Self {
             rows: VectorRowKeyspace::from_legacy_name(name, tenant_scope),
             generation_identity: None,
-            simhasher_registry: Arc::new(super::SimHasherRegistry::default()),
+            simhasher_registry: Arc::new(crate::search::vector::SimHasherRegistry::default()),
             simhash_identity: None,
             simhash_directory_enabled: false,
             simhash_cache: OnceLock::new(),
@@ -192,7 +192,9 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Creates a descriptor-bound handle using its allocated physical ID.
-    pub(crate) fn from_generation(handle: &super::ValidatedVectorGenerationHandle) -> Self {
+    pub(crate) fn from_generation(
+        handle: &crate::search::vector::ValidatedVectorGenerationHandle,
+    ) -> Self {
         Self {
             rows: VectorRowKeyspace::from_allocated(
                 handle.physical_name().to_string(),
@@ -200,7 +202,7 @@ impl<D: Distance> VectorIndex<D> {
                 handle.scope(),
             ),
             generation_identity: Some(handle.identity().clone()),
-            simhasher_registry: Arc::new(super::SimHasherRegistry::default()),
+            simhasher_registry: Arc::new(crate::search::vector::SimHasherRegistry::default()),
             simhash_identity: Some(handle.simhash_identity()),
             simhash_directory_enabled: handle.has_simhash_directory(),
             simhash_cache: OnceLock::new(),
@@ -218,7 +220,7 @@ impl<D: Distance> VectorIndex<D> {
     /// public handles retain a private bounded owner for API compatibility.
     pub(crate) fn with_simhasher_registry(
         mut self,
-        registry: Arc<super::SimHasherRegistry>,
+        registry: Arc<crate::search::vector::SimHasherRegistry>,
     ) -> Self {
         self.simhasher_registry = registry;
         self.simhash_cache = OnceLock::new();
@@ -348,7 +350,7 @@ impl<D: Distance> VectorIndex<D> {
                 "transcoded vector metadata differs from the canonical descriptor".to_string(),
             ));
         }
-        let recorder = super::VectorWriteRecorder::new();
+        let recorder = crate::search::vector::VectorWriteRecorder::new();
         let write = recorder.bind(transaction);
         VectorWriteRows::new(&write, &self.rows).put_metadata(&metadata)?;
         match write.measurement() {
@@ -392,7 +394,10 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Binds managed projection semantics to an already validated descriptor.
-    pub(super) fn with_simhash_identity(mut self, identity: super::SimHashIdentity) -> Self {
+    pub(in crate::search::vector) fn with_simhash_identity(
+        mut self,
+        identity: crate::search::vector::SimHashIdentity,
+    ) -> Self {
         self.simhash_identity = Some(identity);
         self.simhash_cache = OnceLock::new();
         self
@@ -400,7 +405,7 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Enables directory maintenance for generation-capability tests.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) fn with_simhash_directory(mut self) -> Self {
+    pub(in crate::search::vector) fn with_simhash_directory(mut self) -> Self {
         self.simhash_directory_enabled = true;
         self
     }
@@ -411,7 +416,10 @@ impl<D: Distance> VectorIndex<D> {
     /// descriptor identity through the bounded registry. Later calls borrow the
     /// same helper without reacquiring the registry mutex. Legacy handles derive
     /// the deployed current identity from metadata, preserving existing rows.
-    pub(super) fn simhash_cache(&self, dimension: usize) -> Result<&SimHashCache, HelixDbError> {
+    pub(in crate::search::vector) fn simhash_cache(
+        &self,
+        dimension: usize,
+    ) -> Result<&SimHashCache, HelixDbError> {
         match self.simhash_identity {
             Some(identity) if identity.dimension().get() != dimension => {
                 return Err(HelixDbError::InvariantViolation(format!(
@@ -453,7 +461,7 @@ impl<D: Distance> VectorIndex<D> {
     /// The façade owns the configured selector, while the mutation module owns
     /// graph insertion. Keeping selection behind this method avoids exposing
     /// mutable randomness state across the module boundary.
-    pub(super) fn select_mutation_layer(&self, level_multiplier: f32) -> u16 {
+    pub(in crate::search::vector) fn select_mutation_layer(&self, level_multiplier: f32) -> u16 {
         self.layer_selector.select(level_multiplier)
     }
 
@@ -461,9 +469,9 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// The handle retains the configured seed policy while `search.rs` owns all
     /// mutable query-local randomness and traversal decisions.
-    pub(super) fn start_search_randomness(
+    pub(in crate::search::vector) fn start_search_randomness(
         &self,
-        query_simhash: &super::SimHash,
+        query_simhash: &crate::search::vector::SimHash,
         entry_point: NodeId,
         ef: usize,
     ) -> super::randomness::SearchSession {
@@ -498,7 +506,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Returns the stable ID bound to every persisted row for this handle.
-    pub(super) const fn id(&self) -> u64 {
+    pub(in crate::search::vector) const fn id(&self) -> u64 {
         self.rows.index_id()
     }
 
@@ -509,14 +517,14 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Returns the descriptor-bound typed row namespace used by session owners.
-    pub(super) const fn row_keyspace(&self) -> &VectorRowKeyspace {
+    pub(in crate::search::vector) const fn row_keyspace(&self) -> &VectorRowKeyspace {
         &self.rows
     }
 
     /// Returns the complete managed identity required by a reusable build session.
-    pub(super) fn build_session_identity(
+    pub(in crate::search::vector) fn build_session_identity(
         &self,
-    ) -> Result<&super::VectorGenerationIdentity, HelixDbError> {
+    ) -> Result<&crate::search::vector::VectorGenerationIdentity, HelixDbError> {
         self.generation_identity.as_ref().ok_or_else(|| {
             HelixDbError::InvariantViolation(
                 "vector build session requires a validated managed generation".to_string(),
@@ -544,18 +552,21 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Binds an identity-checked managed read cache and commit-window fences.
-    pub(super) fn with_managed_read_cache(
+    pub(in crate::search::vector) fn with_managed_read_cache(
         mut self,
         store: Arc<VectorMemoryStore>,
         pending_rows: Arc<VectorMemoryPendingDirtyRows>,
-    ) -> Result<Self, super::VectorGenerationValidationError> {
+    ) -> Result<Self, crate::search::vector::VectorGenerationValidationError> {
         self.validate_memory_store_identity(&store)?;
         self.memory_access = VectorMemoryAccess::read_snapshot(store, pending_rows);
         Ok(self)
     }
 
     /// Attach transaction-local dirty tracking even when no shared memory store exists yet.
-    pub(super) fn with_write_dirty_rows(mut self, dirty_rows: Arc<VectorMemoryDirtyRows>) -> Self {
+    pub(in crate::search::vector) fn with_write_dirty_rows(
+        mut self,
+        dirty_rows: Arc<VectorMemoryDirtyRows>,
+    ) -> Self {
         self.memory_access = VectorMemoryAccess::write_tracking(dirty_rows);
         self
     }
@@ -564,9 +575,11 @@ impl<D: Distance> VectorIndex<D> {
     fn validate_memory_store_identity(
         &self,
         store: &VectorMemoryStore,
-    ) -> Result<(), super::VectorGenerationValidationError> {
+    ) -> Result<(), crate::search::vector::VectorGenerationValidationError> {
         if store.scope() != self.scope() || store.index_id() != self.id() {
-            return Err(super::VectorGenerationValidationError::CacheIdentityMismatch);
+            return Err(
+                crate::search::vector::VectorGenerationValidationError::CacheIdentityMismatch,
+            );
         }
         Ok(())
     }
@@ -588,13 +601,17 @@ impl<D: Distance> VectorIndex<D> {
     /// Mutation paths call this immediately after staging either row family;
     /// the surrounding write transaction owns publication or abort cleanup.
     #[inline]
-    pub(super) fn mark_memory_node_dirty(&self, node_id: NodeId) {
+    pub(in crate::search::vector) fn mark_memory_node_dirty(&self, node_id: NodeId) {
         self.memory_access.mark_node_dirty(node_id);
     }
 
     /// Marks an upper-neighbor row unsafe for shared-cache reads in this write.
     #[inline]
-    pub(super) fn mark_memory_upper_neighbors_dirty(&self, layer: u16, node_id: NodeId) {
+    pub(in crate::search::vector) fn mark_memory_upper_neighbors_dirty(
+        &self,
+        layer: u16,
+        node_id: NodeId,
+    ) {
         self.memory_access
             .mark_upper_neighbors_dirty(layer, node_id);
     }
@@ -609,13 +626,16 @@ impl<D: Distance> VectorIndex<D> {
     /// Repeating the same binding is idempotent. Observing another dimension on
     /// the same handle is an invariant violation rather than a mutable schema
     /// transition, so no row can be decoded under ambiguous dimensions.
-    pub(super) fn remember_dimension(
+    pub(in crate::search::vector) fn remember_dimension(
         &self,
         dimension: usize,
-    ) -> Result<super::VectorDimension, HelixDbError> {
-        let dimension = super::VectorDimension::try_new(dimension).map_err(|error| {
-            HelixDbError::InvalidVectorConfig(super::VectorConfigError::Dimension(error))
-        })?;
+    ) -> Result<crate::search::vector::VectorDimension, HelixDbError> {
+        let dimension =
+            crate::search::vector::VectorDimension::try_new(dimension).map_err(|error| {
+                HelixDbError::InvalidVectorConfig(
+                    crate::search::vector::VectorConfigError::Dimension(error),
+                )
+            })?;
         if let Some(remembered) = self.dimension.get() {
             if *remembered != dimension {
                 return Err(HelixDbError::InvariantViolation(format!(
@@ -639,10 +659,10 @@ impl<D: Distance> VectorIndex<D> {
     /// The first call validates and loads metadata; later calls are lock-free
     /// reads from the write-once binding. Callers processing multiple rows should
     /// obtain this once per operation and reuse it throughout the loop.
-    pub(super) async fn expected_dimension(
+    pub(in crate::search::vector) async fn expected_dimension(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
-    ) -> Result<super::VectorDimension, HelixDbError> {
+    ) -> Result<crate::search::vector::VectorDimension, HelixDbError> {
         if let Some(dimension) = self.dimension.get() {
             return Ok(*dimension);
         }
@@ -980,7 +1000,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Cached absence remains authoritative for the operation. Reaching the
     /// item limit clears only this disposable operation cache; persisted and
     /// shared memory state are not changed.
-    pub(super) async fn get_item_for_layer_cached(
+    pub(in crate::search::vector) async fn get_item_for_layer_cached(
         &self,
         txn: &DbTransaction,
         layer: u16,
@@ -1023,7 +1043,7 @@ impl<D: Distance> VectorIndex<D> {
     /// The result omits absent nodes and deduplicates physical reads. Upper
     /// layers may use validated hot rows, while layer zero resolves opaque
     /// canonical payload tokens through typed storage.
-    pub(super) async fn get_items_for_layer_cached_batch(
+    pub(in crate::search::vector) async fn get_items_for_layer_cached_batch(
         &self,
         txn: &DbTransaction,
         layer: u16,
@@ -1179,7 +1199,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Load upper-layer neighbors.
-    pub(super) async fn load_upper_neighbors(
+    pub(in crate::search::vector) async fn load_upper_neighbors(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
@@ -1216,23 +1236,27 @@ impl<D: Distance> VectorIndex<D> {
 
     #[inline]
     /// Binds a node and SimHash to its opaque deployed payload-row token.
-    pub(super) fn canonical_vector_key_from_simhash(
+    pub(in crate::search::vector) fn canonical_vector_key_from_simhash(
         &self,
         node_id: NodeId,
-        simhash: super::SimHash,
+        simhash: crate::search::vector::SimHash,
     ) -> CanonicalVectorRowKey {
         let order_code = order_code_from_simhash_bits(simhash.bits());
         self.rows.canonical_vector_row_key(node_id, order_code)
     }
 
     /// Returns the descriptor-bound directory capability for this generation.
-    pub(super) const fn simhash_directory_enabled(&self) -> bool {
+    pub(in crate::search::vector) const fn simhash_directory_enabled(&self) -> bool {
         self.simhash_directory_enabled
     }
 
     #[inline]
     /// Builds the invariant error used when canonical key derivation lacks SimHash state.
-    pub(super) fn missing_simhash_error(&self, node_id: NodeId, context: &str) -> HelixDbError {
+    pub(in crate::search::vector) fn missing_simhash_error(
+        &self,
+        node_id: NodeId,
+        context: &str,
+    ) -> HelixDbError {
         HelixDbError::InvariantViolation(format!(
             "missing simhash for node {node_id} in index {} while {context}",
             self.id()
@@ -1245,11 +1269,13 @@ impl<D: Distance> VectorIndex<D> {
     /// typed storage distinguishes missing, valid, and corrupt deployed rows.
     /// `COLLECT_TIMING` controls only wall-clock diagnostics; logical read counts
     /// and all cache behavior are identical in both specializations.
-    pub(super) async fn fill_simhash_cache_for_nodes_counted<const COLLECT_TIMING: bool>(
+    pub(in crate::search::vector) async fn fill_simhash_cache_for_nodes_counted<
+        const COLLECT_TIMING: bool,
+    >(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_ids: &[NodeId],
-        simhash_local_cache: &mut HashMap<NodeId, Option<super::SimHash>>,
+        simhash_local_cache: &mut HashMap<NodeId, Option<crate::search::vector::SimHash>>,
         context: &'static str,
     ) -> Result<SimHashReadStats, HelixDbError> {
         self.memory_access
@@ -1269,11 +1295,13 @@ impl<D: Distance> VectorIndex<D> {
     /// layer-zero state. Search uses
     /// [`Self::resolve_required_canonical_vector_keys_batch_counted`] so an
     /// unresolved key cannot cross its boundary.
-    pub(super) async fn resolve_canonical_vector_keys_batch_counted<const COLLECT_TIMING: bool>(
+    pub(in crate::search::vector) async fn resolve_canonical_vector_keys_batch_counted<
+        const COLLECT_TIMING: bool,
+    >(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_ids: &[NodeId],
-        simhash_local_cache: &mut HashMap<NodeId, Option<super::SimHash>>,
+        simhash_local_cache: &mut HashMap<NodeId, Option<crate::search::vector::SimHash>>,
         context: &'static str,
     ) -> Result<(Vec<Option<CanonicalVectorRowKey>>, SimHashReadStats), HelixDbError> {
         let stats = self
@@ -1346,7 +1374,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Resolves one optional canonical token through reusable SimHash state.
-    pub(super) async fn resolve_canonical_vector_key_cached(
+    pub(in crate::search::vector) async fn resolve_canonical_vector_key_cached(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_id: NodeId,
@@ -1374,13 +1402,13 @@ impl<D: Distance> VectorIndex<D> {
     /// The non-optional result is the search boundary: a missing SimHash fails
     /// before vector-row I/O, so callers cannot accidentally handle a strict
     /// resolution as though absence were permitted.
-    pub(super) async fn resolve_required_canonical_vector_keys_batch_counted<
+    pub(in crate::search::vector) async fn resolve_required_canonical_vector_keys_batch_counted<
         const COLLECT_TIMING: bool,
     >(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_ids: &[NodeId],
-        simhash_local_cache: &mut HashMap<NodeId, Option<super::SimHash>>,
+        simhash_local_cache: &mut HashMap<NodeId, Option<crate::search::vector::SimHash>>,
         context: &'static str,
     ) -> Result<(Vec<CanonicalVectorRowKey>, SimHashReadStats), HelixDbError> {
         let stats = self
@@ -1407,7 +1435,9 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Mutation deletion permits absence only when both the SimHash and
     /// layer-zero row are absent. Strict callers use the required batch boundary.
-    pub(super) async fn resolve_canonical_vector_key_counted<const COLLECT_TIMING: bool>(
+    pub(in crate::search::vector) async fn resolve_canonical_vector_key_counted<
+        const COLLECT_TIMING: bool,
+    >(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_id: NodeId,
@@ -1442,7 +1472,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Search and corruption fixtures use this boundary when absence is itself
     /// an invariant violation. The return type cannot represent a missing key.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) async fn resolve_required_canonical_vector_key_counted(
+    pub(in crate::search::vector) async fn resolve_required_canonical_vector_key_counted(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_id: NodeId,
@@ -1495,7 +1525,9 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Returns canonical vector bytes plus transactional read counts.
-    pub(super) async fn get_canonical_vector_bytes_counted<const COLLECT_TIMING: bool>(
+    pub(in crate::search::vector) async fn get_canonical_vector_bytes_counted<
+        const COLLECT_TIMING: bool,
+    >(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         node_id: NodeId,
@@ -1543,7 +1575,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Get an item for traversal at the requested layer.
     ///
     /// Upper layers try memory-hot vector cache first, then fall back to persistent vectors.
-    pub(super) async fn get_item_for_layer(
+    pub(in crate::search::vector) async fn get_item_for_layer(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
@@ -1595,8 +1627,8 @@ impl<D: Distance> VectorIndex<D> {
         txn: &(impl DbReadOps + Send + Sync),
         query: &[f32],
         params: &SearchParams,
-    ) -> Result<(Vec<SearchResult>, super::SearchStats), HelixDbError> {
-        let mut stats = super::SearchStats::default();
+    ) -> Result<(Vec<SearchResult>, crate::search::vector::SearchStats), HelixDbError> {
+        let mut stats = crate::search::vector::SearchStats::default();
         let results = {
             SearchSession::new(self, txn, SearchObserver::collecting(&mut stats))
                 .run(query, params)
@@ -1613,7 +1645,7 @@ const fn scale_result_id(result: &SearchResult) -> NodeId {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/index.rs"]
+#[path = "../../../../tests/production_support/vector/index.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
@@ -1662,7 +1694,7 @@ mod tests {
         }
     }
 
-    impl super::super::distance::sealed::Sealed for CustomDistance {}
+    impl crate::search::vector::distance::sealed::Sealed for CustomDistance {}
 
     async fn test_inner_db(name: &str) -> Arc<slatedb::Db> {
         let object_store = Arc::new(InMemory::new());
@@ -1894,7 +1926,7 @@ mod tests {
         assert!(matches!(
             index.get_item(&txn, 1).await,
             Err(HelixDbError::InvalidVectorItem(
-                super::super::VectorItemDecodeError::DimensionMismatch {
+                crate::search::vector::VectorItemDecodeError::DimensionMismatch {
                     expected: 2,
                     actual: 3,
                 }
@@ -2030,7 +2062,7 @@ mod tests {
                 1,
                 &[1.0, 0.0],
                 2,
-                crate::search::vector::mutation::FreshVectorBuildProof::for_test(),
+                crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
             )
             .await
             .unwrap();
@@ -2052,7 +2084,7 @@ mod tests {
                 1,
                 &[0.0, 1.0],
                 0,
-                crate::search::vector::mutation::FreshVectorBuildProof::for_test(),
+                crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
             )
             .await
             .unwrap();
@@ -2439,7 +2471,7 @@ mod tests {
                     offset + 1,
                     &[angle.cos(), angle.sin()],
                     VectorInsertContract::ProvenFresh(
-                        crate::search::vector::mutation::FreshVectorBuildProof::for_test(),
+                        crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
                     ),
                 )
                 .await
@@ -3007,7 +3039,7 @@ mod tests {
                 1,
                 &[1.0, 0.0],
                 VectorInsertContract::ProvenFresh(
-                    crate::search::vector::mutation::FreshVectorBuildProof::for_test(),
+                    crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
                 ),
             )
             .await

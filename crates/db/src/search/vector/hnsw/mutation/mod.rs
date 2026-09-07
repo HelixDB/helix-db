@@ -23,18 +23,20 @@ use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 use crate::search::vector::unaligned_vector::UnalignedVector;
 
-use super::distance::{ActiveVectorSemantics, Distance};
 use super::index::VectorIndex;
-use super::item::Item;
 use super::model::Candidate;
 use super::neighbor_set::{
     NeighborDegreeLimit, NeighborDegreeLimits, NeighborDifference, NeighborSet,
 };
-use super::result::VectorEntityId;
+use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
+use crate::search::vector::item::Item;
+use crate::search::vector::result::VectorEntityId;
 #[cfg(any(test, feature = "production-coverage"))]
-use super::storage::ReverseSourcesForTarget;
-use super::storage::{EntryCandidateLayerRow, VectorRowKeyspace, VectorRows, VectorWriteRows};
-use super::{
+use crate::search::vector::storage::ReverseSourcesForTarget;
+use crate::search::vector::storage::{
+    EntryCandidateLayerRow, VectorRowKeyspace, VectorRows, VectorWriteRows,
+};
+use crate::search::vector::{
     encode_item, select_diverse, Connections, Layer0Connections, MeasuredVectorTransaction,
     ValidatedMetricVector, VectorDimension, VectorGenerationIdentity, VectorIndexMetadata,
     VectorIndexState,
@@ -46,9 +48,9 @@ pub(crate) use active::ActiveVectorMutationRuntime;
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MIN_TARGETS: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION: usize = 8;
-pub(super) const VECTOR_BUILD_ITEM_CACHE_LIMIT: usize = 4_096;
-pub(super) const VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT: usize = 2_048;
-pub(super) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_096;
+pub(in crate::search::vector) const VECTOR_BUILD_ITEM_CACHE_LIMIT: usize = 4_096;
+pub(in crate::search::vector) const VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT: usize = 2_048;
+pub(in crate::search::vector) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_096;
 
 /// Aggregate observable behavior of one reusable vector build session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -149,19 +151,19 @@ pub(crate) struct FreshVectorBuildProof {
 impl FreshVectorBuildProof {
     /// Issues freshness only after the generation module validates durable
     /// `Building` ownership for the exact operation and physical namespace.
-    pub(super) const fn for_building_generation() -> Self {
+    pub(in crate::search::vector) const fn for_building_generation() -> Self {
         Self { _private: () }
     }
 
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) const fn for_test() -> Self {
+    pub(in crate::search::vector) const fn for_test() -> Self {
         Self { _private: () }
     }
 }
 
 /// Internal mutation contract selected by the public or generation façade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum VectorInsertContract {
+pub(in crate::search::vector) enum VectorInsertContract {
     /// Remove an existing graph row before inserting its replacement.
     Upsert,
     /// Insert after consuming lifecycle-owned proof that the target is fresh.
@@ -212,7 +214,7 @@ struct PopulatedHnswInsertion<'item, 'vector, D: Distance> {
 ///
 /// Mutation prefetch consults the authoritative neighbor-row ADT, so a dirty,
 /// clean-present, or clean-absent entry is never overwritten by speculative I/O.
-pub(super) fn select_layer0_neighbor_prefetch_targets<D: Distance>(
+pub(in crate::search::vector) fn select_layer0_neighbor_prefetch_targets<D: Distance>(
     newly_admitted_neighbors: &[(NodeId, f32)],
     mutation_cache: &MutationOpCache<D>,
     remaining_prefetch_budget: usize,
@@ -253,7 +255,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Insert/delete recovery owns the surrounding measured transaction. This
     /// boundary also binds the handle's write-once dimension before any row can
     /// subsequently be decoded under the updated metadata.
-    pub(super) async fn update_metadata(
+    pub(in crate::search::vector) async fn update_metadata(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         metadata: &VectorIndexMetadata,
@@ -268,7 +270,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Corrupt node-layer bytes are removed in the caller-owned transaction and
     /// represented as absence, preventing invalid persisted state from crossing
     /// into graph mutation.
-    pub(super) async fn get_entry_candidate_layer(
+    pub(in crate::search::vector) async fn get_entry_candidate_layer(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -289,7 +291,7 @@ impl<D: Distance> VectorIndex<D> {
     /// A prior sorted row is deleted when the node changed layers, keeping the
     /// node-to-layer row and highest-layer-first scan mutually consistent inside
     /// the caller-owned transaction.
-    pub(super) async fn upsert_entry_candidate(
+    pub(in crate::search::vector) async fn upsert_entry_candidate(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -309,7 +311,7 @@ impl<D: Distance> VectorIndex<D> {
     /// [`FreshVectorBuildProof`] makes a previous node-to-layer row
     /// unrepresentable at this boundary, so source backfill avoids one storage
     /// lookup for every planned insertion.
-    pub(super) fn stage_fresh_entry_candidate(
+    pub(in crate::search::vector) fn stage_fresh_entry_candidate(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -320,7 +322,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Removes both deployed entry-candidate rows for one mutation target.
-    pub(super) async fn remove_entry_candidate(
+    pub(in crate::search::vector) async fn remove_entry_candidate(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -337,7 +339,7 @@ impl<D: Distance> VectorIndex<D> {
     /// The caller owns the measured transaction. Corrupt, mismatched, or
     /// payload-less candidates are pruned before a replacement is returned.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) async fn find_best_entry_candidate(
+    pub(in crate::search::vector) async fn find_best_entry_candidate(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
     ) -> Result<Option<(NodeId, u16)>, HelixDbError> {
@@ -393,7 +395,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Replacement selection and metadata repair are staged in the caller's
     /// transaction, so no independently visible repair state is introduced.
-    pub(super) async fn repair_stale_entry_point_for_write(
+    pub(in crate::search::vector) async fn repair_stale_entry_point_for_write(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         metadata: &mut VectorIndexMetadata,
@@ -454,7 +456,7 @@ impl<D: Distance> VectorIndex<D> {
     /// owned item, or `None` when insertion must continue with an empty candidate
     /// set. Any candidate cleanup remains staged in the caller's measured
     /// transaction; this method never mutates a resident snapshot.
-    pub(super) async fn resolve_beam_entry_point_for_insert(
+    pub(in crate::search::vector) async fn resolve_beam_entry_point_for_insert(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         entry_point: NodeId,
@@ -515,7 +517,7 @@ impl<D: Distance> VectorIndex<D> {
         dead_code,
         reason = "retained behind direct legacy and measured lifecycle mutation contracts"
     )]
-    pub(super) async fn insert_with_measured_transaction(
+    pub(in crate::search::vector) async fn insert_with_measured_transaction(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -574,7 +576,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Reuses one generation-qualified build cache across successive entities.
-    pub(super) async fn insert_with_build_session(
+    pub(in crate::search::vector) async fn insert_with_build_session(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -901,7 +903,7 @@ impl<D: Distance> VectorIndex<D> {
     /// layer-0 reads remain bounded. Missing entry points are resolved through
     /// the write-side recovery contract before expansion begins.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn search_layer_beam(
+    pub(in crate::search::vector) async fn search_layer_beam(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         query: &Item<'_, D>,
@@ -1069,7 +1071,7 @@ impl<D: Distance> VectorIndex<D> {
     /// before applying HNSW Algorithm 4. The method owns graph-selection policy
     /// only; row encoding and write staging remain behind the index storage
     /// primitives used by the surrounding mutation session.
-    pub(super) async fn select_neighbors_heuristic(
+    pub(in crate::search::vector) async fn select_neighbors_heuristic(
         &self,
         txn: &DbTransaction,
         query: &Item<'_, D>,
@@ -1097,7 +1099,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one canonical layer-0 neighbor row through typed storage.
-    pub(super) async fn store_neighbors_layer0(
+    pub(in crate::search::vector) async fn store_neighbors_layer0(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -1107,7 +1109,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one canonical upper-neighbor row and fences its shared-cache copy.
-    pub(super) fn store_upper_neighbors(
+    pub(in crate::search::vector) fn store_upper_neighbors(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1121,7 +1123,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Computes the exact linear reverse-locator delta between canonical rows.
-    pub(super) fn neighbor_deltas(
+    pub(in crate::search::vector) fn neighbor_deltas(
         old_neighbors: &NeighborSet,
         new_neighbors: &NeighborSet,
     ) -> Result<NeighborDifference, HelixDbError> {
@@ -1131,7 +1133,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages only reverse-locator changes implied by a canonical row update.
-    pub(super) fn update_reverse_edge_locator(
+    pub(in crate::search::vector) fn update_reverse_edge_locator(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1152,7 +1154,7 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Loads every reverse source grouped by layer for deletion repair.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) async fn load_reverse_sources_for_target(
+    pub(in crate::search::vector) async fn load_reverse_sources_for_target(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         target_node_id: NodeId,
@@ -1167,7 +1169,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Cache absence means only “not loaded.” A storage miss is installed as
     /// `KnownAbsent`, while a present row is validated against its layer degree
     /// before use. Admission then enforces the operation cache bound.
-    pub(super) async fn load_neighbors_for_mutation(
+    pub(in crate::search::vector) async fn load_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1215,7 +1217,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Both clean and dirty entries are protected. Returned rows are validated
     /// and installed as explicit present/absent states before bounded eviction.
-    pub(super) async fn prefetch_layer0_neighbors_for_mutation(
+    pub(in crate::search::vector) async fn prefetch_layer0_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_ids: &[NodeId],
@@ -1266,7 +1268,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Copies borrowed algorithm output into the canonical staging boundary.
-    pub(super) async fn stage_neighbors_for_mutation(
+    pub(in crate::search::vector) async fn stage_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1288,7 +1290,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Distance-ranked output is sorted into stable node-ID order. Duplicate,
     /// self-neighbor, or excessive-degree states fail before cache or DB writes.
-    pub(super) async fn stage_neighbors_vec_for_mutation(
+    pub(in crate::search::vector) async fn stage_neighbors_vec_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1310,7 +1312,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// The proof prevents an unloaded existing row from being misclassified as
     /// absent; canonical validation still occurs before the cache is mutated.
-    pub(super) async fn stage_new_neighbors_for_mutation(
+    pub(in crate::search::vector) async fn stage_new_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1333,7 +1335,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Rows are processed oldest-first. A failed storage write returns before
     /// the authoritative cache state changes, allowing an exact retry.
-    pub(super) async fn flush_mutation_cache(
+    pub(in crate::search::vector) async fn flush_mutation_cache(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         mutation_cache: &mut MutationOpCache<D>,
@@ -1349,7 +1351,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Dirty entries are durably staged before eviction; clean entries require
     /// no write. The bounded scan order is deterministic under equal recency.
-    pub(super) async fn enforce_mutation_cache_bounds(
+    pub(in crate::search::vector) async fn enforce_mutation_cache_bounds(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         mutation_cache: &mut MutationOpCache<D>,
@@ -1387,7 +1389,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Removes the oldest clean neighbor and its same-row item entry without I/O.
-    pub(super) fn evict_oldest_clean_neighbor(
+    pub(in crate::search::vector) fn evict_oldest_clean_neighbor(
         &self,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> bool {
@@ -1406,7 +1408,7 @@ impl<D: Distance> VectorIndex<D> {
     /// original and current values agree, no storage operation is emitted.
     /// Successful callers may retain the row as clean or evict it atomically
     /// from the operation cache; any error preserves the exact dirty state.
-    pub(super) async fn flush_one_cached_neighbor(
+    pub(in crate::search::vector) async fn flush_one_cached_neighbor(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         mutation_cache: &mut MutationOpCache<D>,
@@ -1418,7 +1420,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Flushes an Active-session canonical row whose locator delta was staged at its entity boundary.
-    pub(super) async fn flush_one_active_cached_neighbor(
+    pub(in crate::search::vector) async fn flush_one_active_cached_neighbor(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         mutation_cache: &mut MutationOpCache<D>,
@@ -1495,7 +1497,7 @@ impl<D: Distance> VectorIndex<D> {
     /// rejected by pruning is removed from its reciprocal row in the same
     /// operation cache, preserving bidirectionality before the flush boundary.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn add_bidirectional_link(
+    pub(in crate::search::vector) async fn add_bidirectional_link(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1655,7 +1657,7 @@ impl<D: Distance> VectorIndex<D> {
         result
     }
 
-    pub(super) async fn stage_delete_with_metadata(
+    pub(in crate::search::vector) async fn stage_delete_with_metadata(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -1773,7 +1775,7 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Finds the highest layer containing a node for production coverage contracts.
     #[cfg(feature = "production-coverage")]
-    pub(super) async fn get_node_max_layer(
+    pub(in crate::search::vector) async fn get_node_max_layer(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -1816,7 +1818,7 @@ impl<D: Distance> VectorIndex<D> {
     /// removed first, then candidates are collected from the remaining local
     /// neighborhoods before Algorithm 2 relinking is staged.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn delete_from_layer(
+    pub(in crate::search::vector) async fn delete_from_layer(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         node_id: NodeId,
@@ -1887,7 +1889,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Removes one reciprocal reference and stages the row only when changed.
-    pub(super) async fn remove_edge_from_neighbor(
+    pub(in crate::search::vector) async fn remove_edge_from_neighbor(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -1913,7 +1915,7 @@ impl<D: Distance> VectorIndex<D> {
     /// retained neighbors, diversity-pruned to the layer degree, and staged.
     /// Every newly selected connection is then inserted and independently
     /// pruned on the reciprocal row before the operation-level flush.
-    pub(super) async fn relink_neighbor(
+    pub(in crate::search::vector) async fn relink_neighbor(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
@@ -2052,47 +2054,47 @@ impl<D: Distance> VectorIndex<D> {
 
 /// Physical HNSW layer bound into one cached neighbor-row identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct HnswLayer(u16);
+pub(in crate::search::vector) struct HnswLayer(u16);
 
 impl HnswLayer {
     /// Wraps a layer decoded from the deployed key without changing its value.
-    pub(super) const fn from_deployed(layer: u16) -> Self {
+    pub(in crate::search::vector) const fn from_deployed(layer: u16) -> Self {
         Self(layer)
     }
 
     /// Returns the deployed layer number.
-    pub(super) const fn number(self) -> u16 {
+    pub(in crate::search::vector) const fn number(self) -> u16 {
         self.0
     }
 }
 
 /// Complete identity of one operation-local neighbor row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct NeighborRowId {
+pub(in crate::search::vector) struct NeighborRowId {
     layer: HnswLayer,
     entity: VectorEntityId,
 }
 
 impl NeighborRowId {
     /// Binds one layer to the descriptor-proven node or edge identity.
-    pub(super) const fn new(layer: HnswLayer, entity: VectorEntityId) -> Self {
+    pub(in crate::search::vector) const fn new(layer: HnswLayer, entity: VectorEntityId) -> Self {
         Self { layer, entity }
     }
 
     /// Returns the row's physical layer.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) const fn layer(self) -> HnswLayer {
+    pub(in crate::search::vector) const fn layer(self) -> HnswLayer {
         self.layer
     }
 
     /// Returns the row's descriptor-proven entity identity.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) const fn entity(self) -> VectorEntityId {
+    pub(in crate::search::vector) const fn entity(self) -> VectorEntityId {
         self.entity
     }
 
     /// Returns the deployed layer and local entity ID used by row storage.
-    pub(super) const fn storage_parts(self) -> (u16, u64) {
+    pub(in crate::search::vector) const fn storage_parts(self) -> (u16, u64) {
         let entity_id = match self.entity {
             VectorEntityId::Node(node_id) => node_id,
             VectorEntityId::Edge(edge_id) => edge_id,
@@ -2103,16 +2105,16 @@ impl NeighborRowId {
 
 /// Monotonic operation-local recency assigned on every cache touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct CacheSequence(u64);
+pub(in crate::search::vector) struct CacheSequence(u64);
 
 impl CacheSequence {
     /// Creates the first sequence in a new operation-local cache.
-    pub(super) const fn initial() -> Self {
+    pub(in crate::search::vector) const fn initial() -> Self {
         Self(0)
     }
 
     /// Advances recency or reports that bounded renumbering is required.
-    pub(super) const fn checked_next(self) -> Option<Self> {
+    pub(in crate::search::vector) const fn checked_next(self) -> Option<Self> {
         match self.0.checked_add(1) {
             Some(next) => Some(Self(next)),
             None => None,
@@ -2122,7 +2124,7 @@ impl CacheSequence {
 
 /// Authoritative decoded value of one loaded neighbor row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum NeighborRowValue {
+pub(in crate::search::vector) enum NeighborRowValue {
     /// Storage proved that the row does not currently exist.
     KnownAbsent,
     /// Storage returned one validated canonical neighbor set.
@@ -2131,7 +2133,7 @@ pub(super) enum NeighborRowValue {
 
 /// Closed write state for one loaded neighbor row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum NeighborCacheState {
+pub(in crate::search::vector) enum NeighborCacheState {
     /// The current value agrees with the transaction's storage view.
     Clean { current: NeighborRowValue },
     /// The first loaded value and latest staged value are retained together.
@@ -2143,7 +2145,7 @@ pub(super) enum NeighborCacheState {
 
 /// One neighbor row with authoritative state and bounded-scan recency.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CachedNeighbor {
+pub(in crate::search::vector) struct CachedNeighbor {
     state: NeighborCacheState,
     last_touch: CacheSequence,
 }
@@ -2159,7 +2161,7 @@ struct CachedItem<D: Distance> {
 /// One SimHash or negative lookup retained with global session recency.
 #[derive(Debug, Clone, Copy)]
 struct CachedSimHash {
-    value: Option<super::SimHash>,
+    value: Option<crate::search::vector::SimHash>,
     last_touch: CacheSequence,
 }
 
@@ -2167,13 +2169,16 @@ struct CachedSimHash {
 ///
 /// The field and constructor remain private to this module, so ordinary staging
 /// cannot manufacture an absent original value for an unloaded existing row.
-pub(super) struct NewNeighborRowProof {
+pub(in crate::search::vector) struct NewNeighborRowProof {
     row: NeighborRowId,
 }
 
 impl CachedNeighbor {
     /// Installs a storage-proven clean row in the operation cache.
-    pub(super) const fn clean(current: NeighborRowValue, last_touch: CacheSequence) -> Self {
+    pub(in crate::search::vector) const fn clean(
+        current: NeighborRowValue,
+        last_touch: CacheSequence,
+    ) -> Self {
         Self {
             state: NeighborCacheState::Clean { current },
             last_touch,
@@ -2181,7 +2186,7 @@ impl CachedNeighbor {
     }
 
     /// Returns the latest authoritative value used by graph mutation.
-    pub(super) const fn current(&self) -> &NeighborRowValue {
+    pub(in crate::search::vector) const fn current(&self) -> &NeighborRowValue {
         match &self.state {
             NeighborCacheState::Clean { current } | NeighborCacheState::Dirty { current, .. } => {
                 current
@@ -2190,7 +2195,7 @@ impl CachedNeighbor {
     }
 
     /// Returns the first storage value only while a write remains pending.
-    pub(super) const fn original(&self) -> Option<&NeighborRowValue> {
+    pub(in crate::search::vector) const fn original(&self) -> Option<&NeighborRowValue> {
         match &self.state {
             NeighborCacheState::Clean { .. } => None,
             NeighborCacheState::Dirty { original, .. } => Some(original),
@@ -2198,12 +2203,16 @@ impl CachedNeighbor {
     }
 
     /// Returns whether this row has a pending staged value.
-    pub(super) const fn is_dirty(&self) -> bool {
+    pub(in crate::search::vector) const fn is_dirty(&self) -> bool {
         matches!(self.state, NeighborCacheState::Dirty { .. })
     }
 
     /// Stages a new value while preserving the first pre-mutation snapshot.
-    pub(super) fn stage(&mut self, staged: NeighborRowValue, last_touch: CacheSequence) {
+    pub(in crate::search::vector) fn stage(
+        &mut self,
+        staged: NeighborRowValue,
+        last_touch: CacheSequence,
+    ) {
         let previous = core::mem::replace(
             &mut self.state,
             NeighborCacheState::Clean {
@@ -2224,7 +2233,7 @@ impl CachedNeighbor {
     }
 
     /// Marks a successfully flushed row clean without changing its value.
-    pub(super) fn mark_flushed(&mut self) {
+    pub(in crate::search::vector) fn mark_flushed(&mut self) {
         let previous = core::mem::replace(
             &mut self.state,
             NeighborCacheState::Clean {
@@ -2239,7 +2248,7 @@ impl CachedNeighbor {
     }
 
     /// Returns the recency used by bounded oldest-clean selection.
-    pub(super) const fn last_touch(&self) -> CacheSequence {
+    pub(in crate::search::vector) const fn last_touch(&self) -> CacheSequence {
         self.last_touch
     }
 }
@@ -2257,7 +2266,7 @@ enum MutationCacheTouchTarget {
 }
 
 #[derive(Debug)]
-pub(super) struct MutationOpCache<D: Distance> {
+pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
     neighbor_rows: HashMap<NeighborRowId, CachedNeighbor>,
     clean_neighbor_recency: BTreeSet<(CacheSequence, NeighborRowId)>,
     dirty_neighbor_recency: BTreeSet<(CacheSequence, NeighborRowId)>,
@@ -2282,7 +2291,10 @@ impl<D: Distance> Default for MutationOpCache<D> {
 
 impl<D: Distance> MutationOpCache<D> {
     /// Creates an operation-local cache with validated final layer degrees.
-    pub(super) fn with_degree_limits(layer0: usize, upper: usize) -> Result<Self, HelixDbError> {
+    pub(in crate::search::vector) fn with_degree_limits(
+        layer0: usize,
+        upper: usize,
+    ) -> Result<Self, HelixDbError> {
         Ok(Self {
             neighbor_rows: HashMap::new(),
             clean_neighbor_recency: BTreeSet::new(),
@@ -2308,17 +2320,17 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns whether one-operation eviction remains authoritative.
-    pub(super) const fn enforces_local_limits(&self) -> bool {
+    pub(in crate::search::vector) const fn enforces_local_limits(&self) -> bool {
         self.enforce_local_limits
     }
 
     /// Starts one entity boundary for explicit Serializable Snapshot read intent.
-    pub(super) fn begin_entity(&mut self) {
+    pub(in crate::search::vector) fn begin_entity(&mut self) {
         self.entity_changed_neighbors.clear();
     }
 
     /// Records that one canonical row changed logically during this entity.
-    pub(super) fn record_neighbor_change(
+    pub(in crate::search::vector) fn record_neighbor_change(
         &mut self,
         row: NeighborRowId,
         original: NeighborRowValue,
@@ -2327,7 +2339,9 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Finishes one entity and returns every canonical row that changed.
-    pub(super) fn finish_entity_changes(&mut self) -> BTreeMap<NeighborRowId, NeighborRowValue> {
+    pub(in crate::search::vector) fn finish_entity_changes(
+        &mut self,
+    ) -> BTreeMap<NeighborRowId, NeighborRowValue> {
         core::mem::take(&mut self.entity_changed_neighbors)
     }
 
@@ -2358,12 +2372,15 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns the validated final degree for one physical layer.
-    pub(super) fn degree_limit(&self, layer: u16) -> NeighborDegreeLimit {
+    pub(in crate::search::vector) fn degree_limit(&self, layer: u16) -> NeighborDegreeLimit {
         self.degree_limits.for_layer(layer)
     }
 
     /// Returns the node-row identity used by the current node-only HNSW core.
-    pub(super) const fn node_row_id(layer: u16, node_id: NodeId) -> NeighborRowId {
+    pub(in crate::search::vector) const fn node_row_id(
+        layer: u16,
+        node_id: NodeId,
+    ) -> NeighborRowId {
         NeighborRowId::new(
             HnswLayer::from_deployed(layer),
             VectorEntityId::Node(node_id),
@@ -2371,7 +2388,10 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns the current state for a previously loaded row.
-    pub(super) fn neighbor(&self, row: NeighborRowId) -> Option<&CachedNeighbor> {
+    pub(in crate::search::vector) fn neighbor(
+        &self,
+        row: NeighborRowId,
+    ) -> Option<&CachedNeighbor> {
         self.neighbor_rows.get(&row)
     }
 
@@ -2404,7 +2424,10 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns and touches one authoritative neighbor row.
-    pub(super) fn touched_neighbor(&mut self, row: NeighborRowId) -> Option<&CachedNeighbor> {
+    pub(in crate::search::vector) fn touched_neighbor(
+        &mut self,
+        row: NeighborRowId,
+    ) -> Option<&CachedNeighbor> {
         if !self.neighbor_rows.contains_key(&row) {
             self.stats.neighbor_misses = self.stats.neighbor_misses.saturating_add(1);
             return None;
@@ -2426,12 +2449,12 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns whether a row is loaded, independently of whether it exists.
-    pub(super) fn contains_neighbor(&self, row: NeighborRowId) -> bool {
+    pub(in crate::search::vector) fn contains_neighbor(&self, row: NeighborRowId) -> bool {
         self.neighbor_rows.contains_key(&row)
     }
 
     /// Installs one storage-proven row unless staging already owns it.
-    pub(super) fn install_loaded_neighbor(
+    pub(in crate::search::vector) fn install_loaded_neighbor(
         &mut self,
         row: NeighborRowId,
         value: NeighborRowValue,
@@ -2451,7 +2474,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Stages a row that must already have storage-proven cache state.
-    pub(super) fn stage_loaded_neighbor(
+    pub(in crate::search::vector) fn stage_loaded_neighbor(
         &mut self,
         row: NeighborRowId,
         value: NeighborRowValue,
@@ -2491,7 +2514,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Issues the unforgeable token used only after allocating a fresh row.
-    pub(super) fn prove_new_neighbor_row(
+    pub(in crate::search::vector) fn prove_new_neighbor_row(
         &self,
         row: NeighborRowId,
     ) -> Result<NewNeighborRowProof, HelixDbError> {
@@ -2504,7 +2527,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Stages a freshly allocated row with a proven absent original value.
-    pub(super) fn stage_new_neighbor(
+    pub(in crate::search::vector) fn stage_new_neighbor(
         &mut self,
         proof: NewNeighborRowProof,
         value: NeighborRowValue,
@@ -2522,7 +2545,10 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes one row after clean eviction or a successful evicting flush.
-    pub(super) fn remove_neighbor(&mut self, row: NeighborRowId) -> Option<CachedNeighbor> {
+    pub(in crate::search::vector) fn remove_neighbor(
+        &mut self,
+        row: NeighborRowId,
+    ) -> Option<CachedNeighbor> {
         let cached = self.neighbor_rows.get(&row)?;
         let payload_bytes = cached_neighbor_payload_bytes(row, cached)
             .expect("validated vector neighbor cache state has measurable payload");
@@ -2537,7 +2563,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Marks one successfully flushed row clean while preserving global recency.
-    pub(super) fn mark_neighbor_flushed(&mut self, row: NeighborRowId) {
+    pub(in crate::search::vector) fn mark_neighbor_flushed(&mut self, row: NeighborRowId) {
         let Some((last_touch, true)) = self
             .neighbor_rows
             .get(&row)
@@ -2567,7 +2593,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes every layer-specific neighbor state for one entity.
-    pub(super) fn invalidate_neighbors(&mut self, node_id: NodeId) {
+    pub(in crate::search::vector) fn invalidate_neighbors(&mut self, node_id: NodeId) {
         let rows = self
             .neighbor_rows
             .keys()
@@ -2581,12 +2607,12 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns the number of loaded neighbor rows.
-    pub(super) fn neighbor_count(&self) -> usize {
+    pub(in crate::search::vector) fn neighbor_count(&self) -> usize {
         self.neighbor_rows.len()
     }
 
     /// Returns and touches one decoded item or negative lookup.
-    pub(super) fn item(
+    pub(in crate::search::vector) fn item(
         &mut self,
         layer: u16,
         node_id: NodeId,
@@ -2623,7 +2649,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Installs or replaces one decoded item state.
-    pub(super) fn put_item(
+    pub(in crate::search::vector) fn put_item(
         &mut self,
         layer: u16,
         node_id: NodeId,
@@ -2659,7 +2685,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes every layer-specific item state for one entity.
-    pub(super) fn invalidate_items(&mut self, node_id: NodeId) {
+    pub(in crate::search::vector) fn invalidate_items(&mut self, node_id: NodeId) {
         let keys = self
             .items
             .keys()
@@ -2672,7 +2698,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes the item entry paired with one evicted neighbor row.
-    pub(super) fn remove_item(&mut self, layer: u16, node_id: NodeId) {
+    pub(in crate::search::vector) fn remove_item(&mut self, layer: u16, node_id: NodeId) {
         let Some(cached) = self.items.get(&(layer, node_id)) else {
             return;
         };
@@ -2690,20 +2716,24 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns the number of retained decoded item states.
-    pub(super) fn item_count(&self) -> usize {
+    pub(in crate::search::vector) fn item_count(&self) -> usize {
         self.items.len()
     }
 
     /// Reports a retained negative lookup without changing its recency.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(super) fn item_is_known_absent(&self, layer: u16, node_id: NodeId) -> bool {
+    pub(in crate::search::vector) fn item_is_known_absent(
+        &self,
+        layer: u16,
+        node_id: NodeId,
+    ) -> bool {
         self.items
             .get(&(layer, node_id))
             .is_some_and(|cached| cached.value.is_none())
     }
 
     /// Evicts the deterministic least-recently-used item in this namespace.
-    pub(super) fn evict_oldest_item(&mut self) -> bool {
+    pub(in crate::search::vector) fn evict_oldest_item(&mut self) -> bool {
         let Some((_, layer, node_id)) = self.item_recency.first().copied() else {
             return false;
         };
@@ -2713,7 +2743,10 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns and touches one SimHash or negative lookup.
-    pub(super) fn simhash(&mut self, node_id: NodeId) -> Option<Option<super::SimHash>> {
+    pub(in crate::search::vector) fn simhash(
+        &mut self,
+        node_id: NodeId,
+    ) -> Option<Option<crate::search::vector::SimHash>> {
         if !self.simhashes.contains_key(&node_id) {
             self.stats.simhash_misses = self.stats.simhash_misses.saturating_add(1);
             return None;
@@ -2745,7 +2778,11 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Installs or replaces one SimHash state.
-    pub(super) fn put_simhash(&mut self, node_id: NodeId, value: Option<super::SimHash>) {
+    pub(in crate::search::vector) fn put_simhash(
+        &mut self,
+        node_id: NodeId,
+        value: Option<crate::search::vector::SimHash>,
+    ) {
         let previous_payload = self
             .simhashes
             .get(&node_id)
@@ -2774,7 +2811,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Invalidates one SimHash or negative lookup after mutation.
-    pub(super) fn invalidate_simhash(&mut self, node_id: NodeId) {
+    pub(in crate::search::vector) fn invalidate_simhash(&mut self, node_id: NodeId) {
         let Some(cached) = self.simhashes.get(&node_id) else {
             return;
         };
@@ -2791,12 +2828,12 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns the number of retained SimHash states.
-    pub(super) fn simhash_count(&self) -> usize {
+    pub(in crate::search::vector) fn simhash_count(&self) -> usize {
         self.simhashes.len()
     }
 
     /// Evicts the deterministic least-recently-used SimHash in this namespace.
-    pub(super) fn evict_oldest_simhash(&mut self) -> bool {
+    pub(in crate::search::vector) fn evict_oldest_simhash(&mut self) -> bool {
         let Some((_, node_id)) = self.simhash_recency.first().copied() else {
             return false;
         };
@@ -2811,12 +2848,12 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Returns the oldest dirty row using one bounded cache scan.
-    pub(super) fn oldest_dirty_neighbor(&self) -> Option<NeighborRowId> {
+    pub(in crate::search::vector) fn oldest_dirty_neighbor(&self) -> Option<NeighborRowId> {
         self.dirty_neighbor_recency.first().map(|(_, row)| *row)
     }
 
     /// Returns the oldest clean row using one bounded cache scan.
-    pub(super) fn oldest_clean_neighbor(&self) -> Option<NeighborRowId> {
+    pub(in crate::search::vector) fn oldest_clean_neighbor(&self) -> Option<NeighborRowId> {
         self.clean_neighbor_recency.first().map(|(_, row)| *row)
     }
 
@@ -2961,7 +2998,7 @@ impl<D: Distance> VectorBuildSession<D> {
     }
 
     /// Temporarily detaches one identity cache for an async mutation operation.
-    pub(super) fn take_cache(
+    pub(in crate::search::vector) fn take_cache(
         &mut self,
         identity: &VectorGenerationIdentity,
         layer0_degree: usize,
@@ -2989,7 +3026,7 @@ impl<D: Distance> VectorBuildSession<D> {
     }
 
     /// Restores one detached identity cache even when mutation planning failed.
-    pub(super) fn restore_cache(
+    pub(in crate::search::vector) fn restore_cache(
         &mut self,
         identity: VectorGenerationIdentity,
         cache: MutationOpCache<D>,
@@ -3361,7 +3398,7 @@ fn cached_neighbor_payload_bytes(
     Ok(payload_bytes)
 }
 
-const fn simhash_payload_bytes(value: Option<super::SimHash>) -> usize {
+const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) -> usize {
     if value.is_some() {
         core::mem::size_of::<u64>()
     } else {
@@ -3370,7 +3407,7 @@ const fn simhash_payload_bytes(value: Option<super::SimHash>) -> usize {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/mutation.rs"]
+#[path = "../../../../../tests/production_support/vector/mutation.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
@@ -3396,7 +3433,7 @@ mod tests {
             NonZeroU64::new(3).unwrap(),
             11,
             crate::index_lifecycle::IndexElementKind::Node,
-            super::super::VectorDimension::try_new(2).unwrap(),
+            crate::search::vector::VectorDimension::try_new(2).unwrap(),
         )
         .unwrap()
     }
@@ -3471,7 +3508,7 @@ mod tests {
 
     /// Compares every observable production row and eviction choice with the model.
     fn assert_matches_reference(
-        cache: &MutationOpCache<super::super::distance::Cosine>,
+        cache: &MutationOpCache<crate::search::vector::distance::Cosine>,
         rows: &HashMap<NodeId, ReferenceNeighbor>,
     ) {
         assert_eq!(cache.neighbor_count(), rows.len());
@@ -3492,7 +3529,8 @@ mod tests {
             .sum();
         assert_eq!(cache.retained_payload_bytes().unwrap(), expected_payload);
         for node_id in 1..=4 {
-            let row = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, node_id);
+            let row =
+                MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, node_id);
             match (cache.neighbor(row), rows.get(&node_id)) {
                 (Some(actual), Some(expected)) => {
                     assert_eq!(actual.current(), &expected.current);
@@ -3509,13 +3547,13 @@ mod tests {
         assert_eq!(
             cache.oldest_clean_neighbor(),
             reference_oldest(rows, false).map(|node_id| {
-                MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, node_id)
+                MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, node_id)
             })
         );
         assert_eq!(
             cache.oldest_dirty_neighbor(),
             reference_oldest(rows, true).map(|node_id| {
-                MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, node_id)
+                MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, node_id)
             })
         );
     }
@@ -3562,10 +3600,10 @@ mod tests {
 
     #[test]
     fn bounded_oldest_selection_uses_recency_and_state() {
-        let mut cache = MutationOpCache::<super::super::distance::Cosine>::default();
-        let first = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 1);
-        let second = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 2);
-        let third = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 3);
+        let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
+        let first = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 1);
+        let second = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 2);
+        let third = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 3);
         cache.install_loaded_neighbor(first, neighbors(1, vec![4]));
         cache.install_loaded_neighbor(second, neighbors(2, vec![4]));
         cache
@@ -3582,9 +3620,9 @@ mod tests {
 
     #[test]
     fn sequence_rollover_renumbers_without_reversing_recency() {
-        let mut cache = MutationOpCache::<super::super::distance::Cosine>::default();
-        let first = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 1);
-        let second = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 2);
+        let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
+        let first = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 1);
+        let second = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 2);
         cache.install_loaded_neighbor(first, neighbors(1, vec![3]));
         cache.install_loaded_neighbor(second, neighbors(2, vec![3]));
         cache.next_touch = CacheSequence(u64::MAX);
@@ -3605,8 +3643,8 @@ mod tests {
 
     #[test]
     fn neighbor_state_transitions_do_not_mutate_the_item_cache() {
-        let mut cache = MutationOpCache::<super::super::distance::Cosine>::default();
-        let row = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 1);
+        let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
+        let row = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 1);
         cache.put_item(0, 1, None, 0);
 
         cache.install_loaded_neighbor(row, neighbors(1, vec![2]));
@@ -3622,14 +3660,14 @@ mod tests {
 
     #[test]
     fn retained_payload_accounting_tracks_replacement_flush_and_invalidation() {
-        let mut cache = MutationOpCache::<super::super::distance::Cosine>::default();
-        let row = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 1);
+        let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
+        let row = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 1);
         let present = neighbors(1, vec![2]);
         let neighbor_bytes = neighbor_payload_bytes(0, &present).unwrap();
 
         cache.put_item(0, 1, None, 11);
         cache.put_item(0, 1, None, 7);
-        cache.put_simhash(1, Some(super::super::SimHash::from_bits(9)));
+        cache.put_simhash(1, Some(crate::search::vector::SimHash::from_bits(9)));
         assert_eq!(
             cache.retained_payload_bytes().unwrap(),
             7 + core::mem::size_of::<u64>()
@@ -3659,7 +3697,7 @@ mod tests {
 
         let first = session_identity(DataScope::Tenant(TenantId::from_u128(1)), 31);
         let second = session_identity(DataScope::Tenant(TenantId::from_u128(2)), 31);
-        let mut session = VectorBuildSession::<super::super::distance::Cosine>::new(
+        let mut session = VectorBuildSession::<crate::search::vector::distance::Cosine>::new(
             NonZeroU64::new(1024).unwrap(),
         );
 
@@ -3667,7 +3705,7 @@ mod tests {
         first_cache.put_item(0, 9, None, 0);
         first_cache.put_simhash(9, None);
         first_cache.install_loaded_neighbor(
-            MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 9),
+            MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 9),
             NeighborRowValue::KnownAbsent,
         );
         session.restore_cache(first.clone(), first_cache);
@@ -3675,9 +3713,9 @@ mod tests {
         let mut second_cache = session.take_cache(&second, 8, 4).unwrap();
         assert!(second_cache.item(0, 9).is_none());
         assert_eq!(second_cache.simhash(9), None);
-        assert!(!second_cache.contains_neighbor(
-            MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 9)
-        ));
+        assert!(!second_cache.contains_neighbor(MutationOpCache::<
+            crate::search::vector::distance::Cosine,
+        >::node_row_id(0, 9)));
         second_cache.put_item(0, 9, None, 0);
         session.restore_cache(second, second_cache);
 
@@ -3695,12 +3733,13 @@ mod tests {
         use crate::encoding::v2::keys::scope::DataScope;
 
         let identity = session_identity(DataScope::LegacyUnscoped, 41);
-        let mut session = VectorBuildSession::<super::super::distance::Cosine>::with_test_limits(
-            NonZeroU64::new(1).unwrap(),
-            1,
-            1,
-            1,
-        );
+        let mut session =
+            VectorBuildSession::<crate::search::vector::distance::Cosine>::with_test_limits(
+                NonZeroU64::new(1).unwrap(),
+                1,
+                1,
+                1,
+            );
         let mut cache = session.take_cache(&identity, 8, 4).unwrap();
         cache.put_item(0, 1, None, 8);
         cache.put_item(0, 2, None, 8);
@@ -3708,7 +3747,7 @@ mod tests {
         cache.put_simhash(2, None);
         for node_id in [1, 2] {
             cache.install_loaded_neighbor(
-                MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, node_id),
+                MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, node_id),
                 NeighborRowValue::KnownAbsent,
             );
         }
@@ -3735,8 +3774,8 @@ mod tests {
         use crate::encoding::v2::keys::scope::DataScope;
 
         let identity = session_identity(DataScope::LegacyUnscoped, 51);
-        let row = MutationOpCache::<super::super::distance::Cosine>::node_row_id(0, 1);
-        let mut session = VectorBuildSession::<super::super::distance::Cosine>::new(
+        let row = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, 1);
+        let mut session = VectorBuildSession::<crate::search::vector::distance::Cosine>::new(
             NonZeroU64::new(1024).unwrap(),
         );
         let mut cache = session.take_cache(&identity, 8, 4).unwrap();
@@ -3776,18 +3815,23 @@ mod tests {
         use crate::encoding::v2::keys::scope::DataScope;
 
         let identity = session_identity(DataScope::LegacyUnscoped, 61);
-        let handle = super::super::ValidatedVectorGenerationHandle::create_current::<
-            super::super::distance::Cosine,
+        let handle = crate::search::vector::ValidatedVectorGenerationHandle::create_current::<
+            crate::search::vector::distance::Cosine,
         >(identity)
         .unwrap();
-        let index = VectorIndex::<super::super::distance::Cosine>::from_generation(&handle);
+        let index =
+            VectorIndex::<crate::search::vector::distance::Cosine>::from_generation(&handle);
         let db = session_test_db("vector-build-session-traversal-reuse").await;
         let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let measured = MeasuredVectorTransaction::new(&transaction);
         index
             .stage_create(
                 &measured,
-                super::super::VectorIndexConfig::new(handle.physical_name(), "embedding", 2),
+                crate::search::vector::VectorIndexConfig::new(
+                    handle.physical_name(),
+                    "embedding",
+                    2,
+                ),
             )
             .await
             .unwrap();
@@ -3834,12 +3878,12 @@ mod tests {
         fn random_neighbor_operations_match_the_reference_model(
             operations in prop::collection::vec((0_u8..5, 1_u64..=4, 0_u8..=8), 0..128),
         ) {
-            let mut cache = MutationOpCache::<super::super::distance::Cosine>::default();
+            let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
             let mut reference = HashMap::<NodeId, ReferenceNeighbor>::new();
             let mut next_touch = 0_u64;
 
             for (operation, node_id, value_token) in operations {
-                let row = MutationOpCache::<super::super::distance::Cosine>::node_row_id(
+                let row = MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(
                     0,
                     node_id,
                 );

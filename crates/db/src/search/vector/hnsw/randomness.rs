@@ -13,7 +13,7 @@ use rand::{RngExt, SeedableRng};
 
 use crate::encoding::NodeId;
 
-use super::{select_layer, SimHash};
+use crate::search::vector::{select_layer, SimHash};
 
 /// Chooses HNSW layers for one index handle.
 ///

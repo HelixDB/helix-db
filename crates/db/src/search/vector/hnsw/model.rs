@@ -7,7 +7,7 @@
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 
-use super::DistanceScore;
+use crate::search::vector::DistanceScore;
 
 /// Distance-ranked graph candidate with a finite, nonnegative score.
 #[derive(Debug, Clone, Copy)]
