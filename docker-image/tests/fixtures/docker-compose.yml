@@ -19,6 +19,7 @@ services:
       - |
         until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
         mc mb --ignore-existing local/helix-db
+        mc mb --ignore-existing local/helix-wal
 
   helix:
     image: ${HELIX_IMAGE_REF:?HELIX_IMAGE_REF must be set}
@@ -32,12 +33,15 @@ services:
       - "${HELIX_IMAGE_TEST_PORT:-18120}:8080"
     environment:
       S3_BUCKET: helix-db
+      WAL_S3_BUCKET: helix-wal
       S3_REGION: us-east-1
       DB_PATH: db/
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_ENDPOINT: http://minio:9000
       AWS_ALLOW_HTTP: "true"
+      WAL_AWS_ACCESS_KEY_ID: minioadmin
+      WAL_AWS_SECRET_ACCESS_KEY: minioadmin
 
 volumes:
   minio-data:

@@ -1,5 +1,9 @@
+use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
 use std::time::Duration;
+
+use slatedb::object_store::ObjectStore;
 
 use super::cache::{
     CacheConfig, CacheMode, FtsMemoryCacheConfig, FtsWarmConfig, SimHasherCacheSettings,
@@ -156,6 +160,15 @@ pub struct HelixConfig {
     db: DbConfig,
 }
 
+#[derive(Clone)]
+struct WalObjectStore(Arc<dyn ObjectStore>);
+
+impl fmt::Debug for WalObjectStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
 impl HelixConfig {
     /// Build a full runtime config from DB settings.
     pub const fn new(db: DbConfig) -> Self {
@@ -179,6 +192,9 @@ pub struct DbConfig {
 
     /// Whether to enable write-ahead logging
     pub(crate) enable_wal: bool,
+
+    /// Optional object store dedicated to write-ahead log objects.
+    wal_object_store: Option<WalObjectStore>,
 
     /// Maximum concurrent reads during traversal
     max_concurrent_reads: NonZeroUsize,
@@ -224,6 +240,7 @@ impl DbConfig {
         Self {
             default_encoding_type: EdgeEncoding::None,
             enable_wal: true,
+            wal_object_store: None,
             max_concurrent_reads: NonZeroUsize::new(64)
                 .expect("default read concurrency is nonzero"),
             edge_update_policy: EdgeUpdatePolicy::Eager,
@@ -346,6 +363,11 @@ impl DbConfig {
         self.migrations
     }
 
+    /// Borrow the object store dedicated to write-ahead log objects, when configured.
+    pub fn wal_object_store(&self) -> Option<&Arc<dyn ObjectStore>> {
+        self.wal_object_store.as_ref().map(|store| &store.0)
+    }
+
     /// Set the default encoding type for edges
     pub fn with_encoding_type(mut self, encoding_type: EdgeEncoding) -> Self {
         self.default_encoding_type = encoding_type;
@@ -361,6 +383,15 @@ impl DbConfig {
     /// Enable or disable write-ahead logging
     pub fn with_wal(mut self, enable: bool) -> Self {
         self.enable_wal = enable;
+        self
+    }
+
+    /// Route write-ahead log objects through a dedicated object store.
+    ///
+    /// The database path is unchanged. When this is not set, SlateDB stores
+    /// write-ahead log objects in the main object store.
+    pub fn with_wal_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(WalObjectStore(object_store));
         self
     }
 

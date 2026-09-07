@@ -9,6 +9,7 @@ fn memory_config(name: &str) -> ServerConfig {
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
         db_path: name.to_string(),
         storage: StorageConfig::Memory,
+        wal_storage: None,
     }
 }
 
