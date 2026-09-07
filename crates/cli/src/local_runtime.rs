@@ -178,16 +178,30 @@ impl LocalRuntime {
     pub fn container_name(&self, instance_name: &str) -> String {
         let name = format!("{}-{}", self.project_name, instance_name);
         let sanitized = sanitize_docker_name(&name);
+        let adopts = sanitized == name
+            && ends_with_hash_suffix(&sanitized)
+            && self.adopts_legacy_name(&format!("helix-{name}"));
         let identity = format!(
             "{}:{}/{}",
             self.project_name.len(),
             self.project_name,
             instance_name
         );
-        if sanitized == name && !ends_with_hash_suffix(&sanitized) {
-            return format!("helix-{sanitized}");
-        }
-        format!("helix-{sanitized}-{}", identity_suffix(&identity))
+        compose_resource_name(&name, &identity, adopts)
+    }
+
+    fn adopts_legacy_name(&self, legacy: &str) -> bool {
+        let minio = format!("{legacy}-minio");
+        let network = format!("{legacy}-net");
+        let volume = format!("{legacy}-minio-data");
+        [
+            ["container", "inspect", legacy],
+            ["container", "inspect", &minio],
+            ["network", "inspect", &network],
+            ["volume", "inspect", &volume],
+        ]
+        .into_iter()
+        .any(|probe| self.resource_exists(&probe))
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -1095,6 +1109,14 @@ fn sanitize_docker_name(name: &str) -> String {
         .collect()
 }
 
+fn compose_resource_name(name: &str, identity: &str, adopts_legacy: bool) -> String {
+    let sanitized = sanitize_docker_name(name);
+    if sanitized == name && (!ends_with_hash_suffix(&sanitized) || adopts_legacy) {
+        return format!("helix-{name}");
+    }
+    format!("helix-{sanitized}-{}", identity_suffix(identity))
+}
+
 const HASH_SUFFIX_LEN: usize = 32;
 
 fn ends_with_hash_suffix(name: &str) -> bool {
@@ -1129,13 +1151,13 @@ mod tests {
     fn container_name_keeps_legacy_names_byte_identical() {
         assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
         assert_eq!(
-            runtime_for("demo").container_name("my-dev"),
+            compose_resource_name("demo-my-dev", "5:demo/my dev", false),
             "helix-demo-my-dev"
         );
     }
 
     #[test]
-    fn container_name_suffixed_only_when_sanitization_or_the_suffix_namespace_requires_it() {
+    fn suffixed_names_carry_a_sha256_of_the_length_delimited_identity() {
         assert_eq!(
             runtime_for("My Project").container_name("dev"),
             "helix-My-Project-dev-028ad0a3ea24fa42ed85d7f07ce24d71"
@@ -1151,28 +1173,26 @@ mod tests {
     }
 
     #[test]
-    fn crafted_valid_names_do_not_collide_with_suffixed_names() {
-        let suffixed = runtime_for("a b").container_name("dev");
-        let crafted_instance = suffixed.strip_prefix("helix-a-b-").unwrap();
-        assert_ne!(
-            suffixed,
-            runtime_for("a-b").container_name(crafted_instance)
+    fn hash_suffixed_legacy_names_are_displaced_only_when_not_adopted() {
+        let identity = "4:demo/dev-14527b3cbdf37376ceb9eda41d2afac4";
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, false),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4-9333c32b4742394d43c85929472329bf"
         );
-    }
-
-    #[test]
-    fn legacy_names_ending_in_a_hash_like_suffix_are_displaced() {
-        assert_ne!(
-            runtime_for("demo").container_name("dev-14527b3cbdf37376ceb9eda41d2afac4"),
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, true),
             "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4"
         );
     }
 
     #[test]
-    fn container_name_sanitizes_instance_names_too() {
-        assert!(runtime_for("demo")
-            .container_name("my dev")
-            .starts_with("helix-demo-my-dev-"));
+    fn crafted_valid_names_do_not_collide_with_suffixed_names() {
+        let suffixed = compose_resource_name("a b-dev", "3:a b/dev", false);
+        let crafted = suffixed.strip_prefix("helix-a-b-").unwrap();
+        assert_ne!(
+            suffixed,
+            compose_resource_name(crafted, &format!("3:a-b/{crafted}"), false)
+        );
     }
 
     #[test]

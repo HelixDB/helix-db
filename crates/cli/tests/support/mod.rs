@@ -329,6 +329,13 @@ if "%1"=="logs" (
   echo fake logs
   exit /b 0
 )
+if "%1"=="container" (
+  if "%2"=="inspect" if "%HELIX_TEST_RUNTIME_CONTAINER_INSPECT%"=="missing" (
+    echo No such object 1>&2
+    exit /b 1
+  )
+  exit /b 0
+)
 if "%1"=="rm" (
   if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
   echo No such container 1>&2
@@ -394,6 +401,13 @@ case "$1" in
     exit 0
     ;;
   logs) echo "fake logs"; exit 0 ;;
+  container)
+    if [ "$2" = "inspect" ] && [ "$HELIX_TEST_RUNTIME_CONTAINER_INSPECT" = "missing" ]; then
+      echo "No such object" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   rm)
     if [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then exit 0; fi
     echo "No such container" >&2

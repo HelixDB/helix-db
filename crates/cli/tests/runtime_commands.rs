@@ -1,6 +1,7 @@
 mod support;
 
 use assert_cmd::assert::Assert;
+use std::fs;
 use support::CliFixture;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -109,6 +110,113 @@ async fn disk_runtime_commands_cover_resource_reuse_status_cleanup_and_errors() 
     assert!(log.contains("minio/mc:latest"));
     assert!(log.contains("logs -f"));
     assert!(log.contains("network inspect"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hash_suffixed_legacy_resources_are_adopted_on_upgrade() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("upgrade-corner-project");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_VOLUME_MODE", "existing")
+        .args(["start", instance])
+        .assert()
+        .success();
+
+    let legacy = "helix-upgrade-corner-project-dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let log = fixture.runtime_log();
+    assert!(
+        log.contains(&format!("volume inspect {legacy}-minio-data")),
+        "expected the legacy volume to be adopted, got: {log}"
+    );
+    assert!(
+        !log.contains("volume create"),
+        "an adopted volume must be reopened, not recreated, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("--name {legacy} -p")),
+        "expected the legacy container name, got: {log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_hash_suffixed_names_get_their_own_digest() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("upgrade-corner-project");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_CONTAINER_INSPECT", "missing")
+        .args(["start", instance])
+        .assert()
+        .success();
+
+    let suffixed =
+        "helix-upgrade-corner-project-dev-14527b3cbdf37376ceb9eda41d2afac4-9205e6a18bfd6e20b5bdbc27e424de51";
+    let log = fixture.runtime_log();
+    assert!(
+        log.contains(&format!("volume create {suffixed}-minio-data")),
+        "expected a fresh suffixed volume, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("--name {suffixed} -p")),
+        "expected a fresh suffixed container, got: {log}"
+    );
 }
 
 #[test]
