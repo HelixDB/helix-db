@@ -571,7 +571,7 @@ impl<D: Distance> VectorIndex<D> {
             )
             .await;
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_cache_stats(mutation_cache.stats);
+        crate::search::vector::record_benchmark_cache_stats(mutation_cache.stats);
         result
     }
 
@@ -1486,7 +1486,7 @@ impl<D: Distance> VectorIndex<D> {
             mutation_cache.mark_neighbor_flushed(row);
         }
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_dirty_neighbor_flush();
+        crate::search::vector::record_benchmark_dirty_neighbor_flush();
         Ok(())
     }
 
@@ -1626,7 +1626,7 @@ impl<D: Distance> VectorIndex<D> {
             Err(error) => Err(error),
         };
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_cache_stats(mutation_cache.stats);
+        crate::search::vector::record_benchmark_cache_stats(mutation_cache.stats);
         result
     }
 
@@ -2365,7 +2365,7 @@ impl<D: Distance> MutationOpCache<D> {
             .max_retained_payload_bytes
             .max(u64::try_from(retained_payload_bytes).unwrap_or(u64::MAX));
         #[cfg(feature = "production-coverage")]
-        super::observe_benchmark_retained_payload(
+        crate::search::vector::observe_benchmark_retained_payload(
             u64::try_from(retained_payload_bytes).unwrap_or(u64::MAX),
         );
         Ok(())

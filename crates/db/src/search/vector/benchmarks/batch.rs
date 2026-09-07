@@ -183,9 +183,10 @@ enum BenchmarkIndex {
 
 impl BenchmarkIndex {
     fn new(metric: VectorBatchBenchmarkMetric, layers: Vec<u16>) -> Result<Self> {
-        let map_error = |error: super::randomness::ScriptedLayerSelectorError| {
-            HelixDbError::Config(format!("invalid benchmark layer script: {error:?}"))
-        };
+        let map_error =
+            |error: crate::search::vector::hnsw::randomness::ScriptedLayerSelectorError| {
+                HelixDbError::Config(format!("invalid benchmark layer script: {error:?}"))
+            };
         match metric {
             VectorBatchBenchmarkMetric::Cosine => VectorIndex::new(PHYSICAL_NAME)
                 .with_batch_benchmark_contract(layers)

@@ -13,7 +13,7 @@ use crate::encoding::v2::values::indexes::vector::simhash::{decode_simhash, enco
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 use crate::search::vector::generation::{CURRENT_SIMHASH_ALGORITHM_VERSION, CURRENT_SIMHASH_SEED};
-use crate::search::vector::write_transaction::MeasuredVectorTransaction;
+use crate::search::vector::storage::transaction::MeasuredVectorTransaction;
 
 use self::registry::SimHasherRegistryError;
 use super::{unaligned_vector::UnalignedVectorCodec, ValidatedMetricVector};

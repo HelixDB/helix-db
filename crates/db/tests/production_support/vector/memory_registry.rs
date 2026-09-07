@@ -220,7 +220,7 @@ pub(crate) async fn run() {
         let (entry, owns_hydration) = registry.entry_for(&handle);
         assert!(owns_hydration);
         assert!(entry.finish_hydration(Arc::clone(&store)));
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         writes.dirty_rows_for(&handle).mark_node_dirty(7);
         let write = writes.entries().pop().unwrap();
         let aborted = registry.prepare_commit(&write).unwrap();
@@ -275,7 +275,7 @@ pub(crate) async fn run() {
         assert!(entry.finish_hydration(Arc::clone(&resident)));
         let guard = entry.acquire_read_guard().unwrap();
 
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         let dirty_rows = writes.dirty_rows_for(&handle);
         dirty_rows.mark_node_dirty(7);
         dirty_rows.mark_upper_neighbors_dirty(2, 9);
@@ -308,7 +308,7 @@ pub(crate) async fn run() {
                 panic!("absent identity must grant initial hydration")
             }
         };
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         writes.dirty_rows_for(&handle).mark_node_dirty(7);
         let pending = registry
             .prepare_commit(&writes.entries().pop().unwrap())
@@ -366,7 +366,7 @@ pub(crate) async fn run() {
             registry.read_guard_for(&handle),
             Err(VectorCacheReadGuardError::Absent)
         ));
-        let empty_writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let empty_writes = super::super::commit::VectorCacheWriteSet::default();
         let empty_write = empty_writes.dirty_rows_for(&handle);
         assert!(registry
             .prepare_commit(&empty_writes.entries().pop().unwrap())

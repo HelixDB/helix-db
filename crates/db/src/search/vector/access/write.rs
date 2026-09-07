@@ -9,9 +9,10 @@
 
 use std::sync::Arc;
 
-use super::cache::store::VectorMemoryDirtyRows;
-use super::{
-    Distance, ValidatedVectorGenerationHandle, VectorGenerationValidationError, VectorIndex,
+use crate::search::vector::cache::store::VectorMemoryDirtyRows;
+use crate::search::vector::{
+    Distance, SimHasherRegistry, ValidatedVectorGenerationHandle, VectorGenerationValidationError,
+    VectorIndex,
 };
 
 /// Constructs one managed mutation index bound to an exact generation handle.
@@ -23,7 +24,7 @@ use super::{
 pub(crate) fn managed_vector_write_index<D: Distance>(
     handle: &ValidatedVectorGenerationHandle,
     dirty_rows: Arc<VectorMemoryDirtyRows>,
-    simhasher_registry: Arc<super::SimHasherRegistry>,
+    simhasher_registry: Arc<SimHasherRegistry>,
 ) -> Result<VectorIndex<D>, VectorGenerationValidationError> {
     handle.validate_distance::<D>()?;
     Ok(VectorIndex::from_generation(handle)
@@ -63,7 +64,7 @@ mod tests {
     fn factory_rejects_distance_mismatch_before_index_construction() {
         let handle = handle();
         let dirty = Arc::new(VectorMemoryDirtyRows::default());
-        let registry = Arc::new(super::super::SimHasherRegistry::default());
+        let registry = Arc::new(SimHasherRegistry::default());
         assert!(managed_vector_write_index::<Cosine>(
             &handle,
             Arc::clone(&dirty),

@@ -83,7 +83,7 @@ pub(crate) async fn run() {
         9,
     ))));
 
-    let simhashers = Arc::new(super::super::SimHasherRegistry::default());
+    let simhashers = Arc::new(crate::search::vector::SimHasherRegistry::default());
     let exact = ValidatedVectorReadIndex::<Cosine>::managed(
         &handle,
         &registry,
@@ -123,7 +123,7 @@ pub(crate) async fn run() {
             Arc::clone(&simhashers),
             VectorReadVisibility::Comparable(9),
         ),
-        Err(super::super::VectorGenerationValidationError::MetricMismatch)
+        Err(crate::search::vector::VectorGenerationValidationError::MetricMismatch)
     ));
 
     let euclidean_handle = ValidatedVectorGenerationHandle::create_current::<Euclidean>(

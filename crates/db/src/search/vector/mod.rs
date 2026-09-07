@@ -97,6 +97,7 @@
 //! use db::search::vector::VectorIndex;
 //! ```
 
+mod access;
 #[cfg(feature = "production-coverage")]
 mod benchmarks;
 mod cache;
@@ -123,15 +124,11 @@ mod primitive_production_contracts;
 #[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/read_fault.rs"]
 pub(crate) mod read_fault_production_support;
-mod read_index;
-mod read_view;
 mod result;
 pub mod simhash;
 pub mod spaces;
 mod storage;
 pub mod unaligned_vector;
-mod write_index;
-mod write_transaction;
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
@@ -157,6 +154,11 @@ use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuard
 use crate::encoding::v2::values::indexes::vector as vector_values;
 use crate::encoding::NodeId;
 
+#[cfg(feature = "production-coverage")]
+pub(crate) use access::read::production_contracts::run as run_read_boundary_contracts;
+pub(crate) use access::read::{ValidatedVectorReadIndex, VectorReadVisibility};
+pub(crate) use access::read_view::VectorReadView;
+pub(crate) use access::write::managed_vector_write_index;
 #[cfg(feature = "production-coverage")]
 pub(crate) use benchmarks::{
     observe_retained_payload as observe_benchmark_retained_payload,
@@ -237,10 +239,6 @@ pub use parameters::{
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use primitive_production_contracts::run as run_primitive_contracts;
-#[cfg(feature = "production-coverage")]
-pub(crate) use read_index::production_contracts::run as run_read_boundary_contracts;
-pub(crate) use read_index::{ValidatedVectorReadIndex, VectorReadVisibility};
-pub(crate) use read_view::VectorReadView;
 pub use result::{
     DistanceOutputUnit, DistanceOutputVersion, MaterializedVectorDistance, VectorEntityId,
 };
@@ -255,18 +253,17 @@ pub use simhash::{
 pub(crate) use simhash::{SimHashIdentity, SimHasherRegistry, SimHasherRegistryLimits};
 #[cfg(feature = "production-coverage")]
 pub(crate) use storage::production_contracts::run as run_storage_contracts;
+#[cfg(feature = "production-coverage")]
+pub(crate) use storage::transaction::production_contracts::run as run_write_transaction_contracts;
+pub(crate) use storage::transaction::{
+    MeasuredVectorTransaction, PlannedVectorMutation, VectorWriteMeasurement, VectorWriteRecorder,
+};
 pub(crate) use storage::{
     CanonicalVectorDirectoryBackfillOutcome, LegacyVectorValidationMode,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
     SimHashDirectoryValidationOutcome, VectorCleanupRow,
 };
 pub(crate) use vector_values::metadata::{VectorIndexConfig, VectorIndexMetadata};
-pub(crate) use write_index::managed_vector_write_index;
-#[cfg(feature = "production-coverage")]
-pub(crate) use write_transaction::production_contracts::run as run_write_transaction_contracts;
-pub(crate) use write_transaction::{
-    MeasuredVectorTransaction, PlannedVectorMutation, VectorWriteMeasurement, VectorWriteRecorder,
-};
 
 /// Supported vector distance metrics
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
