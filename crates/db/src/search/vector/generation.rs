@@ -18,7 +18,7 @@ use crate::index_lifecycle::{
     VectorPhysicalLayout, VectorRoutingLayoutV2,
 };
 use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
-use crate::search::vector::simhash_registry::SimHashIdentity;
+use crate::search::vector::simhash::SimHashIdentity;
 use crate::search::vector::{VectorDimension, VectorDimensionError, VectorDistanceMetric};
 
 /// Seed used by every currently supported persisted SimHash row.

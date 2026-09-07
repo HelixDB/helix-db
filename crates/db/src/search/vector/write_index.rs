@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::memory_store::VectorMemoryDirtyRows;
+use super::cache::store::VectorMemoryDirtyRows;
 use super::{
     Distance, ValidatedVectorGenerationHandle, VectorGenerationValidationError, VectorIndex,
 };

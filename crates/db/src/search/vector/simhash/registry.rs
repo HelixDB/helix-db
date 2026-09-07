@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::{Arc, Condvar, Mutex};
 
-use super::unaligned_vector::simhash::SimHasherConstructionError;
-use super::unaligned_vector::SimHasher;
+use crate::search::vector::unaligned_vector::simhash::SimHasherConstructionError;
+use crate::search::vector::unaligned_vector::SimHasher;
 
 /// Complete deterministic identity of one SimHash projection algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -160,7 +160,8 @@ impl SimHasherRegistry {
         &self,
         identity: SimHashIdentity,
     ) -> Result<Arc<SimHasher>, SimHasherRegistryError> {
-        if identity.algorithm_version.get() != super::generation::CURRENT_SIMHASH_ALGORITHM_VERSION
+        if identity.algorithm_version.get()
+            != crate::search::vector::generation::CURRENT_SIMHASH_ALGORITHM_VERSION
         {
             return Err(SimHasherRegistryError::UnsupportedAlgorithmVersion(
                 identity.algorithm_version.get(),
@@ -305,7 +306,7 @@ impl Default for SimHasherRegistry {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/simhash_registry.rs"]
+#[path = "../../../../tests/production_support/vector/simhash_registry.rs"]
 pub(crate) mod production_contracts;
 
 /// Failure to validate limits, reserve a candidate, or construct projections.
@@ -389,7 +390,8 @@ mod tests {
     #[test]
     fn unknown_algorithm_identity_fails_before_allocation() {
         let registry = SimHasherRegistry::default();
-        let unknown_version = super::super::generation::CURRENT_SIMHASH_ALGORITHM_VERSION + 1;
+        let unknown_version =
+            crate::search::vector::generation::CURRENT_SIMHASH_ALGORITHM_VERSION + 1;
         let unknown = SimHashIdentity::new(
             NonZeroUsize::MIN,
             42,

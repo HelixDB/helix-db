@@ -48,12 +48,12 @@ use crate::error::HelixDbError;
 use crate::search::vector::unaligned_vector::UnalignedVector;
 use slatedb::DbReadOps;
 
-use super::distance::{ActiveVectorSemantics, Distance};
-use super::item::Item;
-use super::memory_store::{
+use super::cache::store::{
     SimHashReadStats, VectorMemoryAccess, VectorMemoryDirtyRows, VectorMemoryPendingDirtyRows,
     VectorMemoryStore,
 };
+use super::distance::{ActiveVectorSemantics, Distance};
+use super::item::Item;
 #[cfg(test)]
 use super::model::Candidate;
 #[cfg(test)]

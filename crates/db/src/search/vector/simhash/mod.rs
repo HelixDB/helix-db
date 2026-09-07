@@ -15,14 +15,15 @@ use crate::error::HelixDbError;
 use crate::search::vector::generation::{CURRENT_SIMHASH_ALGORITHM_VERSION, CURRENT_SIMHASH_SEED};
 use crate::search::vector::write_transaction::MeasuredVectorTransaction;
 
-use super::{
-    simhash_registry::{SimHashIdentity, SimHasherRegistry, SimHasherRegistryError},
-    unaligned_vector::UnalignedVectorCodec,
-    ValidatedMetricVector,
-};
+use self::registry::SimHasherRegistryError;
+use super::{unaligned_vector::UnalignedVectorCodec, ValidatedMetricVector};
+
+pub(crate) use registry::{SimHashIdentity, SimHasherRegistry, SimHasherRegistryLimits};
 
 // Re-export core SimHash types from unaligned_vector
 pub use super::unaligned_vector::{SimHash, SimHashError, SimHasher};
+
+pub(crate) mod registry;
 
 /// Number of bits in a SimHash code
 pub const SIMHASH_BITS: usize = 64;
@@ -290,7 +291,7 @@ impl SimHashCache {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/simhash.rs"]
+#[path = "../../../../tests/production_support/vector/simhash.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]

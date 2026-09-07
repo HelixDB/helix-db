@@ -22,8 +22,8 @@ use crate::encoding::v2::keys::DataKey;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::IndexElementKind;
 
-use super::distance::{Cosine, Distance, Euclidean, Manhattan};
-use super::{
+use crate::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
+use crate::search::vector::{
     benchmark_telemetry_snapshot, reset_benchmark_telemetry, ActiveVectorMutationRuntime, Item,
     SearchParams, SearchResult, SimHasherRegistry, ValidatedVectorGenerationHandle,
     VectorCacheWriteSet, VectorDimension, VectorGenerationIdentity, VectorIndex, VectorIndexConfig,

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use slatedb::DbReadOps;
 
-use super::memory_registry::{VectorCacheReadGuard, VectorCacheRegistry};
+use super::cache::registry::{VectorCacheReadGuard, VectorCacheRegistry};
 use super::{
     Distance, RestrictedVectorCandidates, SearchParams, SearchResult,
     ValidatedVectorGenerationHandle, VectorIndex, VectorIndexMetadata,
