@@ -191,6 +191,35 @@ impl<'a> TextSearchRequest<'a> {
 /// rejected outright rather than being slow.
 pub(crate) const MAX_FUZZY_DISTANCE: u8 = 2;
 
+/// Most expanded terms a single query term may contribute.
+///
+/// Every expansion becomes another clause in the boolean query, so without a
+/// ceiling a short query term would let the caller decide how much work the
+/// server does.
+const MAX_EXPANDED_TERMS: usize = 64;
+
+/// Most dictionary entries the automaton may visit for one query term before
+/// the sweep gives up. Bounds the walk itself, not just what it keeps.
+const MAX_EXPANSION_SCAN: usize = 4096;
+
+/// The distance actually used for a term of this length.
+///
+/// A two character term at distance two matches nearly every short entry in the
+/// dictionary, which is both ruinous and useless: the matches have no
+/// relationship to what was typed. Shorter terms therefore get less latitude,
+/// the same shape Lucene's automatic fuzziness uses.
+fn effective_distance(term: &str, requested: u8) -> u8 {
+    let length = term.chars().count();
+    let allowed = if length < 3 {
+        0
+    } else if length <= 5 {
+        1
+    } else {
+        MAX_FUZZY_DISTANCE
+    };
+    requested.min(allowed)
+}
+
 /// A Levenshtein DFA presented as the automaton the term dictionary expects.
 ///
 /// tantivy has an identical wrapper behind `FuzzyTermQuery`, but it is
@@ -233,8 +262,18 @@ fn expand_term(
     term: &str,
     distance: u8,
 ) -> Result<BTreeMap<String, u8>, HelixDbError> {
+    let distance = effective_distance(term, distance);
+    if distance == 0 {
+        // Nothing to expand to beyond the term itself; let the caller take the
+        // ordinary exact path rather than paying for an automaton sweep.
+        let mut exact = BTreeMap::new();
+        exact.insert(term.to_owned(), 0);
+        return Ok(exact);
+    }
+
     let dfa = Arc::new(LevenshteinAutomatonBuilder::new(distance, true).build_dfa(term));
     let mut matches: BTreeMap<String, u8> = BTreeMap::new();
+    let mut scanned = 0usize;
 
     for segment_reader in searcher.segment_readers() {
         let inverted = segment_reader.inverted_index(field).map_err(|err| {
@@ -252,6 +291,10 @@ fn expand_term(
                 ))
             })?;
         while stream.advance() {
+            scanned += 1;
+            if scanned > MAX_EXPANSION_SCAN {
+                break;
+            }
             let Ok(text) = std::str::from_utf8(stream.key()) else {
                 continue;
             };
@@ -268,6 +311,15 @@ fn expand_term(
                 })
                 .or_insert(edits);
         }
+    }
+
+    if matches.len() > MAX_EXPANDED_TERMS {
+        // Keep the closest matches. Ties break on the term itself so the result
+        // does not depend on which segment happened to be read first.
+        let mut ranked: Vec<(String, u8)> = matches.into_iter().collect();
+        ranked.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        ranked.truncate(MAX_EXPANDED_TERMS);
+        return Ok(ranked.into_iter().collect());
     }
 
     Ok(matches)
@@ -2751,6 +2803,107 @@ mod tests {
             request.fuzzy_distance, 0,
             "callers that do not opt in must stay exact"
         );
+    }
+
+    /// A short term at a large distance matches most of the dictionary, and the
+    /// matches have nothing to do with what was typed. Shorter terms get less
+    /// latitude, so this cannot be used to make the server do arbitrary work.
+    #[test]
+    fn short_terms_get_less_fuzzy_latitude() {
+        assert_eq!(
+            effective_distance("ab", 2),
+            0,
+            "two characters is too short"
+        );
+        assert_eq!(effective_distance("abc", 2), 1);
+        assert_eq!(effective_distance("abcde", 2), 1);
+        assert_eq!(effective_distance("abcdef", 2), 2);
+        assert_eq!(
+            effective_distance("abcdef", 1),
+            1,
+            "the caller's request is still an upper bound"
+        );
+    }
+
+    /// Every expanded term becomes another clause in the boolean query, so the
+    /// expansion has to be bounded no matter how much of the dictionary the
+    /// automaton can reach. The earlier tests all use vocabularies too small for
+    /// this to show up.
+    #[test]
+    fn expansion_is_capped_on_a_large_vocabulary() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+
+        // 676 distinct terms, every one of them within two edits of "helixq".
+        let mut documents = Vec::new();
+        let mut entity_id = 1u64;
+        for first in b'a'..=b'z' {
+            for second in b'a'..=b'z' {
+                documents.push(TextDocumentInput::new(
+                    entity_id,
+                    format!("he{}{}xq", first as char, second as char),
+                ));
+                entity_id += 1;
+            }
+        }
+        assert_eq!(documents.len(), 676);
+
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+        let searcher = reader.searcher();
+
+        let expanded =
+            expand_term(&searcher, fields.body, "helixq", 2).expect("expansion succeeds");
+        assert!(
+            expanded.len() <= MAX_EXPANDED_TERMS,
+            "expansion returned {} terms, cap is {}",
+            expanded.len(),
+            MAX_EXPANDED_TERMS
+        );
+
+        // The cap must keep the closest matches rather than an arbitrary slice.
+        let worst = expanded.values().copied().max().unwrap_or(0);
+        assert!(
+            worst <= 2,
+            "kept a term further than the requested distance: {worst}"
+        );
+
+        // And the whole search still works rather than falling over.
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helixq",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            2,
+        )
+        .expect("bounded fuzzy search");
+        assert!(!hits.is_empty());
+        assert!(hits.len() <= 10);
+    }
+
+    /// A term too short for any latitude skips the automaton entirely and
+    /// resolves to itself, so opting in cannot make a two character query
+    /// sweep the dictionary.
+    #[test]
+    fn a_too_short_term_expands_only_to_itself() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![
+            TextDocumentInput::new(1, "an ax by cd".to_string()),
+            TextDocumentInput::new(2, "ab cd ef".to_string()),
+        ];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+        let searcher = reader.searcher();
+
+        let expanded = expand_term(&searcher, fields.body, "ab", 2).expect("expansion succeeds");
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded.get("ab").copied(), Some(0));
     }
 
     /// A boost of one leaves the exact hit's BM25 score untouched, and each
