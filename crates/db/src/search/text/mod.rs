@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{future::try_join_all, StreamExt};
+use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use range_cache::{CacheCapacity, RangeCache};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,13 +24,14 @@ use slatedb::object_store::{
 use tantivy::collector::{FilterCollector, TopDocs};
 use tantivy::directory::RamDirectory;
 use tantivy::merge_policy::NoMergePolicy;
-use tantivy::query::{BooleanQuery, Occur, TermQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, TermQuery};
 use tantivy::schema::{IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions};
 use tantivy::tokenizer::{
     Language, LowerCaser, PreTokenizedString, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
     WhitespaceTokenizer, MAX_TOKEN_LEN,
 };
 use tantivy::{Index, IndexReader, IndexSettings, ReloadPolicy, TantivyDocument, Term};
+use tantivy_fst::Automaton;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -155,12 +157,129 @@ pub(crate) struct TextSearchRequest<'a> {
     query: &'a str,
     k: usize,
     scope: TextSearchScope,
+    /// Maximum edit distance for keyword matching. Zero keeps the exact
+    /// behaviour, which is what every caller gets unless it opts in.
+    fuzzy_distance: u8,
 }
 
 impl<'a> TextSearchRequest<'a> {
     pub(crate) const fn new(query: &'a str, k: usize, scope: TextSearchScope) -> Self {
-        Self { query, k, scope }
+        Self {
+            query,
+            k,
+            scope,
+            fuzzy_distance: 0,
+        }
     }
+
+    /// Opt this request into fuzzy keyword matching. Distances above
+    /// [`MAX_FUZZY_DISTANCE`] are clamped, since the automaton cannot build
+    /// past it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn with_fuzzy_distance(mut self, distance: u8) -> Self {
+        self.fuzzy_distance = if distance > MAX_FUZZY_DISTANCE {
+            MAX_FUZZY_DISTANCE
+        } else {
+            distance
+        };
+        self
+    }
+}
+
+/// Largest edit distance a Levenshtein automaton can be built for. tantivy
+/// memoises builders in a `[[OnceCell; 2]; 3]`, so anything above two is
+/// rejected outright rather than being slow.
+pub(crate) const MAX_FUZZY_DISTANCE: u8 = 2;
+
+/// A Levenshtein DFA presented as the automaton the term dictionary expects.
+///
+/// tantivy has an identical wrapper behind `FuzzyTermQuery`, but it is
+/// `pub(crate)`. It is not reused here anyway: `FuzzyTermQuery` builds an
+/// `AutomatonWeight`, whose scorer is a `ConstScorer`, so every match scores
+/// the same and BM25 ordering is lost. Driving the automaton over the term
+/// dictionary and scoring the terms it finds with ordinary `TermQuery` keeps
+/// ranking intact.
+#[derive(Clone)]
+struct FuzzyAutomaton(Arc<DFA>);
+
+impl Automaton for FuzzyAutomaton {
+    type State = u32;
+
+    fn start(&self) -> Self::State {
+        self.0.initial_state()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        matches!(self.0.distance(*state), Distance::Exact(_))
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        *state != levenshtein_automata::SINK_STATE
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.0.transition(*state, byte)
+    }
+}
+
+/// Every indexed term within `distance` edits of `term`, paired with the edit
+/// distance that matched it.
+///
+/// Term dictionaries are per segment, so each segment is swept and the results
+/// unioned. A term reachable from several segments keeps its smallest distance.
+fn expand_term(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    term: &str,
+    distance: u8,
+) -> Result<BTreeMap<String, u8>, HelixDbError> {
+    let dfa = Arc::new(LevenshteinAutomatonBuilder::new(distance, true).build_dfa(term));
+    let mut matches: BTreeMap<String, u8> = BTreeMap::new();
+
+    for segment_reader in searcher.segment_readers() {
+        let inverted = segment_reader.inverted_index(field).map_err(|err| {
+            HelixDbError::InvariantViolation(format!(
+                "text inverted index for fuzzy expansion is unavailable: {err}"
+            ))
+        })?;
+        let mut stream = inverted
+            .terms()
+            .search(FuzzyAutomaton(Arc::clone(&dfa)))
+            .into_stream()
+            .map_err(|err| {
+                HelixDbError::InvariantViolation(format!(
+                    "text term dictionary stream failed during fuzzy expansion: {err}"
+                ))
+            })?;
+        while stream.advance() {
+            let Ok(text) = std::str::from_utf8(stream.key()) else {
+                continue;
+            };
+            let edits = match dfa.eval(text.as_bytes()) {
+                Distance::Exact(edits) => edits,
+                Distance::AtLeast(_) => continue,
+            };
+            matches
+                .entry(text.to_owned())
+                .and_modify(|best| {
+                    if edits < *best {
+                        *best = edits;
+                    }
+                })
+                .or_insert(edits);
+        }
+    }
+
+    Ok(matches)
+}
+
+/// Boost applied to a term found at `edits` distance from what was typed.
+///
+/// An exact match keeps its full BM25 score and each further edit halves it, so
+/// a typo can still surface a document without displacing the documents that
+/// actually contain the word.
+fn fuzzy_boost(edits: u8) -> f32 {
+    1.0 / f32::from(edits + 1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,7 +631,12 @@ async fn search_manifest_with_state_source(
 ) -> Result<Vec<TextSearchHit>, HelixDbError> {
     const SPLIT_READ_CONCURRENCY: usize = 8;
     const STATE_BATCH_SIZE: usize = 512;
-    let TextSearchRequest { query, k, scope } = request;
+    let TextSearchRequest {
+        query,
+        k,
+        scope,
+        fuzzy_distance,
+    } = request;
     if k == 0 || scope.is_empty_restricted() {
         return Ok(Vec::new());
     }
@@ -590,7 +714,14 @@ async fn search_manifest_with_state_source(
                 async move {
                     tokio::task::spawn_blocking(move || {
                         split_reader
-                            .search_candidates(analyzer, &query, limit, statistics.as_ref(), &scope)
+                            .search_candidates(
+                                analyzer,
+                                &query,
+                                limit,
+                                statistics.as_ref(),
+                                &scope,
+                                fuzzy_distance,
+                            )
                             .map(|candidates| (index, limit, candidates))
                     })
                     .await
@@ -730,11 +861,17 @@ impl SplitSearchReader {
         limit: usize,
         statistics: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
         scope: &TextSearchScope,
+        fuzzy_distance: u8,
     ) -> Result<Vec<TextSearchCandidate>, HelixDbError> {
         match self {
-            Self::Cached(split) => {
-                split.search_candidates_with_statistics(analyzer, query, limit, statistics, scope)
-            }
+            Self::Cached(split) => split.search_candidates_with_statistics(
+                analyzer,
+                query,
+                limit,
+                statistics,
+                scope,
+                fuzzy_distance,
+            ),
             Self::Direct {
                 index,
                 reader,
@@ -742,7 +879,14 @@ impl SplitSearchReader {
             } => {
                 register_analyzers(index, analyzer);
                 search_reader_candidates_with_statistics(
-                    reader, *fields, analyzer, query, limit, statistics, scope,
+                    reader,
+                    *fields,
+                    analyzer,
+                    query,
+                    limit,
+                    statistics,
+                    scope,
+                    fuzzy_distance,
                 )
             }
         }
@@ -1739,9 +1883,11 @@ pub(crate) fn search_reader_candidates(
         k,
         None,
         &TextSearchScope::Unrestricted,
+        0,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_reader_candidates_with_statistics(
     reader: &IndexReader,
     fields: TextSchemaFields,
@@ -1750,6 +1896,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
     k: usize,
     statistics: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
     scope: &TextSearchScope,
+    fuzzy_distance: u8,
 ) -> Result<Vec<TextSearchCandidate>, HelixDbError> {
     let terms = analyze_query_terms(analyzer, query);
     if terms.is_empty() || k == 0 {
@@ -1785,18 +1932,44 @@ pub(crate) fn search_reader_candidates_with_statistics(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let clauses = terms
-        .into_iter()
-        .map(|term| {
-            (
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.body, &term),
+    let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = if fuzzy_distance == 0 {
+        terms
+            .into_iter()
+            .map(|term| {
+                (
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.body, &term),
+                        IndexRecordOption::WithFreqs,
+                    )) as Box<dyn tantivy::query::Query>,
+                )
+            })
+            .collect()
+    } else {
+        // Expand each analysed term to the indexed terms within edit distance,
+        // then score those with ordinary TermQuery so BM25 still orders them.
+        // A fuzzy match is boosted down by its distance, so a document that
+        // actually contains the word outranks one that merely nearly does.
+        let mut expanded: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+        for term in &terms {
+            for (candidate, edits) in expand_term(&searcher, fields.body, term, fuzzy_distance)? {
+                let scored = TermQuery::new(
+                    Term::from_field_text(fields.body, &candidate),
                     IndexRecordOption::WithFreqs,
-                )) as Box<dyn tantivy::query::Query>,
-            )
-        })
-        .collect::<Vec<_>>();
+                );
+                let scored: Box<dyn tantivy::query::Query> = if edits == 0 {
+                    Box::new(scored)
+                } else {
+                    Box::new(BoostQuery::new(Box::new(scored), fuzzy_boost(edits)))
+                };
+                expanded.push((Occur::Should, scored));
+            }
+        }
+        if expanded.is_empty() {
+            return Ok(Vec::new());
+        }
+        expanded
+    };
     let query = BooleanQuery::new(clauses);
     let collector = TopDocs::with_limit(k).tweak_score(|segment_reader| {
         let entity_ids = segment_reader
@@ -2388,6 +2561,7 @@ mod tests {
             3,
             None,
             &scope,
+            0,
         )
         .unwrap();
 
@@ -2449,11 +2623,143 @@ mod tests {
                 requested_k,
                 None,
                 &scope,
+                0,
             )
             .unwrap();
 
             prop_assert_eq!(restricted, oracle);
         }
+    }
+
+    /// Searching with a distance of zero has to leave the existing behaviour
+    /// exactly as it was, since that is what every caller gets by default.
+    #[test]
+    fn fuzzy_off_is_identical_to_exact_search() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![
+            TextDocumentInput::new(1, "the helix database".to_string()),
+            TextDocumentInput::new(2, "a helox typo".to_string()),
+            TextDocumentInput::new(3, "unrelated content".to_string()),
+        ];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let exact = search_reader_candidates(&reader, fields, definition.analyzer(), "helix", 10)
+            .expect("exact search");
+        let off = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helix",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            0,
+        )
+        .expect("fuzzy disabled search");
+
+        assert_eq!(off, exact);
+        assert_eq!(off.len(), 1, "only the exact document should match");
+        assert_eq!(off[0].entity_id, 1);
+    }
+
+    /// The point of the feature: a term one edit away is unreachable without it.
+    #[test]
+    fn fuzzy_reaches_a_typo_that_exact_search_cannot() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![TextDocumentInput::new(1, "a helox typo".to_string())];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let exact = search_reader_candidates(&reader, fields, definition.analyzer(), "helix", 10)
+            .expect("exact search");
+        assert!(exact.is_empty(), "exact search must not reach the typo");
+
+        let fuzzy = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helix",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            1,
+        )
+        .expect("fuzzy search");
+        assert_eq!(fuzzy.len(), 1);
+        assert_eq!(fuzzy[0].entity_id, 1);
+    }
+
+    /// This is the reason the expansion emits real TermQuery clauses instead of
+    /// using FuzzyTermQuery. FuzzyTermQuery scores every match through a
+    /// ConstScorer, so a document that actually contains the word and one that
+    /// merely resembles it would come back indistinguishable. Expanding to terms
+    /// keeps BM25, and the distance boost keeps the exact hit on top.
+    #[test]
+    fn an_exact_hit_outranks_a_fuzzy_one() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![
+            TextDocumentInput::new(1, "helix".to_string()),
+            TextDocumentInput::new(2, "helox".to_string()),
+        ];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helix",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            1,
+        )
+        .expect("fuzzy search");
+
+        assert_eq!(hits.len(), 2, "both documents should be reachable");
+        assert_eq!(hits[0].entity_id, 1, "the exact match must rank first");
+        assert_eq!(hits[1].entity_id, 2);
+        assert!(
+            hits[0].score > hits[1].score,
+            "exact {} should outscore fuzzy {}",
+            hits[0].score,
+            hits[1].score
+        );
+    }
+
+    /// The automaton builder is memoised for distances zero through two, so a
+    /// larger request has to be clamped rather than passed through and rejected.
+    #[test]
+    fn fuzzy_distance_is_clamped_to_what_the_automaton_supports() {
+        let request =
+            TextSearchRequest::new("q", 10, TextSearchScope::Unrestricted).with_fuzzy_distance(9);
+        assert_eq!(request.fuzzy_distance, MAX_FUZZY_DISTANCE);
+
+        let request =
+            TextSearchRequest::new("q", 10, TextSearchScope::Unrestricted).with_fuzzy_distance(1);
+        assert_eq!(request.fuzzy_distance, 1);
+
+        let request = TextSearchRequest::new("q", 10, TextSearchScope::Unrestricted);
+        assert_eq!(
+            request.fuzzy_distance, 0,
+            "callers that do not opt in must stay exact"
+        );
+    }
+
+    /// A boost of one leaves the exact hit's BM25 score untouched, and each
+    /// further edit halves it.
+    #[test]
+    fn fuzzy_boost_decays_with_distance() {
+        assert_eq!(fuzzy_boost(0), 1.0);
+        assert_eq!(fuzzy_boost(1), 0.5);
+        assert!(fuzzy_boost(2) < fuzzy_boost(1));
     }
 
     #[test]
