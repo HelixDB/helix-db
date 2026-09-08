@@ -18,6 +18,7 @@ pub(in crate::rules) enum AccessSourceParts<'a, Plan> {
         semantics: ir::EqualityIndexValueSemantics,
     },
     RangeIndex {
+        iteration: ir::RangeScanIteration,
         key: &'a catalog::ScopedPropertyDirectionKey,
     },
     VectorSearch {

@@ -179,6 +179,7 @@ mod tests {
             ),
             (
                 ir::NodeAccessPlan::RangeIndex {
+                    iteration: crate::ir::RangeScanIteration::Forward,
                     index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
                     key: range_key,
                     range: ir::IndexRange::All,
@@ -275,6 +276,7 @@ mod tests {
             ),
             (
                 ir::EdgeAccessPlan::RangeIndex {
+                    iteration: crate::ir::RangeScanIteration::Forward,
                     index: catalog::EdgeRangeIndexMeta::try_new("edge_range").unwrap(),
                     key: range_key,
                     range: ir::IndexRange::All,

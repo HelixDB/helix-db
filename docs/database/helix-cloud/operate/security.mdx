@@ -24,8 +24,10 @@ Requests without a valid token are rejected at the gateway before reaching any d
 Token rotation and revocation take immediate effect from the dashboard.
 
 The Helix CLI does not use these application keys. Cloud CLI operations authenticate with a rotating
-WorkOS session, and Cloud CLI queries execute through the backend broker. Interactive MCP also uses
-WorkOS OAuth; explicitly scoped service credentials are reserved for headless API/MCP automation.
+WorkOS session, and Cloud CLI queries execute through the backend broker. Interactive MCP uses WorkOS
+OAuth for human sessions and the WorkOS agent registration flow for agents. The public unified MCP
+endpoint does not accept service credentials; use explicitly scoped service credentials for headless
+HTTP API calls or the separate Admin MCP service where it is deployed.
 
 ## Encryption
 

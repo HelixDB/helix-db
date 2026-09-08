@@ -21,6 +21,7 @@ fn literal_search_limit(value: usize) -> ir::SearchLimitPlan {
 
 fn node_range(direction: helix_ast::index::RangeIndexDirection) -> ir::NodeAccessPlan {
     ir::NodeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new("User", "age", direction).unwrap(),
         range: ir::IndexRange::All,
@@ -29,6 +30,7 @@ fn node_range(direction: helix_ast::index::RangeIndexDirection) -> ir::NodeAcces
 
 fn edge_range(direction: helix_ast::index::RangeIndexDirection) -> ir::EdgeAccessPlan {
     ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("edge_range").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new("FOLLOWS", "score", direction).unwrap(),
         range: ir::IndexRange::All,

@@ -26,22 +26,37 @@ impl<'db> ExecutionContext<'db> {
         plan: &exec::ExecAccessPlan,
         limit: Option<properties::PositiveUsize>,
     ) -> Result<ExecutionValue> {
-        let mut plan = plan;
-        let mut limit = limit;
-        loop {
-            self.check_execution_deadline()?;
-            match plan {
-                exec::ExecAccessPlan::Limited(limited) => {
-                    limit = Some(tightest_access_limit(limit, limited.limit()));
-                    plan = limited.source();
-                }
-                exec::ExecAccessPlan::Node(plan) => {
-                    return self.execute_node_access(plan, limit).await;
-                }
-                exec::ExecAccessPlan::Edge(plan) => {
-                    return self.execute_edge_access(plan, limit).await;
-                }
-            }
+        self.check_execution_deadline()?;
+        let mut source = plan;
+        let mut bounds = Vec::new();
+        while let exec::ExecAccessPlan::Limited(limited) = source {
+            bounds.push(limited.limit());
+            source = limited.source();
+        }
+        let mut resolved = limit.map_or(usize::MAX, properties::PositiveUsize::get);
+        for bound in bounds.iter().rev() {
+            let value = match bound {
+                exec::ExecAccessLimit::Zero => 0,
+                exec::ExecAccessLimit::Static(value) => value.get(),
+                exec::ExecAccessLimit::Dynamic(expr) => super::super::stream::eval_stream_bound(
+                    &ir::StreamBoundPlan::Expr(expr.clone()),
+                    &self.params,
+                )?,
+            };
+            resolved = resolved.min(value);
+        }
+        if resolved == 0 {
+            return Ok(ExecutionValue::Stream(Vec::new()));
+        }
+        let limit = if bounds.is_empty() {
+            limit
+        } else {
+            Some(properties::PositiveUsize::at_least_one(resolved))
+        };
+        match source {
+            exec::ExecAccessPlan::Node(plan) => self.execute_node_access(plan, limit).await,
+            exec::ExecAccessPlan::Edge(plan) => self.execute_edge_access(plan, limit).await,
+            exec::ExecAccessPlan::Limited(_) => unreachable!("all bound layers were resolved"),
         }
     }
 
@@ -130,8 +145,22 @@ impl<'db> ExecutionContext<'db> {
                 let ids = limited_index_ids(read.await?, limit);
                 return self.verified_node_rows(ids);
             }
-            exec::ExecNodeAccessPlan::RangeIndex { key, range, .. } => {
-                let ids = self.node_range_index_ids(key, range, limit).await?;
+            exec::ExecNodeAccessPlan::RangeIndex {
+                key,
+                range,
+                iteration,
+                ..
+            } => {
+                let ids = self
+                    .range_index_ids(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        range,
+                        *iteration,
+                        &[],
+                        limit,
+                    )
+                    .await?;
                 return self.verified_node_rows(ids);
             }
             exec::ExecNodeAccessPlan::SecondarySet { set } => {
@@ -248,8 +277,22 @@ impl<'db> ExecutionContext<'db> {
                 let ids = limited_index_ids(read.await?, limit);
                 return self.verified_edge_rows(ids);
             }
-            exec::ExecEdgeAccessPlan::RangeIndex { key, range, .. } => {
-                let ids = self.edge_range_index_ids(key, range, limit).await?;
+            exec::ExecEdgeAccessPlan::RangeIndex {
+                key,
+                range,
+                iteration,
+                ..
+            } => {
+                let ids = self
+                    .range_index_ids(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        range,
+                        *iteration,
+                        &[],
+                        limit,
+                    )
+                    .await?;
                 return self.verified_edge_rows(ids);
             }
             exec::ExecEdgeAccessPlan::SecondarySet { set } => {
@@ -312,13 +355,6 @@ fn truncate_search_results(
     }
 }
 
-fn tightest_access_limit(
-    current: Option<properties::PositiveUsize>,
-    next: properties::PositiveUsize,
-) -> properties::PositiveUsize {
-    current.filter(|current| current <= &next).unwrap_or(next)
-}
-
 #[cfg(any(test, feature = "production-coverage"))]
 #[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
 pub(super) mod tests {
@@ -328,6 +364,100 @@ pub(super) mod tests {
 
     use super::super::super::{test_support, ElementRef, ExecutionRow};
     use super::*;
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn dynamic_access_limits_validate_inner_first_and_zero_skips_catalog() {
+        use crate::error::HelixDbError;
+        let db = test_support::open_db_with_config(test_support::in_memory_config(
+            "dynamic-access-bounds",
+        ))
+        .await;
+        let base = exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::RangeIndex {
+            index: catalog::NodeRangeIndexMeta::try_new("missing-range").unwrap(),
+            key: catalog::ScopedPropertyDirectionKey::try_new(
+                "User",
+                "age",
+                helix_ast::index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+            range: ir::IndexRange::All,
+            iteration: ir::RangeScanIteration::Reverse,
+        });
+        let dynamic = |name: &str| {
+            exec::ExecAccessLimit::Dynamic(
+                ir::StreamBoundExprPlan::new(helix_ast::expr::Expr::param(name)).unwrap(),
+            )
+        };
+        for (value, expected) in [
+            (PropertyValue::I64(0), "zero"),
+            (
+                PropertyValue::I64(-1),
+                "stream bound expression returned -1",
+            ),
+            (PropertyValue::String("bad".into()), "not an i64"),
+            (PropertyValue::I64(1), "catalog"),
+        ] {
+            let params =
+                context::ParamBindings::default().with_value(test_support::name("limit"), value);
+            let mut execution = ExecutionContext::new(&db, params);
+            execution.enable_request_read_view().await.unwrap();
+            let result = execution
+                .execute_access(&base.clone().limited_by(dynamic("limit")))
+                .await;
+            match expected {
+                "zero" => assert_eq!(result.unwrap(), ExecutionValue::Stream(Vec::new())),
+                "catalog" => assert!(matches!(
+                    result,
+                    Err(HelixDbError::IndexLifecycleUnavailable { .. })
+                )),
+                message => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+            execution.close_request_read_view().unwrap();
+        }
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        // Outer zero must not suppress validation of an inner runtime bound.
+        let plan = base
+            .clone()
+            .limited_by(dynamic("inner"))
+            .limited_by(exec::ExecAccessLimit::Zero);
+        assert!(execution
+            .execute_access(&plan)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("inner"));
+        let plan = base
+            .clone()
+            .limited_by(dynamic("inner"))
+            .limited_by(dynamic("outer"));
+        assert!(execution
+            .execute_access(&plan)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("inner"));
+        // Inner zero still validates an outer runtime bound.
+        let plan = base
+            .clone()
+            .limited_by(exec::ExecAccessLimit::Zero)
+            .limited_by(dynamic("outer"));
+        assert!(execution
+            .execute_access(&plan)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("outer"));
+        execution.fail_deadline_after(0);
+        assert!(matches!(
+            execution
+                .execute_access(&base.limited_by(dynamic("missing")))
+                .await,
+            Err(HelixDbError::QueryDeadlineExceeded)
+        ));
+        execution.close_request_read_view().unwrap();
+    }
 
     fn positive(value: usize) -> properties::PositiveUsize {
         properties::PositiveUsize::new(value).expect("positive test limit")
@@ -368,23 +498,6 @@ pub(super) mod tests {
         assert_eq!(
             results[0].entity_id(),
             crate::search::vector::VectorEntityId::Node(1)
-        );
-    }
-
-    #[cfg_attr(test, test)]
-    fn tightest_access_limit_keeps_the_smallest_nested_limit() {
-        assert_eq!(tightest_access_limit(None, positive(5)).get(), 5);
-        assert_eq!(
-            tightest_access_limit(Some(positive(3)), positive(5)).get(),
-            3
-        );
-        assert_eq!(
-            tightest_access_limit(Some(positive(8)), positive(5)).get(),
-            5
-        );
-        assert_eq!(
-            tightest_access_limit(Some(positive(5)), positive(5)).get(),
-            5
         );
     }
 
@@ -592,6 +705,7 @@ pub(super) mod tests {
         }
 
         let node_range = exec::ExecNodeSecondaryRangePlan {
+            iteration: helix_planner::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::new(test_support::name("node_range:User:rank:Asc")),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -602,6 +716,7 @@ pub(super) mod tests {
             range: ir::IndexRange::All,
         };
         let edge_range = exec::ExecEdgeSecondaryRangePlan {
+            iteration: helix_planner::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::new(test_support::name(
                 "edge_range:FOLLOWS:rank:Asc",
             )),
@@ -861,6 +976,7 @@ pub(super) mod tests {
             exec::ExecNodeAccessPlan::SecondarySet {
                 set: exec::ExecNodeSecondarySetPlan::OrderedIntersect {
                     driver: exec::ExecNodeSecondaryRangePlan {
+                        iteration: helix_planner::ir::RangeScanIteration::Forward,
                         index: catalog::NodeRangeIndexMeta::new(test_support::name(
                             "node_range:User:rank:Asc",
                         )),
@@ -914,6 +1030,7 @@ pub(super) mod tests {
             exec::ExecEdgeAccessPlan::SecondarySet {
                 set: exec::ExecEdgeSecondarySetPlan::OrderedIntersect {
                     driver: exec::ExecEdgeSecondaryRangePlan {
+                        iteration: helix_planner::ir::RangeScanIteration::Forward,
                         index: catalog::EdgeRangeIndexMeta::new(test_support::name(
                             "edge_range:FOLLOWS:rank:Asc",
                         )),
@@ -1128,7 +1245,6 @@ pub(super) mod tests {
     #[cfg(all(feature = "production-coverage", not(test)))]
     pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
         truncate_ids_applies_optional_positive_limit();
-        tightest_access_limit_keeps_the_smallest_nested_limit();
         access_dispatch_covers_node_equality_and_edge_source_variants().await;
         exact_access_dispatch_covers_bitmap_unique_scan_and_dynamic_families().await;
         exact_access_dispatch_rejects_each_invalid_dynamic_and_set_driver_contract().await;

@@ -4423,6 +4423,7 @@ fn public_boundary_read_plan(
                     ))),
                     key,
                     range: ir::IndexRange::All,
+                    iteration: ir::RangeScanIteration::Forward,
                 })
             }
             ValidatedSecondaryIndexDefinition::EdgeRange { direction, .. } => {
@@ -4438,6 +4439,7 @@ fn public_boundary_read_plan(
                     ))),
                     key,
                     range: ir::IndexRange::All,
+                    iteration: ir::RangeScanIteration::Forward,
                 })
             }
         },

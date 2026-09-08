@@ -57,14 +57,14 @@ fn seed_rule_set_explores_access_order_before_access_implementation() {
     let best = result.best_alternative(result.root()).unwrap();
 
     assert!(result.memo().group_count() >= 1);
-    assert!(result.memo().expression_count() >= 2);
+    assert!(result.memo().expression_count() >= 1);
     assert!(result.metrics().alternatives_considered >= 1);
     assert!(matches!(
         &best.expr,
-        physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::RangeIndex,
-            ..
-        }
+        physical::PhysicalExpr::Pipeline(pipeline) if matches!(pipeline.ops(), [
+            physical::PhysicalPipelineOp::Access { access: physical::PhysicalAccess::RangeIndex, .. },
+            physical::PhysicalPipelineOp::OrderSatisfiedByAccess { .. }
+        ])
     ));
 }
 
@@ -94,14 +94,14 @@ fn seed_rule_set_rewrites_access_order_to_catalog_direction_before_implementatio
     let best = result.best_alternative(result.root()).unwrap();
 
     assert!(result.memo().group_count() >= 1);
-    assert!(result.memo().expression_count() >= 2);
+    assert!(result.memo().expression_count() >= 1);
     assert!(result.metrics().alternatives_considered >= 1);
     assert!(matches!(
         &best.expr,
-        physical::PhysicalExpr::Access {
-            access: physical::PhysicalAccess::RangeIndex,
-            ..
-        }
+        physical::PhysicalExpr::Pipeline(pipeline) if matches!(pipeline.ops(), [
+            physical::PhysicalPipelineOp::Access { access: physical::PhysicalAccess::RangeIndex, .. },
+            physical::PhysicalPipelineOp::OrderSatisfiedByAccess { .. }
+        ])
     ));
     assert_eq!(
         best.delivered.ordering,

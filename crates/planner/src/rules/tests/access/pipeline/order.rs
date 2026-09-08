@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn access_pipeline_order_rule_rewrites_range_direction_then_elides_satisfied_order() {
+fn access_pipeline_order_rule_rewrites_range_direction_and_retains_logical_order() {
     let rule = AccessPipelineOrderRule::default();
     let storage = cost::StorageCostProfile::default();
     let desc_key = range_key("User", "age", helix_ast::index::RangeIndexDirection::Desc);
@@ -20,7 +20,7 @@ fn access_pipeline_order_rule_rewrites_range_direction_then_elides_satisfied_ord
         .unwrap(),
     );
 
-    let access = logical_access_path(rule.apply(optimizer::RuleInput {
+    let rewritten = logical_access_pipeline(rule.apply(optimizer::RuleInput {
         expr: &expr,
         storage: &storage,
         indexes: &indexes,
@@ -29,7 +29,7 @@ fn access_pipeline_order_rule_rewrites_range_direction_then_elides_satisfied_ord
     }));
     assert_eq!(rule.metadata().id.as_ref(), "access_pipeline_order");
     assert!(matches!(
-        access,
+        rewritten.access(),
         logical::AccessPath::Node(path)
             if matches!(
                 path.source().as_ref(),
@@ -80,12 +80,12 @@ fn access_pipeline_order_rule_keeps_suffix_after_rewriting_range_direction() {
     ));
     assert!(matches!(
         rewritten.ops(),
-        [logical::StreamPipelineOp::Window { window: actual }] if *actual == window
+        [logical::StreamPipelineOp::Order { ordering }, logical::StreamPipelineOp::Window { window: actual }] if *actual == window && ordering == &desc_order_keys()
     ));
 }
 
 #[test]
-fn access_pipeline_order_rule_elides_satisfied_order_and_keeps_suffix() {
+fn access_pipeline_order_rule_retains_satisfied_order_and_suffix() {
     let rule = AccessPipelineOrderRule::default();
     let storage = cost::StorageCostProfile::default();
     let indexes = catalog::IndexCatalogSnapshot::default();
@@ -110,13 +110,19 @@ fn access_pipeline_order_rule_elides_satisfied_order_and_keeps_suffix() {
         .unwrap(),
     );
 
-    let rewritten = logical_access_pipeline(rule.apply(optimizer::RuleInput {
-        expr: &expr,
-        storage: &storage,
-        indexes: &indexes,
-        planner_limits: default_planner_limits(),
-        stats: default_stats(),
-    }));
+    assert_eq!(
+        rule.apply(optimizer::RuleInput {
+            expr: &expr,
+            storage: &storage,
+            indexes: &indexes,
+            planner_limits: default_planner_limits(),
+            stats: default_stats(),
+        }),
+        optimizer::RuleResult::NotApplicable
+    );
+    let logical::LogicalExpr::AccessPipeline(rewritten) = &expr else {
+        unreachable!()
+    };
 
     assert!(matches!(
         rewritten.access(),
@@ -129,12 +135,12 @@ fn access_pipeline_order_rule_elides_satisfied_order_and_keeps_suffix() {
     ));
     assert!(matches!(
         rewritten.ops(),
-        [logical::StreamPipelineOp::Window { window: actual }] if *actual == window
+        [logical::StreamPipelineOp::Order { ordering }, logical::StreamPipelineOp::Window { window: actual }] if *actual == window && ordering == &desc_order_keys()
     ));
 }
 
 #[test]
-fn access_pipeline_order_rule_elides_order_after_residual_filters() {
+fn access_pipeline_order_rule_retains_order_after_residual_filters() {
     let rule = AccessPipelineOrderRule::default();
     let storage = cost::StorageCostProfile::default();
     let indexes = catalog::IndexCatalogSnapshot::default();
@@ -165,13 +171,19 @@ fn access_pipeline_order_rule_elides_order_after_residual_filters() {
         .unwrap(),
     );
 
-    let rewritten = logical_access_pipeline(rule.apply(optimizer::RuleInput {
-        expr: &expr,
-        storage: &storage,
-        indexes: &indexes,
-        planner_limits: default_planner_limits(),
-        stats: default_stats(),
-    }));
+    assert_eq!(
+        rule.apply(optimizer::RuleInput {
+            expr: &expr,
+            storage: &storage,
+            indexes: &indexes,
+            planner_limits: default_planner_limits(),
+            stats: default_stats(),
+        }),
+        optimizer::RuleResult::NotApplicable
+    );
+    let logical::LogicalExpr::AccessPipeline(rewritten) = &expr else {
+        unreachable!()
+    };
 
     assert!(matches!(
         rewritten.access(),
@@ -184,7 +196,13 @@ fn access_pipeline_order_rule_elides_order_after_residual_filters() {
     ));
     assert_eq!(
         rewritten.ops(),
-        &[filter, logical::StreamPipelineOp::Window { window }]
+        &[
+            filter,
+            logical::StreamPipelineOp::Order {
+                ordering: desc_order_keys()
+            },
+            logical::StreamPipelineOp::Window { window }
+        ]
     );
 }
 
@@ -240,7 +258,13 @@ fn access_pipeline_order_rule_promotes_the_requested_intersection_driver() {
     ));
     assert_eq!(
         rewritten.ops(),
-        &[filter, logical::StreamPipelineOp::Window { window }]
+        &[
+            filter,
+            logical::StreamPipelineOp::Order {
+                ordering: order_keys_for("score", helix_ast::traversal::Order::Asc)
+            },
+            logical::StreamPipelineOp::Window { window }
+        ]
     );
 }
 

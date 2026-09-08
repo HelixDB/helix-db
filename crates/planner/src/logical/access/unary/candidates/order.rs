@@ -39,37 +39,31 @@ fn access_order_satisfaction_candidate(access: &AccessPath, ordering: &ir::Order
     let [required] = ordering.as_ref() else {
         return false;
     };
-    match access {
-        AccessPath::Node(path) => match path.source().as_ref() {
+    fn node_candidate(source: &ir::NodeAccessPlan, required: &ir::OrderKey) -> bool {
+        match source {
             ir::NodeAccessPlan::RangeIndex { key, .. } => range_satisfies_order(key, required),
-            ir::NodeAccessPlan::Intersect(children)
-                if path.source().is_secondary_set_eligible() =>
-            {
-                children.iter().any(|child| {
-                    matches!(
-                        child.as_ref(),
-                        ir::NodeAccessPlan::RangeIndex { key, .. }
-                            if range_satisfies_order(key, required)
-                    )
-                })
+            ir::NodeAccessPlan::Intersect(children) if source.is_secondary_set_eligible() => {
+                children
+                    .iter()
+                    .any(|child| node_candidate(child.as_ref(), required))
             }
             _ => false,
-        },
-        AccessPath::Edge(path) => match path.source().as_ref() {
+        }
+    }
+    fn edge_candidate(source: &ir::EdgeAccessPlan, required: &ir::OrderKey) -> bool {
+        match source {
             ir::EdgeAccessPlan::RangeIndex { key, .. } => range_satisfies_order(key, required),
-            ir::EdgeAccessPlan::Intersect(children)
-                if path.source().is_secondary_set_eligible() =>
-            {
-                children.iter().any(|child| {
-                    matches!(
-                        child.as_ref(),
-                        ir::EdgeAccessPlan::RangeIndex { key, .. }
-                            if range_satisfies_order(key, required)
-                    )
-                })
+            ir::EdgeAccessPlan::Intersect(children) if source.is_secondary_set_eligible() => {
+                children
+                    .iter()
+                    .any(|child| edge_candidate(child.as_ref(), required))
             }
             _ => false,
-        },
+        }
+    }
+    match access {
+        AccessPath::Node(path) => node_candidate(path.source().as_ref(), required),
+        AccessPath::Edge(path) => edge_candidate(path.source().as_ref(), required),
     }
 }
 
@@ -77,7 +71,7 @@ fn range_satisfies_order(
     key: &catalog::ScopedPropertyDirectionKey,
     required: &ir::OrderKey,
 ) -> bool {
-    key.property == required.property && key.direction == range_direction_for_order(required.order)
+    key.property == required.property
 }
 
 fn range_direction_candidate(

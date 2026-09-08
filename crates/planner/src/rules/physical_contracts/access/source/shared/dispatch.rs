@@ -40,9 +40,13 @@ where
             },
             storage,
         ),
-        family::AccessSourceParts::RangeIndex { key } => {
-            leaf::range_index_contract(element, key, F::range_cardinality(stats, key), storage)
-        }
+        family::AccessSourceParts::RangeIndex { key, iteration } => leaf::range_index_contract(
+            element,
+            key,
+            iteration,
+            F::range_cardinality(stats, key),
+            storage,
+        ),
         family::AccessSourceParts::VectorSearch { k } => {
             leaf::search_contract(element, physical::PhysicalAccess::VectorSearch, k, storage)
         }
@@ -88,6 +92,22 @@ fn set_contract<F>(
 where
     F: family::AccessSourceFamily,
 {
+    fn flatten_intersections<F: family::AccessSourceFamily>(plans: Vec<&F::Plan>) -> Vec<&F::Plan> {
+        plans
+            .into_iter()
+            .flat_map(|plan| match F::source_parts(plan) {
+                family::AccessSourceParts::Intersect(children) => {
+                    flatten_intersections::<F>(children)
+                }
+                _ => vec![plan],
+            })
+            .collect()
+    }
+    let plans = if access == physical::PhysicalAccess::SetIntersection {
+        flatten_intersections::<F>(plans)
+    } else {
+        plans
+    };
     set::set_contract(
         element,
         access,

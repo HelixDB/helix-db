@@ -43,7 +43,7 @@ fn cascades_chosen_access_matrix_proves_index_family_and_trace() {
         ctx(indexes.clone()),
     );
     assert_selected_root_family(&node_range_desc, "alternative");
-    assert_selected_rule(&node_range_desc, KnownRuleId::SeedAccessPath);
+    assert_selected_rule(&node_range_desc, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&node_range_desc),
         ExecAccessPlan::Node(ExecNodeAccessPlan::RangeIndex { key, range, .. })
@@ -84,7 +84,7 @@ fn cascades_chosen_access_matrix_proves_index_family_and_trace() {
         ctx(indexes),
     );
     assert_selected_root_family(&edge_range_desc, "alternative");
-    assert_selected_rule(&edge_range_desc, KnownRuleId::SeedAccessPath);
+    assert_selected_rule(&edge_range_desc, KnownRuleId::SeedAccessPipeline);
     assert!(matches!(
         unwrapped_first_exec_access(&edge_range_desc),
         ExecAccessPlan::Edge(ExecEdgeAccessPlan::RangeIndex { key, range, .. })

@@ -94,6 +94,32 @@ impl StorageCostProfile {
         }
     }
 
+    /// Estimate traversal independently of the physical index direction.
+    /// This charges every estimated visited entry, never just the output limit.
+    pub fn ordered_range_scan(
+        &self,
+        rows: EstimatedRows,
+        iteration: crate::ir::RangeScanIteration,
+    ) -> CostVector {
+        let mut cost = self.range_scan(rows);
+        if iteration == crate::ir::RangeScanIteration::Reverse {
+            let extra = u128::from(self.reverse_range_per_1000.as_micros())
+                * u128::from(rows.as_rows())
+                / 1_000;
+            cost.latency = cost.latency.saturating_add(LatencyEstimate::micros(
+                extra.min(u128::from(u64::MAX)) as u64,
+            ));
+        }
+        cost
+    }
+
+    /// Cost property sort-key reads followed by the existing comparator sort.
+    /// Property decoding uses the same per-row estimate as authoritative checks.
+    pub fn property_sort(&self, rows: EstimatedRows) -> CostVector {
+        self.authoritative_verification(rows)
+            .serial(self.explicit_sort(rows))
+    }
+
     /// Cost an equality-index lookup over an estimated result count.
     pub fn equality_index_lookup(&self, estimated_rows: EstimatedRows) -> CostVector {
         self.bitmap_equality_lookup(estimated_rows)

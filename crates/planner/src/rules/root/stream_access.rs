@@ -114,17 +114,60 @@ fn rewrite_access_stream(
             rewrite_filter(filter, indexes, planner_limits, &[])
         }
         logical::AccessStream::Pipeline(pipeline) => {
-            let [logical::StreamPipelineOp::Filter { predicate }, rest @ ..] = pipeline.ops()
-            else {
-                return None;
-            };
-            let filter = logical::AccessFilter::new(pipeline.access().clone(), predicate.clone());
-            rewrite_filter(&filter, indexes, planner_limits, rest)
+            if let [logical::StreamPipelineOp::Filter { predicate }, rest @ ..] = pipeline.ops() {
+                let filter =
+                    logical::AccessFilter::new(pipeline.access().clone(), predicate.clone());
+                if let Some(rewritten) = rewrite_filter(&filter, indexes, planner_limits, rest) {
+                    return Some(rewritten);
+                }
+            }
+            for op in pipeline.ops() {
+                match op {
+                    logical::StreamPipelineOp::Filter { .. } => {}
+                    logical::StreamPipelineOp::Order { ordering } => {
+                        let access = rewrite_order(pipeline.access(), ordering, indexes)?;
+                        return access_stream_with_ops(access, pipeline.ops().to_vec());
+                    }
+                    _ => break,
+                }
+            }
+            None
+        }
+        logical::AccessStream::Order(order) => {
+            rewrite_order(order.access(), order.ordering(), indexes).map(|access| {
+                logical::AccessStream::Order(logical::AccessOrder::new(
+                    access,
+                    order.ordering().clone(),
+                ))
+            })
         }
         logical::AccessStream::Path(_)
         | logical::AccessStream::Window(_)
-        | logical::AccessStream::Order(_)
         | logical::AccessStream::Distinct(_) => None,
+    }
+}
+
+/// Root wrappers inline their access instead of optimizing a child memo group.
+/// Apply the same ordered-driver exploration here while preserving the wrapper.
+fn rewrite_order(
+    access: &logical::AccessPath,
+    ordering: &ir::OrderKeys,
+    indexes: &catalog::IndexCatalogSnapshot,
+) -> Option<logical::AccessPath> {
+    let order = logical::AccessOrder::new(access.clone(), ordering.clone());
+    match rules::access::rewrite_access_order_range_direction(&order, indexes) {
+        rules::access::AccessOrderRangeDirectionRewrite::Rewritten(rewritten)
+            if &rewritten != access =>
+        {
+            return Some(rewritten)
+        }
+        _ => {}
+    }
+    match rules::access::access_order_satisfaction(&order) {
+        rules::access::AccessOrderSatisfaction::Satisfied(rewritten) if &rewritten != access => {
+            Some(rewritten)
+        }
+        _ => None,
     }
 }
 

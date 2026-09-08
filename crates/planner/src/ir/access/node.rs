@@ -56,6 +56,9 @@ pub enum NodeAccessPlan {
         key: catalog::ScopedPropertyDirectionKey,
         /// Range bounds.
         range: ir::IndexRange,
+        /// Traversal within the physical lane.
+        #[serde(default)]
+        iteration: ir::RangeScanIteration,
     },
     /// Vector search.
     VectorSearch {
@@ -177,6 +180,7 @@ mod tests {
     #[test]
     fn secondary_set_eligibility_covers_nested_and_mixed_node_trees() {
         let range = NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -216,6 +220,7 @@ mod tests {
                 value: equality_value(),
             },
             NodeAccessPlan::RangeIndex {
+                iteration: crate::ir::RangeScanIteration::Forward,
                 index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
                 key: catalog::ScopedPropertyDirectionKey::try_new(
                     "User",

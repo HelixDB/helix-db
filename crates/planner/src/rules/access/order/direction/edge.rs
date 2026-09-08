@@ -27,6 +27,7 @@ pub(super) fn rewrite_access_order_range_direction(
     match indexes.edge_range.get(&replacement_key).cloned() {
         Some(index) => contracts::RangeDirectionRewriteApplication::Rewritten(
             ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::RangeIndex {
+                iteration: crate::ir::RangeScanIteration::Forward,
                 index,
                 key: replacement_key,
                 range: range.clone(),

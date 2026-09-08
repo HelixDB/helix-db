@@ -21,6 +21,9 @@ enum AccessExecutionCost {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SecondaryIdSource {
     Other,
+    Range {
+        iteration: ir::RangeScanIteration,
+    },
     BatchableEquality {
         index_id: ir::NonEmptyString,
         key: catalog::ScopedPropertyKey,
@@ -88,6 +91,27 @@ impl AccessPhysicalContract {
         }
     }
 
+    pub(in crate::rules) fn with_range_iteration(
+        mut self,
+        iteration: ir::RangeScanIteration,
+    ) -> Self {
+        let AccessExecutionCost::SecondaryIds { source, .. } = &mut self.execution else {
+            unreachable!("a range contract produces secondary IDs");
+        };
+        *source = SecondaryIdSource::Range { iteration };
+        self
+    }
+
+    pub(in crate::rules) fn range_iteration(&self) -> Option<ir::RangeScanIteration> {
+        match &self.execution {
+            AccessExecutionCost::SecondaryIds {
+                source: SecondaryIdSource::Range { iteration },
+                ..
+            } => Some(*iteration),
+            _ => None,
+        }
+    }
+
     pub(in crate::rules) fn secondary_id_cost(&self) -> Option<cost::CostVector> {
         match &self.execution {
             AccessExecutionCost::MaterializedRows => None,
@@ -105,7 +129,7 @@ impl AccessPhysicalContract {
             } => Some((index_id, key)),
             AccessExecutionCost::MaterializedRows
             | AccessExecutionCost::SecondaryIds {
-                source: SecondaryIdSource::Other,
+                source: SecondaryIdSource::Other | SecondaryIdSource::Range { .. },
                 ..
             } => None,
         }

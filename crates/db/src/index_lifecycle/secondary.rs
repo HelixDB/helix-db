@@ -92,6 +92,7 @@ pub(crate) use exact::{
     count_active_range_generation_with_membership,
     lookup_active_equality_literal_batch_with_compatibility,
     lookup_active_equality_point_literal_with_compatibility, record_equality_graph_read,
+    scan_active_range_generation_ordered, ExactRangeScanProgress,
 };
 #[cfg(test)]
 pub(crate) use exact::{
@@ -3131,97 +3132,23 @@ pub(crate) enum SecondaryRangeQuery {
 ///
 /// Storage bounds use typed, self-delimiting payloads. Every candidate is then
 /// checked against authoritative graph state before it can consume `limit`.
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn scan_active_range_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     query: Option<&SecondaryRangeQuery>,
     limit: Option<usize>,
 ) -> Result<Vec<u64>> {
-    let Some(definition) = handle.secondary_definition() else {
-        return Err(corruption(
-            "secondary range serving received a non-secondary Active handle",
-        ));
-    };
-    if !matches!(
-        definition,
-        ValidatedSecondaryIndexDefinition::NodeRange { .. }
-            | ValidatedSecondaryIndexDefinition::EdgeRange { .. }
-    ) {
-        return Err(corruption(
-            "secondary range serving received an equality definition",
-        ));
-    }
-
-    let direction = match definition.direction() {
-        RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
-        RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
-    };
-    let lane = definition_lane(definition);
-    let bounds = match query {
-        Some(query) => match secondary_range_scan_bounds(direction, query)? {
-            Some(bounds) => bounds,
-            None => return Ok(Vec::new()),
-        },
-        None => (Bound::Unbounded, Bound::Unbounded),
-    };
-    let prefix = IndexKey::data_prefix(
-        handle.scope(),
-        ScopedKey::secondary_lane_prefix(handle.index_id(), handle.generation(), lane),
-    );
-    let mut rows = reader.scan_prefix(&prefix, bounds).await?;
-    let mut owners = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let IndexKey::Data {
-            kind: ScopedKey::SecondaryEntry(key),
-            ..
-        } = IndexKey::parse_from_slice(handle.scope(), &row.key)?
-        else {
-            return Err(corruption(
-                "secondary range prefix yielded another key kind",
-            ));
-        };
-        if key.index_id() != handle.index_id()
-            || key.generation() != handle.generation()
-            || key.lane() != lane
-        {
-            return Err(corruption(
-                "secondary range entry escaped its exact serving prefix",
-            ));
-        }
-        let Some(key_owner) = key.entity_id() else {
-            return Err(corruption("secondary range entry omitted its key owner"));
-        };
-        let value_owner =
-            decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &row.value)?;
-        if key_owner != value_owner {
-            return Err(corruption(
-                "secondary range entry key/value owners disagree",
-            ));
-        }
-        let Some(key_value) = key.range_value() else {
-            return Err(corruption(
-                "secondary range lane contains an equality value",
-            ));
-        };
-        if !authoritative_range_matches(
-            reader,
-            handle.scope(),
-            definition,
-            value_owner,
-            direction,
-            key_value,
-            query,
-        )
-        .await?
-        {
-            continue;
-        }
-        owners.push(value_owner.get());
-        if limit.is_some_and(|limit| owners.len() >= limit) {
-            break;
-        }
-    }
-    Ok(owners)
+    scan_active_range_generation_ordered(
+        reader,
+        handle,
+        query,
+        helix_planner::ir::RangeScanIteration::Forward,
+        limit,
+        &[],
+        &exact::UnobservedRangeScan,
+    )
+    .await
 }
 
 /// Produces suffix bounds for one generation/lane `scan_prefix` call.
@@ -3375,6 +3302,7 @@ fn secondary_range_query_matches(query: &SecondaryRangeQuery, value: &PropertyVa
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authoritative_range_matches(
     reader: &(impl DbReadOps + Sync),
     scope: DataScope,
@@ -3383,14 +3311,22 @@ async fn authoritative_range_matches(
     direction: StorageRangeIndexDirection,
     key_value: &CanonicalRangeValue,
     query: Option<&SecondaryRangeQuery>,
+    progress: &dyn ExactRangeScanProgress,
 ) -> Result<bool> {
     let entity = IndexEntity {
         kind: definition.element_kind(),
         id: entity_id,
     };
-    let Some(properties) = read_authoritative_properties(reader, scope, entity).await? else {
+    progress.checkpoint()?;
+    progress.authoritative_read();
+    let Some(bytes) = reader
+        .get(authoritative_property_key(scope, entity))
+        .await?
+    else {
         return Ok(false);
     };
+    progress.authoritative_decode();
+    let properties = decode_properties(&bytes)?;
     if !properties_match_definition(definition, &properties) {
         return Ok(false);
     }
@@ -3953,7 +3889,12 @@ mod tests {
     }
 
     /// Persists one generation-qualified entry matching the fixture handle.
-    async fn put_read_entry(db: &Db, handle: &ActiveIndexHandle, value: &str, entity_id: u64) {
+    pub(super) async fn put_read_entry(
+        db: &Db,
+        handle: &ActiveIndexHandle,
+        value: &str,
+        entity_id: u64,
+    ) {
         let definition = handle
             .secondary_definition()
             .expect("secondary read fixture uses a secondary handle");
@@ -7671,3 +7612,9 @@ mod tests {
 #[cfg(test)]
 #[path = "../../tests/unit/index_lifecycle_secondary_contracts.rs"]
 mod external_contracts;
+
+#[cfg(test)]
+pub(crate) use exact::RangeScanCounters;
+
+#[cfg(test)]
+mod ordered_tests;

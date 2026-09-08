@@ -57,6 +57,8 @@ pub enum ExecPlanError {
     StepIdSpaceExhausted,
     /// Parallel schedule requires at least two dependencies.
     InvalidParallelDependencyCount { step: ExecStepId, actual: usize },
+    /// An access step claims property ordering absent from its executable driver.
+    InvalidAccessOrdering { step: ExecStepId },
     /// A count program failed its internal executable-contract validation.
     InvalidCountProgram {
         /// Count step.
@@ -147,6 +149,10 @@ impl std::fmt::Display for ExecPlanError {
                 f,
                 "parallel exec step {} has {actual} dependencies, expected at least 2",
                 step.get()
+            ),
+            Self::InvalidAccessOrdering { step } => write!(
+                f,
+                "access step {step:?} claims ordering its executable driver cannot supply"
             ),
             Self::InvalidCountProgram { step, reason } => write!(
                 f,

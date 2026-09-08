@@ -244,9 +244,16 @@ payload instead.
 ### Query functions
 
 Annotate a query builder with `#[query]` to get a callable helper that builds a
-`QueryRequest` directly from typed arguments. The generated function returns the request
-value itself (not a `Result`) — parameter coercion that can fail (e.g. `DateTime`, bytes) panics
-with a descriptive message rather than returning an error.
+`QueryRequest` directly from typed arguments. The generated function returns
+`Result<QueryRequest, QueryError>`. Parameter coercion that can fail (e.g.
+`DateTime`, unsupported bytes) returns `QueryError` rather than panicking, so a
+failed conversion cannot leave a partially populated request.
+
+The compile-tested end-to-end examples are:
+
+- [`examples/basic_query.rs`](./examples/basic_query.rs) — root README journey
+- [`examples/readme_sdk_query.rs`](./examples/readme_sdk_query.rs) — this section
+- [`examples/readme_macros_query.rs`](./examples/readme_macros_query.rs) — macros README usage
 
 ```rust
 use helix_db::dsl::prelude::*;
@@ -270,8 +277,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new(Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"))?
         .with_api_key(Some("hx_your_api_key"));
 
-    // Building the request is infallible — no `?` needed here.
-    let request = add_user("John".to_string());
+    // Handle QueryError from parameter coercion / request construction.
+    let request = add_user("John".to_string())?;
 
     let response: AddUserResponse = client.query(request).send().await?;
     println!("created user {}", response.user_id);

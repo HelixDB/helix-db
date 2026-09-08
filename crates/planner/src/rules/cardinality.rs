@@ -436,17 +436,17 @@ fn node_count_plans(
         ir::NodeAccessPlan::EqualityIndex { index, key, value } => {
             return Ok(vec![node_equality_count(index, key, value, window, rule)?]);
         }
-        ir::NodeAccessPlan::RangeIndex { index, key, range } => {
-            exec::ExecCountPlan::NodeRange(exec::ExecNodeRangeCountPlan {
-                driver: exec::ExecNodeVerifiedRangeScanPlan {
-                    index: index.clone(),
-                    key: key.clone(),
-                    range: range.clone(),
-                },
-                membership: exec::ExecNodeRangeMembershipPlan::All,
-                window,
-            })
-        }
+        ir::NodeAccessPlan::RangeIndex {
+            index, key, range, ..
+        } => exec::ExecCountPlan::NodeRange(exec::ExecNodeRangeCountPlan {
+            driver: exec::ExecNodeVerifiedRangeScanPlan {
+                index: index.clone(),
+                key: key.clone(),
+                range: range.clone(),
+            },
+            membership: exec::ExecNodeRangeMembershipPlan::All,
+            window,
+        }),
         ir::NodeAccessPlan::VectorSearch {
             key,
             index,
@@ -525,17 +525,17 @@ fn edge_count_plans(
         ir::EdgeAccessPlan::EqualityIndex { index, key, value } => {
             return Ok(vec![edge_equality_count(index, key, value, window, rule)?]);
         }
-        ir::EdgeAccessPlan::RangeIndex { index, key, range } => {
-            exec::ExecCountPlan::EdgeRange(exec::ExecEdgeRangeCountPlan {
-                driver: exec::ExecEdgeVerifiedRangeScanPlan {
-                    index: index.clone(),
-                    key: key.clone(),
-                    range: range.clone(),
-                },
-                membership: exec::ExecEdgeRangeMembershipPlan::All,
-                window,
-            })
-        }
+        ir::EdgeAccessPlan::RangeIndex {
+            index, key, range, ..
+        } => exec::ExecCountPlan::EdgeRange(exec::ExecEdgeRangeCountPlan {
+            driver: exec::ExecEdgeVerifiedRangeScanPlan {
+                index: index.clone(),
+                key: key.clone(),
+                range: range.clone(),
+            },
+            membership: exec::ExecEdgeRangeMembershipPlan::All,
+            window,
+        }),
         ir::EdgeAccessPlan::VectorSearch {
             key,
             index,
@@ -1221,7 +1221,10 @@ fn node_intersection_count_plans(
         if alternatives.len() >= alternative_limit {
             break;
         }
-        let ir::NodeAccessPlan::RangeIndex { index, key, range } = child.as_ref() else {
+        let ir::NodeAccessPlan::RangeIndex {
+            index, key, range, ..
+        } = child.as_ref()
+        else {
             continue;
         };
         let filters = children
@@ -1295,7 +1298,10 @@ fn edge_intersection_count_plans(
         if alternatives.len() >= alternative_limit {
             break;
         }
-        let ir::EdgeAccessPlan::RangeIndex { index, key, range } = child.as_ref() else {
+        let ir::EdgeAccessPlan::RangeIndex {
+            index, key, range, ..
+        } = child.as_ref()
+        else {
             continue;
         };
         let filters = children
@@ -1976,6 +1982,7 @@ mod tests {
 
     fn node_range_plan() -> ir::NodeAccessPlan {
         ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("node-range").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -1989,6 +1996,7 @@ mod tests {
 
     fn edge_range_plan() -> ir::EdgeAccessPlan {
         ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::try_new("edge-range").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "LIKES",
@@ -2531,6 +2539,7 @@ mod tests {
     #[test]
     fn verified_range_intersection_encodes_driver_membership_and_window() {
         let range = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -2651,6 +2660,7 @@ mod tests {
             catalog::ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc)
                 .unwrap();
         let range = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: range_key.clone(),
             range: ir::IndexRange::All,

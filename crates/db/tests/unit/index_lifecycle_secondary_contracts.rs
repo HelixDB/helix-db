@@ -895,6 +895,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &key_value,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -915,6 +916,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &different,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -929,6 +931,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
             value: PropertyValue::I64(8),
             inclusive: true,
         }),
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -947,6 +950,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &key_value,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -967,6 +971,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &key_value,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());

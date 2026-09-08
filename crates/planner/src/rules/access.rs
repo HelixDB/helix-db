@@ -41,3 +41,8 @@ pub use self::{
     },
     window::{AccessWindowImplementationRule, AccessWindowRule},
 };
+
+pub(in crate::rules) use order::{
+    access_order_satisfaction, rewrite_access_order_range_direction,
+    AccessOrderRangeDirectionRewrite, AccessOrderSatisfaction,
+};

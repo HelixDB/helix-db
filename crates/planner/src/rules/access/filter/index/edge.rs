@@ -89,6 +89,7 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
         range: ir::IndexRange,
     ) -> Self::Source {
         ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index,
             key,
             range,

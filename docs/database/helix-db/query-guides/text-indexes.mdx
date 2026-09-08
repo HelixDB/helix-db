@@ -82,6 +82,12 @@ Start with the SDK's text-search operation for label `Doc`, property `body`, que
 text `"consensus protocol"`, and a result limit of `10`. The hit stream is ordered
 by BM25 relevance. Project the rank field before traversing away from a hit.
 
+## Result limits
+
+The server caps the effective text-search result count at 800 per request. Traversal-scoped text
+search returns at most `min(unique candidates, k, 800)` rows. A candidate stream with more than
+1,000,000 unique entities is a query error.
+
 ## Indexed values
 
 - Store searchable text in a top-level property.

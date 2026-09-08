@@ -24,6 +24,9 @@ impl<'a> SearchReadLimit<'a> {
 }
 
 impl<'db> ExecutionContext<'db> {
+    /// Effective `k` for search that has no reject-based ceiling of its own:
+    /// unrestricted vector search, and text search in either scope. Tightens by
+    /// `access_limit` first, then applies `DEFAULT_MAX_SEARCH_RESULT_COUNT`.
     pub(in crate::execution::interpreter::access::search) async fn effective_search_limit(
         &self,
         limit: SearchReadLimit<'_>,
@@ -33,12 +36,56 @@ impl<'db> ExecutionContext<'db> {
             limit.access_limit,
         ))
     }
+
+    /// Effective `k` for restricted vector search specifically.
+    ///
+    /// Restricted vector search already enforces its own hard ceiling on the
+    /// *effective* result count (`RestrictedResultCount::try_new`, which computes
+    /// `min(requested, candidate_count)` and rejects — rather than clamps — if
+    /// that exceeds `MAX_RESTRICTED_RESULT_COUNT`). Routing it through
+    /// `effective_search_limit` instead would clamp an over-budget `k` down to
+    /// `DEFAULT_MAX_SEARCH_RESULT_COUNT` before that check ever ran, turning what
+    /// should be a rejected request into one that silently succeeds with fewer
+    /// results than asked for. It would also reject a `k` that only looks
+    /// oversized before being intersected with a small candidate set — a
+    /// `k = 10_000` request against 5 candidates is entirely legitimate.
+    /// So this applies only the schema-level `access_limit`, exactly what
+    /// `effective_search_limit` did before `DEFAULT_MAX_SEARCH_RESULT_COUNT`
+    /// existed, and leaves the restricted-path ceiling to keep doing its own,
+    /// stricter, candidate-count-aware check downstream.
+    pub(in crate::execution::interpreter::access::search) async fn effective_restricted_vector_search_limit(
+        &self,
+        limit: SearchReadLimit<'_>,
+    ) -> Result<usize> {
+        Ok(access_limited_k(
+            self.search_limit(limit.search_limit).await?,
+            limit.access_limit,
+        ))
+    }
 }
+
+/// Hard ceiling applied to every search result count that has no narrower
+/// schema-level `access_limit`.
+///
+/// A client-supplied `k` otherwise passes straight into `SearchParams`/the
+/// text-manifest search with no upper bound: `ResultCount::try_new` only
+/// rejects zero, and `effective_search_limit` only tightens `k` when the
+/// index definition happens to configure an `access_limit`. For vector
+/// search this drives the HNSW beam width (`ef = k.max(100)`) directly,
+/// letting an unauthenticated caller force a full frontier expansion over
+/// the entire index with a single large `k`. Mirrors the value the
+/// restricted vector-search path already enforces unconditionally via
+/// `MAX_RESTRICTED_RESULT_COUNT` in `crate::search::vector::restricted`.
+const DEFAULT_MAX_SEARCH_RESULT_COUNT: usize = 800;
 
 pub(in crate::execution::interpreter::access) fn limited_search_k(
     k: usize,
     limit: Option<properties::PositiveUsize>,
 ) -> usize {
+    access_limited_k(k.min(DEFAULT_MAX_SEARCH_RESULT_COUNT), limit)
+}
+
+fn access_limited_k(k: usize, limit: Option<properties::PositiveUsize>) -> usize {
     limit.map(|limit| k.min(limit.get())).unwrap_or(k)
 }
 
@@ -65,6 +112,42 @@ mod tests {
         assert_eq!(
             limited_search_k(1_000, properties::PositiveUsize::new(800)),
             800
+        );
+    }
+
+    #[test]
+    fn limited_search_k_applies_the_default_ceiling_with_no_access_limit() {
+        assert_eq!(
+            limited_search_k(DEFAULT_MAX_SEARCH_RESULT_COUNT, None),
+            DEFAULT_MAX_SEARCH_RESULT_COUNT
+        );
+        assert_eq!(
+            limited_search_k(DEFAULT_MAX_SEARCH_RESULT_COUNT + 1, None),
+            DEFAULT_MAX_SEARCH_RESULT_COUNT
+        );
+        assert_eq!(
+            limited_search_k(usize::MAX, None),
+            DEFAULT_MAX_SEARCH_RESULT_COUNT
+        );
+    }
+
+    #[test]
+    fn limited_search_k_lets_a_narrower_access_limit_still_win_under_the_default_ceiling() {
+        let narrower = properties::PositiveUsize::new(DEFAULT_MAX_SEARCH_RESULT_COUNT - 1)
+            .expect("nonzero access limit");
+        assert_eq!(
+            limited_search_k(usize::MAX, Some(narrower)),
+            DEFAULT_MAX_SEARCH_RESULT_COUNT - 1
+        );
+    }
+
+    #[test]
+    fn limited_search_k_ignores_an_access_limit_looser_than_the_default_ceiling() {
+        let looser = properties::PositiveUsize::new(DEFAULT_MAX_SEARCH_RESULT_COUNT * 10)
+            .expect("nonzero access limit");
+        assert_eq!(
+            limited_search_k(usize::MAX, Some(looser)),
+            DEFAULT_MAX_SEARCH_RESULT_COUNT
         );
     }
 }

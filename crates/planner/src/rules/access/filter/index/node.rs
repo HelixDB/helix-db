@@ -89,6 +89,7 @@ impl shared::AccessFilterIndexFamily for NodeIndexFamily {
         range: ir::IndexRange,
     ) -> Self::Source {
         ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index,
             key,
             range,

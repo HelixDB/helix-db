@@ -221,7 +221,7 @@ mod tests {
             })
             .map(|access| match access {
                 ExecAccessPlan::Limited(limited) => {
-                    assert_eq!(limited.limit().get(), 7);
+                    assert_eq!(limited.limit().literal().expect("static test bound"), 7);
                     limited.source()
                 }
                 access => panic!("expected pushed range read cap, got {access:?}"),

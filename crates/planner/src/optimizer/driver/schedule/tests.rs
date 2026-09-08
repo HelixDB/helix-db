@@ -272,6 +272,7 @@ fn node_range_source(
     direction: helix_ast::index::RangeIndexDirection,
 ) -> ir::NodeAccessPlan {
     ir::NodeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new("User", property, direction).unwrap(),
         range: ir::IndexRange::All,
@@ -280,6 +281,7 @@ fn node_range_source(
 
 fn node_range_access_source(property: &str, range: ir::IndexRange) -> ir::NodeAccessSourcePlan {
     node_source(ir::NodeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new(format!("node_range_User_{property}")).unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new(
             "User",
@@ -783,7 +785,7 @@ fn rule_schedule_routes_access_order_feature_candidates() {
             node_range_source("age", helix_ast::index::RangeIndexDirection::Asc),
             order_keys("age", helix_ast::traversal::Order::Desc),
         ))),
-        ["any", "range_direction", "order_broad"]
+        ["any", "range_direction", "elision", "order_broad"]
     );
 }
 

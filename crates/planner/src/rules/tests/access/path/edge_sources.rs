@@ -72,6 +72,7 @@ fn access_path_contract_covers_edge_source_families() {
     );
     let range = access_path_contract(
         &edge_access_path(ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::try_new("edge_weight").unwrap(),
             key: edge_weight,
             range: lower_range(1),

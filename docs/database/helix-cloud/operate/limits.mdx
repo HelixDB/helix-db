@@ -24,7 +24,7 @@ key, application instance, and gateway replica draw from the same allowance.
 | Startup | 10 requests per second | 20 requests |
 | Growth | 20 requests per second | 40 requests |
 
-Database-specific overrides can change the sustained rate and burst capacity.
+Database-specific overrides can change the sustained rate, burst capacity, and query attempt budget.
 The values assigned to your database take precedence over its plan limits. Each
 admitted query request costs one token from one shared bucket per Cloud database.
 
@@ -112,6 +112,7 @@ bucket was exhausted.
 | Dimension matching       | Vectors must exactly match the configured index dimension                                                                                |
 | Distance metrics         | cosine, euclidean, manhattan                                                                                                             |
 | Search type              | Approximate nearest neighbor (ANN)                                                                                                       |
+| Result count              | Unrestricted vector search caps effective `k` at 800. Traversal-scoped vector search rejects when `min(k, unique candidates)` exceeds 800 or when the candidate stream exceeds 1,000,000 unique entities. |
 | Restricted search        | Final membership is the exact current traversal stream; ranking may still use approximate index structures                              |
 
 ## Text Indexes
@@ -123,6 +124,7 @@ bucket was exhausted.
 | Unsupported values       | `null` and non-string values are rejected                                                                                                                     |
 | Analyzer config          | Preset analyzers: `standard`, `standard_stem_en`, `whitespace_lowercase`                                                                                      |
 | Term positions           | Optional                                                                                                                                                      |
+| Result count              | Effective `k` is capped at 800. Traversal-scoped text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
 | Tenant partitioning      | Optional. Tenant-partitioned text indexes currently require the partition property name to be `tenant_id`, and tenant-scoped searches require a tenant value. |
 
 ## Secondary Indexes
@@ -140,6 +142,7 @@ bucket was exhausted.
 | Query model       | Dynamic queries                      |
 | Query language    | SDK DSLs or dynamic JSON AST         |
 | Transaction scope | One transaction per query invocation |
+| Query attempt budget | 30 seconds in the current default and plan configuration; database-specific overrides may change it |
 | Request envelope   | One `read` or `write` operation-tree batch with named entries and explicit returns |
 
 ## Index lifecycle

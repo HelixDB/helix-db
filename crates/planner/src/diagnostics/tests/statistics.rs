@@ -118,6 +118,8 @@ fn selected_access_statistics_cover_every_node_and_edge_access_family() {
         point_lookups: 2,
         equality_index_lookups: 1,
         range_index_scans: 1,
+        reverse_range_index_scans: 0,
+        dynamic_bounded_accesses: 0,
         vector_searches: 1,
         text_searches: 1,
         bounded_accesses: 0,
@@ -202,10 +204,10 @@ fn native_all_scans_and_nested_serialized_limits_keep_exact_bounds() {
             "source": {
                 "limited": {
                     "source": { "node": "all_scan" },
-                    "limit": 2
+                    "limit": { "static": 2 }
                 }
             },
-            "limit": 3
+            "limit": { "static": 3 }
         }
     }))
     .unwrap();

@@ -159,3 +159,24 @@ fn validated_step_index_rejects_malformed_count_programs() {
         }
     );
 }
+
+#[test]
+fn executable_validation_rejects_false_access_ordering() {
+    let mut access = step(1, vec![]);
+    access.op = ExecOp::Access {
+        plan: Box::new(crate::exec::ExecAccessPlan::Node(
+            crate::exec::ExecNodeAccessPlan::AllScan,
+        )),
+    };
+    access.delivered.ordering =
+        properties::DeliveredOrdering::ByKeys(ir::OrderKeys::from(ir::OrderKey {
+            property: ir::NonEmptyString::new("last_seen").unwrap(),
+            order: helix_ast::traversal::Order::Desc,
+        }));
+    let graph_steps = steps(vec![access]);
+    let Err(error) = index::ValidatedStepIndex::new(&graph_steps, id(1)) else {
+        panic!("unordered access must not claim property order");
+    };
+    assert_eq!(error, ExecPlanError::InvalidAccessOrdering { step: id(1) });
+    assert!(error.to_string().contains("ordering"));
+}

@@ -1197,6 +1197,7 @@ pub(crate) async fn run_request_read_view_guards() {
         ),
         (
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::RangeIndex {
+                iteration: helix_planner::ir::RangeScanIteration::Forward,
                 index: catalog::NodeRangeIndexMeta::new(
                     ir::NonEmptyString::new("guard-node-range").expect("index ID is non-empty"),
                 ),
@@ -1207,6 +1208,7 @@ pub(crate) async fn run_request_read_view_guards() {
         ),
         (
             exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::RangeIndex {
+                iteration: helix_planner::ir::RangeScanIteration::Forward,
                 index: catalog::EdgeRangeIndexMeta::new(
                     ir::NonEmptyString::new("guard-edge-range").expect("index ID is non-empty"),
                 ),

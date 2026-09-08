@@ -484,7 +484,7 @@ fn rule_metadata_encodes_scheduler_applicability() {
         order_keys(),
     );
     assert!(access_order_rule.applicability.matches(&satisfied_order));
-    assert!(!access_order_rule
+    assert!(access_order_rule
         .applicability
         .matches(&opposite_direction_order));
     assert!(access_order_range_direction_rule

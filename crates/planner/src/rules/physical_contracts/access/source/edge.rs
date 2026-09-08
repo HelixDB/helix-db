@@ -10,7 +10,8 @@ pub(in crate::rules) fn edge_access_contract(
     storage: &cost::StorageCostProfile,
     stats: &context::StatsSnapshot,
 ) -> AccessPhysicalContract {
-    let contract = shared::access_contract::<EdgeAccessFamily>(plan, storage, stats);
+    let mut contract = shared::access_contract::<EdgeAccessFamily>(plan, storage, stats);
+    contract.delivered.ordering = exec::edge_range_ordering(plan);
     let exact = match plan {
         ir::EdgeAccessPlan::Union(_) | ir::EdgeAccessPlan::Intersect(_) => {
             exec::edge_secondary_set(plan).map(|set| exec::ExecEdgeAccessPlan::SecondarySet { set })
@@ -78,8 +79,11 @@ impl shared::AccessSourceFamily for EdgeAccessFamily {
                     semantics: value.semantics(),
                 }
             }
-            ir::EdgeAccessPlan::RangeIndex { key, .. } => {
-                shared::AccessSourceParts::RangeIndex { key }
+            ir::EdgeAccessPlan::RangeIndex { key, iteration, .. } => {
+                shared::AccessSourceParts::RangeIndex {
+                    key,
+                    iteration: *iteration,
+                }
             }
             ir::EdgeAccessPlan::VectorSearch { k, .. } => {
                 shared::AccessSourceParts::VectorSearch { k }

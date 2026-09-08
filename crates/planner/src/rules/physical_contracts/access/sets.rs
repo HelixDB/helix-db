@@ -60,9 +60,34 @@ pub(super) fn access_set_contract(
             rows,
         )
     } else {
-        storage
-            .parallel(&secondary_costs, storage.max_parallel_kv_reads)
-            .serial(storage.secondary_set_operation(rows))
+        let driver = (access == physical::PhysicalAccess::SetIntersection)
+            .then(|| {
+                children
+                    .iter()
+                    .position(|child| child.range_iteration().is_some())
+            })
+            .flatten();
+        let scanned = driver.map_or(rows, |index| children[index].estimated_rows);
+        children
+            .iter()
+            .zip(secondary_costs)
+            .enumerate()
+            .map(|(index, (child, cost))| {
+                if Some(index) == driver {
+                    // Only the ordered driver is filtered before verification;
+                    // other ranges are complete membership inputs.
+                    storage
+                        .ordered_range_scan(
+                            child.estimated_rows,
+                            child.range_iteration().expect("selected range driver"),
+                        )
+                        .serial(storage.authoritative_verification(rows))
+                } else {
+                    cost
+                }
+            })
+            .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+            .serial(storage.secondary_set_operation(scanned))
     };
     AccessPhysicalContract::new_secondary(
         access,

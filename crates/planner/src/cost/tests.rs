@@ -348,3 +348,24 @@ fn parallel_peak_memory_uses_largest_concurrent_child_peaks() {
         ByteEstimate::bytes(126)
     );
 }
+
+#[test]
+fn reverse_range_cost_charges_visited_rows_with_sub_microsecond_precision() {
+    let profile = StorageCostProfile::default();
+    for count in [0, 1, 1_000, 100_000, u64::MAX] {
+        let rows = EstimatedRows::rows(count);
+        let forward = profile.ordered_range_scan(rows, crate::ir::RangeScanIteration::Forward);
+        let reverse = profile.ordered_range_scan(rows, crate::ir::RangeScanIteration::Reverse);
+        assert_eq!(forward, profile.range_scan(rows));
+        assert_eq!(reverse.range_nexts, count);
+        assert!(reverse.latency >= forward.latency);
+        if count == 1_000 {
+            assert_eq!(
+                reverse.latency,
+                forward
+                    .latency
+                    .saturating_add(profile.reverse_range_per_1000)
+            );
+        }
+    }
+}

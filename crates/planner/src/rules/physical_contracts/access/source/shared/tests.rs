@@ -63,7 +63,10 @@ impl AccessSourceFamily for TestFamily {
                 kind: EqualityIndexKind::NonUnique,
                 semantics: ir::EqualityIndexValueSemantics::Indexed,
             },
-            TestPlan::Range(key) => AccessSourceParts::RangeIndex { key },
+            TestPlan::Range(key) => AccessSourceParts::RangeIndex {
+                key,
+                iteration: crate::ir::RangeScanIteration::Forward,
+            },
             TestPlan::Search(k) => AccessSourceParts::VectorSearch { k },
             TestPlan::Intersect(plans) => AccessSourceParts::Intersect(plans.iter().collect()),
             TestPlan::Union(plans) => AccessSourceParts::Union(plans.iter().collect()),
@@ -224,7 +227,7 @@ fn set_and_filter_contracts_reuse_shared_child_costs() {
 }
 
 #[test]
-fn intersection_contract_inherits_order_only_from_a_direct_range_child() {
+fn intersection_contract_inherits_order_from_the_flattened_range_driver() {
     let key = range_key();
     let stats = context::StatsSnapshot::default().with_node_range_cardinality(key.clone(), 5);
     let storage = cost::StorageCostProfile::default();
@@ -252,8 +255,5 @@ fn intersection_contract_inherits_order_only_from_a_direct_range_child() {
         flat.delivered.ordering,
         properties::DeliveredOrdering::ByKeys(_)
     ));
-    assert_eq!(
-        nested.delivered.ordering,
-        properties::DeliveredOrdering::Unordered
-    );
+    assert_eq!(nested.delivered.ordering, flat.delivered.ordering);
 }
