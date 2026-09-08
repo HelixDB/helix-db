@@ -2885,6 +2885,64 @@ mod tests {
         assert!(hits.len() <= 10);
     }
 
+    /// Term dictionaries are per segment, so the expansion sweeps every segment
+    /// and unions what it finds. `populate_index` commits once and therefore
+    /// only ever produces a single segment, so nothing else here exercises that
+    /// union. A real index has many: the prefilter benchmark alone uses ten.
+    #[test]
+    fn expansion_unions_matches_across_segments() {
+        use tantivy::TantivyDocument;
+
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+
+        // One commit per document, so each lands in its own segment.
+        let mut writer = index.writer(15_000_000).expect("writer");
+        writer.set_merge_policy(Box::new(NoMergePolicy));
+        for (entity_id, text) in [(1u64, "helixa"), (2, "helixb"), (3, "helixc")] {
+            let mut document = TantivyDocument::default();
+            document.add_u64(fields.entity_id, entity_id);
+            document.add_u64(fields.logical_version, 0);
+            document.add_text(fields.body, text);
+            writer.add_document(document).expect("add document");
+            writer.commit().expect("commit");
+        }
+        drop(writer);
+
+        let reader = build_reader(&index).expect("reader");
+        let searcher = reader.searcher();
+        assert!(
+            searcher.segment_readers().len() > 1,
+            "this test is pointless without several segments, got {}",
+            searcher.segment_readers().len()
+        );
+
+        let expanded =
+            expand_term(&searcher, fields.body, "helixq", 2).expect("expansion succeeds");
+        for term in ["helixa", "helixb", "helixc"] {
+            assert!(
+                expanded.contains_key(term),
+                "{term} lives in its own segment and was missed, got {expanded:?}"
+            );
+        }
+
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helixq",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            2,
+        )
+        .expect("fuzzy search across segments");
+        let mut found: Vec<u64> = hits.iter().map(|hit| hit.entity_id).collect();
+        found.sort_unstable();
+        assert_eq!(found, vec![1, 2, 3], "every segment should contribute");
+    }
+
     /// A term too short for any latitude skips the automaton entirely and
     /// resolves to itself, so opting in cannot make a two character query
     /// sweep the dictionary.
