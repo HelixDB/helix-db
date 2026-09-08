@@ -417,6 +417,7 @@ impl FtsPrefilterBenchmarkFixture {
                     k,
                     Some(statistics),
                     scope,
+                    0,
                 )
             })
             .buffered(8)
