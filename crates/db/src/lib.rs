@@ -3021,17 +3021,137 @@ fn foyer_disk_block_size(disk_capacity_bytes: usize) -> usize {
         )
 }
 
-/// One hybrid cache per disk root, for the lifetime of the process.
+/// The settings a hybrid cache was built with, compared when a later open
+/// reaches the same root.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SlateDbHybridSettings {
+    memory_bytes: usize,
+    disk_bytes: usize,
+    block_size_bytes: usize,
+}
+
+impl SlateDbHybridSettings {
+    fn conflict(&self, other: &Self) -> Option<&'static str> {
+        if self.memory_bytes != other.memory_bytes {
+            return Some("memory capacity");
+        }
+        if self.disk_bytes != other.disk_bytes {
+            return Some("disk capacity");
+        }
+        if self.block_size_bytes != other.block_size_bytes {
+            return Some("block size");
+        }
+        None
+    }
+}
+
+struct SlateDbHybridEntry {
+    settings: SlateDbHybridSettings,
+    cache: Arc<dyn DbCache>,
+}
+
+/// A hybrid cache owned by the process rather than by any one database.
+///
+/// `close` is deliberately inert. The cache outlives every database that
+/// borrows it, so forwarding a close would mark foyer's block engine inactive
+/// and silently disable the disk tier for every other database on the same
+/// root. Whoever owns the process closes it, or it dies with the process.
+struct SharedSlateDbCache(Arc<dyn DbCache>);
+
+#[async_trait::async_trait]
+impl DbCache for SharedSlateDbCache {
+    async fn get_block(&self, key: &slatedb::db_cache::CachedKey) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+        self.0.get_block(key).await
+    }
+
+    async fn get_index(&self, key: &slatedb::db_cache::CachedKey) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+        self.0.get_index(key).await
+    }
+
+    async fn get_filter(&self, key: &slatedb::db_cache::CachedKey) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+        self.0.get_filter(key).await
+    }
+
+    async fn get_stats(&self, key: &slatedb::db_cache::CachedKey) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+        self.0.get_stats(key).await
+    }
+
+    async fn insert(&self, key: slatedb::db_cache::CachedKey, value: CachedEntry) {
+        self.0.insert(key, value).await;
+    }
+
+    async fn remove(&self, key: &slatedb::db_cache::CachedKey) {
+        self.0.remove(key).await;
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.0.entry_count()
+    }
+
+    fn usage_snapshot(&self) -> slatedb::db_cache::DbCacheUsageSnapshot {
+        self.0.usage_snapshot()
+    }
+
+    async fn close(&self) -> std::result::Result<(), slatedb::Error> {
+        Ok(())
+    }
+
+    async fn fetch_block(&self, key: slatedb::db_cache::CachedKey, loader: slatedb::db_cache::CacheLoader) -> std::result::Result<CachedEntry, slatedb::Error> {
+        self.0.fetch_block(key, loader).await
+    }
+
+    async fn fetch_index(&self, key: slatedb::db_cache::CachedKey, loader: slatedb::db_cache::CacheLoader) -> std::result::Result<CachedEntry, slatedb::Error> {
+        self.0.fetch_index(key, loader).await
+    }
+
+    async fn fetch_filter(&self, key: slatedb::db_cache::CachedKey, loader: slatedb::db_cache::CacheLoader) -> std::result::Result<CachedEntry, slatedb::Error> {
+        self.0.fetch_filter(key, loader).await
+    }
+
+    async fn fetch_stats(&self, key: slatedb::db_cache::CachedKey, loader: slatedb::db_cache::CacheLoader) -> std::result::Result<CachedEntry, slatedb::Error> {
+        self.0.fetch_stats(key, loader).await
+    }
+}
+
+/// One hybrid cache per canonical disk root, for the lifetime of the process.
 ///
 /// The device opens one file per block — 22,528 of them at the managed 352 GiB
 /// profile — and foyer frees them only when its whole task graph drops, which
 /// `close` cannot force because it borrows. Building one per open attempt would
 /// strand a full set every time a reader retried while waiting for bootstrap.
-static SLATE_DB_HYBRID_CACHES: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Arc<dyn DbCache>>>> =
-    OnceLock::new();
+///
+/// The map holds a cell per root rather than the cache itself, so the map lock
+/// is never held across a device build: a slow build for one root cannot block
+/// an unrelated one, and a failed build leaves the cell empty to retry.
+type SlateDbHybridRegistry = HashMap<PathBuf, Arc<tokio::sync::OnceCell<SlateDbHybridEntry>>>;
 
-fn slate_db_hybrid_caches() -> &'static tokio::sync::Mutex<HashMap<PathBuf, Arc<dyn DbCache>>> {
-    SLATE_DB_HYBRID_CACHES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+static SLATE_DB_HYBRID_CACHES: OnceLock<std::sync::Mutex<SlateDbHybridRegistry>> = OnceLock::new();
+
+fn slate_db_hybrid_cell(root: &std::path::Path) -> Arc<tokio::sync::OnceCell<SlateDbHybridEntry>> {
+    let registry = SLATE_DB_HYBRID_CACHES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut registry = registry.lock().unwrap_or_else(|err| err.into_inner());
+    Arc::clone(registry.entry(root.to_path_buf()).or_default())
+}
+
+/// Resolves a configured cache root to one stable physical path.
+///
+/// Relative paths, `..` components and symlinks all reach the same directory
+/// under different spellings; keying the registry on any of them would build a
+/// second device over the same files. The directory is created first because a
+/// path that does not exist yet cannot be canonicalized.
+async fn canonical_slate_db_root(root: &std::path::Path) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(root).await.map_err(|err| {
+        HelixDbError::Config(format!(
+            "failed to create Slate hybrid cache root {}: {err}",
+            root.display()
+        ))
+    })?;
+    tokio::fs::canonicalize(root).await.map_err(|err| {
+        HelixDbError::Config(format!(
+            "failed to canonicalize Slate hybrid cache root {}: {err}",
+            root.display()
+        ))
+    })
 }
 
 async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
@@ -3056,41 +3176,59 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
             )))
         }
         CacheMode::Hybrid { slate_db, .. } => {
-            let root = slate_db.disk().root().to_path_buf();
-            let mut caches = slate_db_hybrid_caches().lock().await;
-            if let Some(cache) = caches.get(&root) {
-                return Ok(Some(Arc::clone(cache)));
+            let root = canonical_slate_db_root(slate_db.disk().root()).await?;
+            let disk_bytes = slate_db.disk().bytes();
+            let settings = SlateDbHybridSettings {
+                memory_bytes: slate_db.memory_bytes(),
+                disk_bytes,
+                block_size_bytes: foyer_disk_block_size(disk_bytes),
+            };
+            let cell = slate_db_hybrid_cell(&root);
+            let entry = cell
+                .get_or_try_init(|| async {
+                    let metrics = FoyerHybridCacheMetrics::new();
+                    let cache = HybridCacheBuilder::new()
+                        .with_name("helix-slate-hybrid")
+                        .with_metrics_registry(metrics.registry())
+                        .memory(settings.memory_bytes)
+                        .with_weighter(|_, value: &CachedEntry| value.size())
+                        .storage()
+                        .with_io_engine_config(PsyncIoEngineConfig::new())
+                        .with_engine_config(
+                            BlockEngineConfig::new(
+                                FsDeviceBuilder::new(&root)
+                                    .with_capacity(settings.disk_bytes)
+                                    .build()
+                                    .map_err(|err| {
+                                        HelixDbError::Config(format!(
+                                            "failed to build Slate hybrid cache device: {err}"
+                                        ))
+                                    })?,
+                            )
+                            .with_block_size(settings.block_size_bytes),
+                        )
+                        .build()
+                        .await
+                        .map_err(|err| {
+                            HelixDbError::Config(format!(
+                                "failed to build Slate hybrid cache: {err}"
+                            ))
+                        })?;
+                    Ok::<_, HelixDbError>(SlateDbHybridEntry {
+                        settings,
+                        cache: Arc::new(FoyerHybridCache::new_with_cache_and_metrics(
+                            cache, metrics,
+                        )),
+                    })
+                })
+                .await?;
+            if let Some(field) = entry.settings.conflict(&settings) {
+                return Err(HelixDbError::Config(format!(
+                    "Slate hybrid cache root {} is already open with a different {field}",
+                    root.display()
+                )));
             }
-            let metrics = FoyerHybridCacheMetrics::new();
-            let cache = HybridCacheBuilder::new()
-                .with_name("helix-slate-hybrid")
-                .with_metrics_registry(metrics.registry())
-                .memory(slate_db.memory_bytes())
-                .with_weighter(|_, value: &CachedEntry| value.size())
-                .storage()
-                .with_io_engine_config(PsyncIoEngineConfig::new())
-                .with_engine_config(
-                    BlockEngineConfig::new(
-                        FsDeviceBuilder::new(slate_db.disk().root())
-                            .with_capacity(slate_db.disk().bytes())
-                            .build()
-                            .map_err(|err| {
-                                HelixDbError::Config(format!(
-                                    "failed to build Slate hybrid cache device: {err}"
-                                ))
-                            })?,
-                    )
-                    .with_block_size(foyer_disk_block_size(slate_db.disk().bytes())),
-                )
-                .build()
-                .await
-                .map_err(|err| {
-                    HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
-                })?;
-            let cache: Arc<dyn DbCache> =
-                Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics));
-            caches.insert(root, Arc::clone(&cache));
-            Ok(Some(cache))
+            Ok(Some(Arc::new(SharedSlateDbCache(Arc::clone(&entry.cache)))))
         }
     }
 }
@@ -3155,6 +3293,256 @@ mod tests {
             disk_bytes / foyer_disk_block_size(disk_bytes)
         );
         cache.close().await.expect("Foyer cache closes");
+    }
+
+    /// Builds a hybrid CacheMode for one root, with overridable capacities so a
+    /// test can provoke a configuration conflict on an already-open root.
+    fn hybrid_mode_at(
+        root: &std::path::Path,
+        memory_bytes: usize,
+        disk_bytes: usize,
+    ) -> CacheMode {
+        use crate::config::{
+            ObjectStoreWarmLevel, SlateHybridCacheConfig, SlateObjectStoreCacheSettings,
+            SlateWarmConfig,
+        };
+        CacheMode::Hybrid {
+            slate_db: SlateHybridCacheConfig::try_new(memory_bytes, root, disk_bytes)
+                .expect("valid Slate hybrid cache"),
+            object_store: SlateObjectStoreCacheSettings::try_new(
+                root.join("object-store"),
+                Some(1024 * 1024),
+                4096,
+                false,
+                ObjectStoreWarmLevel::Off,
+                None,
+                1,
+            )
+            .expect("valid object-store cache"),
+            slate_warm: SlateWarmConfig::Off,
+            fts: None,
+        }
+    }
+
+    fn foyer_device_count(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("Foyer cache directory exists")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("foyer-storage-direct-fs-")
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn repeated_opens_reuse_one_hybrid_cache() {
+        let dir = tempfile::tempdir().expect("temporary cache root");
+        let root = dir.path().join("foyer");
+        let mode = hybrid_mode_at(&root, 1024 * 1024, 16 * 1024 * 1024);
+
+        let first = build_slate_db_cache(&mode)
+            .await
+            .expect("hybrid cache builds")
+            .expect("hybrid mode enables Foyer");
+        let descriptors = foyer_device_count(&root);
+
+        // A reader waiting on bootstrap reopens on every retry.
+        for _ in 0..8 {
+            build_slate_db_cache(&mode)
+                .await
+                .expect("hybrid cache builds")
+                .expect("hybrid mode enables Foyer");
+        }
+
+        assert_eq!(
+            foyer_device_count(&root),
+            descriptors,
+            "every retry must reuse the first device"
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn concurrent_opens_build_one_hybrid_cache() {
+        let dir = tempfile::tempdir().expect("temporary cache root");
+        let root = dir.path().join("foyer");
+        let mode = hybrid_mode_at(&root, 1024 * 1024, 16 * 1024 * 1024);
+
+        let opens = (0..8)
+            .map(|_| {
+                let mode = mode.clone();
+                tokio::spawn(async move {
+                    build_slate_db_cache(&mode)
+                        .await
+                        .expect("hybrid cache builds")
+                        .expect("hybrid mode enables Foyer")
+                })
+            })
+            .collect::<Vec<_>>();
+        for open in opens {
+            open.await.expect("open task completes");
+        }
+
+        let block_size = foyer_disk_block_size(16 * 1024 * 1024);
+        assert_eq!(
+            foyer_device_count(&root),
+            16 * 1024 * 1024 / block_size,
+            "concurrent opens must not each build a device"
+        );
+    }
+
+    #[tokio::test]
+    async fn path_aliases_reuse_one_hybrid_cache() {
+        let dir = tempfile::tempdir().expect("temporary cache root");
+        let root = dir.path().join("nested").join("foyer");
+        std::fs::create_dir_all(&root).expect("cache root");
+
+        build_slate_db_cache(&hybrid_mode_at(&root, 1024 * 1024, 16 * 1024 * 1024))
+            .await
+            .expect("hybrid cache builds");
+        let descriptors = foyer_device_count(&root);
+
+        let mut aliases = vec![dir.path().join("nested").join("..").join("nested").join("foyer")];
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&root, &link).expect("symlink to cache root");
+            aliases.push(link);
+        }
+
+        for alias in aliases {
+            build_slate_db_cache(&hybrid_mode_at(&alias, 1024 * 1024, 16 * 1024 * 1024))
+                .await
+                .expect("hybrid cache builds")
+                .expect("hybrid mode enables Foyer");
+            assert_eq!(
+                foyer_device_count(&root),
+                descriptors,
+                "alias {} opened a second device over the same directory",
+                alias.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_capacities_are_rejected_for_an_open_root() {
+        let dir = tempfile::tempdir().expect("temporary cache root");
+        let root = dir.path().join("foyer");
+        let disk_bytes = 16 * 1024 * 1024;
+
+        build_slate_db_cache(&hybrid_mode_at(&root, 1024 * 1024, disk_bytes))
+            .await
+            .expect("hybrid cache builds");
+
+        for (memory_bytes, disk_bytes, field) in [
+            (2 * 1024 * 1024, disk_bytes, "memory capacity"),
+            (1024 * 1024, 32 * 1024 * 1024, "disk capacity"),
+            (1024 * 1024, 512 * 1024 * 1024 * 1024, "disk capacity"),
+        ] {
+            let error = build_slate_db_cache(&hybrid_mode_at(&root, memory_bytes, disk_bytes))
+                .await
+                .err()
+                .expect("a differently sized cache must not reuse the open device");
+            assert!(
+                error.to_string().contains(field),
+                "expected a {field} conflict, got {error}"
+            );
+        }
+    }
+
+    /// Records whether a close reached the cache underneath the shared handle.
+    #[derive(Default)]
+    struct CloseCountingCache(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl DbCache for CloseCountingCache {
+        async fn get_block(
+            &self,
+            _key: &slatedb::db_cache::CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            unreachable!("this fake only observes close")
+        }
+
+        async fn get_index(
+            &self,
+            _key: &slatedb::db_cache::CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            unreachable!("this fake only observes close")
+        }
+
+        async fn get_filter(
+            &self,
+            _key: &slatedb::db_cache::CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            unreachable!("this fake only observes close")
+        }
+
+        async fn get_stats(
+            &self,
+            _key: &slatedb::db_cache::CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            unreachable!("this fake only observes close")
+        }
+
+        async fn insert(&self, _key: slatedb::db_cache::CachedKey, _value: CachedEntry) {}
+
+        async fn remove(&self, _key: &slatedb::db_cache::CachedKey) {}
+
+        fn entry_count(&self) -> u64 {
+            0
+        }
+
+        async fn close(&self) -> std::result::Result<(), slatedb::Error> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_a_database_does_not_close_the_shared_cache() {
+        let inner = Arc::new(CloseCountingCache::default());
+        let shared = SharedSlateDbCache(Arc::clone(&inner) as Arc<dyn DbCache>);
+
+        // What HelixDB::close does to the cache it was handed.
+        shared.close().await.expect("close is inert for a shared cache");
+
+        assert_eq!(
+            inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "one database closing must not close the process-owned cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_one_database_leaves_the_shared_cache_usable() {
+        let dir = tempfile::tempdir().expect("temporary cache root");
+        let root = dir.path().join("foyer");
+        let mode = hybrid_mode_at(&root, 1024 * 1024, 16 * 1024 * 1024);
+
+        let first = build_slate_db_cache(&mode)
+            .await
+            .expect("hybrid cache builds")
+            .expect("hybrid mode enables Foyer");
+        let second = build_slate_db_cache(&mode)
+            .await
+            .expect("hybrid cache builds")
+            .expect("hybrid mode enables Foyer");
+
+        first.close().await.expect("close is inert for a shared cache");
+
+        let disk = second.usage_snapshot().disk;
+        assert!(
+            matches!(disk, CacheUsageSnapshot::Ready { .. }),
+            "closing one database left the disk tier {disk:?} for another sharing it"
+        );
+        assert_eq!(
+            foyer_device_count(&root),
+            16 * 1024 * 1024 / foyer_disk_block_size(16 * 1024 * 1024),
+            "a reopen after close must not build a second device"
+        );
     }
 
     #[test]
