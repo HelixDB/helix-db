@@ -909,22 +909,55 @@ fn classify_docker_endpoint(endpoint: &str) -> Option<DockerBackend> {
 
 /// The backend the Docker CLI would actually talk to right now.
 ///
-/// `DOCKER_HOST` wins when it is set, the same way the CLI treats it; otherwise
-/// the active context's endpoint is read. Bounded by `RUNTIME_INFO_TIMEOUT`
-/// because this also runs on the advisory path, which must not stall `init`.
+/// Bounded by `RUNTIME_INFO_TIMEOUT` because this also runs on the advisory
+/// path, which must not stall `init`.
 fn active_docker_backend() -> Option<DockerBackend> {
-    if let Some(host) = std::env::var_os("DOCKER_HOST") {
-        return classify_docker_endpoint(&host.to_string_lossy());
+    if let Some(context) = nonempty_env("DOCKER_CONTEXT")
+        && let Some(endpoint) = docker_context_endpoint(Some(&context))
+    {
+        return select_docker_backend(Some(&endpoint), None, None);
     }
 
+    if let Some(host) = nonempty_env("DOCKER_HOST") {
+        return select_docker_backend(None, Some(&host), None);
+    }
+
+    docker_context_endpoint(None)
+        .as_deref()
+        .and_then(|endpoint| select_docker_backend(None, None, Some(endpoint)))
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    let value = std::env::var_os(key)?.to_string_lossy().into_owned();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn docker_context_endpoint(name: Option<&str>) -> Option<String> {
     let mut command = Command::new("docker");
-    command.args([
-        "context",
-        "inspect",
-        "--format",
-        "{{.Endpoints.docker.Host}}",
-    ]);
-    classify_docker_endpoint(&command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)?)
+    command.arg("context").arg("inspect");
+    if let Some(name) = name {
+        command.arg(name);
+    }
+    command.args(["--format", "{{.Endpoints.docker.Host}}"]);
+    command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
+}
+
+fn select_docker_backend(
+    explicit_context_endpoint: Option<&str>,
+    docker_host_endpoint: Option<&str>,
+    configured_context_endpoint: Option<&str>,
+) -> Option<DockerBackend> {
+    if let Some(endpoint) = explicit_context_endpoint {
+        return classify_docker_endpoint(endpoint);
+    }
+    if let Some(endpoint) = docker_host_endpoint {
+        return classify_docker_endpoint(endpoint);
+    }
+    configured_context_endpoint.and_then(classify_docker_endpoint)
 }
 
 /// Resolve the active backend only where it can change the answer, so Podman
@@ -1331,6 +1364,44 @@ mod tests {
         assert!(!hint.contains("Start it"));
         assert!(!hint.to_lowercase().contains("docker"));
     }
+
+    #[test]
+    fn explicit_docker_context_wins_over_docker_host() {
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(desktop), Some(colima), None),
+            Some(DockerBackend::DockerDesktop)
+        );
+        assert_eq!(
+            select_docker_backend(Some(colima), Some(desktop), None),
+            Some(DockerBackend::Colima)
+        );
+    }
+
+    #[test]
+    fn docker_host_wins_over_configured_context_without_explicit_context() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        assert_eq!(
+            select_docker_backend(None, Some(colima), Some(desktop)),
+            Some(DockerBackend::Colima)
+        );
+        assert_eq!(
+            select_docker_backend(None, None, Some(desktop)),
+            Some(DockerBackend::DockerDesktop)
+        );
+    }
+
+    #[test]
+    fn unknown_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some("unix:///var/run/docker.sock"), Some(colima), None),
+            None
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
