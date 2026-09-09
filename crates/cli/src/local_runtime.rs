@@ -203,29 +203,30 @@ impl LocalRuntime {
         let minio = format!("{legacy}-minio");
         let network = format!("{legacy}-net");
         let volume = format!("{legacy}-minio-data");
-        [
+        let mut found = false;
+        for (kind, owner_format, resource) in [
             ("container", CONTAINER_OWNER_FORMAT, legacy),
             ("container", CONTAINER_OWNER_FORMAT, &minio),
             ("network", RESOURCE_OWNER_FORMAT, &network),
             ("volume", RESOURCE_OWNER_FORMAT, &volume),
-        ]
-        .into_iter()
-        .any(|(kind, owner_format, resource)| {
+        ] {
             let Some(owner) =
                 self.resource_label(&[kind, "inspect", "--format", owner_format, resource])
             else {
-                return false;
+                continue;
             };
-            owner.is_empty() || owner == identity
-        })
+            if !owner.is_empty() && owner != identity {
+                return false;
+            }
+            found = true;
+        }
+        found
     }
 
     fn resource_label(&self, args: &[&str]) -> Option<String> {
-        let output = self.runtime_command().args(args).output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        let mut command = self.runtime_command();
+        command.args(args);
+        command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {

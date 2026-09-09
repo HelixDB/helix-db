@@ -310,6 +310,101 @@ async fn foreign_labeled_resources_are_not_adopted_or_removed() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_ownership_is_not_adopted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("a-b-dev");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_CONTAINER_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_NETWORK_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_VOLUME_LABEL", "3:a b/dev")
+        .args(["start", instance])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_CONTAINER_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_NETWORK_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_VOLUME_LABEL", "3:a b/dev")
+        .args(["prune", instance, "--yes"])
+        .assert()
+        .success();
+
+    let legacy = "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let suffixed = format!("{legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea");
+    let log = fixture.runtime_log().replace('\r', "");
+    assert!(
+        log.contains(&format!("--name {suffixed} -p")),
+        "mixed ownership must use the suffixed name, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("--name {legacy} -p")),
+        "mixed ownership must not adopt the legacy container, got: {log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "volume create --label helixdb.identity=7:a-b-dev/{instance} {suffixed}-minio-data"
+        )),
+        "mixed ownership must create its own volume, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!(
+            "volume create --label helixdb.identity=7:a-b-dev/{instance} {legacy}-minio-data"
+        )),
+        "mixed ownership must not reuse the foreign volume, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("rm -f {suffixed}\n")),
+        "prune must remove the suffixed container, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("rm -f {legacy}\n")),
+        "prune must not remove the legacy container, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("volume rm {suffixed}-minio-data")),
+        "prune must remove the suffixed volume, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("volume rm {legacy}-minio-data")),
+        "prune must not remove the foreign volume, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("network rm {legacy}-net\n")),
+        "prune must not remove the legacy network, got: {log}"
+    );
+}
+
 #[test]
 fn logs_and_status_report_a_missing_runtime_like_stop_does() {
     let fixture = CliFixture::new().with_missing_runtime();
