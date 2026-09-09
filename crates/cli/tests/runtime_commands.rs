@@ -285,7 +285,7 @@ async fn foreign_labeled_resources_are_not_adopted_or_removed() {
         .success();
 
     let legacy = "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4";
-    let log = fixture.runtime_log();
+    let log = fixture.runtime_log().replace('\r', "");
     assert!(
         log.contains(&format!(
             "--name {legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea -p"
