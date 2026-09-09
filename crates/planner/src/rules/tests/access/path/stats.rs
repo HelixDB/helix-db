@@ -32,6 +32,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         value: equality_literal(1),
     });
     let range = edge_access_expr(ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
         key: likes_weight,
         range: lower_range(10),

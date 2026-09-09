@@ -10,7 +10,7 @@ fn limited_access_flattens_nested_limits_to_tightest_bound() {
     let ExecAccessPlan::Limited(limited) = access else {
         panic!("expected limited access wrapper");
     };
-    assert_eq!(limited.limit().get(), 3);
+    assert_eq!(limited.limit().literal().expect("static test bound"), 3);
     assert!(matches!(
         limited.source(),
         ExecAccessPlan::Node(ExecNodeAccessPlan::AllScan)
@@ -30,7 +30,7 @@ fn access_read_limit_applies_only_when_bounded() {
         .apply_to(ExecAccessPlan::Node(ExecNodeAccessPlan::AllScan));
     assert!(matches!(
         bounded,
-        ExecAccessPlan::Limited(limited) if limited.limit().get() == 4
+        ExecAccessPlan::Limited(limited) if limited.limit().literal().expect("static test bound") == 4
     ));
 }
 

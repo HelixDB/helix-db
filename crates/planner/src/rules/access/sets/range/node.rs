@@ -64,6 +64,7 @@ fn merge_range_sources(
     match (left.as_ref(), right.as_ref()) {
         (
             ir::NodeAccessPlan::RangeIndex {
+                iteration: _,
                 index,
                 key,
                 range: left_range,
@@ -76,6 +77,7 @@ fn merge_range_sources(
         ) if key == right_key => match left_range.intersect(right_range) {
             Some(range) => merge::RangeSourceMerge::Merged(
                 ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::RangeIndex {
+                    iteration: crate::ir::RangeScanIteration::Forward,
                     index: index.clone(),
                     key: key.clone(),
                     range,

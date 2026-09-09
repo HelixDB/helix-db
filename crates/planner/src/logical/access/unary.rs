@@ -92,6 +92,7 @@ impl AccessOrder {
     /// use helix_planner::{catalog, ir, logical};
     ///
     /// let source = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+    ///     iteration: helix_planner::ir::RangeScanIteration::Forward,
     ///     index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
     ///     key: catalog::ScopedPropertyDirectionKey::try_new(
     ///         "User",
@@ -125,6 +126,7 @@ impl AccessOrder {
     /// use helix_planner::{catalog, ir, logical};
     ///
     /// let source = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+    ///     iteration: helix_planner::ir::RangeScanIteration::Forward,
     ///     index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
     ///     key: catalog::ScopedPropertyDirectionKey::try_new(
     ///         "User",

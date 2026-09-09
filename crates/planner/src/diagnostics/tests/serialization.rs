@@ -13,6 +13,8 @@ fn empty_access_json() -> Value {
         "point_lookups": 0,
         "equality_index_lookups": 0,
         "range_index_scans": 0,
+        "reverse_range_index_scans": 0,
+        "dynamic_bounded_accesses": 0,
         "vector_searches": 0,
         "text_searches": 0,
         "bounded_accesses": 0,

@@ -17,7 +17,6 @@ pub mod id_allocator;
 pub mod index_lifecycle;
 #[cfg(feature = "index-lifecycle-testing")]
 pub mod index_lifecycle_testing;
-mod membership_delta;
 mod merge_operator;
 #[cfg(feature = "migration-parity")]
 pub mod migration_parity;
@@ -102,18 +101,6 @@ pub enum HelixDbMode {
     ReadOnly,
     /// Read/write handle.
     Writer,
-}
-
-/// Persisted write strategy for shared graph membership rows.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub enum MembershipDeltaWriteMode {
-    /// Emit only canonical values through the legacy exclusive update path.
-    #[default]
-    LegacyExclusive,
-    /// Emit conflict-safe V2 membership delta operands.
-    DisjointV2,
 }
 
 /// Durable storage schema understood by managed writer migration authorization.
@@ -1481,30 +1468,6 @@ impl HelixDB {
     /// Whether this handle can execute write plans.
     pub fn is_writer_mode(&self) -> bool {
         self.mode() == HelixDbMode::Writer
-    }
-
-    /// Returns the persisted shared-membership write strategy.
-    pub async fn membership_delta_write_mode(&self) -> Result<MembershipDeltaWriteMode> {
-        match self.storage() {
-            HelixStorage::Reader(reader) => {
-                membership_delta::read_write_mode(reader.as_ref()).await
-            }
-            HelixStorage::Writer(writer) => membership_delta::read_write_mode(writer.db()).await,
-        }
-    }
-
-    /// Permanently enables V2 disjoint membership operands for this database.
-    ///
-    /// The caller must first prove that every active reader supports V2 and
-    /// fence all older processes. After activation, rollback to a pre-V2 binary
-    /// is unsafe and must be rejected by deployment tooling.
-    pub async fn activate_membership_delta_v2(&self) -> Result<()> {
-        let HelixStorage::Writer(writer) = self.storage() else {
-            return Err(HelixDbError::WriterModeRequired {
-                actual: self.mode().as_str(),
-            });
-        };
-        membership_delta::activate(writer.db()).await
     }
 
     async fn start_background_migration_worker(&self) {
@@ -3556,49 +3519,228 @@ mod tests {
         raw.close().await.expect("raw reader closes");
     }
 
+    #[test]
+    fn storage_version_four_reopens_without_membership_activation() {
+        // Public cascade queries have large debug futures. Use the same dedicated
+        // stack as the production deletion contracts; do not change runtime limits.
+        std::thread::Builder::new()
+            .name("default-membership-reopen".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        use crate::encoding::v2::{keys, values};
+                        use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
+
+                        let token =
+                            ProcessLocalDatabaseToken::new("facade-default-membership").unwrap();
+                        let write = || {
+                            QueryRequest::write(
+                                write_batch()
+                                    .var_as(
+                                        "created",
+                                        g().add_n(
+                                            "User",
+                                            vec![("name", PropertyInput::from("Ada"))],
+                                        )
+                                        .count(),
+                                    )
+                                    .returning(["created"]),
+                            )
+                        };
+                        let read = || {
+                            QueryRequest::read(
+                                read_batch()
+                                    .var_as("users", g().n_with_label("User").count())
+                                    .returning(["users"]),
+                            )
+                        };
+                        let version_key = keys::ManagedIndexKey::Global {
+                            kind: keys::GlobalKey::StorageVersion,
+                        }
+                        .to_bytes();
+                        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .unwrap();
+                        writer.query(write()).await.unwrap();
+                        writer.query(write()).await.unwrap();
+                        assert_eq!(writer.query(read()).await.unwrap()["users"], 2);
+                        assert_eq!(
+                            values::decode_metadata_value(
+                                &writer.inner_db().get(&version_key).await.unwrap().unwrap()
+                            )
+                            .unwrap(),
+                            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+                        );
+                        writer.inner_db().flush().await.unwrap();
+                        writer.close().await.unwrap();
+
+                        let reader = HelixDB::open_reader(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .expect("a reader accepts default storage without activation");
+                        assert_eq!(reader.query(read()).await.unwrap()["users"], 2);
+                        reader.close().await.unwrap();
+
+                        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .expect("a writer reopens without format activation");
+                        assert_eq!(writer.query(read()).await.unwrap()["users"], 2);
+                        writer.query(write()).await.unwrap();
+                        assert_eq!(writer.query(read()).await.unwrap()["users"], 3);
+                        writer.flush_writer().await.unwrap();
+                        let reader = HelixDB::open_reader(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(reader.query(read()).await.unwrap()["users"], 3);
+                        // Keep the ordinary reader open while the membership row becomes empty
+                        // and is recreated. Allow three default manifest polling intervals.
+                        for expected in [0, 1] {
+                            if expected == 0 {
+                                writer
+                                    .query(QueryRequest::write(
+                                        write_batch()
+                                            .var_as("deleted", g().n_with_label("User").drop())
+                                            .returning(Vec::<String>::new()),
+                                    ))
+                                    .await
+                                    .unwrap();
+                            } else {
+                                writer.query(write()).await.unwrap();
+                            }
+                            assert_eq!(writer.query(read()).await.unwrap()["users"], expected);
+                            let published = writer.flush_writer().await.unwrap();
+                            let replay = tokio::time::timeout(Duration::from_secs(30), async {
+                                while reader.visible_sequence().await.unwrap() < published {
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                }
+                            })
+                            .await;
+                            assert!(
+                                replay.is_ok(),
+                                "reader sequence {:?}, published {:?}, rows {:?}",
+                                reader.visible_sequence().await.unwrap(),
+                                published,
+                                reader.query(read()).await.unwrap()
+                            );
+                            assert_eq!(reader.query(read()).await.unwrap()["users"], expected);
+                        }
+                        reader.close().await.unwrap();
+                        assert_eq!(
+                            values::decode_metadata_value(
+                                &writer.inner_db().get(&version_key).await.unwrap().unwrap()
+                            )
+                            .unwrap(),
+                            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+                        );
+                        writer.close().await.unwrap();
+                        let reopened = HelixDB::open(HelixDbSource::InMemoryToken { token })
+                            .await
+                            .unwrap();
+                        assert_eq!(reopened.query(read()).await.unwrap()["users"], 1);
+                        reopened.close().await.unwrap();
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn membership_delta_activation_is_durable_and_reader_visible() {
-        let token = ProcessLocalDatabaseToken::new("facade-membership-delta-activation").unwrap();
-        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
-            token: token.clone(),
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            writer.membership_delta_write_mode().await.unwrap(),
-            MembershipDeltaWriteMode::LegacyExclusive
-        );
-        writer.activate_membership_delta_v2().await.unwrap();
-        assert_eq!(
-            writer.membership_delta_write_mode().await.unwrap(),
-            MembershipDeltaWriteMode::DisjointV2
-        );
-        writer.inner_db().flush().await.unwrap();
-        writer.close().await.unwrap();
+    async fn experimental_version_five_is_rejected_without_downgrade() {
+        use crate::encoding::v2::{keys, values};
+        use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
 
-        let reader = HelixDB::open_reader(HelixDbSource::InMemoryToken {
-            token: token.clone(),
-        })
-        .await
-        .expect("a new reader accepts the activated storage fence");
-        assert_eq!(
-            reader.membership_delta_write_mode().await.unwrap(),
-            MembershipDeltaWriteMode::DisjointV2
-        );
-        assert!(matches!(
-            reader.activate_membership_delta_v2().await,
-            Err(HelixDbError::WriterModeRequired { .. })
-        ));
-        reader.close().await.unwrap();
+        // Exercise each public startup role against its own persisted store.
+        for role in [
+            "reader",
+            "embedded",
+            "managed-bootstrap",
+            "managed-failover",
+        ] {
+            let token = ProcessLocalDatabaseToken::new(format!("reject-v5-{role}")).unwrap();
+            let source = || HelixDbSource::InMemoryToken {
+                token: token.clone(),
+            };
+            let writer = HelixDB::open(source()).await.unwrap();
+            let key = keys::ManagedIndexKey::Global {
+                kind: keys::GlobalKey::StorageVersion,
+            }
+            .to_bytes();
+            let marker = values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                IndexStorageVersion::new(5).unwrap(),
+            ));
+            writer.inner_db().put(&key, marker.clone()).await.unwrap();
+            writer.inner_db().flush().await.unwrap();
+            writer.close().await.unwrap();
 
-        let writer = HelixDB::open(HelixDbSource::InMemoryToken { token })
-            .await
-            .expect("a writer reopens after the one-way format activation");
-        assert_eq!(
-            writer.membership_delta_write_mode().await.unwrap(),
-            MembershipDeltaWriteMode::DisjointV2
-        );
-        writer.close().await.unwrap();
+            let result = match role {
+                "reader" => HelixDB::open_reader(source()).await,
+                "embedded" => HelixDB::open(source()).await,
+                "managed-bootstrap" | "managed-failover" => {
+                    HelixDB::open_managed_writer_with_config(
+                        source(),
+                        DbConfig::new(),
+                        NonZeroU64::new(10).unwrap(),
+                        if role == "managed-bootstrap" {
+                            ManagedWriterOpenIntent::Bootstrap
+                        } else {
+                            ManagedWriterOpenIntent::Failover
+                        },
+                    )
+                    .await
+                }
+                _ => unreachable!("all startup roles are listed above"),
+            };
+            let Err(error) = result else {
+                panic!("{role} accepted version five");
+            };
+            if role == "managed-bootstrap" {
+                // Bootstrap is only valid for a pristine store, regardless of its version.
+                assert!(
+                    matches!(
+                        error,
+                        HelixDbError::WriterMigrationRequired {
+                            requirement:
+                                crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+                        }
+                    ),
+                    "{error}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        HelixDbError::UnsupportedIndexStorageVersion {
+                            found: 5,
+                            supported: 4,
+                        }
+                    ),
+                    "{role}: {error}"
+                );
+            }
+            let raw = DbReader::builder(token.database().to_string(), token.object_store())
+                .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(
+                raw.get(&key).await.unwrap(),
+                Some(marker),
+                "{role} changed the marker"
+            );
+            raw.close().await.unwrap();
+        }
     }
 
     #[tokio::test]

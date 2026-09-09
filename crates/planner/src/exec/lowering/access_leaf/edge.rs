@@ -23,6 +23,7 @@ pub(in crate::exec) enum SimpleEdgeAccessLeaf<'a> {
         index: &'a catalog::EdgeRangeIndexMeta,
         key: &'a catalog::ScopedPropertyDirectionKey,
         range: &'a ir::IndexRange,
+        iteration: &'a ir::RangeScanIteration,
     },
     VectorSearch {
         key: &'a catalog::EdgeSearchIndexKey,
@@ -51,9 +52,17 @@ impl<'a> TryFrom<&'a ir::EdgeAccessPlan> for SimpleEdgeAccessLeaf<'a> {
             ir::EdgeAccessPlan::EqualityIndex { index, key, value } => {
                 Ok(Self::EqualityIndex { index, key, value })
             }
-            ir::EdgeAccessPlan::RangeIndex { index, key, range } => {
-                Ok(Self::RangeIndex { index, key, range })
-            }
+            ir::EdgeAccessPlan::RangeIndex {
+                index,
+                key,
+                range,
+                iteration,
+            } => Ok(Self::RangeIndex {
+                index,
+                key,
+                range,
+                iteration,
+            }),
             ir::EdgeAccessPlan::VectorSearch {
                 key,
                 index,
@@ -104,7 +113,13 @@ pub(in crate::exec) fn edge_exec_access(plan: SimpleEdgeAccessLeaf<'_>) -> ExecE
         SimpleEdgeAccessLeaf::EqualityIndex { index, key, value } => {
             ExecEdgeAccessPlan::exact_equality(index.clone(), key.clone(), value.clone())
         }
-        SimpleEdgeAccessLeaf::RangeIndex { index, key, range } => ExecEdgeAccessPlan::RangeIndex {
+        SimpleEdgeAccessLeaf::RangeIndex {
+            index,
+            key,
+            range,
+            iteration,
+        } => ExecEdgeAccessPlan::RangeIndex {
+            iteration: *iteration,
             index: index.clone(),
             key: key.clone(),
             range: range.clone(),

@@ -146,6 +146,7 @@
               {
                 "group": "SDK SETUP",
                 "pages": [
+                  "database/helix-db/start-here/sdk-setup/overview",
                   "database/helix-db/start-here/sdk-setup/rust-project-setup",
                   "database/helix-db/start-here/sdk-setup/typescript-project-setup",
                   "database/helix-db/start-here/sdk-setup/go-project-setup",
@@ -265,6 +266,38 @@
     "href": "https://www.helix-db.com"
   },
   "redirects": [
+    {
+      "source": "/documentation/cli-v2/getting-started",
+      "destination": "/cli/getting-started"
+    },
+    {
+      "source": "/documentation/cli-v2/workflows",
+      "destination": "/cli/getting-started"
+    },
+    {
+      "source": "/documentation/getting-started/installation",
+      "destination": "/cli/getting-started"
+    },
+    {
+      "source": "/documentation/getting-started/intro",
+      "destination": "/database/helix-db/start-here/introduction"
+    },
+    {
+      "source": "/documentation/hql/hql",
+      "destination": "/legacy/hql"
+    },
+    {
+      "source": "/documentation/sdks",
+      "destination": "/database/helix-db/start-here/sdk-setup/overview"
+    },
+    {
+      "source": "/documentation/sdks/helix-py",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/change-log/helixdb",
+      "destination": "/database/helix-db/start-here/release-notes"
+    },
     {
       "source": "/database/querying-guide/parameters-bundles",
       "destination": "/database/helix-db/query-guides/parameters"

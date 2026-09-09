@@ -1,4 +1,4 @@
-use crate::{context, cost, ir, logical, physical, properties};
+use crate::{context, cost, exec, ir, logical, physical, properties};
 
 use super::super::support::{
     access_pipeline_op, access_window_stream_contract, estimated_pipeline_rows,
@@ -63,7 +63,12 @@ pub(in crate::rules) fn access_order_pipeline_contract(
     cost::CostVector,
 ) {
     let access = access_path_contract(order.access(), storage, stats);
-    let sort_cost = storage.explicit_sort(access.estimated_rows);
+    let satisfied = exec::access_delivers_order(order.access(), order.ordering());
+    let sort_cost = if satisfied {
+        cost::CostVector::ZERO
+    } else {
+        storage.property_sort(access.estimated_rows)
+    };
     let delivered = properties::DeliveredProperties {
         ordering: properties::DeliveredOrdering::ByKeys(order.ordering().clone()),
         materialization: properties::Materialization::Materialized,
@@ -71,7 +76,13 @@ pub(in crate::rules) fn access_order_pipeline_contract(
     };
     let pipeline = physical::PhysicalPipeline::new(ir::AtLeast::<_, 1>::from_one_and_rest(
         access_pipeline_op(order.access(), access.access),
-        vec![physical::PhysicalPipelineOp::Sort],
+        vec![if satisfied {
+            physical::PhysicalPipelineOp::OrderSatisfiedByAccess {
+                ordering: order.ordering().clone(),
+            }
+        } else {
+            physical::PhysicalPipelineOp::Sort
+        }],
     ));
     (pipeline, delivered, access.cost.serial(sort_cost))
 }
@@ -117,9 +128,42 @@ pub(in crate::rules) fn access_pipeline_physical_contract(
     let mut rows = access.estimated_rows;
     let mut total_cost = access.cost;
 
+    let mut push_limit = exec::range_access_can_push_limit(pipeline.access());
     for op in pipeline.ops() {
-        let (physical_op, next_delivered, op_cost) =
+        let (mut physical_op, next_delivered, mut op_cost) =
             stream_pipeline_op_contract(op, delivered.clone(), rows, storage);
+        match op {
+            logical::StreamPipelineOp::Order { ordering }
+                if exec::access_delivers_order(pipeline.access(), ordering)
+                    && (delivered
+                        .cardinality
+                        .upper()
+                        .is_some_and(|upper| upper <= 1)
+                        || delivered.ordering.satisfies(
+                            &properties::RequiredOrdering::ByKeys(ordering.clone()),
+                        )) =>
+            {
+                physical_op = physical::PhysicalPipelineOp::OrderSatisfiedByAccess {
+                    ordering: ordering.clone(),
+                };
+                op_cost = cost::CostVector::ZERO;
+            }
+            logical::StreamPipelineOp::Limit { count } if push_limit => {
+                physical_op = physical::PhysicalPipelineOp::AccessReadLimit {
+                    count: count.clone(),
+                };
+                op_cost = cost::CostVector::ZERO;
+            }
+            logical::StreamPipelineOp::Window { window }
+                if push_limit && window.start() == 0 && window.end().is_some() =>
+            {
+                physical_op = physical::PhysicalPipelineOp::AccessReadLimit {
+                    count: ir::StreamBoundPlan::Literal(window.end().expect("bounded window")),
+                };
+                op_cost = cost::CostVector::ZERO;
+            }
+            _ => push_limit = false,
+        }
         rest.push(physical_op);
         delivered = next_delivered;
         rows = estimated_pipeline_rows(&delivered, rows);

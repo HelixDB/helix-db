@@ -577,7 +577,7 @@ pub(crate) async fn load_entity_contribution(
 }
 
 /// Revalidates every observed row without buffering writes.
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn validate(
     transaction: &DbTransaction,
     prepared: &PreparedTextStatisticsTransition,
@@ -593,7 +593,7 @@ pub(crate) async fn validate(
 }
 
 /// Buffers a transition after its complete request-level validation pass.
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) fn stage_validated(
     transaction: &DbTransaction,
     prepared: &PreparedTextStatisticsTransition,

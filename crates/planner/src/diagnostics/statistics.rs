@@ -13,12 +13,16 @@ pub struct AccessStatistics {
     pub equality_index_lookups: usize,
     /// Range-index scan operations.
     pub range_index_scans: usize,
+    /// Range scans traversing their existing physical lane backwards.
+    pub reverse_range_index_scans: usize,
     /// Vector-search operations.
     pub vector_searches: usize,
     /// Text-search operations.
     pub text_searches: usize,
     /// Access operations with a planner-proven positive read bound.
     pub bounded_accesses: usize,
+    /// Bounded accesses that evaluate at least one runtime expression.
+    pub dynamic_bounded_accesses: usize,
 }
 
 /// Stable planner work and selected executable-plan shape statistics.

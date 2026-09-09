@@ -53,3 +53,5 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 }
+
+pub(in crate::execution::interpreter) use bounds::eval_stream_bound;

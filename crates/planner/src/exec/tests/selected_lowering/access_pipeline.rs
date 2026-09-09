@@ -267,7 +267,7 @@ fn selected_access_window_pushes_static_end_into_native_access_limit() {
             if matches!(
                 plan.as_ref(),
                 ExecAccessPlan::Limited(limited)
-                    if limited.limit().get() == 3
+                    if limited.limit().literal().expect("static test bound") == 3
                         && matches!(
                             limited.source(),
                             ExecAccessPlan::Node(ExecNodeAccessPlan::FromParam { param })
@@ -470,7 +470,7 @@ fn selected_access_pipeline_pushes_only_leading_window_into_kv_scan_limit() {
             if matches!(
                 plan.as_ref(),
                 ExecAccessPlan::Limited(limited)
-                    if limited.limit().get() == 4
+                    if limited.limit().literal().expect("static test bound") == 4
                         && matches!(
                             limited.source(),
                             ExecAccessPlan::Node(ExecNodeAccessPlan::FromParam { param })
@@ -666,4 +666,39 @@ fn selected_access_pipeline_lowers_variable_to_native_dag() {
         &subplan.steps()[1].output,
         ir::BatchOutputPlan::Bind(name) if name.as_ref() == "users"
     ));
+}
+
+#[test]
+fn selected_order_proof_rejects_a_driver_that_does_not_supply_the_claimed_order() {
+    let profile = cost::StorageCostProfile::default();
+    let ordering = ir::OrderKeys::from(ir::OrderKey {
+        property: name("age"),
+        order: Order::Desc,
+    });
+    let source = node_access_order_expr(ir::NodeAccessPlan::AllScan, ordering.clone());
+    let alternative = physical::PhysicalAlternative::new(
+        physical::PhysicalExpr::Pipeline(physical::PhysicalPipeline::new(
+            ir::AtLeast::from_one_and_rest(
+                selected_kv_node_access(),
+                vec![physical::PhysicalPipelineOp::OrderSatisfiedByAccess {
+                    ordering: ordering.clone(),
+                }],
+            ),
+        )),
+        properties::DeliveredProperties {
+            ordering: properties::DeliveredOrdering::ByKeys(ordering),
+            ..Default::default()
+        },
+        cost::CostVector::ZERO,
+    );
+    assert!(
+        ExecutableSubplan::from_selected_executable_alternative_with_io(
+            &source,
+            &alternative,
+            &profile,
+            ir::BatchOutputPlan::Discard,
+            ExecCondition::Always
+        )
+        .is_err()
+    );
 }

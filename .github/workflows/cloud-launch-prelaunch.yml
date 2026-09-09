@@ -29,7 +29,7 @@ env:
 jobs:
   release-scale:
     name: Release scale — ${{ matrix.name }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 370
     strategy:
       fail-fast: false
@@ -65,7 +65,7 @@ jobs:
 
   release-contracts:
     name: Stable failpoint and coordinator contracts
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -78,7 +78,7 @@ jobs:
 
   vector-diagnostic:
     name: Vector recall and throughput diagnostic
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -92,7 +92,7 @@ jobs:
 
   sustained:
     name: Ten-run LocalFileSystem and long lifecycle matrix
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
@@ -111,7 +111,7 @@ jobs:
 
   performance-decision:
     name: Same-host performance, lag, and resource decision
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
@@ -129,7 +129,7 @@ jobs:
 
   final-quality:
     name: Final quality and coverage
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6

@@ -59,6 +59,9 @@ pub enum ExecNodeAccessPlan {
         key: catalog::ScopedPropertyDirectionKey,
         /// Range bounds.
         range: ir::IndexRange,
+        /// Traversal within the physical lane.
+        #[serde(default)]
+        iteration: ir::RangeScanIteration,
     },
     /// V2-aware secondary-ID set evaluated before row materialization.
     SecondarySet {
@@ -203,6 +206,9 @@ pub struct ExecNodeSecondaryRangePlan {
     pub key: catalog::ScopedPropertyDirectionKey,
     /// Logical range bounds.
     pub range: ir::IndexRange,
+    /// Traversal within the physical lane.
+    #[serde(default)]
+    pub iteration: ir::RangeScanIteration,
 }
 
 /// V2-aware node secondary-ID set.

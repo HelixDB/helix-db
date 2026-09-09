@@ -47,6 +47,58 @@ fn index_lifecycle_backfill_mutations_and_unique_retry_converge() {
         .expect("lifecycle mutation test thread should not panic");
 }
 
+/// Proves every shape converges after repeated mutations at each build boundary.
+#[test]
+fn index_lifecycle_all_index_shapes_reenter_catch_up_before_activation() {
+    std::thread::Builder::new()
+        .name("index-lifecycle-all-index-validation".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .expect("all-index validation test runtime should build")
+                .block_on(async {
+                    let _permit = CONTRACT_SUITE
+                        .acquire()
+                        .await
+                        .expect("lifecycle contract semaphore remains open");
+                    db::index_lifecycle_testing::run_deterministic_all_index_validation_contracts()
+                        .await;
+                });
+        })
+        .expect("all-index validation test thread should spawn")
+        .join()
+        .expect("all-index validation test thread should not panic");
+}
+
+/// Proves real public writes survive every secondary/vector build boundary.
+#[test]
+fn index_lifecycle_secondary_vector_public_writes_cover_every_build_boundary() {
+    std::thread::Builder::new()
+        .name("index-lifecycle-secondary-vector-public-boundary".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .expect("secondary/vector public-boundary runtime should build")
+                .block_on(async {
+                    let _permit = CONTRACT_SUITE
+                        .acquire()
+                        .await
+                        .expect("lifecycle contract semaphore remains open");
+                    db::index_lifecycle_testing::run_secondary_vector_public_boundary_contracts()
+                        .await;
+                });
+        })
+        .expect("secondary/vector public-boundary test thread should spawn")
+        .join()
+        .expect("secondary/vector public-boundary test thread should not panic");
+}
+
 /// Proves simultaneous CREATE requests converge after retryable serialization.
 #[tokio::test(flavor = "multi_thread")]
 async fn index_lifecycle_concurrent_create_converges_for_every_family() {

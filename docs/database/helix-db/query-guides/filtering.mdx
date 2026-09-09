@@ -116,6 +116,12 @@ ranking → top k**. The traversal membership is authoritative. Approximate inde
 structures may accelerate ranking, but a result outside the candidate set cannot be
 returned.
 
+The server caps unrestricted vector search at 800 effective results. Traversal-scoped vector
+search applies its 800-result ceiling after candidate intersection and rejects when
+`min(k, unique candidates)` is greater than 800. It does not silently clamp an oversized request;
+when the candidate stream contains 800 or fewer unique entities, a larger `k` can succeed. A
+candidate stream with more than 1,000,000 unique entities is a query error.
+
 ### Rank a node stream
 
 This request finds projects owned by the current user, ranks that exact set by
@@ -351,7 +357,8 @@ permissions, or earlier predicates define which records are eligible for text se
 The execution order is **graph traversal → exact candidate membership → BM25 ranking
 → top k**. Results are identical to an exhaustive BM25 search of the selected tenant
 partition, intersected with the candidate IDs, followed by deterministic top-k
-selection. BM25 statistics still come from the full tenant partition.
+selection. BM25 statistics still come from the full tenant partition. The server caps the
+effective result count at 800.
 
 ### Rank a node stream
 
@@ -558,7 +565,7 @@ are `text_search` and `textSearch`.
 ### Result contract
 
 - Output IDs are a deduplicated subset of the input IDs.
-- The result contains at most `min(unique candidates, k)` rows.
+- The result contains at most `min(unique candidates, k, 800)` rows.
 - Rows are ordered by BM25 score descending, then entity ID ascending.
 - The selected input row keeps its bindings, path, and sack; `$score` is attached.
 - Empty input returns without opening the text index.

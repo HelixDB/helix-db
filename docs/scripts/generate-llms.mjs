@@ -45,7 +45,7 @@ const DEVELOPER_RESOURCES = [
   "- [HelixDB HTTP API documentation](https://docs.helix-db.com/database/helix-db/query-guides/http-api): Request contract, authentication, headers, responses, and examples for `POST /v2/query`.",
   "- [HelixDB OpenAPI specification](https://www.helix-db.com/openapi.json): OpenAPI 3.1 JSON for the public HelixDB HTTP API.",
   "- [HelixDB authentication guide for agents](https://www.helix-db.com/auth.md): Supported API-key and OAuth surfaces, with links to machine-readable discovery metadata.",
-  "- [HelixDB hosted MCP server](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect agents to read-only Helix Cloud insights over OAuth.",
+  "- [HelixDB unified MCP endpoint](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect authorized users and agents to query tools and human-only Cloud inspection tools over WorkOS OAuth.",
   "- [HelixDB AI Catalog](https://www.helix-db.com/.well-known/ai-catalog.json): ARD catalog of HelixDB agent resources.",
 ].join("\n");
 

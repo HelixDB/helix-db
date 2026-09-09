@@ -11,10 +11,12 @@ use serde::Serialize;
 use crate::digest;
 
 mod edge;
+mod iteration;
 mod node;
 
 pub use self::{
     edge::{EdgeAccessPlan, EdgeAccessSourcePlan},
+    iteration::RangeScanIteration,
     node::{NodeAccessPlan, NodeAccessSourcePlan},
 };
 

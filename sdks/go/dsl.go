@@ -3023,19 +3023,11 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 		}
 		return QueryString(typed), nil
 	case paramKindDateTime:
-		typed, ok := value.(string)
-		if !ok {
-			return nil, ErrInvalidDateTimeParameter
-		}
-		dateTime, err := ParseDateTimeRFC3339(typed)
+		formatted, err := queryDateTime(value)
 		if err != nil {
 			return nil, ErrInvalidDateTimeParameter
 		}
-		normalized, err := dateTime.RFC3339()
-		if err != nil {
-			return nil, ErrInvalidDateTimeParameter
-		}
-		return QueryString(normalized), nil
+		return QueryString(formatted), nil
 	case paramKindBytes:
 		return nil, ErrUnsupportedBytesParameter
 	case paramKindValue:

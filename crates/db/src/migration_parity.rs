@@ -320,8 +320,6 @@ fn migration_parity_text_partition(
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationParityV2State {
     pub storage_version: Option<u16>,
-    #[serde(default)]
-    pub membership_delta_write_mode: crate::MembershipDeltaWriteMode,
     pub canonical_records: Vec<MigrationParityV2Record>,
     pub operation_statuses: Vec<String>,
     pub scoped_row_counts: BTreeMap<String, u64>,
@@ -2112,8 +2110,6 @@ async fn scan_v2_state(
     state.text_term_statistics.sort();
     state.text_entity_statistics.sort();
 
-    let mut storage_version_value = None;
-    let mut membership_delta_write_mode_value = None;
     let mut global = read
         .scan_prefix(Bytes::copy_from_slice(&GLOBAL_SENTINEL), ..)
         .await?;
@@ -2123,7 +2119,6 @@ async fn scan_v2_state(
         increment_count(&mut state.global_row_counts, &kind);
         match key {
             GlobalKey::StorageVersion => {
-                storage_version_value = Some(row.value.clone());
                 let crate::index_lifecycle::IndexV2MetadataValue::StorageVersion(version) =
                     decode_metadata_value(&row.value)?
                 else {
@@ -2234,18 +2229,11 @@ async fn scan_v2_state(
                         })?;
                 }
             }
-            GlobalKey::MembershipDeltaWriteMode => {
-                membership_delta_write_mode_value = Some(row.value);
-            }
             GlobalKey::TextCompactionPointer(_)
             | GlobalKey::LogicalIndexIdWatermark
             | GlobalKey::VectorPhysicalIdWatermark => {}
         }
     }
-    state.membership_delta_write_mode = crate::membership_delta::decode_write_mode(
-        membership_delta_write_mode_value.as_deref(),
-        storage_version_value.as_deref(),
-    )?;
     state.vector_migration.rebuilt_indexes =
         u64::try_from(completed_vector_builds.len()).map_err(|_| {
             crate::error::HelixDbError::InvariantViolation(
@@ -2622,10 +2610,6 @@ fn increment_count(counts: &mut BTreeMap<String, u64>, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use slatedb::object_store::memory::InMemory;
-
     use super::*;
     use crate::encoding::v1::keys::NodePropertyKey;
     use crate::encoding::v1::property::equality_value::{
@@ -2641,37 +2625,26 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn parity_state_tracks_the_validated_membership_delta_mode() {
-        let db = slatedb::Db::builder(
-            "migration-parity-membership-mode",
-            Arc::new(InMemory::new()),
-        )
-        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
-        .build()
+    async fn parity_state_reports_current_storage_without_a_write_mode() {
+        let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+            database: "migration-parity-default-membership".to_string(),
+        })
         .await
         .unwrap();
-        crate::migrations::startup::bootstrap_writer(&db)
-            .await
-            .unwrap();
-
-        let mut legacy = MigrationParityV2State::default();
-        scan_v2_state(&db, DataScope::LegacyUnscoped, &mut legacy)
-            .await
-            .unwrap();
-        assert_eq!(
-            legacy.membership_delta_write_mode,
-            crate::MembershipDeltaWriteMode::LegacyExclusive
-        );
-
-        crate::membership_delta::activate(&db).await.unwrap();
-        let mut activated = MigrationParityV2State::default();
-        scan_v2_state(&db, DataScope::LegacyUnscoped, &mut activated)
-            .await
-            .unwrap();
-        assert_eq!(
-            activated.membership_delta_write_mode,
-            crate::MembershipDeltaWriteMode::DisjointV2
-        );
+        let mut state = MigrationParityV2State::default();
+        scan_v2_state(
+            db.inner_db().as_ref(),
+            DataScope::LegacyUnscoped,
+            &mut state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.storage_version, Some(4));
+        assert!(serde_json::to_value(&state)
+            .unwrap()
+            .get("membership_delta_write_mode")
+            .is_none());
+        db.close().await.unwrap();
     }
 
     #[test]

@@ -28,7 +28,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [HelixDB HTTP API documentation](https://docs.helix-db.com/database/helix-db/query-guides/http-api): Request contract, authentication, headers, responses, and examples for `POST /v2/query`.
 - [HelixDB OpenAPI specification](https://www.helix-db.com/openapi.json): OpenAPI 3.1 JSON for the public HelixDB HTTP API.
 - [HelixDB authentication guide for agents](https://www.helix-db.com/auth.md): Supported API-key and OAuth surfaces, with links to machine-readable discovery metadata.
-- [HelixDB hosted MCP server](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect agents to read-only Helix Cloud insights over OAuth.
+- [HelixDB unified MCP endpoint](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect authorized users and agents to query tools and human-only Cloud inspection tools over WorkOS OAuth.
 - [HelixDB AI Catalog](https://www.helix-db.com/.well-known/ai-catalog.json): ARD catalog of HelixDB agent resources.
 
 ## HelixDB — Start Here
@@ -37,6 +37,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Deployment options](https://docs.helix-db.com/database/helix-db/start-here/run-modes): Compare Cloud, local server, and embedded execution — Page type: Concept
 - [Local server](https://docs.helix-db.com/database/helix-db/start-here/local-development/local-server): Start HelixDB locally with ephemeral memory or persistent object storage — Page type: Guide
 - [Embedded database](https://docs.helix-db.com/database/helix-db/start-here/local-development/embedded-database): Open HelixDB directly inside your process with explicit storage and cache settings — Page type: Guide
+- [SDK setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/overview): Choose a HelixDB SDK and connect it to a local or Cloud server — Page type: Guide
 - [Rust SDK](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/rust-project-setup): Build typed HelixDB queries and execute them over HTTP or an embedded engine — Page type: Guide
 - [TypeScript SDK](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/typescript-project-setup): Build typed HelixDB requests for Node.js applications — Page type: Guide
 - [Go SDK](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/go-project-setup): Build and execute HelixDB requests with ordinary Go functions — Page type: Guide
@@ -68,7 +69,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Architecture](https://docs.helix-db.com/database/helix-cloud/start-here/architecture) — Page type: Concept
 
 ## Connect and automate
-- [Helix Cloud MCP servers](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect agents to separate Insights, query, and administration surfaces — Page type: Reference
+- [Helix Cloud MCP](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect users and agents to the unified Helix Cloud MCP endpoint — Page type: Reference
 
 ## Operate
 - [Multi-Tenancy](https://docs.helix-db.com/database/helix-cloud/operate/multi-tenancy) — Page type: Guide
@@ -107,7 +108,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [helix start](https://docs.helix-db.com/cli/command-reference/start) — Page type: Reference
 - [helix status](https://docs.helix-db.com/cli/command-reference/status): Inspect local runtime or current Cloud database state — Page type: Reference
 - [helix stop](https://docs.helix-db.com/cli/command-reference/stop) — Page type: Reference
-- [helix service-credential](https://docs.helix-db.com/cli/command-reference/service-credential): Manage workspace-owned credentials for headless API and MCP clients — Page type: Reference
+- [helix service-credential](https://docs.helix-db.com/cli/command-reference/service-credential): Manage workspace-owned credentials for headless HTTP API and deployed Admin MCP clients — Page type: Reference
 - [helix shell](https://docs.helix-db.com/cli/command-reference/shell): Run line-oriented Helix v3 JSON requests — Page type: Reference
 - [helix update](https://docs.helix-db.com/cli/command-reference/update) — Page type: Reference
 - [helix workspace](https://docs.helix-db.com/cli/command-reference/workspace): Discover WorkOS workspace memberships — Page type: Reference

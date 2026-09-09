@@ -730,7 +730,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "siphasher",
- "slatedb 0.15.0",
+ "slatedb 0.16.0",
  "sonic-rs",
  "stable_deref_trait",
  "tantivy 0.26.1",
@@ -1810,7 +1810,7 @@ dependencies = [
  "siphasher",
  "slatedb 0.10.0",
  "slatedb 0.15.0",
- "slatedb-common",
+ "slatedb-common 0.15.0",
  "tempfile",
  "tokio",
  "toml 0.8.23",
@@ -3841,8 +3841,54 @@ dependencies = [
  "serde",
  "serde_json",
  "siphasher",
- "slatedb-common",
- "slatedb-txn-obj",
+ "slatedb-common 0.15.0",
+ "slatedb-txn-obj 0.15.0",
+ "smallvec",
+ "sysinfo",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
+ "url",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "slatedb"
+version = "0.16.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
+dependencies = [
+ "ahash",
+ "async-channel",
+ "async-trait",
+ "atomic",
+ "backon",
+ "bitflags",
+ "bytes",
+ "chrono",
+ "crc32fast",
+ "crossbeam-skiplist",
+ "dotenvy",
+ "duration-str",
+ "fail-parallel 0.6.0",
+ "figment",
+ "flatbuffers",
+ "foyer 0.22.3",
+ "futures",
+ "log",
+ "lru 0.18.1",
+ "mixtrics",
+ "object_store 0.14.1",
+ "ouroboros",
+ "parking_lot",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "siphasher",
+ "slatedb-common 0.16.0",
+ "slatedb-txn-obj 0.16.0",
  "smallvec",
  "sysinfo",
  "thiserror 1.0.69",
@@ -3871,6 +3917,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "slatedb-common"
+version = "0.16.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
+dependencies = [
+ "chrono",
+ "log",
+ "object_store 0.14.1",
+ "rand 0.9.5",
+ "rand_xoshiro 0.7.0",
+ "serde",
+ "thread_local",
+ "tokio",
+]
+
+[[package]]
 name = "slatedb-txn-obj"
 version = "0.15.0"
 source = "git+https://github.com/HelixDB/slatedb.git?rev=099067afda1294e80308687d4ae41cdf6e5d01df#099067afda1294e80308687d4ae41cdf6e5d01df"
@@ -3882,7 +3943,23 @@ dependencies = [
  "log",
  "object_store 0.14.1",
  "parking_lot",
- "slatedb-common",
+ "slatedb-common 0.15.0",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "slatedb-txn-obj"
+version = "0.16.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "log",
+ "object_store 0.14.1",
+ "parking_lot",
+ "slatedb-common 0.16.0",
  "thiserror 1.0.69",
 ]
 

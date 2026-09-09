@@ -44,9 +44,9 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - blacksmith-2vcpu-ubuntu-2404-arm
+          - ubuntu-24.04-arm
           - macos-latest
-          - blacksmith-2vcpu-windows-2025
+          - windows-2025
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -76,7 +76,7 @@ jobs:
   coverage:
     name: Coverage (Ubuntu)
     if: github.event_name != 'schedule'
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -107,7 +107,7 @@ jobs:
   registry-smoke:
     name: Published TypeScript SDK registry smoke
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6

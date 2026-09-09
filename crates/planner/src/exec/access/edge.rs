@@ -52,6 +52,9 @@ pub enum ExecEdgeAccessPlan {
         key: catalog::ScopedPropertyDirectionKey,
         /// Range bounds.
         range: ir::IndexRange,
+        /// Traversal within the physical lane.
+        #[serde(default)]
+        iteration: ir::RangeScanIteration,
     },
     /// V2-aware secondary-ID set evaluated before row materialization.
     SecondarySet {
@@ -169,6 +172,9 @@ pub struct ExecEdgeSecondaryRangePlan {
     pub key: catalog::ScopedPropertyDirectionKey,
     /// Logical range bounds.
     pub range: ir::IndexRange,
+    /// Traversal within the physical lane.
+    #[serde(default)]
+    pub iteration: ir::RangeScanIteration,
 }
 
 /// V2-aware edge secondary-ID set.

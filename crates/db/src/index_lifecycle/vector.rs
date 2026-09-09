@@ -27,10 +27,10 @@ use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
 use crate::encoding::v2::legacy::vector::transaction_guard::{
     decode_active_txn_guard, LegacyVectorTxnGuardKey,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::encoding::v2::values::decode_index_record;
-use crate::encoding::v2::values::encode_build_delta;
 use crate::encoding::v2::values::property::encode_index_partition_value;
+use crate::encoding::v2::values::{decode_build_delta, encode_build_delta};
 use crate::error::{HelixDbError, Result};
 use crate::search;
 use crate::search::vector::{
@@ -39,8 +39,8 @@ use crate::search::vector::{
 };
 
 use super::repository;
-use super::work::{CoalescedBuildDeltaValue, VectorTenantPartition};
-#[cfg(test)]
+use super::work::{CoalescedBuildDeltaState, CoalescedBuildDeltaValue, VectorTenantPartition};
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use super::IndexStateV2;
 use super::{
     ActiveIndexHandle, IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
@@ -103,7 +103,11 @@ pub(crate) struct VectorEntityMutation<'a> {
 
 impl<'a> VectorEntityMutation<'a> {
     /// Binds one entity to its complete before/after property snapshots.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(
+        test,
+        feature = "production-coverage",
+        feature = "index-lifecycle-testing"
+    ))]
     pub(crate) const fn new(
         entity_kind: IndexElementKind,
         entity_id: u64,
@@ -173,7 +177,7 @@ impl VectorMutationSet {
 /// The canonical record scan is part of the caller's serializable graph
 /// transaction. Activation/drop revisions therefore conflict with the graph
 /// commit rather than allowing writes to cross a lifecycle boundary.
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -231,7 +235,11 @@ pub(crate) async fn load_mutation_set(
 /// `before` and `after` are complete authoritative property sets. Partition
 /// moves therefore become a typed remove-plus-upsert, and hidden builds receive
 /// one coalesced reconciliation marker for any semantic document change.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn maintain_entity_with_runtime(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -281,21 +289,14 @@ async fn maintain_target(
                 kind: entity.entity_kind,
                 id: entity.entity_id,
             };
-            let key = scoped_index_key(
+            stage_vector_build_delta(
+                transaction,
                 scope,
-                ScopedKey::BuildDelta(IndexEntityStateKey {
-                    index_id: target.index_id,
-                    generation: target.generation,
-                    entity: index_entity,
-                }),
-            );
-            let value = CoalescedBuildDeltaValue {
-                index_id: target.index_id,
-                generation: target.generation,
-                entity_kind: entity.entity_kind,
-                entity_id: entity.entity_id,
-            };
-            transaction.put(key, encode_build_delta(&value))?;
+                target,
+                index_entity,
+                old_document.map(|document| document.partition),
+            )
+            .await?;
         }
         VectorMutationMode::MaintainActive(handle) => {
             maintain_active(
@@ -312,6 +313,61 @@ async fn maintain_target(
             .await?;
         }
     }
+    Ok(())
+}
+
+/// Preserves the original partition across repeated coalesced mutations.
+async fn stage_vector_build_delta(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    target: &VectorMutationTarget,
+    entity: IndexEntity,
+    initial_before: Option<TextPartition>,
+) -> Result<()> {
+    let key = scoped_index_key(
+        scope,
+        ScopedKey::BuildDelta(IndexEntityStateKey {
+            index_id: target.index_id,
+            generation: target.generation,
+            entity,
+        }),
+    );
+    let state = match transaction.get(&key).await? {
+        Some(existing) => {
+            let value = crate::index_lifecycle::expect_typed_value(
+                decode_build_delta(&existing),
+                "vector build-delta key contains another value kind",
+            )?;
+            if value.index_id != target.index_id
+                || value.generation != target.generation
+                || value.entity_kind != entity.kind
+                || value.entity_id != entity.id
+            {
+                return Err(corruption("vector build-delta key/value mismatch"));
+            }
+            match value.state {
+                CoalescedBuildDeltaState::Marker | CoalescedBuildDeltaState::VectorBefore(_) => {
+                    value.state
+                }
+                CoalescedBuildDeltaState::SecondaryBefore(_) => {
+                    return Err(corruption(
+                        "vector build delta contains secondary recovery state",
+                    ));
+                }
+            }
+        }
+        None => CoalescedBuildDeltaState::VectorBefore(initial_before),
+    };
+    transaction.put(
+        key,
+        encode_build_delta(&CoalescedBuildDeltaValue {
+            index_id: target.index_id,
+            generation: target.generation,
+            entity_kind: entity.kind,
+            entity_id: entity.id,
+            state,
+        }),
+    )?;
     Ok(())
 }
 
@@ -355,7 +411,11 @@ pub(crate) async fn maintain_routed_entity_with_runtime(
 }
 
 /// Preserves the isolated per-entity contract as a differential-test oracle.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn maintain_entity(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -1027,6 +1087,60 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn repeated_build_deltas_preserve_the_first_vector_partition() {
+        let db = test_db("vector-build-delta-first-partition").await;
+        let scope = DataScope::LegacyUnscoped;
+        let target = VectorMutationTarget {
+            index_id: IndexId::new(31).unwrap(),
+            generation: IndexGenerationId::new(7).unwrap(),
+            definition: validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean),
+            mode: VectorMutationMode::RecordBuildDelta,
+        };
+        let first_partition =
+            TextPartition::try_tenant_value(Bytes::from_static(b"first")).unwrap();
+        let second_partition =
+            TextPartition::try_tenant_value(Bytes::from_static(b"second")).unwrap();
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        for (entity_id, first, second) in [
+            (
+                IndexEntityId::new(7),
+                Some(first_partition.clone()),
+                Some(second_partition.clone()),
+            ),
+            (IndexEntityId::new(8), None, Some(second_partition.clone())),
+        ] {
+            let entity = IndexEntity {
+                kind: IndexElementKind::Node,
+                id: entity_id,
+            };
+            stage_vector_build_delta(&transaction, scope, &target, entity, first.clone())
+                .await
+                .unwrap();
+            stage_vector_build_delta(&transaction, scope, &target, entity, second)
+                .await
+                .unwrap();
+
+            let key = scoped_index_key(
+                scope,
+                ScopedKey::BuildDelta(IndexEntityStateKey {
+                    index_id: target.index_id,
+                    generation: target.generation,
+                    entity,
+                }),
+            );
+            let delta = decode_build_delta(&transaction.get(&key).await.unwrap().unwrap()).unwrap();
+            assert_eq!(delta.state, CoalescedBuildDeltaState::VectorBefore(first));
+        }
+
+        transaction.rollback();
+        db.close().await.unwrap();
+    }
+
     /// Exercises one unpartitioned active generation through insert and removal.
     async fn exercise_active_unpartitioned_metric<D: Distance>(
         db_name: &str,
@@ -1136,6 +1250,37 @@ mod tests {
             ],
         );
         assert!(matches!(zero, Err(HelixDbError::ZeroNormCosineVector)));
+
+        for (vector, invalid_index) in [
+            (vec![f32::NAN, 2.0, 3.0], 0),
+            (vec![1.0, f32::INFINITY, 3.0], 1),
+            (vec![1.0, 2.0, f32::NEG_INFINITY], 2),
+        ] {
+            assert!(matches!(
+                vector_document(
+                    &validated_definition(None, VectorDistanceMetric::Euclidean),
+                    &[
+                        property("$label", PropertyValue::String("Document".to_string())),
+                        property("embedding", PropertyValue::F32Array(vector)),
+                    ],
+                ),
+                Err(HelixDbError::InvalidVectorComponent { index }) if index == invalid_index
+            ));
+        }
+
+        for vector in [vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]] {
+            let actual = vector.len();
+            assert!(matches!(
+                vector_document(
+                    &validated_definition(None, VectorDistanceMetric::Euclidean),
+                    &[
+                        property("$label", PropertyValue::String("Document".to_string())),
+                        property("embedding", PropertyValue::F32Array(vector)),
+                    ],
+                ),
+                Err(HelixDbError::InvalidDimension { expected: 3, got }) if got == actual
+            ));
+        }
 
         let overflow = vector_document(
             &validated_definition(None, VectorDistanceMetric::Euclidean),
@@ -1653,6 +1798,7 @@ mod tests {
                 generation: target.generation,
                 entity_kind: IndexElementKind::Node,
                 entity_id: IndexEntityId::new(9),
+                state: CoalescedBuildDeltaState::Marker,
             }),
         )
         .await

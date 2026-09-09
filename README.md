@@ -116,24 +116,23 @@ pub fn get_user(name: String) -> ReadBatch {
 }
 
 #[tokio::main]
-async fn main() {
-    let client = Client::new(None).unwrap(); // defaults to http://localhost:6969
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new(None)?; // defaults to http://localhost:6969
 
-    // add user
+    // add user — #[query] helpers return Result<QueryRequest, QueryError>
     let new_user: sonic_rs::Value = client
-        .query(add_user("John Doe".to_string()))
+        .query(add_user("John Doe".to_string())?)
         .send()
-        .await
-        .unwrap();
-    println!("new user: {:#}", sonic_rs::to_string_pretty(&new_user).unwrap());
+        .await?;
+    println!("new user: {:#}", sonic_rs::to_string_pretty(&new_user)?);
 
     // get user
     let user: sonic_rs::Value = client
-        .query(get_user("John Doe".to_string()))
+        .query(get_user("John Doe".to_string())?)
         .send()
-        .await
-        .unwrap();
-    println!("user: {:#}", sonic_rs::to_string_pretty(&user).unwrap());
+        .await?;
+    println!("user: {:#}", sonic_rs::to_string_pretty(&user)?);
+    Ok(())
 }
 ```
 

@@ -1,8 +1,18 @@
+use std::collections::HashSet;
+use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use futures::stream::BoxStream;
 use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::path::Path;
+use slatedb::object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
+};
 use slatedb::{Db, IsolationLevel};
+use tokio::sync::Notify;
 
 use super::*;
 use crate::index_lifecycle::{
@@ -76,6 +86,388 @@ fn batch_limits(
         NonZeroU64::new(max_output_bytes).unwrap(),
     )
     .unwrap()
+}
+
+#[derive(Debug, Default)]
+struct HeadState {
+    active: usize,
+    armed: bool,
+    entered: usize,
+    peak: usize,
+    released: bool,
+    transient: HashSet<Path>,
+}
+
+#[derive(Debug, Default)]
+struct ControlledHeadStore {
+    inner: InMemory,
+    state: Mutex<HeadState>,
+    changed: Notify,
+}
+
+impl ControlledHeadStore {
+    fn arm(&self) {
+        let mut state = self.state.lock().expect("head state is healthy");
+        state.active = 0;
+        state.armed = true;
+        state.entered = 0;
+        state.peak = 0;
+        state.released = false;
+    }
+
+    fn fail_head(&self, path: Path) {
+        self.state
+            .lock()
+            .expect("head state is healthy")
+            .transient
+            .insert(path);
+    }
+
+    async fn wait_until_entered(&self, expected: usize) {
+        loop {
+            let notified = self.changed.notified();
+            if self.state.lock().expect("head state is healthy").entered >= expected {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.state.lock().expect("head state is healthy").released = true;
+        self.changed.notify_waiters();
+    }
+
+    fn peak(&self) -> usize {
+        self.state.lock().expect("head state is healthy").peak
+    }
+}
+
+struct ActiveHeadGuard<'a> {
+    state: &'a Mutex<HeadState>,
+}
+
+impl Drop for ActiveHeadGuard<'_> {
+    fn drop(&mut self) {
+        self.state.lock().expect("head state is healthy").active -= 1;
+    }
+}
+
+impl fmt::Display for ControlledHeadStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("controlled-head-memory")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for ControlledHeadStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> ObjectStoreResult<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
+        let _guard = if options.head {
+            let armed = {
+                let mut state = self.state.lock().expect("head state is healthy");
+                state.active += 1;
+                state.entered += 1;
+                state.peak = state.peak.max(state.active);
+                state.armed
+            };
+            self.changed.notify_waiters();
+            if armed {
+                loop {
+                    let notified = self.changed.notified();
+                    if self.state.lock().expect("head state is healthy").released {
+                        break;
+                    }
+                    notified.await;
+                }
+            }
+            Some(ActiveHeadGuard { state: &self.state })
+        } else {
+            None
+        };
+        if options.head
+            && self
+                .state
+                .lock()
+                .expect("head state is healthy")
+                .transient
+                .contains(location)
+        {
+            return Err(slatedb::object_store::Error::Generic {
+                store: "controlled-head-memory",
+                source: Box::new(std::io::Error::other("injected HEAD failure")),
+            });
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, ObjectStoreResult<Path>>,
+    ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> ObjectStoreResult<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HeadFixture {
+    Valid,
+    Missing,
+    WrongSize,
+    Transient,
+}
+
+async fn validation_head_fixture(
+    database: &str,
+    fixtures: &[HeadFixture],
+) -> (
+    Db,
+    IndexOperationRecord,
+    ValidatedTextIndexDefinition,
+    TextManifestValidationProgress,
+    TextStorageRuntime,
+    Arc<ControlledHeadStore>,
+) {
+    let scope = DataScope::LegacyUnscoped;
+    let operation = operation();
+    let definition = definition();
+    let dynamic = ValidatedDynamicIndexDefinition::Text(definition.clone());
+    let record = IndexRecordV2::building(
+        operation.index_id(),
+        dynamic,
+        operation.index_record_revision(),
+        crate::index_lifecycle::PhysicalGeneration::Text {
+            generation: operation.generation(),
+        },
+        operation.operation_id(),
+    )
+    .unwrap();
+    let db = Db::open(database, Arc::new(InMemory::new())).await.unwrap();
+    db.put(
+        scoped_index_key(scope, ScopedKey::index_record(record.identity().clone())),
+        crate::encoding::v2::values::encode_index_record(&record),
+    )
+    .await
+    .unwrap();
+
+    let partition = TextPartition::Unpartitioned;
+    let root = TextManifestRootKey {
+        index_id: operation.index_id(),
+        generation: operation.generation(),
+        partition: partition.fingerprint(),
+    };
+    let root_value = work::TextManifestRootValue::try_new(
+        operation.index_id(),
+        operation.generation(),
+        partition.clone(),
+        TextManifestRevision::new(2).unwrap(),
+        1,
+        u64::try_from(fixtures.len()).unwrap(),
+    )
+    .unwrap();
+    db.put(
+        scoped_index_key(scope, ScopedKey::TextManifestRoot(root)),
+        crate::encoding::v2::values::encode_manifest_root(&root_value),
+    )
+    .await
+    .unwrap();
+
+    let store = Arc::new(ControlledHeadStore::default());
+    let mut splits = Vec::new();
+    for (ordinal, fixture) in fixtures.iter().copied().enumerate() {
+        let seed = u8::try_from(ordinal + 1).unwrap();
+        let split = crate::index_lifecycle::text::test_support::split(seed, 128);
+        let path = crate::search::text::blob_object_store_path(database, *split.blob().hash());
+        match fixture {
+            HeadFixture::Valid | HeadFixture::Transient => {
+                store
+                    .put(&path, PutPayload::from(vec![0; 128]))
+                    .await
+                    .unwrap();
+            }
+            HeadFixture::Missing => {}
+            HeadFixture::WrongSize => {
+                store
+                    .put(&path, PutPayload::from(vec![0; 127]))
+                    .await
+                    .unwrap();
+            }
+        }
+        if matches!(fixture, HeadFixture::Transient) {
+            store.fail_head(path);
+        }
+        splits.push(split);
+    }
+    let page = work::TextManifestPageValue::try_new(
+        operation.index_id(),
+        operation.generation(),
+        partition,
+        0,
+        splits,
+    )
+    .unwrap();
+    db.put(
+        scoped_index_key(
+            scope,
+            ScopedKey::TextManifestPage(crate::encoding::v2::keys::TextManifestPageKey {
+                root,
+                page: 0,
+            }),
+        ),
+        crate::encoding::v2::values::encode_manifest_page(&page),
+    )
+    .await
+    .unwrap();
+    let runtime = TextStorageRuntime {
+        object_store: store.clone(),
+        db_path: database.to_string(),
+        compaction_limits: crate::config::SearchIndexBackfillLimits::default().text_compaction(),
+    };
+    (
+        db,
+        operation,
+        definition,
+        TextManifestValidationProgress::initial(OperationCounters::default()),
+        runtime,
+        store,
+    )
+}
+
+async fn stage_prepared_validation(
+    db: &Db,
+    step: PreparedTextOperationStep,
+) -> IndexOperationStepResult {
+    let PreparedTextOperationStep::Validation(prepared) = step else {
+        panic!("manifest validation prepares an exact validation step")
+    };
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    match *prepared {
+        PreparedTextValidationStep::Database { prepared, .. } => {
+            prepared.stage(&transaction).await.unwrap()
+        }
+        PreparedTextValidationStep::Page { prepared, .. } => {
+            prepared.stage(&transaction).await.unwrap()
+        }
+    }
+}
+
+#[tokio::test]
+async fn manifest_blob_heads_run_with_exact_bounded_concurrency() {
+    let (db, operation, _, progress, runtime, store) =
+        validation_head_fixture("text-validation-concurrent-heads", &[HeadFixture::Valid; 9]).await;
+    store.arm();
+    let preparation = prepare_validation_step(
+        &db,
+        DataScope::LegacyUnscoped,
+        &operation,
+        &progress,
+        limits(u64::MAX),
+        &runtime,
+    );
+    tokio::pin!(preparation);
+    let reached_window = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(1), store.wait_until_entered(8)) => {
+            result.is_ok()
+        }
+        _ = &mut preparation => panic!("validation completed before HEAD window filled"),
+    };
+    store.release();
+    let step = preparation.await.unwrap();
+    assert!(reached_window, "eight HEAD requests must overlap");
+    assert_eq!(store.peak(), 8);
+    assert!(matches!(
+        stage_prepared_validation(&db, step).await,
+        IndexOperationStepResult::Progressed(_)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_head_results_preserve_complete_error_classification() {
+    #[derive(Debug, Clone, Copy)]
+    enum Expected {
+        Progressed,
+        Blocked,
+        Transient,
+    }
+
+    for (ordinal, (fixtures, expected)) in [
+        (vec![HeadFixture::Valid], Expected::Progressed),
+        (vec![HeadFixture::Missing], Expected::Blocked),
+        (vec![HeadFixture::WrongSize], Expected::Blocked),
+        (vec![HeadFixture::Transient], Expected::Transient),
+        (
+            vec![HeadFixture::Transient, HeadFixture::WrongSize],
+            Expected::Blocked,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let database = format!("text-validation-head-classification-{ordinal}");
+        let (db, operation, _, progress, runtime, _) =
+            validation_head_fixture(&database, &fixtures).await;
+        let step = prepare_validation_step(
+            &db,
+            DataScope::LegacyUnscoped,
+            &operation,
+            &progress,
+            limits(u64::MAX),
+            &runtime,
+        )
+        .await
+        .unwrap();
+        let actual = stage_prepared_validation(&db, step).await;
+        assert!(
+            matches!(
+                (actual, expected),
+                (
+                    IndexOperationStepResult::Progressed(_),
+                    Expected::Progressed
+                ) | (
+                    IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
+                    Expected::Blocked
+                ) | (
+                    IndexOperationStepResult::TransientFailure,
+                    Expected::Transient
+                )
+            ),
+            "HEAD fixture {fixtures:?} returned the wrong result"
+        );
+        db.close().await.unwrap();
+    }
 }
 
 fn split_input(

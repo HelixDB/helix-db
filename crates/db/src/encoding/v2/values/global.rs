@@ -11,6 +11,13 @@ use crate::index_lifecycle::{
 
 use super::*;
 
+#[test]
+fn retired_membership_activation_value_is_not_reused() {
+    for mode in 0..=u8::MAX {
+        assert!(decode_metadata_value(&[INDEX_V2_VALUE_VERSION, 0x08, mode]).is_err());
+    }
+}
+
 pub(crate) fn encode_metadata_value(value: &IndexV2MetadataValue) -> Bytes {
     let kind = match value {
         IndexV2MetadataValue::StorageVersion(_) => 0x01,
@@ -19,7 +26,6 @@ pub(crate) fn encode_metadata_value(value: &IndexV2MetadataValue) -> Bytes {
         IndexV2MetadataValue::OperationQueuePointer(_) => 0x04,
         IndexV2MetadataValue::LegacyVectorPhysicalReservation(_) => 0x06,
         IndexV2MetadataValue::TextCompactionPointer(_) => 0x07,
-        IndexV2MetadataValue::MembershipDeltaWriteMode(_) => 0x08,
     };
     let mut encoder = ValueEncoder::with_header(kind);
     match value {
@@ -68,10 +74,6 @@ pub(crate) fn encode_metadata_value(value: &IndexV2MetadataValue) -> Bytes {
         IndexV2MetadataValue::TextCompactionPointer(pointer) => {
             encoder.put_u64(pointer.revision.get())
         }
-        IndexV2MetadataValue::MembershipDeltaWriteMode(mode) => encoder.put_u8(match mode {
-            crate::MembershipDeltaWriteMode::LegacyExclusive => 0x00,
-            crate::MembershipDeltaWriteMode::DisjointV2 => 0x01,
-        }),
     }
     encoder.finish()
 }
@@ -121,11 +123,7 @@ pub(crate) fn decode_metadata_value(value: &[u8]) -> Result<IndexV2MetadataValue
             revision: crate::index_lifecycle::TextManifestRevision::new(decoder.take_u64()?)
                 .map_err(model_error)?,
         }),
-        0x08 => IndexV2MetadataValue::MembershipDeltaWriteMode(match decoder.take_u8()? {
-            0x00 => crate::MembershipDeltaWriteMode::LegacyExclusive,
-            0x01 => crate::MembershipDeltaWriteMode::DisjointV2,
-            unknown => return Err(unknown_discriminant("membership delta write mode", unknown)),
-        }),
+        // 0x08 is retired (experimental membership activation); do not reuse it.
         unknown => return Err(unknown_discriminant("metadata value", unknown)),
     };
     decoder.finish()?;

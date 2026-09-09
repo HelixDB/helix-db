@@ -2444,6 +2444,7 @@ async fn public_query_boundary_covers_active_range_index_access_and_mutation() {
         exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::RangeIndex {
+                    iteration: helix_planner::ir::RangeScanIteration::Forward,
                     index: catalog::NodeRangeIndexMeta::new(range_index_id.clone()),
                     key: catalog::ScopedPropertyDirectionKey::try_new(
                         "Document",
@@ -2712,23 +2713,36 @@ async fn public_query_boundary_covers_active_text_index_mutations_contract() {
         serde_json::json!({ "ids": [0] })
     );
 
-    db.query(QueryRequest::write(
-        batch::write_batch()
-            .var_as(
-                "removed",
-                traversal::g().n(NodeRef::id(0)).remove_property("body"),
-            )
-            .var_as(
-                "newcomer",
-                traversal::g().add_n(
-                    "Document",
-                    vec![("body", PropertyInput::from("alpha newcomer"))],
-                ),
-            )
-            .returning(Vec::<String>::new()),
-    ))
-    .await
-    .unwrap();
+    const MAX_TRANSACTION_CONFLICT_RETRIES: usize = 3;
+    for attempt in 0..MAX_TRANSACTION_CONFLICT_RETRIES {
+        match db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "removed",
+                        traversal::g().n(NodeRef::id(0)).remove_property("body"),
+                    )
+                    .var_as(
+                        "newcomer",
+                        traversal::g().add_n(
+                            "Document",
+                            vec![("body", PropertyInput::from("alpha newcomer"))],
+                        ),
+                    )
+                    .returning(Vec::<String>::new()),
+            ))
+            .await
+        {
+            Ok(_) => break,
+            Err(error)
+                if error.is_transaction_conflict()
+                    && attempt + 1 < MAX_TRANSACTION_CONFLICT_RETRIES =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("text-index mutation commits after maintenance: {error}"),
+        }
+    }
     assert_eq!(
         db.query(search("retired")).await.unwrap(),
         serde_json::json!({ "ids": [] })
@@ -5331,6 +5345,7 @@ async fn public_query_boundary_covers_active_secondary_index_families_contract()
         )
     };
     let node_range = || exec::ExecNodeSecondaryRangePlan {
+        iteration: helix_planner::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new("node_range:Document:rank:asc")
             .expect("logical node range index name is non-empty"),
         key: catalog::ScopedPropertyDirectionKey::try_new(
@@ -5342,6 +5357,7 @@ async fn public_query_boundary_covers_active_secondary_index_families_contract()
         range: ir::IndexRange::All,
     };
     let edge_range = || exec::ExecEdgeSecondaryRangePlan {
+        iteration: helix_planner::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("edge_range:LINK:weight:desc")
             .expect("logical edge range index name is non-empty"),
         key: catalog::ScopedPropertyDirectionKey::try_new(

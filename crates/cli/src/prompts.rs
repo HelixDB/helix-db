@@ -74,31 +74,23 @@ pub fn confirm(message: &str) -> Result<bool> {
 }
 
 pub fn input_instance_name(default: &str) -> Result<String> {
-    input_name("Instance name", default, 32)
+    input_name("Instance name", default)
 }
 
 fn input_project_instance_name(default: &str) -> Result<String> {
-    input_name("Instance name", default, 32)
+    input_name("Instance name", default)
 }
 
-fn input_name(label: &str, default: &str, max_len: usize) -> Result<String> {
+/// Prompts for a name, enforcing the exact same charset and length limit
+/// [`crate::config::validate_instance_name`] enforces on a `--name` passed on the
+/// command line and [`crate::config::HelixConfig::validate`] enforces on a name
+/// loaded from `helix.toml`. All three sources go through one shared validator so
+/// a name typed here can never be rejected later, after it's already been saved.
+fn input_name(label: &str, default: &str) -> Result<String> {
     let name: String = cliclack::input(label)
         .default_input(default)
         .placeholder(default)
-        .validate(move |input: &String| {
-            if input.trim().is_empty() {
-                Err("name cannot be empty")
-            } else if input.len() > max_len {
-                Err("name is too long")
-            } else if !input
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                Err("name can only contain letters, numbers, hyphens, and underscores")
-            } else {
-                Ok(())
-            }
-        })
+        .validate(|input: &String| crate::config::validate_instance_name(input))
         .interact()?;
     Ok(name)
 }

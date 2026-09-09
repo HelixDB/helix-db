@@ -291,4 +291,76 @@ mod tests {
             println!("avx test skipped");
         }
     }
+
+    /// The fixed vectors above are small integers, so every intermediate is
+    /// exactly representable and no kernel here can disagree with the scalar
+    /// reference no matter how it rounds. FMA is the sharpest case: the fused
+    /// kernels round once per term where the reference rounds twice, so integer
+    /// input is precisely where the two cannot be told apart.
+    ///
+    /// The non-FMA kernels also have no other coverage. The test above picks the
+    /// FMA variant whenever the CPU reports FMA, which every x86 part since 2013
+    /// does, so `euclid_similarity_avx` and `dot_similarity_avx` are otherwise
+    /// never executed. Both pairs run here.
+    ///
+    /// Seeded identically to the NEON and SSE agreement tests, so a divergence
+    /// on one architecture and not another is a real difference in the kernel
+    /// rather than a different input.
+    #[test]
+    fn avx_kernels_agree_with_scalar_on_rounding_sensitive_input() {
+        use super::*;
+        use crate::search::vector::spaces::kernel_agreement::{
+            assert_agrees, dot_scale, TestRng, AGREEMENT_DIMENSIONS,
+        };
+
+        if !is_x86_feature_detected!("avx") {
+            return;
+        }
+        let has_fma = is_x86_feature_detected!("fma");
+
+        let mut rng = TestRng(0x2026_0904);
+        for dimension in AGREEMENT_DIMENSIONS {
+            let left_values = rng.vector(dimension);
+            let right_values = rng.vector(dimension);
+            let left = UnalignedVector::from_slice(&left_values[..]);
+            let right = UnalignedVector::from_slice(&right_values[..]);
+            let pair = SameDimensionPair::try_new(&left, &right).unwrap();
+
+            let euclid_scalar = euclidean_distance_non_optimized(&left, &right);
+            let dot_scalar = dot_product_non_optimized(&left, &right);
+            let scale = dot_scale(&left_values, &right_values);
+
+            assert_agrees(
+                unsafe { euclid_similarity_avx(pair) },
+                euclid_scalar,
+                euclid_scalar,
+                "euclidean avx",
+                dimension,
+            );
+            assert_agrees(
+                unsafe { dot_similarity_avx(pair) },
+                dot_scalar,
+                scale,
+                "dot avx",
+                dimension,
+            );
+
+            if has_fma {
+                assert_agrees(
+                    unsafe { euclid_similarity_avx_fma(pair) },
+                    euclid_scalar,
+                    euclid_scalar,
+                    "euclidean avx+fma",
+                    dimension,
+                );
+                assert_agrees(
+                    unsafe { dot_similarity_avx_fma(pair) },
+                    dot_scalar,
+                    scale,
+                    "dot avx+fma",
+                    dimension,
+                );
+            }
+        }
+    }
 }

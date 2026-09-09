@@ -510,7 +510,7 @@ execute; they are simply not serialized back to the client.
 <CodeGroup>
 
 ```rust Rust
-let request = write_users();
+let request = write_users()?;
 ```
 
 ```ts TypeScript
@@ -533,9 +533,10 @@ request = query.to_query_request(query_name="write_users")
 
 </CodeGroup>
 
-Rust's `#[query]` macro rewrites the function to return a request and sets `query_name`
-from the function name. TypeScript and Python convert a batch with `toQueryRequest` /
-`to_query_request`, and Go's `WriteQuery(name)` took the name up front.
+Rust's `#[query]` macro rewrites the function to return
+`Result<QueryRequest, QueryError>` and sets `query_name` from the function name.
+TypeScript and Python convert a batch with `toQueryRequest` / `to_query_request`,
+and Go's `WriteQuery(name)` took the name up front.
 
 `query_name` is optional diagnostic metadata for gateway logs and query diagnostics. It
 does not create a stored endpoint or deploy anything; a missing or `null` name is

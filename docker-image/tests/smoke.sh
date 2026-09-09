@@ -161,8 +161,9 @@ if isinstance(value, dict) and "properties" in value:
 if not isinstance(value, (list, dict)):
     raise SystemExit("users response is not a collection")
 is_empty = len(value) == 0
-expected_empty = sys.argv[1] == "empty"
-if is_empty != expected_empty:
+expected = sys.argv[1]
+valid = (is_empty if expected == "empty" else not is_empty) if expected in ("empty", "nonempty") else len(value) == int(expected)
+if not valid:
     raise SystemExit(f"expected users to be {sys.argv[1]}, got {value!r}")
 PY
 }
@@ -191,6 +192,7 @@ run_native_disk_test() {
   local second_port=$((base_port + 3))
   local first="helixdb-image-disk-a-$resource_suffix"
   local second="helixdb-image-disk-b-$resource_suffix"
+  local third="helixdb-image-disk-c-$resource_suffix"
   local volume="helixdb-image-data-$resource_suffix"
   local mount="type=volume,source=$volume,target=/var/lib/helix"
 
@@ -207,6 +209,23 @@ run_native_disk_test() {
   start_container "$second" "$second_port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
   wait_for_http "http://127.0.0.1:${second_port}/readyz" "$second"
   assert_users_state nonempty "$(post_json "$second_port" dynamic-read.json)"
+
+  log "Testing membership deletion, cold restart, and reinsertion"
+  post_json "$second_port" dynamic-write.json true >/dev/null
+  assert_users_state 2 "$(post_json "$second_port" dynamic-read.json)"
+  post_json "$second_port" dynamic-delete.json true >/dev/null
+  assert_users_state empty "$(post_json "$second_port" dynamic-read.json)"
+  docker stop "$second" >/dev/null
+  docker rm "$second" >/dev/null
+
+  start_container "$third" "$first_port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
+  wait_for_http "http://127.0.0.1:${first_port}/readyz" "$third"
+  assert_users_state empty "$(post_json "$first_port" dynamic-read.json)"
+  post_json "$first_port" dynamic-write.json true >/dev/null
+  assert_users_state 1 "$(post_json "$first_port" dynamic-read.json)"
+  docker restart "$third" >/dev/null
+  wait_for_http "http://127.0.0.1:${first_port}/readyz" "$third"
+  assert_users_state 1 "$(post_json "$first_port" dynamic-read.json)"
 }
 
 run_invalid_configuration_tests() {
@@ -242,8 +261,19 @@ run_signal_test() {
   fi
 }
 
+run_concurrent_membership_test() {
+  local port=$((base_port + 7))
+  local container="helixdb-image-concurrent-membership-$resource_suffix"
+
+  log "Testing concurrent shared label, equality, adjacency, and cascade membership"
+  start_container "$container" "$port"
+  wait_for_http "http://127.0.0.1:${port}/readyz" "$container"
+  python3 "$script_dir/concurrent_membership.py" --url "http://127.0.0.1:${port}"
+}
+
 run_memory_test
 run_native_disk_test
+run_concurrent_membership_test
 run_invalid_configuration_tests
 run_signal_test
 log "Docker image runtime smoke tests passed"

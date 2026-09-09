@@ -525,202 +525,192 @@ mod tests {
     #[tokio::test]
     async fn rejected_cascade_delete_preserves_every_graph_and_index_row() {
         let scope = keys::scope::DataScope::LegacyUnscoped;
-        for mode in [
-            crate::MembershipDeltaWriteMode::LegacyExclusive,
-            crate::MembershipDeltaWriteMode::DisjointV2,
-        ] {
-            let config = test_support::in_memory_config(&format!(
-                "mutation-corrupt-cascade-delete-{mode:?}"
-            ))
+        let config = test_support::in_memory_config("mutation-corrupt-cascade-delete")
             .with_equality_index("User", "status")
             .with_edge_equality_index("FOLLOWS", "status");
-            let db = test_support::open_db_with_config(config).await;
-            if mode == crate::MembershipDeltaWriteMode::DisjointV2 {
-                db.activate_membership_delta_v2().await.unwrap();
-            }
-            let target = test_support::add_node_with_properties(
-                &db,
-                "User",
-                vec![("status", AstPropertyValue::from("shared"))],
-            )
-            .await;
-            let neighbor = test_support::add_node_with_properties(
-                &db,
-                "User",
-                vec![("status", AstPropertyValue::from("shared"))],
-            )
-            .await;
-            let outgoing = test_support::add_edge_with_properties(
-                &db,
-                target,
-                neighbor,
-                "FOLLOWS",
-                vec![("status", AstPropertyValue::from("shared"))],
-            )
-            .await;
-            let incoming = test_support::add_edge_with_properties(
-                &db,
-                neighbor,
-                target,
-                "FOLLOWS",
-                vec![("status", AstPropertyValue::from("shared"))],
-            )
-            .await;
+        let db = test_support::open_db_with_config(config).await;
+        let target = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+        let neighbor = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+        let outgoing = test_support::add_edge_with_properties(
+            &db,
+            target,
+            neighbor,
+            "FOLLOWS",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+        let incoming = test_support::add_edge_with_properties(
+            &db,
+            neighbor,
+            target,
+            "FOLLOWS",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
 
-            let handles = db.active_index_handles_loaded(scope);
-            let node_equality = handles
-                .iter()
-                .find(|handle| {
-                    handle.secondary_definition().is_some_and(|definition| {
-                        definition.element_kind() == crate::index_lifecycle::IndexElementKind::Node
-                    })
+        let handles = db.active_index_handles_loaded(scope);
+        let node_equality = handles
+            .iter()
+            .find(|handle| {
+                handle.secondary_definition().is_some_and(|definition| {
+                    definition.element_kind() == crate::index_lifecycle::IndexElementKind::Node
                 })
-                .expect("the node equality generation is active");
-            let edge_equality = handles
-                .iter()
-                .find(|handle| {
-                    handle.secondary_definition().is_some_and(|definition| {
-                        definition.element_kind() == crate::index_lifecycle::IndexElementKind::Edge
-                    })
+            })
+            .expect("the node equality generation is active");
+        let edge_equality = handles
+            .iter()
+            .find(|handle| {
+                handle.secondary_definition().is_some_and(|definition| {
+                    definition.element_kind() == crate::index_lifecycle::IndexElementKind::Edge
                 })
-                .expect("the edge equality generation is active");
-            let cases = [
-                (
-                    "node-label",
-                    super::super::topology::node_label_key(scope, "User"),
+            })
+            .expect("the edge equality generation is active");
+        let cases = [
+            (
+                "node-label",
+                super::super::topology::node_label_key(scope, "User"),
+            ),
+            (
+                "edge-pair",
+                super::super::topology::edge_pair_key(scope, target, neighbor),
+            ),
+            (
+                "edge-label-out",
+                super::super::topology::edge_label_neighbor_key(
+                    scope,
+                    crate::encoding::indexes::EdgeDirection::Out,
+                    target,
+                    "FOLLOWS",
                 ),
-                (
-                    "edge-pair",
-                    super::super::topology::edge_pair_key(scope, target, neighbor),
+            ),
+            (
+                "edge-label-in",
+                super::super::topology::edge_label_neighbor_key(
+                    scope,
+                    crate::encoding::indexes::EdgeDirection::In,
+                    target,
+                    "FOLLOWS",
                 ),
-                (
-                    "edge-label-out",
-                    super::super::topology::edge_label_neighbor_key(
-                        scope,
-                        crate::encoding::indexes::EdgeDirection::Out,
-                        target,
-                        "FOLLOWS",
-                    ),
-                ),
-                (
-                    "edge-label-in",
-                    super::super::topology::edge_label_neighbor_key(
-                        scope,
-                        crate::encoding::indexes::EdgeDirection::In,
-                        target,
-                        "FOLLOWS",
-                    ),
-                ),
-                (
-                    "global-edge-label",
-                    super::super::topology::global_edge_label_key(scope, "FOLLOWS"),
-                ),
-                (
-                    "adjacency",
-                    keys::DataKey::Data {
-                        scope,
-                        kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
-                    }
-                    .to_bytes(),
-                ),
-                (
-                    "node-equality",
-                    crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
-                        node_equality,
-                        "shared",
-                    ),
-                ),
-                (
-                    "edge-equality",
-                    crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
-                        edge_equality,
-                        "shared",
-                    ),
-                ),
-            ];
-            let node_key = keys::DataKey::Data {
-                scope,
-                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(target)),
-            }
-            .to_bytes();
-            let outgoing_key = keys::DataKey::Data {
-                scope,
-                kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(outgoing)),
-            }
-            .to_bytes();
-            let incoming_key = keys::DataKey::Data {
-                scope,
-                kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(incoming)),
-            }
-            .to_bytes();
-            let node_param = test_support::name("node");
-            let access_id = exec::ExecStepId::new(1).unwrap();
-            let drop_node = test_support::executable(
-                ir::PlanKind::Write,
-                vec![
-                    test_support::step(
-                        1,
-                        Vec::new(),
-                        exec::ExecOp::Access {
-                            plan: Box::new(exec::ExecAccessPlan::Node(
-                                exec::ExecNodeAccessPlan::FromParam {
-                                    param: node_param.clone(),
-                                },
-                            )),
-                        },
-                    ),
-                    test_support::step(
-                        2,
-                        vec![access_id],
-                        exec::ExecOp::Mutation {
-                            plan: exec::ExecMutationPlan::Drop,
-                        },
-                    ),
-                ],
-                2,
-            );
-
-            for (name, key) in cases {
-                let original = db
-                    .inner_db()
-                    .get(&key)
-                    .await
-                    .unwrap()
-                    .unwrap_or_else(|| panic!("{name} fixture row exists"));
-                db.inner_db()
-                    .put(&key, Bytes::from_static(b"corrupt-membership-row"))
-                    .await
-                    .unwrap();
-                let before = all_rows(&db).await;
-                db.execute(
-                    &drop_node,
-                    context::ParamBindings::default()
-                        .with_value(node_param.clone(), AstPropertyValue::I64(target as i64)),
-                )
-                .await
-                .expect_err("corrupt membership rows reject the cascade delete");
-                assert_eq!(all_rows(&db).await, before, "{mode:?} {name}");
-                for record_key in [&node_key, &outgoing_key, &incoming_key] {
-                    assert!(
-                        db.inner_db().get(record_key).await.unwrap().is_some(),
-                        "{mode:?} {name} preserves node and edge records"
-                    );
+            ),
+            (
+                "global-edge-label",
+                super::super::topology::global_edge_label_key(scope, "FOLLOWS"),
+            ),
+            (
+                "adjacency",
+                keys::DataKey::Data {
+                    scope,
+                    kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
                 }
-                db.inner_db().put(&key, original).await.unwrap();
-            }
+                .to_bytes(),
+            ),
+            (
+                "node-equality",
+                crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
+                    node_equality,
+                    "shared",
+                ),
+            ),
+            (
+                "edge-equality",
+                crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
+                    edge_equality,
+                    "shared",
+                ),
+            ),
+        ];
+        let node_key = keys::DataKey::Data {
+            scope,
+            kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(target)),
+        }
+        .to_bytes();
+        let outgoing_key = keys::DataKey::Data {
+            scope,
+            kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(outgoing)),
+        }
+        .to_bytes();
+        let incoming_key = keys::DataKey::Data {
+            scope,
+            kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(incoming)),
+        }
+        .to_bytes();
+        let node_param = test_support::name("node");
+        let access_id = exec::ExecStepId::new(1).unwrap();
+        let drop_node = test_support::executable(
+            ir::PlanKind::Write,
+            vec![
+                test_support::step(
+                    1,
+                    Vec::new(),
+                    exec::ExecOp::Access {
+                        plan: Box::new(exec::ExecAccessPlan::Node(
+                            exec::ExecNodeAccessPlan::FromParam {
+                                param: node_param.clone(),
+                            },
+                        )),
+                    },
+                ),
+                test_support::step(
+                    2,
+                    vec![access_id],
+                    exec::ExecOp::Mutation {
+                        plan: exec::ExecMutationPlan::Drop,
+                    },
+                ),
+            ],
+            2,
+        );
 
+        for (name, key) in cases {
+            let original = db
+                .inner_db()
+                .get(&key)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name} fixture row exists"));
+            db.inner_db()
+                .put(&key, Bytes::from_static(b"corrupt-membership-row"))
+                .await
+                .unwrap();
+            let before = all_rows(&db).await;
             db.execute(
                 &drop_node,
                 context::ParamBindings::default()
-                    .with_value(node_param, AstPropertyValue::I64(target as i64)),
+                    .with_value(node_param.clone(), AstPropertyValue::I64(target as i64)),
             )
             .await
-            .expect("the repaired fixture still permits a complete cascade delete");
+            .expect_err("corrupt membership rows reject the cascade delete");
+            assert_eq!(all_rows(&db).await, before, "{name}");
             for record_key in [&node_key, &outgoing_key, &incoming_key] {
-                assert!(db.inner_db().get(record_key).await.unwrap().is_none());
+                assert!(
+                    db.inner_db().get(record_key).await.unwrap().is_some(),
+                    "{name} preserves node and edge records"
+                );
             }
-            db.close().await.unwrap();
+            db.inner_db().put(&key, original).await.unwrap();
         }
+
+        db.execute(
+            &drop_node,
+            context::ParamBindings::default()
+                .with_value(node_param, AstPropertyValue::I64(target as i64)),
+        )
+        .await
+        .expect("the repaired fixture still permits a complete cascade delete");
+        for record_key in [&node_key, &outgoing_key, &incoming_key] {
+            assert!(db.inner_db().get(record_key).await.unwrap().is_none());
+        }
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

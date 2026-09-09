@@ -226,6 +226,23 @@ impl<'a> Analyzer<'a> {
     }
 
     fn analyze_access(&mut self, access: &exec::ExecAccessPlan) {
+        let mut leaf = access;
+        let mut dynamic = false;
+        while let exec::ExecAccessPlan::Limited(limited) = leaf {
+            dynamic |= matches!(limited.limit(), exec::ExecAccessLimit::Dynamic(_));
+            leaf = limited.source();
+        }
+        if dynamic {
+            match leaf {
+                exec::ExecAccessPlan::Node(_) => {
+                    self.statistics.node_accesses.dynamic_bounded_accesses += 1
+                }
+                exec::ExecAccessPlan::Edge(_) => {
+                    self.statistics.edge_accesses.dynamic_bounded_accesses += 1
+                }
+                exec::ExecAccessPlan::Limited(_) => unreachable!("all bound layers were visited"),
+            }
+        }
         match access {
             exec::ExecAccessPlan::Limited(limited) => {
                 self.analyze_access_leaf(limited.source(), true);
@@ -278,7 +295,9 @@ impl<'a> Analyzer<'a> {
                             .equality_index_lookups
                             .saturating_add(values.max_values().get());
                     }
-                    exec::ExecNodeAccessPlan::RangeIndex { .. } => {
+                    exec::ExecNodeAccessPlan::RangeIndex { iteration, .. } => {
+                        self.statistics.node_accesses.reverse_range_index_scans +=
+                            usize::from(*iteration == crate::ir::RangeScanIteration::Reverse);
                         self.statistics.node_accesses.range_index_scans = self
                             .statistics
                             .node_accesses
@@ -346,7 +365,9 @@ impl<'a> Analyzer<'a> {
                             .equality_index_lookups
                             .saturating_add(values.max_values().get());
                     }
-                    exec::ExecEdgeAccessPlan::RangeIndex { .. } => {
+                    exec::ExecEdgeAccessPlan::RangeIndex { iteration, .. } => {
+                        self.statistics.edge_accesses.reverse_range_index_scans +=
+                            usize::from(*iteration == crate::ir::RangeScanIteration::Reverse);
                         self.statistics.edge_accesses.range_index_scans = self
                             .statistics
                             .edge_accesses
@@ -407,7 +428,9 @@ impl<'a> Analyzer<'a> {
                     .equality_index_lookups
                     .saturating_add(values.max_values().get());
             }
-            exec::ExecNodeSecondarySetPlan::Range(_) => {
+            exec::ExecNodeSecondarySetPlan::Range(driver) => {
+                self.statistics.node_accesses.reverse_range_index_scans +=
+                    usize::from(driver.iteration == crate::ir::RangeScanIteration::Reverse);
                 self.statistics.node_accesses.range_index_scans = self
                     .statistics
                     .node_accesses
@@ -426,7 +449,9 @@ impl<'a> Analyzer<'a> {
                     .chain(rest.iter())
                     .for_each(|child| self.analyze_node_secondary_set(child));
             }
-            exec::ExecNodeSecondarySetPlan::OrderedIntersect { filters, .. } => {
+            exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters } => {
+                self.statistics.node_accesses.reverse_range_index_scans +=
+                    usize::from(driver.iteration == crate::ir::RangeScanIteration::Reverse);
                 self.statistics.intersections = self.statistics.intersections.saturating_add(1);
                 self.statistics.node_accesses.range_index_scans = self
                     .statistics
@@ -465,7 +490,9 @@ impl<'a> Analyzer<'a> {
                     .equality_index_lookups
                     .saturating_add(values.max_values().get());
             }
-            exec::ExecEdgeSecondarySetPlan::Range(_) => {
+            exec::ExecEdgeSecondarySetPlan::Range(driver) => {
+                self.statistics.edge_accesses.reverse_range_index_scans +=
+                    usize::from(driver.iteration == crate::ir::RangeScanIteration::Reverse);
                 self.statistics.edge_accesses.range_index_scans = self
                     .statistics
                     .edge_accesses
@@ -484,7 +511,9 @@ impl<'a> Analyzer<'a> {
                     .chain(rest.iter())
                     .for_each(|child| self.analyze_edge_secondary_set(child));
             }
-            exec::ExecEdgeSecondarySetPlan::OrderedIntersect { filters, .. } => {
+            exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters } => {
+                self.statistics.edge_accesses.reverse_range_index_scans +=
+                    usize::from(driver.iteration == crate::ir::RangeScanIteration::Reverse);
                 self.statistics.intersections = self.statistics.intersections.saturating_add(1);
                 self.statistics.edge_accesses.range_index_scans = self
                     .statistics

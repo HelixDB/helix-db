@@ -2297,6 +2297,7 @@ fn access_subsumption_contract_covers_scan_label_and_filtered_sources() {
         label: node_user_label.clone(),
     };
     let node_range = NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: NodeRangeIndexMeta::new("node_age"),
         key: ScopedPropertyDirectionKey::new(
             node_user_label,
@@ -2354,6 +2355,7 @@ fn access_subsumption_contract_covers_scan_label_and_filtered_sources() {
         label: edge_follows_label.clone(),
     };
     let edge_range = EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: EdgeRangeIndexMeta::new("edge_weight"),
         key: ScopedPropertyDirectionKey::new(
             edge_follows_label,
@@ -2747,6 +2749,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
     let node_score_key =
         ScopedPropertyDirectionKey::try_new("User", "score", RangeIndexDirection::Asc).unwrap();
     let node_age_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_index.clone(),
         key: node_age_key.clone(),
         range: IndexRange::between(
@@ -2755,6 +2758,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
         ),
     });
     let node_score_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_index.clone(),
         key: node_score_key,
         range: IndexRange::between(
@@ -2764,6 +2768,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
     });
     let node_dynamic_age_range =
         NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
             index: node_index.clone(),
             key: node_age_key.clone(),
             range: IndexRange::Lower {
@@ -2771,6 +2776,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
             },
         });
     let node_age_lower = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_index,
         key: node_age_key.clone(),
         range: IndexRange::Lower {
@@ -2842,6 +2848,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
     let edge_rank_key =
         ScopedPropertyDirectionKey::try_new("FOLLOWS", "rank", RangeIndexDirection::Asc).unwrap();
     let edge_weight_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_index.clone(),
         key: edge_weight_key.clone(),
         range: IndexRange::between(
@@ -2850,6 +2857,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
         ),
     });
     let edge_rank_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_index.clone(),
         key: edge_rank_key,
         range: IndexRange::between(
@@ -2859,6 +2867,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
     });
     let edge_dynamic_weight_range =
         EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
             index: edge_index.clone(),
             key: edge_weight_key.clone(),
             range: IndexRange::Lower {
@@ -2866,6 +2875,7 @@ fn range_union_intersection_contract_keeps_unknown_and_mismatched_sources_conser
             },
         });
     let edge_weight_lower = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_index,
         key: edge_weight_key,
         range: IndexRange::Lower {
@@ -2947,6 +2957,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
     let node_score_range_key =
         ScopedPropertyDirectionKey::try_new("User", "score", RangeIndexDirection::Asc).unwrap();
     let node_age_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_range_index.clone(),
         key: node_age_range_key.clone(),
         range: IndexRange::between(
@@ -2955,6 +2966,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
         ),
     });
     let node_age_later_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_range_index.clone(),
         key: node_age_range_key,
         range: IndexRange::between(
@@ -2963,6 +2975,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
         ),
     });
     let node_dynamic_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_range_index.clone(),
         key: ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc).unwrap(),
         range: IndexRange::Lower {
@@ -2970,6 +2983,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
         },
     });
     let node_score_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: node_range_index.clone(),
         key: node_score_range_key.clone(),
         range: IndexRange::between(
@@ -2979,6 +2993,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
     });
     let node_score_later_range =
         NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
             index: node_range_index,
             key: node_score_range_key,
             range: IndexRange::between(
@@ -3038,6 +3053,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
     let edge_rank_range_key =
         ScopedPropertyDirectionKey::try_new("FOLLOWS", "rank", RangeIndexDirection::Asc).unwrap();
     let edge_weight_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_range_index.clone(),
         key: edge_weight_range_key.clone(),
         range: IndexRange::between(
@@ -3047,6 +3063,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
     });
     let edge_weight_later_range =
         EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
             index: edge_range_index.clone(),
             key: edge_weight_range_key,
             range: IndexRange::between(
@@ -3055,6 +3072,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
             ),
         });
     let edge_dynamic_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_range_index.clone(),
         key: ScopedPropertyDirectionKey::try_new("FOLLOWS", "weight", RangeIndexDirection::Asc)
             .unwrap(),
@@ -3063,6 +3081,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
         },
     });
     let edge_rank_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_range_index.clone(),
         key: edge_rank_range_key.clone(),
         range: IndexRange::between(
@@ -3071,6 +3090,7 @@ fn equality_range_union_intersection_contract_keeps_unknown_and_mixed_ranges_con
         ),
     });
     let edge_rank_later_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: edge_range_index,
         key: edge_rank_range_key,
         range: IndexRange::between(
@@ -3121,6 +3141,7 @@ fn equality_range_intersection_contract_keeps_dynamic_ranges_conservative() {
         value: IndexValue::Literal(SecondaryIndexLiteral::new(PropertyValue::from(30)).unwrap()),
     });
     let node_dynamic_range = NodeAccessSourcePlan::from_unfiltered(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: NodeRangeIndexMeta::new("node_range"),
         key: node_range_key,
         range: IndexRange::Lower {
@@ -3143,6 +3164,7 @@ fn equality_range_intersection_contract_keeps_dynamic_ranges_conservative() {
         value: IndexValue::Literal(SecondaryIndexLiteral::new(PropertyValue::from(5)).unwrap()),
     });
     let edge_dynamic_range = EdgeAccessSourcePlan::from_unfiltered(EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: EdgeRangeIndexMeta::new("edge_range"),
         key: edge_range_key,
         range: IndexRange::Upper {

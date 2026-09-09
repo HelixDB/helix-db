@@ -40,6 +40,9 @@ pub struct StorageCostProfile {
     pub range_seek: LatencyEstimate,
     /// Per-row range scan step cost.
     pub range_next: LatencyEstimate,
+    /// Additional reverse traversal work per 1,000 visited entries. Batched units
+    /// preserve sub-microsecond calibration without changing latency units.
+    pub reverse_range_per_1000: LatencyEstimate,
     /// Per-row residual predicate CPU cost.
     pub cpu_predicate_eval: LatencyEstimate,
     /// Per-row generic stream operator CPU cost.

@@ -8,8 +8,6 @@ use super::{
 
 /// Canonical V2 index format number written by this implementation.
 pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0004;
-/// First storage format that permits persisted disjoint membership operands.
-pub(crate) const DISJOINT_MEMBERSHIP_INDEX_STORAGE_VERSION: u16 = 0x0005;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,8 +15,7 @@ pub(crate) struct IndexStorageVersion(u16);
 
 impl IndexStorageVersion {
     pub(crate) const CURRENT: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
-    pub(crate) const DISJOINT_MEMBERSHIP: Self = Self(DISJOINT_MEMBERSHIP_INDEX_STORAGE_VERSION);
-    pub(crate) const MAX_SUPPORTED: Self = Self::DISJOINT_MEMBERSHIP;
+    pub(crate) const MAX_SUPPORTED: Self = Self::CURRENT;
 
     pub(crate) fn new(value: u16) -> Result<Self, crate::encoding::error::EncodingError> {
         if value == 0 {
@@ -203,7 +200,6 @@ pub(crate) enum IndexV2MetadataValue {
     OperationQueuePointer(OperationQueuePointerValue),
     LegacyVectorPhysicalReservation(LegacyVectorPhysicalReservation),
     TextCompactionPointer(TextCompactionPointerValue),
-    MembershipDeltaWriteMode(crate::MembershipDeltaWriteMode),
 }
 
 #[cfg(test)]

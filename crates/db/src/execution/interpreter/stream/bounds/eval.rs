@@ -28,7 +28,7 @@ impl<'db> ExecutionContext<'db> {
     }
 }
 
-pub(in crate::execution::interpreter::stream) fn eval_stream_bound(
+pub(in crate::execution::interpreter) fn eval_stream_bound(
     count: &ir::StreamBoundPlan,
     params: &context::ParamBindings,
 ) -> Result<usize> {

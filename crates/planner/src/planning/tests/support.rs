@@ -203,7 +203,9 @@ pub(crate) fn first_kv_read_limit(plan: &ExecutablePlan) -> Option<usize> {
 
 pub(crate) fn first_limited_access_limit(plan: &ExecutablePlan) -> Option<usize> {
     match first_exec_access(plan) {
-        ExecAccessPlan::Limited(limited) => Some(limited.limit().get()),
+        ExecAccessPlan::Limited(limited) => {
+            Some(limited.limit().literal().expect("static test bound"))
+        }
         ExecAccessPlan::Node(_) | ExecAccessPlan::Edge(_) => None,
     }
 }

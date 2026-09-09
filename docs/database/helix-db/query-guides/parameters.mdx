@@ -32,7 +32,7 @@ fn find_users(tenant_id: String, limit: i64) -> ReadBatch {
         .returning(["users"])
 }
 
-let request = find_users("acme".to_string(), 25);
+let request = find_users("acme".to_string(), 25)?;
 ```
 
 ```ts TypeScript
@@ -170,6 +170,10 @@ request = query.to_query_request(
 - typed objects and arrays
 
 JSON cannot represent a bytes parameter directly; use an SDK's byte request encoder.
+
+In Go, `ParamDateTime` and typed `date_time` parameters accept `helix.DateTime`, `time.Time`, an
+RFC3339 string, or an `int`/`int64` epoch-millisecond value. The SDK normalizes each value to UTC
+RFC3339 with millisecond precision.
 
 ## Query names
 

@@ -63,7 +63,8 @@ use crate::index_lifecycle::outbox::{
 };
 use crate::index_lifecycle::repository::ReaderStorageCompatibility;
 use crate::index_lifecycle::work::{
-    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, SecondaryEntryValue,
+    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaState,
+    CoalescedBuildDeltaValue, SecondaryEntryValue,
 };
 #[cfg(any(
     test,
@@ -85,12 +86,13 @@ use super::IndexScopeGates;
 mod exact;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) use exact::scan_active_range_generation_with_membership;
 pub(crate) use exact::{
     count_active_range_generation_with_membership,
     lookup_active_equality_literal_batch_with_compatibility,
     lookup_active_equality_point_literal_with_compatibility, record_equality_graph_read,
+    scan_active_range_generation_ordered, ExactRangeScanProgress,
 };
 #[cfg(test)]
 pub(crate) use exact::{
@@ -427,21 +429,14 @@ impl SecondaryMutationRuntime {
                 .ok_or_else(|| corruption("pending secondary mutation lost its catalog target"))?;
             match target.mode {
                 SecondaryMutationMode::RecordBuildDelta => {
-                    let key = scoped_index_key(
+                    stage_secondary_build_delta(
+                        transaction,
                         change.scope,
-                        ScopedKey::BuildDelta(IndexEntityStateKey {
-                            index_id: target.index_id,
-                            generation: target.generation,
-                            entity: change.entity,
-                        }),
-                    );
-                    let value = CoalescedBuildDeltaValue {
-                        index_id: target.index_id,
-                        generation: target.generation,
-                        entity_kind: change.entity.kind,
-                        entity_id: change.entity.id,
-                    };
-                    transaction.put(key, encode_build_delta(&value))?;
+                        target,
+                        change.entity,
+                        change.old_value,
+                    )
+                    .await?;
                 }
                 SecondaryMutationMode::MaintainActive => {
                     if definition_uses_equality_bitmap(&target.definition) {
@@ -669,24 +664,41 @@ pub(crate) async fn maintain_entity(
                     kind: entity_kind,
                     id: entity_id,
                 };
-                let key = scoped_index_key(
-                    scope,
-                    ScopedKey::BuildDelta(IndexEntityStateKey {
-                        index_id: target.index_id,
-                        generation: target.generation,
-                        entity,
-                    }),
-                );
-                let value = CoalescedBuildDeltaValue {
-                    index_id: target.index_id,
-                    generation: target.generation,
-                    entity_kind,
-                    entity_id,
-                };
-                transaction.put(key, encode_build_delta(&value))?;
+                stage_secondary_build_delta(transaction, scope, target, entity, old_value).await?;
             }
         }
     }
+    Ok(())
+}
+
+/// Preserves the original secondary value across repeated coalesced mutations.
+async fn stage_secondary_build_delta(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    target: &SecondaryMutationTarget,
+    entity: IndexEntity,
+    initial_before: Option<CanonicalSecondaryValue>,
+) -> Result<()> {
+    let key = scoped_index_key(
+        scope,
+        ScopedKey::BuildDelta(IndexEntityStateKey {
+            index_id: target.index_id,
+            generation: target.generation,
+            entity,
+        }),
+    );
+    let state = match transaction.get(&key).await? {
+        Some(existing) => decode_delta(scope, &key, &existing)?.1.state,
+        None => CoalescedBuildDeltaState::SecondaryBefore(initial_before),
+    };
+    let value = CoalescedBuildDeltaValue {
+        index_id: target.index_id,
+        generation: target.generation,
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+        state,
+    };
+    transaction.put(key, encode_build_delta(&value))?;
     Ok(())
 }
 
@@ -1327,10 +1339,13 @@ async fn catch_up(
         let plan = match reconciliation_plan(
             transaction,
             scope,
-            operation.index_id(),
-            operation.generation(),
+            IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity,
+            },
             definition,
-            entity.id,
+            &value.state,
             next_value,
         )
         .await?
@@ -1434,17 +1449,18 @@ async fn catch_up_exact(
             delta_key,
             entity,
             u64::try_from(delta_value.len()).unwrap_or(u64::MAX),
+            value.state,
         ));
     }
 
     let property_keys = decoded
         .iter()
-        .map(|(_, entity, _)| authoritative_property_key(scope, *entity))
+        .map(|(_, entity, _, _)| authoritative_property_key(scope, *entity))
         .collect::<Vec<_>>();
     let property_values = transaction.multi_get(&property_keys).await?;
     let applied_keys = decoded
         .iter()
-        .map(|(_, entity, _)| {
+        .map(|(_, entity, _, _)| {
             scoped_index_key(
                 scope,
                 ScopedKey::AppliedState(IndexEntityStateKey {
@@ -1458,12 +1474,14 @@ async fn catch_up_exact(
     let applied_values = transaction.multi_get(&applied_keys).await?;
     let mut rows = Vec::with_capacity(decoded.len());
     let mut unique_keys = Vec::new();
-    for ((((delta_key, entity, delta_value_bytes), property_key), property_value), applied_pair) in
-        decoded
-            .into_iter()
-            .zip(property_keys)
-            .zip(property_values)
-            .zip(applied_keys.into_iter().zip(applied_values))
+    for (
+        (((delta_key, entity, delta_value_bytes, delta_state), property_key), property_value),
+        applied_pair,
+    ) in decoded
+        .into_iter()
+        .zip(property_keys)
+        .zip(property_values)
+        .zip(applied_keys.into_iter().zip(applied_values))
     {
         let next_value = match property_value.as_ref() {
             Some(properties) => {
@@ -1483,13 +1501,14 @@ async fn catch_up_exact(
             None => None,
         };
         let (applied_key, applied_value) = applied_pair;
-        let previous_value = decode_previous_applied(
+        let previous_value = reconciliation_previous_value(
             scope,
             operation.index_id(),
             operation.generation(),
             entity,
             &applied_key,
             applied_value.as_deref(),
+            &delta_state,
         )?;
         let mut unique_entry_keys = Vec::new();
         if definition.unique() && previous_value != next_value {
@@ -2277,16 +2296,21 @@ fn apply_active_change_from_overlay(
 async fn reconciliation_plan(
     transaction: &DbTransaction,
     scope: DataScope,
-    index_id: IndexId,
-    generation: IndexGenerationId,
+    state_key: IndexEntityStateKey,
     definition: &ValidatedSecondaryIndexDefinition,
-    entity_id: IndexEntityId,
+    delta_state: &CoalescedBuildDeltaState,
     next_value: Option<CanonicalSecondaryValue>,
 ) -> Result<ReconciliationPlan> {
-    let entity = IndexEntity {
-        kind: definition.element_kind(),
-        id: entity_id,
-    };
+    let IndexEntityStateKey {
+        index_id,
+        generation,
+        entity,
+    } = state_key;
+    if entity.kind != definition.element_kind() {
+        return Err(corruption(
+            "secondary reconciliation entity kind disagrees with definition",
+        ));
+    }
     let applied_key = scoped_index_key(
         scope,
         ScopedKey::AppliedState(IndexEntityStateKey {
@@ -2296,13 +2320,14 @@ async fn reconciliation_plan(
         }),
     );
     let applied_value = transaction.get(&applied_key).await?;
-    let previous = decode_previous_applied(
+    let previous = reconciliation_previous_value(
         scope,
         index_id,
         generation,
         entity,
         &applied_key,
         applied_value.as_deref(),
+        delta_state,
     )?;
     let mut unique_entries = BTreeMap::new();
     if definition.unique() && previous != next_value {
@@ -2316,7 +2341,7 @@ async fn reconciliation_plan(
                 generation,
                 definition,
                 value.clone(),
-                entity_id,
+                entity.id,
             )?;
             let observed = transaction.get(&key).await?;
             unique_entries.insert(key, observed);
@@ -2333,6 +2358,36 @@ async fn reconciliation_plan(
         next_value,
         &unique_entries,
     )
+}
+
+fn reconciliation_previous_value(
+    scope: DataScope,
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    entity: IndexEntity,
+    applied_key: &[u8],
+    applied_value: Option<&[u8]>,
+    delta_state: &CoalescedBuildDeltaState,
+) -> Result<Option<CanonicalSecondaryValue>> {
+    if applied_value.is_some() {
+        return decode_previous_applied(
+            scope,
+            index_id,
+            generation,
+            entity,
+            applied_key,
+            applied_value,
+        );
+    }
+    match delta_state {
+        CoalescedBuildDeltaState::SecondaryBefore(previous) => Ok(previous.clone()),
+        CoalescedBuildDeltaState::Marker => Err(corruption(
+            "secondary build delta has no original value after applied-state release",
+        )),
+        CoalescedBuildDeltaState::VectorBefore(_) => Err(corruption(
+            "secondary build delta contains vector recovery state",
+        )),
+    }
 }
 
 fn decode_previous_applied(
@@ -2560,57 +2615,23 @@ async fn stage_bitmap_changes(
     transaction: &DbTransaction,
     changes: &BTreeMap<Bytes, BTreeMap<u64, bool>>,
 ) -> Result<()> {
-    match crate::membership_delta::transaction_write_mode(transaction).await? {
-        crate::MembershipDeltaWriteMode::LegacyExclusive => {
-            for (key, changes) in changes {
-                let mut bitmap = transaction
-                    .get(key)
-                    .await?
-                    .as_deref()
-                    .map(SecondaryEqualityBitmapValue::decode)
-                    .transpose()?
-                    .map(SecondaryEqualityBitmapValue::into_ids)
-                    .unwrap_or_default();
-                for (entity_id, present) in changes {
-                    if *present {
-                        bitmap.insert(*entity_id);
-                    } else {
-                        bitmap.remove(*entity_id);
-                    }
-                }
-                if bitmap.is_empty() {
-                    transaction.delete(key)?;
-                } else {
-                    transaction.put_with_options(
-                        key,
-                        SecondaryEqualityBitmapValue::new(bitmap).encode(),
-                        &slatedb::config::PutOptions {
-                            ttl: slatedb::config::Ttl::NoExpiry,
-                        },
-                    )?;
-                }
+    let mut merges = Vec::with_capacity(changes.len());
+    for (key, members) in changes {
+        let mut delta = BitmapMembershipDelta::default();
+        for (&entity_id, &present) in members {
+            if present {
+                delta.add(entity_id);
+            } else {
+                delta.remove(entity_id);
             }
         }
-        crate::MembershipDeltaWriteMode::DisjointV2 => {
-            let mut merges = Vec::with_capacity(changes.len());
-            for (key, changes) in changes {
-                let mut delta = BitmapMembershipDelta::default();
-                for (entity_id, present) in changes {
-                    if *present {
-                        delta.add(*entity_id);
-                    } else {
-                        delta.remove(*entity_id);
-                    }
-                }
-                merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                    key.clone(),
-                    delta.members().map(u128::from),
-                    delta.encode(),
-                ));
-            }
-            transaction.merge_disjoint_checked_batch(merges).await?;
-        }
+        merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
+            key.clone(),
+            delta.members().map(u128::from),
+            delta.encode(),
+        ));
     }
+    transaction.merge_disjoint_checked_batch(merges).await?;
     Ok(())
 }
 
@@ -2832,7 +2853,11 @@ fn property_value_type_name(value: &PropertyValue) -> &'static str {
 /// with `handle`. Unique entries and V4 non-unique bitmaps each use one point
 /// read. Authoritative-null lookup remains a graph scan because nulls are not
 /// physically indexed.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn lookup_active_equality_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -3107,97 +3132,23 @@ pub(crate) enum SecondaryRangeQuery {
 ///
 /// Storage bounds use typed, self-delimiting payloads. Every candidate is then
 /// checked against authoritative graph state before it can consume `limit`.
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn scan_active_range_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     query: Option<&SecondaryRangeQuery>,
     limit: Option<usize>,
 ) -> Result<Vec<u64>> {
-    let Some(definition) = handle.secondary_definition() else {
-        return Err(corruption(
-            "secondary range serving received a non-secondary Active handle",
-        ));
-    };
-    if !matches!(
-        definition,
-        ValidatedSecondaryIndexDefinition::NodeRange { .. }
-            | ValidatedSecondaryIndexDefinition::EdgeRange { .. }
-    ) {
-        return Err(corruption(
-            "secondary range serving received an equality definition",
-        ));
-    }
-
-    let direction = match definition.direction() {
-        RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
-        RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
-    };
-    let lane = definition_lane(definition);
-    let bounds = match query {
-        Some(query) => match secondary_range_scan_bounds(direction, query)? {
-            Some(bounds) => bounds,
-            None => return Ok(Vec::new()),
-        },
-        None => (Bound::Unbounded, Bound::Unbounded),
-    };
-    let prefix = IndexKey::data_prefix(
-        handle.scope(),
-        ScopedKey::secondary_lane_prefix(handle.index_id(), handle.generation(), lane),
-    );
-    let mut rows = reader.scan_prefix(&prefix, bounds).await?;
-    let mut owners = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let IndexKey::Data {
-            kind: ScopedKey::SecondaryEntry(key),
-            ..
-        } = IndexKey::parse_from_slice(handle.scope(), &row.key)?
-        else {
-            return Err(corruption(
-                "secondary range prefix yielded another key kind",
-            ));
-        };
-        if key.index_id() != handle.index_id()
-            || key.generation() != handle.generation()
-            || key.lane() != lane
-        {
-            return Err(corruption(
-                "secondary range entry escaped its exact serving prefix",
-            ));
-        }
-        let Some(key_owner) = key.entity_id() else {
-            return Err(corruption("secondary range entry omitted its key owner"));
-        };
-        let value_owner =
-            decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &row.value)?;
-        if key_owner != value_owner {
-            return Err(corruption(
-                "secondary range entry key/value owners disagree",
-            ));
-        }
-        let Some(key_value) = key.range_value() else {
-            return Err(corruption(
-                "secondary range lane contains an equality value",
-            ));
-        };
-        if !authoritative_range_matches(
-            reader,
-            handle.scope(),
-            definition,
-            value_owner,
-            direction,
-            key_value,
-            query,
-        )
-        .await?
-        {
-            continue;
-        }
-        owners.push(value_owner.get());
-        if limit.is_some_and(|limit| owners.len() >= limit) {
-            break;
-        }
-    }
-    Ok(owners)
+    scan_active_range_generation_ordered(
+        reader,
+        handle,
+        query,
+        helix_planner::ir::RangeScanIteration::Forward,
+        limit,
+        &[],
+        &exact::UnobservedRangeScan,
+    )
+    .await
 }
 
 /// Produces suffix bounds for one generation/lane `scan_prefix` call.
@@ -3351,6 +3302,7 @@ fn secondary_range_query_matches(query: &SecondaryRangeQuery, value: &PropertyVa
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authoritative_range_matches(
     reader: &(impl DbReadOps + Sync),
     scope: DataScope,
@@ -3359,14 +3311,22 @@ async fn authoritative_range_matches(
     direction: StorageRangeIndexDirection,
     key_value: &CanonicalRangeValue,
     query: Option<&SecondaryRangeQuery>,
+    progress: &dyn ExactRangeScanProgress,
 ) -> Result<bool> {
     let entity = IndexEntity {
         kind: definition.element_kind(),
         id: entity_id,
     };
-    let Some(properties) = read_authoritative_properties(reader, scope, entity).await? else {
+    progress.checkpoint()?;
+    progress.authoritative_read();
+    let Some(bytes) = reader
+        .get(authoritative_property_key(scope, entity))
+        .await?
+    else {
         return Ok(false);
     };
+    progress.authoritative_decode();
+    let properties = decode_properties(&bytes)?;
     if !properties_match_definition(definition, &properties) {
         return Ok(false);
     }
@@ -3714,7 +3674,7 @@ mod tests {
 
     const NOW_MILLIS: u64 = 1;
 
-    async fn test_db_with_mode(name: &str, mode: crate::MembershipDeltaWriteMode) -> Db {
+    pub(super) async fn test_db(name: &str) -> Db {
         let db = Db::builder(name, Arc::new(InMemory::new()))
             .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
             .build()
@@ -3723,16 +3683,7 @@ mod tests {
         bootstrap_writer(&db)
             .await
             .expect("secondary test database bootstraps V2 metadata");
-        if mode == crate::MembershipDeltaWriteMode::DisjointV2 {
-            crate::membership_delta::activate(&db)
-                .await
-                .expect("secondary test database activates V2 deltas");
-        }
         db
-    }
-
-    pub(super) async fn test_db(name: &str) -> Db {
-        test_db_with_mode(name, crate::MembershipDeltaWriteMode::DisjointV2).await
     }
 
     fn validated(definition: SecondaryIndexDefinition) -> ValidatedDynamicIndexDefinition {
@@ -3938,7 +3889,12 @@ mod tests {
     }
 
     /// Persists one generation-qualified entry matching the fixture handle.
-    async fn put_read_entry(db: &Db, handle: &ActiveIndexHandle, value: &str, entity_id: u64) {
+    pub(super) async fn put_read_entry(
+        db: &Db,
+        handle: &ActiveIndexHandle,
+        value: &str,
+        entity_id: u64,
+    ) {
         let definition = handle
             .secondary_definition()
             .expect("secondary read fixture uses a secondary handle");
@@ -5778,6 +5734,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bitmap_reconciliation_persists_physical_and_applied_state_together() {
+        let db = test_db("secondary-bitmap-reconciliation-state").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "status")
+                .expect("node equality definition validates"),
+        );
+        let ValidatedDynamicIndexDefinition::Secondary(definition) = definition else {
+            unreachable!("secondary fixture is type-checked")
+        };
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::initial(),
+        };
+        let applied_key = scoped_index_key(
+            scope,
+            ScopedKey::AppliedState(IndexEntityStateKey {
+                index_id: IndexId::initial(),
+                generation: IndexGenerationId::initial(),
+                entity,
+            }),
+        );
+        let next = CanonicalSecondaryValue::equality_string("ready");
+        let ReconciliationPlan::Writes(plan) = reconciliation_plan_from_observations(
+            scope,
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            &definition,
+            entity,
+            applied_key.clone(),
+            None,
+            Some(next.clone()),
+            &BTreeMap::new(),
+        )
+        .expect("bitmap reconciliation plan validates") else {
+            panic!("fresh bitmap membership cannot be blocked")
+        };
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("bitmap reconciliation transaction begins");
+        plan.stage(&transaction)
+            .await
+            .expect("bitmap reconciliation stages");
+        transaction
+            .commit()
+            .await
+            .expect("bitmap reconciliation commits");
+
+        assert!(db
+            .get(&applied_key)
+            .await
+            .expect("applied state is readable")
+            .is_some());
+        let bitmap_key = secondary_entry_key(
+            scope,
+            IndexId::initial(),
+            IndexGenerationId::initial(),
+            &definition,
+            next,
+            entity.id,
+        )
+        .expect("bitmap key validates");
+        assert_eq!(
+            SecondaryEqualityBitmapValue::decode(
+                &db.get(bitmap_key)
+                    .await
+                    .expect("bitmap is readable")
+                    .expect("bitmap exists"),
+            )
+            .expect("bitmap decodes")
+            .ids()
+            .iter()
+            .collect::<Vec<_>>(),
+            vec![entity.id.get()]
+        );
+        db.close()
+            .await
+            .expect("bitmap reconciliation database closes");
+    }
+
+    #[tokio::test]
+    async fn bitmap_source_scan_retains_applied_state_for_catch_up() {
+        let db = test_db("secondary-bitmap-source-scan-state").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "status")
+                .expect("node equality definition validates"),
+        );
+        put_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &[
+                Property::string("$label", "User"),
+                Property::string("status", "ready"),
+            ],
+        )
+        .await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Progressed
+        );
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation,)
+                .await
+                .len(),
+            1
+        );
+        db.close()
+            .await
+            .expect("bitmap source scan database closes");
+    }
+
+    #[tokio::test]
     async fn removal_bearing_bitmap_changes_merge_or_tombstone() {
         let db = test_db("secondary-mixed-bitmap-changes").await;
         let handle = active_read_handle(
@@ -5856,62 +5931,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_node_and_edge_equality_rows_fail_closed_in_every_write_mode() {
-        for mode in [
-            crate::MembershipDeltaWriteMode::LegacyExclusive,
-            crate::MembershipDeltaWriteMode::DisjointV2,
+    async fn corrupt_node_and_edge_equality_rows_fail_closed() {
+        for (kind, definition) in [
+            (
+                "node",
+                SecondaryIndexDefinition::node_equality("User", "status")
+                    .expect("node equality definition validates"),
+            ),
+            (
+                "edge",
+                SecondaryIndexDefinition::edge_equality("FOLLOWS", "status")
+                    .expect("edge equality definition validates"),
+            ),
         ] {
-            for (kind, definition) in [
-                (
-                    "node",
-                    SecondaryIndexDefinition::node_equality("User", "status")
-                        .expect("node equality definition validates"),
-                ),
-                (
-                    "edge",
-                    SecondaryIndexDefinition::edge_equality("FOLLOWS", "status")
-                        .expect("edge equality definition validates"),
-                ),
-            ] {
-                let db =
-                    test_db_with_mode(&format!("secondary-corrupt-{mode:?}-{kind}-equality"), mode)
-                        .await;
-                let handle = active_read_handle(&db, definition).await;
-                let key = secondary_entry_key(
-                    handle.scope(),
-                    handle.index_id(),
-                    handle.generation(),
-                    handle
-                        .secondary_definition()
-                        .expect("secondary handle retains its definition"),
-                    CanonicalSecondaryValue::equality_string("corrupt"),
-                    IndexEntityId::initial(),
-                )
-                .expect("equality bitmap key validates");
-                let corrupt = Bytes::from_static(b"corrupt-equality-bitmap");
-                db.put(&key, corrupt.clone()).await.unwrap();
+            let db = test_db(&format!("secondary-corrupt-{kind}-equality")).await;
+            let handle = active_read_handle(&db, definition).await;
+            let key = secondary_entry_key(
+                handle.scope(),
+                handle.index_id(),
+                handle.generation(),
+                handle
+                    .secondary_definition()
+                    .expect("secondary handle retains its definition"),
+                CanonicalSecondaryValue::equality_string("corrupt"),
+                IndexEntityId::initial(),
+            )
+            .expect("equality bitmap key validates");
+            let corrupt = Bytes::from_static(b"corrupt-equality-bitmap");
+            db.put(&key, corrupt.clone()).await.unwrap();
 
-                let transaction = db
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .unwrap();
-                assert!(
-                    stage_bitmap_changes(
-                        &transaction,
-                        &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
-                    )
-                    .await
-                    .is_err(),
-                    "{mode:?} {kind} equality corruption"
-                );
-                transaction.rollback();
-                assert_eq!(
-                    db.get(&key).await.unwrap(),
-                    Some(corrupt),
-                    "{mode:?} {kind} equality corruption"
-                );
-                db.close().await.unwrap();
-            }
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            assert!(
+                stage_bitmap_changes(
+                    &transaction,
+                    &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
+                )
+                .await
+                .is_err(),
+                "{kind} equality corruption"
+            );
+            transaction.rollback();
+            assert_eq!(
+                db.get(&key).await.unwrap(),
+                Some(corrupt),
+                "{kind} equality corruption"
+            );
+            db.close().await.unwrap();
         }
     }
 
@@ -5990,139 +6058,113 @@ mod tests {
         let fixtures = [
             (
                 "node",
-                SecondaryIndexDefinition::node_equality("User", "status")
-                    .expect("node equality definition validates"),
+                SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
             ),
             (
                 "edge",
-                SecondaryIndexDefinition::edge_equality("FOLLOWS", "status")
-                    .expect("edge equality definition validates"),
+                SecondaryIndexDefinition::edge_equality("FOLLOWS", "status").unwrap(),
             ),
         ];
-
         for (kind, fixture) in fixtures {
-            let db = test_db(&format!("secondary-disjoint-{kind}-bitmap-races")).await;
+            let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+                database: format!("default-secondary-{kind}-races"),
+            })
+            .await
+            .unwrap();
+            let db = facade.inner_db();
             let handle = active_read_handle(&db, fixture).await;
-            let definition = handle
-                .secondary_definition()
-                .expect("secondary handle retains its definition");
+            let definition = handle.secondary_definition().unwrap();
 
-            for insert_commits_first in [false, true] {
-                let key = secondary_entry_key(
-                    handle.scope(),
-                    handle.index_id(),
-                    handle.generation(),
-                    definition,
-                    CanonicalSecondaryValue::equality_string(&format!(
-                        "disjoint-{insert_commits_first}"
-                    )),
-                    IndexEntityId::initial(),
-                )
-                .expect("bitmap key validates");
-                db.put(
-                    &key,
-                    SecondaryEqualityBitmapValue::new(roaring::RoaringTreemap::from_iter([1]))
-                        .encode(),
-                )
-                .await
-                .expect("initial bitmap persists");
-                let insert = db
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .expect("insert transaction begins");
-                let remove = db
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .expect("remove transaction begins");
-                stage_bitmap_changes(
-                    &insert,
-                    &BTreeMap::from([(key.clone(), BTreeMap::from([(2, true)]))]),
-                )
-                .await
-                .expect("insert stages");
-                stage_bitmap_changes(
-                    &remove,
-                    &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
-                )
-                .await
-                .expect("remove stages");
-                if insert_commits_first {
-                    insert.commit().await.expect("insert commits");
-                    remove.commit().await.expect("disjoint remove commits");
-                } else {
-                    remove.commit().await.expect("remove commits");
-                    insert.commit().await.expect("disjoint insert commits");
-                }
-                assert_eq!(
-                    SecondaryEqualityBitmapValue::decode(
-                        &db.get(&key)
+            for (left_present, right_present) in [(true, true), (false, false), (true, false)] {
+                for left_first in [false, true] {
+                    for overlap in [false, true] {
+                        let key = secondary_entry_key(
+                            handle.scope(),
+                            handle.index_id(),
+                            handle.generation(),
+                            definition,
+                            CanonicalSecondaryValue::equality_string(&format!(
+                                "{left_present}-{right_present}-{left_first}-{overlap}"
+                            )),
+                            IndexEntityId::initial(),
+                        )
+                        .unwrap();
+                        let right_id = if overlap { 1 } else { 2 };
+                        let mut expected = roaring::RoaringTreemap::new();
+                        for (id, present) in [(1, left_present), (right_id, right_present)] {
+                            if !present {
+                                expected.insert(id);
+                            }
+                        }
+                        db.put(
+                            &key,
+                            SecondaryEqualityBitmapValue::new(expected.clone()).encode(),
+                        )
+                        .await
+                        .unwrap();
+                        // Direct commits with overlapping snapshots: no automatic retry.
+                        let left = db
+                            .begin(IsolationLevel::SerializableSnapshot)
                             .await
-                            .expect("result bitmap reads")
-                            .expect("result bitmap exists"),
-                    )
-                    .unwrap()
-                    .into_ids()
-                    .iter()
-                    .collect::<Vec<_>>(),
-                    vec![2]
-                );
-            }
-
-            for insert_commits_first in [false, true] {
-                let key = secondary_entry_key(
-                    handle.scope(),
-                    handle.index_id(),
-                    handle.generation(),
-                    definition,
-                    CanonicalSecondaryValue::equality_string(&format!(
-                        "overlap-{insert_commits_first}"
-                    )),
-                    IndexEntityId::initial(),
-                )
-                .expect("bitmap key validates");
-                db.put(
-                    &key,
-                    SecondaryEqualityBitmapValue::new(roaring::RoaringTreemap::from_iter([1]))
-                        .encode(),
-                )
-                .await
-                .expect("initial bitmap persists");
-                let insert = db
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .expect("insert transaction begins");
-                let remove = db
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .expect("remove transaction begins");
-                stage_bitmap_changes(
-                    &insert,
-                    &BTreeMap::from([(key.clone(), BTreeMap::from([(1, true)]))]),
-                )
-                .await
-                .expect("insert stages");
-                stage_bitmap_changes(
-                    &remove,
-                    &BTreeMap::from([(key, BTreeMap::from([(1, false)]))]),
-                )
-                .await
-                .expect("remove stages");
-                if insert_commits_first {
-                    insert.commit().await.expect("insert commits");
-                    assert_eq!(
-                        remove.commit().await.unwrap_err().kind(),
-                        slatedb::ErrorKind::Transaction
-                    );
-                } else {
-                    remove.commit().await.expect("remove commits");
-                    assert_eq!(
-                        insert.commit().await.unwrap_err().kind(),
-                        slatedb::ErrorKind::Transaction
-                    );
+                            .unwrap();
+                        let right = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        for (txn, id, present) in
+                            [(&left, 1, left_present), (&right, right_id, right_present)]
+                        {
+                            stage_bitmap_changes(
+                                txn,
+                                &BTreeMap::from([(key.clone(), BTreeMap::from([(id, present)]))]),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        let (first, second, first_change, second_change) = if left_first {
+                            (left, right, (1, left_present), (right_id, right_present))
+                        } else {
+                            (right, left, (right_id, right_present), (1, left_present))
+                        };
+                        first.commit().await.unwrap();
+                        let outcome = second.commit().await;
+                        if overlap {
+                            assert_eq!(
+                                outcome.unwrap_err().kind(),
+                                slatedb::ErrorKind::Transaction
+                            );
+                        } else {
+                            outcome.expect("different equality members must not conflict");
+                        }
+                        for (id, present) in
+                            [Some(first_change), (!overlap).then_some(second_change)]
+                                .into_iter()
+                                .flatten()
+                        {
+                            if present {
+                                expected.insert(id);
+                            } else {
+                                expected.remove(id);
+                            }
+                        }
+                        let actual = db
+                            .get(&key)
+                            .await
+                            .unwrap()
+                            .map(|bytes| {
+                                SecondaryEqualityBitmapValue::decode(&bytes)
+                                    .unwrap()
+                                    .into_ids()
+                            })
+                            .unwrap_or_default();
+                        assert_eq!(
+                            actual, expected,
+                            "{kind}: overlap={overlap}, left_first={left_first}"
+                        );
+                    }
                 }
             }
-
-            db.close().await.expect("bitmap race database closes");
+            facade.close().await.unwrap();
         }
     }
 
@@ -7570,3 +7612,9 @@ mod tests {
 #[cfg(test)]
 #[path = "../../tests/unit/index_lifecycle_secondary_contracts.rs"]
 mod external_contracts;
+
+#[cfg(test)]
+pub(crate) use exact::RangeScanCounters;
+
+#[cfg(test)]
+mod ordered_tests;

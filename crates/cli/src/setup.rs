@@ -201,12 +201,7 @@ pub(crate) fn warn_if_container_runtime_unavailable() {
             // Bounded advisory probe — must not trigger daemon auto-start
             // (which can block for up to 120s) during project scaffolding.
             if !LocalRuntime::is_running(runtime) {
-                crate::output::warning(&format!(
-                    "{} is installed but not running. Start it before 'helix start' — \
-                     `open -a Docker` / `colima start` on macOS, `sudo systemctl start docker` \
-                     (or `sudo dockerd &`) on Linux/headless.",
-                    runtime.label()
-                ));
+                crate::output::warning(&crate::local_runtime::runtime_unavailable_hint(runtime));
             }
         }
     }

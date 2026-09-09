@@ -247,9 +247,14 @@ fn node_secondary_set_cost(
                 rows,
             )
         }
-        exec::ExecNodeSecondarySetPlan::Range(_) => {
+        exec::ExecNodeSecondarySetPlan::Range(driver) => {
             let rows = profile.default_range_index_rows;
-            (profile.secondary_range_lookup(rows), rows)
+            (
+                profile
+                    .ordered_range_scan(rows, driver.iteration)
+                    .serial(profile.authoritative_verification(rows)),
+                rows,
+            )
         }
         exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => {
             let children = core::iter::once(driver.as_ref())
@@ -286,16 +291,20 @@ fn node_secondary_set_cost(
                 .serial(profile.secondary_set_operation(rows));
             (cost, rows)
         }
-        exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver: _, filters } => {
+        exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters } => {
             let driver_rows = profile.default_range_index_rows;
             let mut rows = driver_rows;
-            let mut cost = profile.secondary_range_lookup(driver_rows);
+            let mut cost = profile.ordered_range_scan(driver_rows, driver.iteration);
             for filter in filters {
                 let (filter_cost, filter_rows) = node_secondary_set_cost(filter, profile);
                 cost = cost.serial(filter_cost);
                 rows = rows.min(filter_rows);
             }
-            (cost.serial(profile.secondary_set_operation(rows)), rows)
+            (
+                cost.serial(profile.authoritative_verification(rows))
+                    .serial(profile.secondary_set_operation(driver_rows)),
+                rows,
+            )
         }
     }
 }
@@ -329,9 +338,14 @@ fn edge_secondary_set_cost(
                 rows,
             )
         }
-        exec::ExecEdgeSecondarySetPlan::Range(_) => {
+        exec::ExecEdgeSecondarySetPlan::Range(driver) => {
             let rows = profile.default_range_index_rows;
-            (profile.secondary_range_lookup(rows), rows)
+            (
+                profile
+                    .ordered_range_scan(rows, driver.iteration)
+                    .serial(profile.authoritative_verification(rows)),
+                rows,
+            )
         }
         exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => {
             let children = core::iter::once(driver.as_ref())
@@ -368,16 +382,20 @@ fn edge_secondary_set_cost(
                 .serial(profile.secondary_set_operation(rows));
             (cost, rows)
         }
-        exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver: _, filters } => {
+        exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters } => {
             let driver_rows = profile.default_range_index_rows;
             let mut rows = driver_rows;
-            let mut cost = profile.secondary_range_lookup(driver_rows);
+            let mut cost = profile.ordered_range_scan(driver_rows, driver.iteration);
             for filter in filters {
                 let (filter_cost, filter_rows) = edge_secondary_set_cost(filter, profile);
                 cost = cost.serial(filter_cost);
                 rows = rows.min(filter_rows);
             }
-            (cost.serial(profile.secondary_set_operation(rows)), rows)
+            (
+                cost.serial(profile.authoritative_verification(rows))
+                    .serial(profile.secondary_set_operation(driver_rows)),
+                rows,
+            )
         }
     }
 }

@@ -27,6 +27,7 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
         value: index_value("bob"),
     };
     let node_range = ir::NodeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
         key: range_key.clone(),
         range: lower_range(18),
@@ -93,6 +94,7 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
         value: index_value("active"),
     };
     let edge_range = ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("edge_weight").unwrap(),
         key: edge_range_key,
         range: lower_range(1),

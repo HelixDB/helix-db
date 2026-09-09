@@ -114,6 +114,7 @@ mod tests {
             catalog::ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc)
                 .unwrap();
         let source = ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("node_age").unwrap(),
             key: key.clone(),
             range: ir::IndexRange::All,

@@ -589,8 +589,7 @@ async fn linked_operation(
             | IndexV2MetadataValue::LogicalIndexIdWatermark(_)
             | IndexV2MetadataValue::VectorPhysicalIdWatermark(_)
             | IndexV2MetadataValue::LegacyVectorPhysicalReservation(_)
-            | IndexV2MetadataValue::TextCompactionPointer(_)
-            | IndexV2MetadataValue::MembershipDeltaWriteMode(_) => Err(corruption(
+            | IndexV2MetadataValue::TextCompactionPointer(_) => Err(corruption(
                 "operation pointer key contains the wrong value kind",
             )),
         })

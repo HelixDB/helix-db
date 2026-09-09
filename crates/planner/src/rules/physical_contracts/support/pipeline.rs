@@ -123,7 +123,7 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
                 materialization: properties::Materialization::Materialized,
                 ..delivered
             },
-            storage.explicit_sort(rows),
+            storage.property_sort(rows),
         ),
         logical::StreamPipelineOp::Expand { plan } => (
             physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::Expand),

@@ -51,7 +51,7 @@ fn stream_aggregate_implementation_rule_appends_materializing_terminal_pipeline(
         alternative.cost,
         storage
             .range_scan(rows)
-            .serial(storage.explicit_sort(rows))
+            .serial(storage.property_sort(rows))
             .serial(storage.explicit_sort(rows))
     );
 }

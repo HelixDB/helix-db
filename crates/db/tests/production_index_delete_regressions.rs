@@ -5,7 +5,7 @@
 
 use std::{future::Future, num::NonZeroUsize, time::Duration};
 
-use db::{HelixDB, HelixDbSource, MembershipDeltaWriteMode};
+use db::{HelixDB, HelixDbSource};
 use helix_ast::batch;
 use helix_ast::expr::Predicate;
 use helix_ast::graph::{EdgeRef, NodeRef};
@@ -645,18 +645,6 @@ async fn deletes_indexed_node_and_edge_equality_members_through_disjoint_deltas(
         })
         .await
         .unwrap_or_else(|error| panic!("{} database opens: {error}", case.name()));
-        assert_eq!(
-            db.membership_delta_write_mode().await.unwrap(),
-            MembershipDeltaWriteMode::LegacyExclusive
-        );
-        db.activate_membership_delta_v2()
-            .await
-            .unwrap_or_else(|error| panic!("{} activates disjoint deltas: {error}", case.name()));
-        assert_eq!(
-            db.membership_delta_write_mode().await.unwrap(),
-            MembershipDeltaWriteMode::DisjointV2
-        );
-
         let seeded = seed_case(&db, case).await;
         create_index(&db, case).await;
         assert_eq!(control_ids(&db, case).await, vec![seeded.control_id]);

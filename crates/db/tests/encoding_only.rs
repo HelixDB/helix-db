@@ -9,7 +9,7 @@
 // New typed encoding modules intentionally refer to their owning production
 // DTOs. Re-export those crate modules so this path-included test target keeps
 // exercising the real encoding sources without creating test-only DTO copies.
-pub use db::{config, error, search, MembershipDeltaWriteMode};
+pub use db::{config, error, search};
 
 #[path = "../src/index_lifecycle/model.rs"]
 mod index_lifecycle_model;

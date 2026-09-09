@@ -568,6 +568,64 @@ func TestFloatParametersAcceptEveryIntegerWidth(t *testing.T) {
 	}
 }
 
+func TestTypedDateTimeParameterAcceptsSameValuesAsConvenienceHelper(t *testing.T) {
+	// The convenience helper ParamDateTime accepts DateTime, time.Time, RFC3339
+	// strings and epoch-millis ints. The low-level typed insertion path
+	// (WithTypedParameter / InsertTypedParameter with ParamTypeDateTime) must
+	// accept the same values so both insertion styles serialize identically.
+	millis := int64(1_776_000_000_000)
+	expected, err := DateTimeFromMillis(millis).RFC3339()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	convenience := NewReadQueryRequest(Read())
+	convenience.ParamDateTime("t", millis)
+
+	typed := NewReadQueryRequest(Read())
+	typed.WithTypedParameter("t_millis", ParamTypeDateTime(), QueryI64(millis))
+	typed.WithTypedParameter("t_rfc3339", ParamTypeDateTime(), QueryString(expected))
+	typed.WithTypedParameter("t_time", ParamTypeDateTime(), time.UnixMilli(millis))
+	typed.WithTypedParameter("t_datetime", ParamTypeDateTime(), DateTimeFromMillis(millis))
+
+	if err := typed.Validate(); err != nil {
+		t.Fatalf("typed datetime parameters failed: %v", err)
+	}
+	convenienceBody, err := json.Marshal(convenience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedBody, err := json.Marshal(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conveniencePayload struct {
+		Parameters map[string]string `json:"parameters"`
+	}
+	if err := json.Unmarshal(convenienceBody, &conveniencePayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := conveniencePayload.Parameters["t"]; got != expected {
+		t.Fatalf("convenience datetime parameter unexpected value: got %s want %s", got, expected)
+	}
+	var typedPayload struct {
+		Parameters map[string]string `json:"parameters"`
+	}
+	if err := json.Unmarshal(typedBody, &typedPayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"t_millis", "t_rfc3339", "t_time", "t_datetime"} {
+		if got := typedPayload.Parameters[name]; got != expected {
+			t.Fatalf("typed datetime parameter %s serialized as %s, want %s", name, got, expected)
+		}
+	}
+
+	rejected := NewReadQueryRequest(Read())
+	rejected.WithTypedParameter("bad", ParamTypeDateTime(), QueryBool(true))
+	if !errors.Is(rejected.Validate(), ErrInvalidDateTimeParameter) {
+		t.Fatal("non-date typed datetime parameter unexpectedly accepted")
+	}
+}
 func TestBatchDecodersCoverClosedVariantsAndMalformedShapes(t *testing.T) {
 	for _, input := range []string{
 		`"prev_not_empty"`,

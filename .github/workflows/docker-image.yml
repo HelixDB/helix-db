@@ -36,7 +36,7 @@ env:
 jobs:
   quality:
     name: Workspace and tooling quality
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -88,10 +88,10 @@ jobs:
         include:
           - architecture: amd64
             platform: linux/amd64
-            runner: blacksmith-2vcpu-ubuntu-2404
+            runner: ubuntu-24.04
           - architecture: arm64
             platform: linux/arm64
-            runner: blacksmith-2vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:

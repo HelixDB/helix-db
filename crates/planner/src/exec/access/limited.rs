@@ -21,11 +21,16 @@ pub enum ExecAccessPlan {
     Node(ExecNodeAccessPlan),
     /// Edge-producing access.
     Edge(ExecEdgeAccessPlan),
-    /// Access with a positive read limit.
+    /// Access with a literal or runtime read limit.
     Limited(ExecLimitedAccessPlan),
 }
 
 impl ExecAccessPlan {
+    /// Apply an access bound without discarding nested runtime validation.
+    pub fn limited_by(self, limit: ExecAccessLimit) -> Self {
+        Self::Limited(ExecLimitedAccessPlan::new_bound(self, limit))
+    }
+
     /// Return this access with a positive read limit.
     pub fn limited(self, limit: properties::PositiveUsize) -> Self {
         Self::Limited(ExecLimitedAccessPlan::new(self, limit))
@@ -96,25 +101,39 @@ impl ExecAccessReadLimit {
     }
 }
 
-/// Native executable access plus a positive read limit.
+/// Native executable access plus a typed read limit.
 ///
-/// Nested limits are flattened by construction, and zero is unrepresentable
-/// because the limit is a [`properties::PositiveUsize`].
+/// Adjacent positive literals are tightened during construction. Runtime layers
+/// remain nested and are validated from inner to outer before scanning, even
+/// when an outer bound is zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecLimitedAccessPlan {
     source: Box<ExecAccessPlan>,
-    limit: properties::PositiveUsize,
+    limit: ExecAccessLimit,
 }
 
 impl ExecLimitedAccessPlan {
     /// Build a limited access plan, preserving the tightest nested bound.
     pub fn new(source: ExecAccessPlan, limit: properties::PositiveUsize) -> Self {
-        match source {
-            ExecAccessPlan::Limited(existing) => Self {
-                source: existing.source,
-                limit: tightest_limit(existing.limit, limit),
-            },
-            source @ (ExecAccessPlan::Node(_) | ExecAccessPlan::Edge(_)) => Self {
+        Self::new_bound(source, ExecAccessLimit::Static(limit))
+    }
+
+    /// Keep runtime layers nested so evaluation retains inner-to-outer order.
+    pub fn new_bound(source: ExecAccessPlan, limit: ExecAccessLimit) -> Self {
+        match (source, limit) {
+            (ExecAccessPlan::Limited(existing), ExecAccessLimit::Static(outer)) => {
+                let ExecAccessLimit::Static(inner) = &existing.limit else {
+                    return Self {
+                        source: Box::new(ExecAccessPlan::Limited(existing)),
+                        limit: ExecAccessLimit::Static(outer),
+                    };
+                };
+                Self {
+                    limit: ExecAccessLimit::Static(tightest_limit(*inner, outer)),
+                    source: existing.source,
+                }
+            }
+            (source, limit) => Self {
                 source: Box::new(source),
                 limit,
             },
@@ -126,9 +145,9 @@ impl ExecLimitedAccessPlan {
         &self.source
     }
 
-    /// Positive read limit.
-    pub const fn limit(&self) -> properties::PositiveUsize {
-        self.limit
+    /// Bound evaluated before access.
+    pub const fn limit(&self) -> &ExecAccessLimit {
+        &self.limit
     }
 }
 
@@ -140,5 +159,40 @@ fn tightest_limit(
         left
     } else {
         right
+    }
+}
+
+/// A planner-selected access bound. Dynamic bounds must be evaluated before
+/// access and must never be removed using a static cardinality estimate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecAccessLimit {
+    /// A literal zero; inner runtime bounds still require validation.
+    Zero,
+    /// A positive literal bound.
+    Static(properties::PositiveUsize),
+    /// A runtime expression, including a bound that may resolve to zero.
+    Dynamic(crate::ir::StreamBoundExprPlan),
+}
+
+impl ExecAccessLimit {
+    /// Preserve the logical bound without resolving runtime parameters.
+    pub fn from_stream_bound(bound: &crate::ir::StreamBoundPlan) -> Self {
+        match bound {
+            crate::ir::StreamBoundPlan::Literal(0) => Self::Zero,
+            crate::ir::StreamBoundPlan::Literal(value) => {
+                Self::Static(properties::PositiveUsize::at_least_one(*value))
+            }
+            crate::ir::StreamBoundPlan::Expr(expr) => Self::Dynamic(expr.clone()),
+        }
+    }
+
+    /// Known bound, if available. Runtime expressions are never cardinality facts.
+    pub const fn literal(&self) -> Option<usize> {
+        match self {
+            Self::Zero => Some(0),
+            Self::Static(value) => Some(value.get()),
+            Self::Dynamic(_) => None,
+        }
     }
 }

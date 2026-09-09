@@ -64,7 +64,6 @@ pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
     let vector = transaction.get(&vector_key).await?;
     let cleanup_ready = super::super::index_storage_v4_cleanup_ready(&transaction).await?;
     let tenant_envelope_ready = super::super::tenant_key_envelope_ready(&transaction).await?;
-    crate::membership_delta::transaction_write_mode(&transaction).await?;
 
     let Some(marker) = marker else {
         transaction.rollback();
@@ -128,7 +127,6 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
     let vector = transaction.get(&vector_key).await?;
     let cleanup_ready = super::super::index_storage_v4_cleanup_ready(&transaction).await?;
     let tenant_envelope_ready = super::super::tenant_key_envelope_ready(&transaction).await?;
-    crate::membership_delta::transaction_write_mode(&transaction).await?;
 
     let Some(marker) = marker else {
         if logical.is_some() || vector.is_some() || cleanup_ready {

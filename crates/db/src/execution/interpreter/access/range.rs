@@ -90,45 +90,15 @@ impl<'db> ExecutionContext<'db> {
         range: &ir::IndexRange,
         limit: Option<properties::PositiveUsize>,
     ) -> Result<Vec<u64>> {
-        let direction = storage_range_direction(key.direction);
-        let limit = limit.map(|limit| limit.get());
-        let query = range_query(self, range)?;
-        let identity = secondary_range_identity(
+        self.range_index_ids(
             crate::index_lifecycle::IndexElementKind::Node,
-            key.label.as_ref(),
-            key.property.as_ref(),
-        )?;
-        if let Some(active) = self.active_write_tx() {
-            return scan_node_range_in_view(self, &active.txn, &identity, &query, direction, limit)
-                .await;
-        }
-        if let Some(view) = self.request_read_view() {
-            return scan_node_range_in_view(self, view, &identity, &query, direction, limit).await;
-        }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    scan_node_range_in_view(
-                        self,
-                        reader.as_ref(),
-                        &identity,
-                        &query,
-                        direction,
-                        limit,
-                    )
-                    .await
-                }
-                HelixStorage::Writer(writer) => {
-                    scan_node_range_in_view(self, writer.db(), &identity, &query, direction, limit)
-                        .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "node secondary range lookup escaped its request read view".to_string(),
-        ))
+            key,
+            range,
+            ir::RangeScanIteration::Forward,
+            &[],
+            limit,
+        )
+        .await
     }
 
     pub(in crate::execution::interpreter) async fn edge_range_index_ids(
@@ -137,44 +107,97 @@ impl<'db> ExecutionContext<'db> {
         range: &ir::IndexRange,
         limit: Option<properties::PositiveUsize>,
     ) -> Result<Vec<u64>> {
-        let direction = storage_range_direction(key.direction);
-        let limit = limit.map(|limit| limit.get());
-        let query = range_query(self, range)?;
-        let identity = secondary_range_identity(
+        self.range_index_ids(
             crate::index_lifecycle::IndexElementKind::Edge,
-            key.label.as_ref(),
-            key.property.as_ref(),
-        )?;
+            key,
+            range,
+            ir::RangeScanIteration::Forward,
+            &[],
+            limit,
+        )
+        .await
+    }
+
+    pub(in crate::execution::interpreter) async fn range_index_ids(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyDirectionKey,
+        range: &ir::IndexRange,
+        iteration: ir::RangeScanIteration,
+        membership: &[roaring::RoaringTreemap],
+        limit: Option<properties::PositiveUsize>,
+    ) -> Result<Vec<u64>> {
+        self.check_execution_deadline()?;
+        let direction = storage_range_direction(key.direction);
+        let limit = limit.map(properties::PositiveUsize::get);
+        let query = range_query(self, range)?;
+        let query = match &query {
+            OwnedRangeQuery::All => None,
+            OwnedRangeQuery::Bounded(query) => Some(query),
+        };
+        let identity =
+            secondary_range_identity(element_kind, key.label.as_ref(), key.property.as_ref())?;
         if let Some(active) = self.active_write_tx() {
-            return scan_edge_range_in_view(self, &active.txn, &identity, &query, direction, limit)
-                .await;
+            return scan_managed_range_in_view(
+                self,
+                &active.txn,
+                &identity,
+                query,
+                direction,
+                iteration,
+                membership,
+                limit,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return scan_edge_range_in_view(self, view, &identity, &query, direction, limit).await;
+            return scan_managed_range_in_view(
+                self, view, &identity, query, direction, iteration, membership, limit,
+            )
+            .await;
         }
         #[cfg(test)]
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    scan_edge_range_in_view(
+                    scan_managed_range_in_view(
                         self,
                         reader.as_ref(),
                         &identity,
-                        &query,
+                        query,
                         direction,
+                        iteration,
+                        membership,
                         limit,
                     )
                     .await
                 }
                 HelixStorage::Writer(writer) => {
-                    scan_edge_range_in_view(self, writer.db(), &identity, &query, direction, limit)
-                        .await
+                    scan_managed_range_in_view(
+                        self,
+                        writer.db(),
+                        &identity,
+                        query,
+                        direction,
+                        iteration,
+                        membership,
+                        limit,
+                    )
+                    .await
                 }
             }
         }
         #[cfg(not(test))]
         Err(HelixDbError::InvariantViolation(
-            "edge secondary range lookup escaped its request read view".to_string(),
+            match element_kind {
+                crate::index_lifecycle::IndexElementKind::Node => {
+                    "node secondary range lookup escaped its request read view"
+                }
+                crate::index_lifecycle::IndexElementKind::Edge => {
+                    "edge secondary range lookup escaped its request read view"
+                }
+            }
+            .to_string(),
         ))
     }
 }
@@ -196,53 +219,26 @@ fn secondary_range_identity(
     ))
 }
 
-/// Routes node range access through the exact canonical V2 identity.
-async fn scan_node_range_in_view(
-    context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
-    identity: &crate::index_lifecycle::IndexIdentity,
-    query: &OwnedRangeQuery,
-    direction: StorageRangeIndexDirection,
-    limit: Option<usize>,
-) -> Result<Vec<u64>> {
-    let managed_query = match query {
-        OwnedRangeQuery::All => None,
-        OwnedRangeQuery::Bounded(query) => Some(query),
-    };
-    scan_managed_range_in_view(context, reader, identity, managed_query, direction, limit).await
-}
-
-/// Routes edge range access through the exact canonical V2 identity.
-async fn scan_edge_range_in_view(
-    context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
-    identity: &crate::index_lifecycle::IndexIdentity,
-    query: &OwnedRangeQuery,
-    direction: StorageRangeIndexDirection,
-    limit: Option<usize>,
-) -> Result<Vec<u64>> {
-    let managed_query = match query {
-        OwnedRangeQuery::All => None,
-        OwnedRangeQuery::Bounded(query) => Some(query),
-    };
-    scan_managed_range_in_view(context, reader, identity, managed_query, direction, limit).await
-}
-
 /// Resolves, leases, and scans a present canonical range identity.
 ///
 /// An absent/non-Active record or direction mismatch fails closed.
+#[allow(clippy::too_many_arguments)]
 async fn scan_managed_range_in_view(
     context: &ExecutionContext<'_>,
     reader: &(impl DbReadOps + Send + Sync),
     identity: &crate::index_lifecycle::IndexIdentity,
     query: Option<&crate::index_lifecycle::secondary::SecondaryRangeQuery>,
     requested_direction: StorageRangeIndexDirection,
+    iteration: ir::RangeScanIteration,
+    membership: &[roaring::RoaringTreemap],
     limit: Option<usize>,
 ) -> Result<Vec<u64>> {
     let active =
         active_range_handle_in_view(context, reader, identity, requested_direction).await?;
-    crate::index_lifecycle::secondary::scan_active_range_generation(reader, &active, query, limit)
-        .await
+    crate::index_lifecycle::secondary::scan_active_range_generation_ordered(
+        reader, &active, query, iteration, limit, membership, context,
+    )
+    .await
 }
 
 async fn active_range_handle_in_view(
@@ -380,5 +376,35 @@ fn storage_range_direction(
     match direction {
         helix_ast::index::RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
         helix_ast::index::RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
+    }
+}
+
+impl crate::index_lifecycle::secondary::ExactRangeScanProgress for ExecutionContext<'_> {
+    fn checkpoint(&self) -> Result<()> {
+        self.check_execution_deadline()
+    }
+    #[cfg(test)]
+    fn entry_visited(&self) {
+        self.range_reads.entry_visited();
+    }
+    #[cfg(test)]
+    fn authoritative_read(&self) {
+        self.range_reads.authoritative_read();
+    }
+    #[cfg(test)]
+    fn authoritative_decode(&self) {
+        self.range_reads.authoritative_decode();
+    }
+    #[cfg(test)]
+    fn stale_candidate(&self) {
+        self.range_reads.stale_candidate();
+    }
+    #[cfg(test)]
+    fn fallback_scan(&self) {
+        self.range_reads.fallback_scan();
+    }
+    #[cfg(test)]
+    fn retained_ids(&self, count: usize) {
+        self.range_reads.retained_ids(count);
     }
 }

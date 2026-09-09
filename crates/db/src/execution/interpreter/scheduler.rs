@@ -140,6 +140,8 @@ impl<'db> ExecutionContext<'db> {
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
             #[cfg(test)]
+            range_reads: std::sync::Arc::clone(&self.range_reads),
+            #[cfg(test)]
             deadline_checks_remaining: std::sync::atomic::AtomicUsize::new(usize::MAX),
         })
     }

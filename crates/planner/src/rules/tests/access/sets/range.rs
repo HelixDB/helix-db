@@ -203,3 +203,61 @@ fn access_range_rule_declines_non_intersections_and_unprovable_range_merges() {
         );
     }
 }
+
+#[test]
+fn set_range_tightening_is_independent_of_iteration() {
+    let rule = AccessRangeIntersectionRule::default();
+    let storage = cost::StorageCostProfile::default();
+    for iteration in [
+        ir::RangeScanIteration::Forward,
+        ir::RangeScanIteration::Reverse,
+    ] {
+        let mut node = ir::NodeAccessPlan::from(node_range_source("User", "age", lower_range(3)));
+        let ir::NodeAccessPlan::RangeIndex {
+            iteration: selected,
+            ..
+        } = &mut node
+        else {
+            unreachable!()
+        };
+        *selected = iteration;
+        let mut edge =
+            ir::EdgeAccessPlan::from(edge_range_source("LIKES", "weight", lower_range(3)));
+        let ir::EdgeAccessPlan::RangeIndex {
+            iteration: selected,
+            ..
+        } = &mut edge
+        else {
+            unreachable!()
+        };
+        *selected = iteration;
+        let sources = [
+            node_access_expr(ir::NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
+                ir::NodeAccessSourcePlan::from_unfiltered(node),
+                node_range_source("User", "age", upper_range(9)),
+            ))),
+            edge_access_expr(ir::EdgeAccessPlan::Intersect(ir::AtLeast::from_pair(
+                ir::EdgeAccessSourcePlan::from_unfiltered(edge),
+                edge_range_source("LIKES", "weight", upper_range(9)),
+            ))),
+        ];
+        for expr in sources {
+            let rewritten = logical_access_path(rule.apply(optimizer::RuleInput {
+                expr: &expr,
+                storage: &storage,
+                indexes: empty_indexes(),
+                planner_limits: default_planner_limits(),
+                stats: default_stats(),
+            }));
+            let expected = lower_range(3).intersect(&upper_range(9)).unwrap();
+            match rewritten {
+                logical::AccessPath::Node(path) => assert!(
+                    matches!(path.source().as_ref(), ir::NodeAccessPlan::RangeIndex { range, .. } if range == &expected)
+                ),
+                logical::AccessPath::Edge(path) => assert!(
+                    matches!(path.source().as_ref(), ir::EdgeAccessPlan::RangeIndex { range, .. } if range == &expected)
+                ),
+            }
+        }
+    }
+}

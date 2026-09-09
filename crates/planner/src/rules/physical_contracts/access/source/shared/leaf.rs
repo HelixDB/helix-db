@@ -178,6 +178,7 @@ const fn equality_cardinality(kind: EqualityIndexKind) -> properties::Cardinalit
 pub(super) fn range_index_contract(
     element: properties::ElementKind,
     key: &catalog::ScopedPropertyDirectionKey,
+    iteration: crate::ir::RangeScanIteration,
     cardinality: Option<u64>,
     storage: &cost::StorageCostProfile,
 ) -> AccessPhysicalContract {
@@ -188,10 +189,13 @@ pub(super) fn range_index_contract(
             access_delivered_close(element),
             range_delivered_ordering(key),
         ),
-        storage.secondary_range_lookup(rows),
+        storage
+            .ordered_range_scan(rows, iteration)
+            .serial(storage.authoritative_verification(rows)),
         storage.secondary_row_materialization(rows),
         rows,
     )
+    .with_range_iteration(iteration)
 }
 
 pub(super) fn search_contract(

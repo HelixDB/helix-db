@@ -80,6 +80,7 @@ impl EdgeAccessSourcePlan {
     ///     label: label.clone(),
     /// }).unwrap();
     /// let right = EdgeAccessSourcePlan::new(EdgeAccessPlan::RangeIndex {
+    ///     iteration: helix_planner::ir::RangeScanIteration::Forward,
     ///     index: EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
     ///     key: ScopedPropertyDirectionKey::try_new(
     ///         "LIKES",

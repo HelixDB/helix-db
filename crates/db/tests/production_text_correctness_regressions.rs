@@ -493,6 +493,22 @@ async fn insert_node(db: &HelixDB, text: &str) -> u64 {
     )
 }
 
+async fn delete_node(db: &HelixDB, entity_id: u64, expectation: &str) {
+    let parameter = name("text_lifecycle_delete");
+    execute_with_transaction_retry(
+        db,
+        &node_mutation_plan(parameter.clone(), exec::ExecMutationPlan::Drop),
+        context::ParamBindings::default().with_value(
+            parameter,
+            PropertyValue::I64(
+                i64::try_from(entity_id).expect("fixture node ID fits signed input"),
+            ),
+        ),
+        expectation,
+    )
+    .await;
+}
+
 async fn insert_edge(db: &HelixDB, from: u64, to: u64, text: &str) -> u64 {
     let parameter = name("fragmented_edge_from");
     created_edge_id(
@@ -2954,6 +2970,83 @@ async fn late_build_delta_after_catch_up_converges_to_active() {
         "late BuildDelta must re-enter catch-up without rejecting a populated manifest root:\n{}",
         failures.join("\n")
     );
+}
+
+#[tokio::test]
+async fn delete_during_entity_state_validation_returns_to_catch_up_and_activates() {
+    let token = ProcessLocalDatabaseToken::new("fts-delete-during-entity-validation")
+        .expect("late-delete token validates");
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        },
+        DbConfig::new(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("late-delete fixture opens");
+    let deleted_id = insert_node(&db, "deletedwhilevalidating").await;
+    let controller = LifecycleTestController::new();
+    let definition: ValidatedDynamicIndexDefinition =
+        TextIndexDefinition::new_node(LABEL, PROPERTY)
+            .expect("late-delete definition validates")
+            .try_into()
+            .expect("late-delete definition converts");
+    let operation_id = receipt_operation_id(
+        controller
+            .create_index(
+                &db,
+                DataScope::LegacyUnscoped,
+                definition,
+                ir::IndexCreateMode::ErrorIfExists,
+            )
+            .await
+            .expect("late-delete text CREATE is accepted"),
+    );
+    drive_to_late_delta_pause(
+        &db,
+        &controller,
+        operation_id,
+        LateDeltaPause::Validation(TextManifestValidationLane::EntityStates),
+    )
+    .await
+    .expect("entity-state validation pause is reached");
+
+    delete_node(
+        &db,
+        deleted_id,
+        "deletion during entity-state validation commits",
+    )
+    .await;
+    let terminal = drive_to_terminal_explicit(&db, &controller, operation_id)
+        .await
+        .expect("late-delete lifecycle remains runnable");
+    assert!(
+        matches!(terminal, IndexOperationStatus::Succeeded { .. }),
+        "late delete must return validation to catch-up, observed {terminal:?}"
+    );
+
+    db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
+        .await
+        .expect("late-delete Active definition refreshes into the planner catalog");
+    let response = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "ids",
+                    traversal::g()
+                        .text_search_nodes(LABEL, PROPERTY, "deletedwhilevalidating", 10, None)
+                        .id(),
+                )
+                .returning(["ids"]),
+        ))
+        .await
+        .expect("late-delete Active index remains queryable");
+    assert!(
+        query_node_ids(&response, "ids").is_empty(),
+        "deleted entity must not survive catch-up and activation"
+    );
+    db.close().await.expect("late-delete fixture closes");
 }
 
 fn text_row_node_ids(result: ExecutionResult) -> Vec<u64> {

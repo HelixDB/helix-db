@@ -23,6 +23,7 @@ pub(in crate::exec) enum SimpleNodeAccessLeaf<'a> {
         index: &'a catalog::NodeRangeIndexMeta,
         key: &'a catalog::ScopedPropertyDirectionKey,
         range: &'a ir::IndexRange,
+        iteration: &'a ir::RangeScanIteration,
     },
     VectorSearch {
         key: &'a catalog::NodeSearchIndexKey,
@@ -51,9 +52,17 @@ impl<'a> TryFrom<&'a ir::NodeAccessPlan> for SimpleNodeAccessLeaf<'a> {
             ir::NodeAccessPlan::EqualityIndex { index, key, value } => {
                 Ok(Self::EqualityIndex { index, key, value })
             }
-            ir::NodeAccessPlan::RangeIndex { index, key, range } => {
-                Ok(Self::RangeIndex { index, key, range })
-            }
+            ir::NodeAccessPlan::RangeIndex {
+                index,
+                key,
+                range,
+                iteration,
+            } => Ok(Self::RangeIndex {
+                index,
+                key,
+                range,
+                iteration,
+            }),
             ir::NodeAccessPlan::VectorSearch {
                 key,
                 index,
@@ -104,7 +113,13 @@ pub(in crate::exec) fn node_exec_access(plan: SimpleNodeAccessLeaf<'_>) -> ExecN
         SimpleNodeAccessLeaf::EqualityIndex { index, key, value } => {
             ExecNodeAccessPlan::exact_equality(index.clone(), key.clone(), value.clone())
         }
-        SimpleNodeAccessLeaf::RangeIndex { index, key, range } => ExecNodeAccessPlan::RangeIndex {
+        SimpleNodeAccessLeaf::RangeIndex {
+            index,
+            key,
+            range,
+            iteration,
+        } => ExecNodeAccessPlan::RangeIndex {
+            iteration: *iteration,
             index: index.clone(),
             key: key.clone(),
             range: range.clone(),

@@ -17,7 +17,7 @@ use crate::encoding::indexes::{
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey};
 use crate::encoding::v2::values::{adjacency as edges, indexes as secondary};
-use crate::{HelixDbError, MembershipDeltaWriteMode, Result};
+use crate::{HelixDbError, Result};
 
 /// A final membership operation for one ID within the current epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +103,6 @@ struct TopologyMutationBatch {
 pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     state: TopologyMutationRuntimeState,
     staged_keys: BTreeSet<Bytes>,
-    #[cfg(test)]
-    unchecked_disjoint_for_benchmark: bool,
 }
 
 #[derive(Debug, Default)]
@@ -406,122 +404,40 @@ impl TopologyMutationRuntime {
             }
         };
 
-        match crate::membership_delta::transaction_write_mode(transaction).await? {
-            MembershipDeltaWriteMode::LegacyExclusive => {
-                for (row, delta) in batch.bitmaps {
-                    let key = row.to_bytes();
-                    let mut bitmap = transaction
-                        .get(&key)
-                        .await?
-                        .map(|value| {
-                            secondary::SecondaryEqualityBitmapValue::decode(&value)
-                                .map(secondary::SecondaryEqualityBitmapValue::into_ids)
-                        })
-                        .transpose()?
-                        .unwrap_or_default();
-                    delta.apply_to(&mut bitmap);
-                    if bitmap.is_empty() {
-                        transaction.delete(&key)?;
-                    } else {
-                        transaction.put_with_options(
-                            &key,
-                            secondary::SecondaryEqualityBitmapValue::new(bitmap).encode(),
-                            &slatedb::config::PutOptions {
-                                ttl: slatedb::config::Ttl::NoExpiry,
-                            },
-                        )?;
-                    }
-                    self.staged_keys.insert(key);
-                }
-
-                for ((scope, node), delta) in batch.adjacency {
-                    let key = DataKey::Data {
-                        scope,
-                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
-                    }
-                    .to_bytes();
-                    let mut adjacency = transaction
-                        .get(&key)
-                        .await?
-                        .map(|value| edges::decode_edges(&value))
-                        .transpose()?
-                        .unwrap_or_default();
-                    delta.apply_to(&mut adjacency);
-                    if adjacency.is_empty() {
-                        transaction.delete(&key)?;
-                    } else {
-                        transaction.put_with_options(
-                            &key,
-                            edges::encode_edges(&adjacency),
-                            &slatedb::config::PutOptions {
-                                ttl: slatedb::config::Ttl::NoExpiry,
-                            },
-                        )?;
-                    }
-                    self.staged_keys.insert(key);
-                }
-            }
-            MembershipDeltaWriteMode::DisjointV2 => {
-                let mut merges = Vec::with_capacity(batch.bitmaps.len() + batch.adjacency.len());
-                let mut staged_keys = Vec::with_capacity(merges.capacity());
-                for (row, delta) in batch.bitmaps {
-                    let key = row.to_bytes();
-                    #[cfg(test)]
-                    if self.unchecked_disjoint_for_benchmark {
-                        transaction.merge_disjoint_tokens(
-                            &key,
-                            delta.members().map(u128::from),
-                            delta.encode(),
-                        )?;
-                        self.staged_keys.insert(key);
-                        continue;
-                    }
-                    staged_keys.push(key.clone());
-                    merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                        key,
-                        delta.members().map(u128::from),
-                        delta.encode(),
-                    ));
-                }
-
-                for ((scope, node), delta) in batch.adjacency {
-                    const INCOMING_DIRECTION_TOKEN: u128 = 1_u128 << u64::BITS;
-
-                    let key = DataKey::Data {
-                        scope,
-                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
-                    }
-                    .to_bytes();
-                    let outgoing = delta.outgoing_members().map(u128::from);
-                    let incoming = delta
-                        .incoming_members()
-                        .map(|neighbor| INCOMING_DIRECTION_TOKEN | u128::from(neighbor));
-                    #[cfg(test)]
-                    if self.unchecked_disjoint_for_benchmark {
-                        transaction.merge_disjoint_tokens(
-                            &key,
-                            outgoing.chain(incoming),
-                            delta.encode(),
-                        )?;
-                        self.staged_keys.insert(key);
-                        continue;
-                    }
-                    staged_keys.push(key.clone());
-                    merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                        key,
-                        outgoing.chain(incoming),
-                        delta.encode(),
-                    ));
-                }
-
-                #[cfg(test)]
-                if self.unchecked_disjoint_for_benchmark {
-                    return Ok(());
-                }
-                transaction.merge_disjoint_checked_batch(merges).await?;
-                self.staged_keys.extend(staged_keys);
-            }
+        let mut merges = Vec::with_capacity(batch.bitmaps.len() + batch.adjacency.len());
+        let mut staged_keys = Vec::with_capacity(merges.capacity());
+        for (row, delta) in batch.bitmaps {
+            let key = row.to_bytes();
+            staged_keys.push(key.clone());
+            merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
+                key,
+                delta.members().map(u128::from),
+                delta.encode(),
+            ));
         }
+
+        for ((scope, node), delta) in batch.adjacency {
+            const INCOMING_DIRECTION_TOKEN: u128 = 1_u128 << u64::BITS;
+
+            let key = DataKey::Data {
+                scope,
+                kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
+            }
+            .to_bytes();
+            let outgoing = delta.outgoing_members().map(u128::from);
+            let incoming = delta
+                .incoming_members()
+                .map(|neighbor| INCOMING_DIRECTION_TOKEN | u128::from(neighbor));
+            staged_keys.push(key.clone());
+            merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
+                key,
+                outgoing.chain(incoming),
+                delta.encode(),
+            ));
+        }
+
+        transaction.merge_disjoint_checked_batch(merges).await?;
+        self.staged_keys.extend(staged_keys);
         Ok(())
     }
 
@@ -610,7 +526,7 @@ mod tests {
 
     use super::*;
 
-    async fn database_with_mode(name: &str, mode: MembershipDeltaWriteMode) -> Db {
+    async fn database(name: &str) -> Db {
         let db = Db::builder(
             format!("topology-mutation-runtime/{name}"),
             Arc::new(InMemory::new()),
@@ -622,16 +538,7 @@ mod tests {
         crate::migrations::startup::bootstrap_writer(&db)
             .await
             .expect("topology test database bootstraps storage metadata");
-        if mode == MembershipDeltaWriteMode::DisjointV2 {
-            crate::membership_delta::activate(&db)
-                .await
-                .expect("topology test database activates V2 deltas");
-        }
         db
-    }
-
-    async fn database(name: &str) -> Db {
-        database_with_mode(name, MembershipDeltaWriteMode::DisjointV2).await
     }
 
     async fn transaction(name: &str) -> DbTransaction {
@@ -712,8 +619,7 @@ mod tests {
         parent_id: u64,
         event_id: u64,
         edge_id: u64,
-        node_label: &str,
-        edge_label: &str,
+        (node_label, edge_label): (&str, &str),
         mutation: MembershipMutation,
     ) {
         match mutation {
@@ -776,71 +682,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_topology_rows_fail_closed_in_every_write_mode() {
+    async fn corrupt_topology_rows_fail_closed() {
         let scope = DataScope::LegacyUnscoped;
-        for mode in [
-            MembershipDeltaWriteMode::LegacyExclusive,
-            MembershipDeltaWriteMode::DisjointV2,
+        for row in [
+            "node-label",
+            "edge-pair",
+            "edge-neighbor-out",
+            "edge-neighbor-in",
+            "global-edge-label",
+            "adjacency",
         ] {
-            for row in [
-                "node-label",
-                "edge-pair",
-                "edge-neighbor-out",
-                "edge-neighbor-in",
-                "global-edge-label",
-                "adjacency",
-            ] {
-                let db = database_with_mode(&format!("corrupt-{mode:?}-{row}"), mode).await;
-                let key = match row {
-                    "node-label" => node_label_key(scope, "Corrupt"),
-                    "edge-pair" => edge_pair_key(scope, 10, 11),
-                    "edge-neighbor-out" => {
-                        edge_label_neighbor_key(scope, EdgeDirection::Out, 10, "CORRUPT")
-                    }
-                    "edge-neighbor-in" => {
-                        edge_label_neighbor_key(scope, EdgeDirection::In, 11, "CORRUPT")
-                    }
-                    "global-edge-label" => global_edge_label_key(scope, "CORRUPT"),
-                    "adjacency" => DataKey::Data {
-                        scope,
-                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(10)),
-                    }
-                    .to_bytes(),
-                    _ => unreachable!("the fixture lists every topology row"),
-                };
-                let corrupt = Bytes::from_static(b"corrupt-topology-value");
-                db.put(&key, corrupt.clone()).await.unwrap();
-
-                let transaction = db
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .unwrap();
-                let mut runtime = TopologyMutationRuntime::default();
-                match row {
-                    "node-label" => runtime.remove_node_label(scope, "Corrupt", 1).unwrap(),
-                    "edge-pair" => runtime.remove_edge_pair(scope, 10, 11, 1).unwrap(),
-                    "edge-neighbor-out" | "edge-neighbor-in" => runtime
-                        .remove_edge_label_neighbors(scope, 10, 11, "CORRUPT")
-                        .unwrap(),
-                    "global-edge-label" => runtime
-                        .remove_global_edge_label(scope, "CORRUPT", 1)
-                        .unwrap(),
-                    "adjacency" => runtime
-                        .remove_adjacency(scope, 10, 11, helix_planner::ir::ExpandDirection::Out)
-                        .unwrap(),
-                    _ => unreachable!("the fixture lists every topology row"),
+            let db = database(&format!("corrupt-{row}")).await;
+            let key = match row {
+                "node-label" => node_label_key(scope, "Corrupt"),
+                "edge-pair" => edge_pair_key(scope, 10, 11),
+                "edge-neighbor-out" => {
+                    edge_label_neighbor_key(scope, EdgeDirection::Out, 10, "CORRUPT")
                 }
-                assert!(runtime.flush(&transaction).await.is_err(), "{mode:?} {row}");
-                transaction.rollback();
-                assert_eq!(db.get(&key).await.unwrap(), Some(corrupt), "{mode:?} {row}");
-                db.close().await.unwrap();
+                "edge-neighbor-in" => {
+                    edge_label_neighbor_key(scope, EdgeDirection::In, 11, "CORRUPT")
+                }
+                "global-edge-label" => global_edge_label_key(scope, "CORRUPT"),
+                "adjacency" => DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(10)),
+                }
+                .to_bytes(),
+                _ => unreachable!("the fixture lists every topology row"),
+            };
+            let corrupt = Bytes::from_static(b"corrupt-topology-value");
+            db.put(&key, corrupt.clone()).await.unwrap();
+
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut runtime = TopologyMutationRuntime::default();
+            match row {
+                "node-label" => runtime.remove_node_label(scope, "Corrupt", 1).unwrap(),
+                "edge-pair" => runtime.remove_edge_pair(scope, 10, 11, 1).unwrap(),
+                "edge-neighbor-out" | "edge-neighbor-in" => runtime
+                    .remove_edge_label_neighbors(scope, 10, 11, "CORRUPT")
+                    .unwrap(),
+                "global-edge-label" => runtime
+                    .remove_global_edge_label(scope, "CORRUPT", 1)
+                    .unwrap(),
+                "adjacency" => runtime
+                    .remove_adjacency(scope, 10, 11, helix_planner::ir::ExpandDirection::Out)
+                    .unwrap(),
+                _ => unreachable!("the fixture lists every topology row"),
             }
+            assert!(runtime.flush(&transaction).await.is_err(), "{row}");
+            transaction.rollback();
+            assert_eq!(db.get(&key).await.unwrap(), Some(corrupt), "{row}");
+            db.close().await.unwrap();
         }
     }
 
     #[tokio::test]
     async fn concurrent_add_only_rows_commit_and_preserve_every_topology_membership() {
-        let db = database("concurrent-add-only").await;
+        let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+            database: "concurrent-add-only-default".to_string(),
+        })
+        .await
+        .unwrap();
+        let db = facade.inner_db();
         let scope = DataScope::LegacyUnscoped;
         let left = db
             .begin(IsolationLevel::SerializableSnapshot)
@@ -936,7 +842,128 @@ mod tests {
         .unwrap();
         assert_eq!(adjacency.iter_out().collect::<Vec<_>>(), vec![60, 61]);
         assert_eq!(adjacency.iter_in().collect::<Vec<_>>(), vec![60, 61]);
-        db.close().await.unwrap();
+        facade.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_startup_disjoint_topology_commits_without_retries() {
+        for (left_present, right_present) in [(true, true), (false, false), (true, false)] {
+            for left_first in [false, true] {
+                let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+                    database: format!(
+                        "default-topology-{left_present}-{right_present}-{left_first}"
+                    ),
+                })
+                .await
+                .unwrap();
+                let db = facade.inner_db();
+                for scope in [
+                    DataScope::LegacyUnscoped,
+                    DataScope::Tenant(crate::encoding::keys::scope::TenantId::from_u128(42)),
+                ] {
+                    for row in [RaceRow::NodeLabel("Event"), RaceRow::OutAdjacency(100)] {
+                        let seed = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        let mut runtime = TopologyMutationRuntime::default();
+                        for (id, present) in [(1, left_present), (2, right_present)] {
+                            if !present {
+                                row.stage(&mut runtime, scope, id, MembershipMutation::Present);
+                            }
+                        }
+                        runtime.prepare(&seed).await.unwrap();
+                        runtime.consume_prepared().unwrap();
+                        seed.commit().await.unwrap();
+
+                        // Both snapshots and both preparations precede either commit. No facade
+                        // retry loop can turn a false conflict into a passing test.
+                        let left = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        let right = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        for (txn, id, present) in
+                            [(&left, 1, left_present), (&right, 2, right_present)]
+                        {
+                            let mut runtime = TopologyMutationRuntime::default();
+                            row.stage(
+                                &mut runtime,
+                                scope,
+                                id,
+                                if present {
+                                    MembershipMutation::Present
+                                } else {
+                                    MembershipMutation::Absent
+                                },
+                            );
+                            runtime.prepare(txn).await.unwrap();
+                            runtime.consume_prepared().unwrap();
+                        }
+                        let (first, second) = if left_first {
+                            (left, right)
+                        } else {
+                            (right, left)
+                        };
+                        first.commit().await.unwrap();
+                        second
+                            .commit()
+                            .await
+                            .expect("disjoint members must not conflict");
+                        let expected = [(1, left_present), (2, right_present)]
+                            .into_iter()
+                            .filter_map(|(id, present)| present.then_some(id))
+                            .collect::<Vec<_>>();
+                        assert_eq!(row.ids(&db, scope).await, expected);
+                    }
+                }
+                facade.close().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_membership_writes_keep_explicit_row_and_range_conflicts() {
+        for range_read in [false, true] {
+            let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+                database: format!("default-membership-observations-{range_read}"),
+            })
+            .await
+            .unwrap();
+            let db = facade.inner_db();
+            let scope = DataScope::LegacyUnscoped;
+            let key = node_label_key(scope, "Event");
+            let observed = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let concurrent = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            if range_read {
+                let mut rows = observed.scan(key.clone()..=key.clone()).await.unwrap();
+                assert!(rows.next().await.unwrap().is_none());
+            } else {
+                assert!(observed.get(&key).await.unwrap().is_none());
+            }
+            for (txn, id) in [(&observed, 1), (&concurrent, 2)] {
+                let mut runtime = TopologyMutationRuntime::default();
+                runtime.add_node_label(scope, "Event", id).unwrap();
+                runtime.prepare(txn).await.unwrap();
+                runtime.consume_prepared().unwrap();
+            }
+            concurrent.commit().await.unwrap();
+            assert_eq!(
+                observed.commit().await.unwrap_err().kind(),
+                slatedb::ErrorKind::Transaction
+            );
+            assert_eq!(RaceRow::NodeLabel("Event").ids(&db, scope).await, vec![2]);
+            facade.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1157,8 +1184,7 @@ mod tests {
                 parent_id,
                 expired_event_id,
                 expired_edge_id,
-                &node_label,
-                &edge_label,
+                (&node_label, &edge_label),
                 MembershipMutation::Present,
             );
             seed_runtime.prepare(&seed).await.unwrap();
@@ -1180,8 +1206,7 @@ mod tests {
                 parent_id,
                 inserted_event_id,
                 inserted_edge_id,
-                &node_label,
-                &edge_label,
+                (&node_label, &edge_label),
                 MembershipMutation::Present,
             );
             insert_runtime.prepare(&insert).await.unwrap();
@@ -1193,8 +1218,7 @@ mod tests {
                 parent_id,
                 expired_event_id,
                 expired_edge_id,
-                &node_label,
-                &edge_label,
+                (&node_label, &edge_label),
                 MembershipMutation::Absent,
             );
             remove_runtime.prepare(&remove).await.unwrap();
@@ -1425,12 +1449,17 @@ mod tests {
             runtime.add_node_label(DataScope::LegacyUnscoped, "User", 1),
             Err(HelixDbError::InvariantViolation(_))
         ));
+        assert!(matches!(
+            runtime.flush(&transaction).await,
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        // A rejected extra flush must retain the prepared state for commit.
+        runtime.consume_prepared().unwrap();
     }
 
     #[derive(Debug, Clone, Copy)]
     enum SweepBenchmarkStrategy {
         ExclusiveReadModifyWrite,
-        UncheckedDisjointDelta,
         DisjointDelta,
     }
 
@@ -1537,11 +1566,8 @@ mod tests {
                         .expect("exclusive benchmark adjacency replacement stages");
                 }
             }
-            SweepBenchmarkStrategy::UncheckedDisjointDelta
-            | SweepBenchmarkStrategy::DisjointDelta => {
+            SweepBenchmarkStrategy::DisjointDelta => {
                 let mut runtime = TopologyMutationRuntime::default();
-                runtime.unchecked_disjoint_for_benchmark =
-                    matches!(strategy, SweepBenchmarkStrategy::UncheckedDisjointDelta);
                 for id in ids {
                     if present {
                         runtime
@@ -1589,16 +1615,10 @@ mod tests {
         let db = Arc::new(
             database(match strategy {
                 SweepBenchmarkStrategy::ExclusiveReadModifyWrite => "benchmark-exclusive",
-                SweepBenchmarkStrategy::UncheckedDisjointDelta => "benchmark-unchecked-disjoint",
                 SweepBenchmarkStrategy::DisjointDelta => "benchmark-disjoint",
             })
             .await,
         );
-        if !matches!(strategy, SweepBenchmarkStrategy::ExclusiveReadModifyWrite) {
-            crate::membership_delta::activate(db.as_ref())
-                .await
-                .expect("disjoint conflict benchmark activates V2 membership deltas");
-        }
         let label_key = node_label_key(DataScope::LegacyUnscoped, LABEL);
         db.put(
             &label_key,
@@ -1646,7 +1666,11 @@ mod tests {
                         let transaction =
                             stage_benchmark_memberships(&db, strategy, start..end, true).await;
                         if first_attempt && chunk < synchronized_chunks {
-                            barriers[chunk].wait().await;
+                            barriers
+                                .get(chunk)
+                                .expect("synchronized chunk has a barrier")
+                                .wait()
+                                .await;
                         }
                         match transaction.commit().await {
                             Ok(_) => break,
@@ -1678,7 +1702,11 @@ mod tests {
                         let transaction =
                             stage_benchmark_memberships(&db, strategy, start..end, false).await;
                         if first_attempt && chunk < synchronized_chunks {
-                            barriers[chunk].wait().await;
+                            barriers
+                                .get(chunk)
+                                .expect("synchronized chunk has a barrier")
+                                .wait()
+                                .await;
                             loop {
                                 let notified = writer_notify.notified();
                                 if writer_progress.load(Ordering::Acquire) > chunk {
@@ -1751,15 +1779,9 @@ mod tests {
 
         let db = database(match strategy {
             SweepBenchmarkStrategy::ExclusiveReadModifyWrite => "prepare-exclusive",
-            SweepBenchmarkStrategy::UncheckedDisjointDelta => "prepare-unchecked-disjoint",
             SweepBenchmarkStrategy::DisjointDelta => "prepare-disjoint",
         })
         .await;
-        if !matches!(strategy, SweepBenchmarkStrategy::ExclusiveReadModifyWrite) {
-            crate::membership_delta::activate(&db)
-                .await
-                .expect("disjoint preparation benchmark activates V2 membership deltas");
-        }
         db.put(
             node_label_key(DataScope::LegacyUnscoped, LABEL),
             secondary::SecondaryEqualityValue::encode_ids(
@@ -1823,8 +1845,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "manual 100K-member conflict and preparation-performance comparison"]
     async fn benchmark_exclusive_vs_disjoint_linked_event_sweep() {
-        const MAX_CHECKED_PREPARATION_REGRESSION: f64 = 1.10;
-
         let expired_members = std::env::var("HELIX_SWEEP_BENCH_EXPIRED")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -1868,10 +1888,10 @@ mod tests {
             writer_chunk,
         )
         .await;
-        let before_sweep_conflict_rate =
-            before_conflicts.sweeper_conflicts as f64 / before_conflicts.sweeper_commits as f64;
-        let after_sweep_conflict_rate =
-            after_conflicts.sweeper_conflicts as f64 / after_conflicts.sweeper_commits as f64;
+        let before_sweep_conflict_rate = before_conflicts.sweeper_conflicts as f64
+            / (before_conflicts.sweeper_commits + before_conflicts.sweeper_conflicts) as f64;
+        let after_sweep_conflict_rate = after_conflicts.sweeper_conflicts as f64
+            / (after_conflicts.sweeper_commits + after_conflicts.sweeper_conflicts) as f64;
 
         let before_preparation = run_sweep_preparation_benchmark(
             SweepBenchmarkStrategy::ExclusiveReadModifyWrite,
@@ -1887,23 +1907,12 @@ mod tests {
             performance_samples,
         )
         .await;
-        let unchecked_preparation = run_sweep_preparation_benchmark(
-            SweepBenchmarkStrategy::UncheckedDisjointDelta,
-            expired_members,
-            sweep_chunk,
-            performance_samples,
-        )
-        .await;
         let before_preparation_throughput =
             expired_members as f64 / before_preparation.median.as_secs_f64();
         let after_preparation_throughput =
             expired_members as f64 / after_preparation.median.as_secs_f64();
-        let unchecked_preparation_throughput =
-            expired_members as f64 / unchecked_preparation.median.as_secs_f64();
         let exclusive_preparation_time_ratio =
             after_preparation.median.as_secs_f64() / before_preparation.median.as_secs_f64();
-        let checked_preparation_time_ratio =
-            after_preparation.median.as_secs_f64() / unchecked_preparation.median.as_secs_f64();
 
         println!(
             "SWEEP_CONFLICT before sweep_commits={} sweep_conflicts={} sweep_conflict_rate={:.4} writer_commits={} writer_conflicts={}",
@@ -1930,14 +1939,6 @@ mod tests {
             before_preparation_throughput,
         );
         println!(
-            "SWEEP_PREP unchecked samples={} min_ms={} median_ms={} max_ms={} throughput_members_per_s={:.0}",
-            unchecked_preparation.samples,
-            unchecked_preparation.minimum.as_millis(),
-            unchecked_preparation.median.as_millis(),
-            unchecked_preparation.maximum.as_millis(),
-            unchecked_preparation_throughput,
-        );
-        println!(
             "SWEEP_PREP after samples={} min_ms={} median_ms={} max_ms={} throughput_members_per_s={:.0}",
             after_preparation.samples,
             after_preparation.minimum.as_millis(),
@@ -1946,21 +1947,13 @@ mod tests {
             after_preparation_throughput,
         );
         println!(
-            "SWEEP_DELTA conflict_rate_points={:.2} exclusive_preparation_time_ratio={:.3} checked_preparation_time_ratio={:.3}",
+            "SWEEP_DELTA conflict_rate_points={:.2} exclusive_preparation_time_ratio={:.3}",
             (after_sweep_conflict_rate - before_sweep_conflict_rate) * 100.0,
             exclusive_preparation_time_ratio,
-            checked_preparation_time_ratio,
         );
 
         assert!(before_conflicts.sweeper_conflicts > 0);
         assert_eq!(after_conflicts.sweeper_conflicts, 0);
         assert_eq!(after_conflicts.writer_conflicts, 0);
-        assert!(
-            checked_preparation_time_ratio <= MAX_CHECKED_PREPARATION_REGRESSION,
-            "checked validation exceeded the {:.0}% preparation regression budget: unchecked={:?}, checked={:?}",
-            (MAX_CHECKED_PREPARATION_REGRESSION - 1.0) * 100.0,
-            unchecked_preparation,
-            after_preparation,
-        );
     }
 }

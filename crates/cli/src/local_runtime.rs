@@ -120,7 +120,8 @@ impl LocalRuntime {
     /// ready (or we time out). Returns `Err` if there's no known launcher for this
     /// platform, the launch command fails, or the daemon never comes up.
     fn try_start_runtime(runtime: ContainerRuntime) -> Result<()> {
-        let Some(start) = runtime_start_command(std::env::consts::OS, runtime, command_exists)
+        let os = std::env::consts::OS;
+        let Some(start) = runtime_start_command(os, runtime, detected_docker_backend(os, runtime))
         else {
             return Err(eyre!(
                 "no known way to start {} on this platform",
@@ -407,6 +408,12 @@ impl LocalRuntime {
         self.run_detached(instance_name, config)
     }
 
+    // No upfront `is_installed`-style preflight here: `spawn_failed_because_runtime_missing`
+    // below already distinguishes a genuinely missing binary (NotFound and absent from
+    // PATH) from a present-but-unspawnable one, and preserves the real OS error as the
+    // cause in either case. A preflight based on PATH presence alone can't make that
+    // distinction and reports "not installed" for a binary that's present but, say, not
+    // executable.
     pub fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
         let name = self.container_name(instance_name);
         let mut command = self.runtime_command();
@@ -755,6 +762,37 @@ fn runtime_command(runtime: ContainerRuntime) -> Command {
     }
 }
 
+/// Runs one command inside the same wall-clock bound and returns its trimmed
+/// stdout, or `None` if it could not be spawned, exited non-zero, or had to be
+/// killed. Callers must keep the output to roughly one line: nothing drains the
+/// pipe until the child exits, so a chatty command would sit there until the
+/// deadline kills it.
+fn command_output_within(command: &mut Command, timeout: Duration) -> Option<String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let output = child.wait_with_output().ok()?;
+                return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    RUNTIME_INFO_POLL_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// Runs one status-only command inside a hard wall-clock bound.
 fn command_succeeds_within(command: &mut Command, timeout: Duration) -> bool {
     command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -906,45 +944,158 @@ fn not_installed_error(
 struct StartCommand {
     program: &'static str,
     args: Vec<&'static str>,
+    /// Whether a person running this by hand normally has to elevate. Advisory
+    /// text only; `try_start_runtime` still issues the command unelevated.
+    may_need_privileges: bool,
+}
+
+/// A Docker-compatible backend that the active endpoint is known to belong to.
+///
+/// There is deliberately no `Unknown` variant. Colima, Docker Desktop and
+/// OrbStack can all be installed on one machine, so an endpoint we cannot place
+/// is absent rather than guessed, and callers fall back to advice that names no
+/// launcher at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerBackend {
+    Colima,
+    DockerDesktop,
+    OrbStack,
+}
+
+/// Classify a Docker endpoint by the socket it points at.
+///
+/// The socket path is the only trustworthy signal here. Context names are
+/// user-editable, and both `default` and `/var/run/docker.sock` are shared by
+/// every backend, so neither of those proves anything.
+fn classify_docker_endpoint(endpoint: &str) -> Option<DockerBackend> {
+    if endpoint.contains("/.colima/") {
+        Some(DockerBackend::Colima)
+    } else if endpoint.contains("/.orbstack/") {
+        Some(DockerBackend::OrbStack)
+    } else if endpoint.contains("/.docker/run/docker.sock") {
+        Some(DockerBackend::DockerDesktop)
+    } else {
+        None
+    }
+}
+
+/// The backend the Docker CLI would actually talk to right now.
+///
+/// `DOCKER_HOST` wins when it is set, the same way the CLI treats it; otherwise
+/// the active context's endpoint is read. Bounded by `RUNTIME_INFO_TIMEOUT`
+/// because this also runs on the advisory path, which must not stall `init`.
+fn active_docker_backend() -> Option<DockerBackend> {
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        return classify_docker_endpoint(&host.to_string_lossy());
+    }
+
+    let mut command = Command::new("docker");
+    command.args([
+        "context",
+        "inspect",
+        "--format",
+        "{{.Endpoints.docker.Host}}",
+    ]);
+    classify_docker_endpoint(&command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)?)
+}
+
+/// Resolve the active backend only where it can change the answer, so Podman
+/// and non-macOS runs never pay for a `docker context inspect`.
+fn detected_docker_backend(os: &str, runtime: ContainerRuntime) -> Option<DockerBackend> {
+    if os == "macos" && runtime == ContainerRuntime::Docker {
+        active_docker_backend()
+    } else {
+        None
+    }
 }
 
 /// Resolve the command to start the given runtime's daemon for the current OS.
 ///
-/// Pure helper — the OS string and an installed-probe are injected so it can be
-/// unit-tested deterministically. Returns `None` when there's no known launcher
-/// (e.g. Podman on Linux is daemonless, or an unsupported OS).
+/// Pure helper — the OS string and the resolved backend are injected so it
+/// can be unit-tested deterministically. Returns `None` when there is no known
+/// launcher: Podman on Linux is daemonless, the OS is unsupported, or the active
+/// Docker endpoint does not prove which backend is behind it.
 fn runtime_start_command(
     os: &str,
     runtime: ContainerRuntime,
-    is_installed: impl Fn(&str) -> bool,
+    docker_backend: Option<DockerBackend>,
 ) -> Option<StartCommand> {
     match (os, runtime) {
-        // macOS Docker: prefer Colima if it's installed, otherwise Docker Desktop.
-        ("macos", ContainerRuntime::Docker) => {
-            if is_installed("colima") {
-                Some(StartCommand {
-                    program: "colima",
-                    args: vec!["start"],
-                })
-            } else {
-                Some(StartCommand {
-                    program: "open",
-                    args: vec!["-a", "Docker"],
-                })
-            }
-        }
+        // macOS Docker: start only the backend the active endpoint proves. Going
+        // by executable presence starts a VM the user was not on and leaves the
+        // endpoint that actually failed down.
+        ("macos", ContainerRuntime::Docker) => match docker_backend? {
+            DockerBackend::Colima => Some(StartCommand {
+                program: "colima",
+                args: vec!["start"],
+                may_need_privileges: false,
+            }),
+            DockerBackend::DockerDesktop => Some(StartCommand {
+                program: "open",
+                args: vec!["-a", "Docker"],
+                may_need_privileges: false,
+            }),
+            DockerBackend::OrbStack => Some(StartCommand {
+                program: "open",
+                args: vec!["-a", "OrbStack"],
+                may_need_privileges: false,
+            }),
+        },
         ("macos", ContainerRuntime::Podman) => Some(StartCommand {
             program: "podman",
             args: vec!["machine", "start"],
+            may_need_privileges: false,
         }),
         // Linux Docker: best-effort via systemd (may need privileges; if it fails we
         // fall back to the manual-hint error).
         ("linux", ContainerRuntime::Docker) => Some(StartCommand {
             program: "systemctl",
             args: vec!["start", "docker"],
+            may_need_privileges: true,
         }),
         // Podman on Linux is daemonless; nothing to start. Other OSes: unknown launcher.
         _ => None,
+    }
+}
+
+/// Advisory for a runtime that is installed but whose `info` probe did not
+/// succeed.
+///
+/// Reuses `runtime_start_command`, the same launcher table `try_start_runtime`
+/// drives, so the remedy always names the runtime that was actually detected.
+/// When that table has no launcher the runtime has nothing to start (Podman on
+/// Linux is daemonless), so the message says what to check instead of naming a
+/// daemon that does not exist.
+pub(crate) fn runtime_unavailable_hint(runtime: ContainerRuntime) -> String {
+    let os = std::env::consts::OS;
+    runtime_unavailable_hint_for(os, runtime, detected_docker_backend(os, runtime))
+}
+
+/// Pure form of [`runtime_unavailable_hint`], with the OS and the resolved
+/// backend injected so it can be unit-tested deterministically.
+fn runtime_unavailable_hint_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    docker_backend: Option<DockerBackend>,
+) -> String {
+    match runtime_start_command(os, runtime, docker_backend) {
+        Some(start) => format!(
+            "{} is installed but not running. Start it before 'helix start' \u{2014} `{} {}`.{}",
+            runtime.label(),
+            start.program,
+            start.args.join(" "),
+            if start.may_need_privileges {
+                " It usually needs `sudo`."
+            } else {
+                ""
+            }
+        ),
+        None => format!(
+            "{} is installed but `{} info` did not succeed. Check it is configured before \
+             'helix start'.",
+            runtime.label(),
+            runtime.binary()
+        ),
     }
 }
 
@@ -1262,6 +1413,111 @@ mod tests {
         assert_eq!(resources.volume, format!("{base}-minio-data"));
     }
 
+    /// The launcher table and the advisory must never disagree about which
+    /// runtime is in play. Before this was wired to `runtime_start_command`, a
+    /// Podman user was told to run `open -a Docker` and `systemctl start docker`,
+    /// neither of which starts Podman.
+    #[test]
+    fn unavailable_hint_names_the_detected_runtime_not_another_one() {
+        let podman_macos = runtime_unavailable_hint_for("macos", ContainerRuntime::Podman, None);
+        assert!(podman_macos.contains("podman machine start"));
+        assert!(!podman_macos.to_lowercase().contains("docker"));
+        assert!(!podman_macos.to_lowercase().contains("colima"));
+
+        let docker_linux = runtime_unavailable_hint_for("linux", ContainerRuntime::Docker, None);
+        assert!(docker_linux.contains("systemctl start docker"));
+        assert!(!docker_linux.to_lowercase().contains("podman"));
+
+        let docker_macos_colima = runtime_unavailable_hint_for(
+            "macos",
+            ContainerRuntime::Docker,
+            Some(DockerBackend::Colima),
+        );
+        assert!(docker_macos_colima.contains("colima start"));
+    }
+
+    /// Colima, Docker Desktop and OrbStack can all be installed at once, so the
+    /// advisory has to follow the endpoint that actually failed. Picking by
+    /// executable presence names a backend the caller was never on.
+    #[test]
+    fn unavailable_hint_follows_the_active_backend_not_what_is_installed() {
+        let launchers = ["colima start", "open -a Docker", "open -a OrbStack"];
+        for (backend, launcher) in [
+            (DockerBackend::Colima, "colima start"),
+            (DockerBackend::DockerDesktop, "open -a Docker"),
+            (DockerBackend::OrbStack, "open -a OrbStack"),
+        ] {
+            let hint =
+                runtime_unavailable_hint_for("macos", ContainerRuntime::Docker, Some(backend));
+            assert!(hint.contains(launcher), "{backend:?} gave {hint}");
+            for other in launchers {
+                assert!(
+                    other == launcher || !hint.contains(other),
+                    "{backend:?} also named {other}"
+                );
+            }
+        }
+    }
+
+    /// An unknown or custom context proves nothing. The advisory then names no
+    /// launcher at all rather than guessing one of the three, so neither
+    /// auto-start nor `helix init` can switch the caller's backend.
+    #[test]
+    fn unavailable_hint_stays_neutral_when_the_backend_is_unproven() {
+        let hint = runtime_unavailable_hint_for("macos", ContainerRuntime::Docker, None);
+        assert!(hint.contains("docker info"));
+        assert!(!hint.contains("Start it"));
+        for named in ["colima", "Docker Desktop", "OrbStack", "open -a"] {
+            assert!(!hint.contains(named), "unproven hint named {named}: {hint}");
+        }
+    }
+
+    /// The message this replaced told Linux users to run `sudo systemctl start
+    /// docker`. Routing it through the launcher table must not quietly drop the
+    /// `sudo`, or the suggested command fails on a stock install.
+    #[test]
+    fn linux_docker_hint_keeps_the_sudo_the_old_message_had() {
+        let hint = runtime_unavailable_hint_for("linux", ContainerRuntime::Docker, None);
+        assert!(hint.contains("systemctl start docker"));
+        assert!(hint.contains("sudo"), "linux hint lost sudo: {hint}");
+    }
+
+    /// Context names are user-editable, and `default` and `/var/run/docker.sock`
+    /// are shared by every backend, so only a backend-specific socket counts as
+    /// proof. Anything else classifies as unknown and fails closed.
+    #[test]
+    fn docker_endpoints_classify_only_when_the_socket_proves_it() {
+        assert_eq!(
+            classify_docker_endpoint("unix:///Users/me/.colima/default/docker.sock"),
+            Some(DockerBackend::Colima)
+        );
+        assert_eq!(
+            classify_docker_endpoint("unix:///Users/me/.orbstack/run/docker.sock"),
+            Some(DockerBackend::OrbStack)
+        );
+        assert_eq!(
+            classify_docker_endpoint("unix:///Users/me/.docker/run/docker.sock"),
+            Some(DockerBackend::DockerDesktop)
+        );
+
+        for ambiguous in ["unix:///var/run/docker.sock", "tcp://192.168.1.10:2375", ""] {
+            assert_eq!(
+                classify_docker_endpoint(ambiguous),
+                None,
+                "{ambiguous} should not prove a backend"
+            );
+        }
+    }
+
+    /// Podman on Linux is daemonless, so there is nothing to start. The advisory
+    /// has to say what to check rather than name a daemon that does not exist.
+    #[test]
+    fn unavailable_hint_does_not_invent_a_daemon_when_there_is_none() {
+        let hint = runtime_unavailable_hint_for("linux", ContainerRuntime::Podman, None);
+        assert!(hint.contains("podman info"));
+        assert!(!hint.contains("Start it"));
+        assert!(!hint.to_lowercase().contains("docker"));
+    }
     #[cfg(unix)]
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
@@ -1484,9 +1740,9 @@ mod tests {
     fn start_cmd(
         os: &str,
         runtime: ContainerRuntime,
-        colima: bool,
+        docker_backend: Option<DockerBackend>,
     ) -> Option<(String, Vec<String>)> {
-        runtime_start_command(os, runtime, |bin| colima && bin == "colima").map(|c| {
+        runtime_start_command(os, runtime, docker_backend).map(|c| {
             (
                 c.program.to_string(),
                 c.args.iter().map(|a| a.to_string()).collect(),
@@ -1494,29 +1750,51 @@ mod tests {
         })
     }
 
+    /// `try_start_runtime` runs whatever this returns, so a wrong answer here
+    /// boots a VM the caller was not using rather than merely misadvising them.
     #[test]
-    fn macos_docker_prefers_colima_when_installed() {
+    fn macos_docker_starts_only_the_backend_the_endpoint_proves() {
         assert_eq!(
-            start_cmd("macos", ContainerRuntime::Docker, true),
+            start_cmd(
+                "macos",
+                ContainerRuntime::Docker,
+                Some(DockerBackend::Colima)
+            ),
             Some(("colima".to_string(), vec!["start".to_string()]))
         );
-    }
-
-    #[test]
-    fn macos_docker_falls_back_to_docker_desktop() {
         assert_eq!(
-            start_cmd("macos", ContainerRuntime::Docker, false),
+            start_cmd(
+                "macos",
+                ContainerRuntime::Docker,
+                Some(DockerBackend::DockerDesktop)
+            ),
             Some((
                 "open".to_string(),
                 vec!["-a".to_string(), "Docker".to_string()]
             ))
         );
+        assert_eq!(
+            start_cmd(
+                "macos",
+                ContainerRuntime::Docker,
+                Some(DockerBackend::OrbStack)
+            ),
+            Some((
+                "open".to_string(),
+                vec!["-a".to_string(), "OrbStack".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn macos_docker_has_no_launcher_when_the_backend_is_unproven() {
+        assert_eq!(start_cmd("macos", ContainerRuntime::Docker, None), None);
     }
 
     #[test]
     fn macos_podman_starts_machine() {
         assert_eq!(
-            start_cmd("macos", ContainerRuntime::Podman, false),
+            start_cmd("macos", ContainerRuntime::Podman, None),
             Some((
                 "podman".to_string(),
                 vec!["machine".to_string(), "start".to_string()]
@@ -1527,7 +1805,7 @@ mod tests {
     #[test]
     fn linux_docker_uses_systemctl() {
         assert_eq!(
-            start_cmd("linux", ContainerRuntime::Docker, false),
+            start_cmd("linux", ContainerRuntime::Docker, None),
             Some((
                 "systemctl".to_string(),
                 vec!["start".to_string(), "docker".to_string()]
@@ -1537,8 +1815,8 @@ mod tests {
 
     #[test]
     fn no_launcher_for_linux_podman_or_unknown_os() {
-        assert_eq!(start_cmd("linux", ContainerRuntime::Podman, false), None);
-        assert_eq!(start_cmd("windows", ContainerRuntime::Docker, false), None);
+        assert_eq!(start_cmd("linux", ContainerRuntime::Podman, None), None);
+        assert_eq!(start_cmd("windows", ContainerRuntime::Docker, None), None);
     }
 
     #[test]

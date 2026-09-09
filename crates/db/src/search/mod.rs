@@ -62,7 +62,6 @@ use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
 use crate::encoding::v2::values::indexes::{BitmapMembershipDelta, SecondaryEqualityValue};
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::HelixDbError;
-use crate::MembershipDeltaWriteMode;
 use slatedb::DbReadOps;
 
 fn bounded_prefix_end(prefix: &Bytes) -> Bytes {
@@ -619,46 +618,14 @@ async fn stage_shared_bitmap_membership(
     entity_id: u64,
     present: bool,
 ) -> Result<(), HelixDbError> {
-    match crate::membership_delta::transaction_write_mode(txn).await? {
-        MembershipDeltaWriteMode::LegacyExclusive => {
-            let existing = txn.get(key).await?;
-            if existing.is_none() && !present {
-                return Ok(());
-            }
-            let mut bitmap = existing
-                .as_deref()
-                .map(SecondaryEqualityValue::decode)
-                .transpose()?
-                .map(SecondaryEqualityValue::into_ids)
-                .unwrap_or_default();
-            if present {
-                bitmap.insert(entity_id);
-            } else {
-                bitmap.remove(entity_id);
-            }
-            if bitmap.is_empty() {
-                txn.delete(key)?;
-            } else {
-                txn.put_with_options(
-                    key,
-                    encode_roaring_treemap(&bitmap),
-                    &slatedb::config::PutOptions {
-                        ttl: slatedb::config::Ttl::NoExpiry,
-                    },
-                )?;
-            }
-        }
-        MembershipDeltaWriteMode::DisjointV2 => {
-            let mut delta = BitmapMembershipDelta::default();
-            if present {
-                delta.add(entity_id);
-            } else {
-                delta.remove(entity_id);
-            }
-            txn.merge_disjoint_tokens_checked(key, [u128::from(entity_id)], delta.encode())
-                .await?;
-        }
+    let mut delta = BitmapMembershipDelta::default();
+    if present {
+        delta.add(entity_id);
+    } else {
+        delta.remove(entity_id);
     }
+    txn.merge_disjoint_tokens_checked(key, [u128::from(entity_id)], delta.encode())
+        .await?;
     Ok(())
 }
 
@@ -3703,50 +3670,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_bitmap_staging_rejects_corruption_in_every_write_mode() {
-        for mode in [
-            MembershipDeltaWriteMode::LegacyExclusive,
-            MembershipDeltaWriteMode::DisjointV2,
-        ] {
-            for present in [false, true] {
-                let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
-                    database: format!("search-corrupt-shared-bitmap-{mode:?}-{present}"),
-                })
-                .await
-                .expect("db opens");
-                if mode == MembershipDeltaWriteMode::DisjointV2 {
-                    db.activate_membership_delta_v2()
-                        .await
-                        .expect("corruption fixture activates V2 deltas");
-                }
-                let key = DataKey::Data {
-                    scope: DataScope::LegacyUnscoped,
-                    kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-                        EqualityIndexKey::new(
-                            hash_property_name("status"),
-                            hash_property_value("corrupt"),
-                        ),
-                    )),
-                }
-                .to_bytes();
-                let corrupt = Bytes::from_static(b"not-a-shared-bitmap");
-                db.inner_db().put(&key, corrupt.clone()).await.unwrap();
-
-                let txn = db
-                    .inner_db()
-                    .begin(IsolationLevel::SerializableSnapshot)
-                    .await
-                    .unwrap();
-                assert!(
-                    stage_shared_bitmap_membership(&txn, &key, 7, present)
-                        .await
-                        .is_err(),
-                    "{mode:?} present={present}"
-                );
-                txn.rollback();
-                assert_eq!(db.inner_db().get(&key).await.unwrap(), Some(corrupt));
-                db.close().await.unwrap();
+    async fn shared_bitmap_staging_rejects_corruption() {
+        for present in [false, true] {
+            let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+                database: format!("search-corrupt-shared-bitmap-{present}"),
+            })
+            .await
+            .expect("db opens");
+            let key = DataKey::Data {
+                scope: DataScope::LegacyUnscoped,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
+                    EqualityIndexKey::new(
+                        hash_property_name("status"),
+                        hash_property_value("corrupt"),
+                    ),
+                )),
             }
+            .to_bytes();
+            let corrupt = Bytes::from_static(b"not-a-shared-bitmap");
+            db.inner_db().put(&key, corrupt.clone()).await.unwrap();
+
+            let txn = db
+                .inner_db()
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            assert!(
+                stage_shared_bitmap_membership(&txn, &key, 7, present)
+                    .await
+                    .is_err(),
+                "present={present}"
+            );
+            txn.rollback();
+            assert_eq!(db.inner_db().get(&key).await.unwrap(), Some(corrupt));
+            db.close().await.unwrap();
         }
     }
 
@@ -3759,9 +3716,6 @@ mod tests {
         })
         .await
         .expect("db opens");
-        db.activate_membership_delta_v2()
-            .await
-            .expect("concurrent shared-bitmap fixture activates V2 deltas");
         let tenant_a =
             crate::encoding::keys::scope::TenantId::from_ulid_str("0000000000000000000000000A")
                 .expect("valid tenant");
@@ -3912,7 +3866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bitmap_insert_and_remove_races_conflict_in_both_commit_orders() {
+    async fn bitmap_disjoint_insert_and_remove_commit_in_both_orders() {
         let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
             database: "search-bitmap-insert-remove-races".to_string(),
         })
@@ -3949,16 +3903,10 @@ mod tests {
 
             if insert_commits_first {
                 insert.commit().await.expect("insert commits first");
-                assert!(
-                    remove.commit().await.is_err(),
-                    "read-modify-write removal must conflict with a committed insert",
-                );
+                remove.commit().await.expect("disjoint removal commits");
             } else {
                 remove.commit().await.expect("removal commits first");
-                assert!(
-                    insert.commit().await.is_err(),
-                    "insert must conflict with a committed read-modify-write removal",
-                );
+                insert.commit().await.expect("disjoint insert commits");
             }
         }
 
@@ -3971,12 +3919,16 @@ mod tests {
             lookup_equality_index(&read, "race", "insert-first")
                 .await
                 .expect("insert-first lookup succeeds"),
-            vec![1, 2],
+            vec![2],
         );
-        assert!(lookup_equality_index(&read, "race", "remove-first")
-            .await
-            .expect("remove-first lookup succeeds")
-            .is_empty(),);
+        assert_eq!(
+            lookup_equality_index(&read, "race", "remove-first")
+                .await
+                .expect("remove-first lookup succeeds"),
+            vec![2]
+        );
+        drop(read);
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

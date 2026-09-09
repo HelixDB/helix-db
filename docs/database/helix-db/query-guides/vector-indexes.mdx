@@ -122,6 +122,16 @@ a query vector, and a result limit of `10`. `$distance` is available on the hit
 stream; project it before traversing away from the hit if it must remain in the
 response.
 
+## Result limits
+
+The server caps unrestricted vector search at 800 effective results per request. A narrower
+access bound from the surrounding plan can reduce this value.
+
+Traversal-scoped vector search checks the effective count after candidate intersection. It rejects
+the request when `min(k, unique candidates)` is greater than 800; it does not silently reduce `k`.
+A request with `k` above 800 can succeed when the candidate stream contains 800 or fewer unique
+entities. The candidate stream cannot contain more than 1,000,000 unique entities.
+
 ## Operational notes
 
 - Creation returns before the backfill necessarily finishes.

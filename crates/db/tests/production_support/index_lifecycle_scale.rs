@@ -999,12 +999,17 @@ async fn drop_index(db: &HelixDB, scope: DataScope, spec: ir::IndexDdlDropSpec) 
 }
 
 /// Opens a writer and seeds one positive unscoped authoritative shape.
-async fn open_seeded_unscoped(database: &str, entity_count: NonZeroUsize) -> HelixDB {
+async fn open_seeded_unscoped(
+    database: &str,
+    entity_count: NonZeroUsize,
+) -> (ProcessLocalDatabaseToken, HelixDB) {
     let entity_count = entity_count.get();
     let token = ProcessLocalDatabaseToken::new(database).expect("scale database token is valid");
-    let db = HelixDB::open(HelixDbSource::InMemoryToken { token })
-        .await
-        .expect("scale writer opens");
+    let db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: token.clone(),
+    })
+    .await
+    .expect("scale writer opens");
     let crate::HelixStorage::Writer(writer) = db.storage() else {
         panic!("scale database should be a writer");
     };
@@ -1032,7 +1037,19 @@ async fn open_seeded_unscoped(database: &str, entity_count: NonZeroUsize) -> Hel
         entity_count.div_ceil(SEED_BATCH_ROWS),
         seed_started.elapsed().as_millis(),
     );
-    db
+    (token, db)
+}
+
+/// Cold-reopens one process-local scale database without replacing its store.
+async fn reopen_process_local(db: &mut HelixDB, token: &ProcessLocalDatabaseToken) {
+    db.close()
+        .await
+        .expect("scale writer closes before restart validation");
+    *db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: token.clone(),
+    })
+    .await
+    .expect("scale writer reopens for restart validation");
 }
 
 /// Runs secondary, text, multi-scope, and cleanup scale oracles.
@@ -1042,7 +1059,7 @@ pub(super) async fn run_secondary_text_tenant() {
         "release scale shape must remain fixed"
     );
     assert_eq!(TENANT_COUNT, 16, "tenant release shape must remain fixed");
-    let db = open_seeded_unscoped(
+    let (token, mut db) = open_seeded_unscoped(
         "index-lifecycle-production-secondary-text-scale",
         NonZeroUsize::new(ENTITY_COUNT).expect("release entity count is positive"),
     )
@@ -1184,6 +1201,67 @@ pub(super) async fn run_secondary_text_tenant() {
         tenant_seed_started.elapsed().as_millis(),
     );
 
+    reopen_process_local(&mut db, &token).await;
+    let mut actual = projected_node_ids(
+        db.execute(
+            &equality_search_plan(
+                NON_UNIQUE_PROPERTY,
+                PlannerPropertyValue::String("shared-target".to_string()),
+                catalog::IndexUniqueness::NonUnique,
+            ),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("non-unique scale search survives restart"),
+    );
+    actual.sort_unstable();
+    assert_eq!(actual, vec![0, 1]);
+    assert_eq!(
+        projected_node_ids(
+            db.execute(
+                &equality_search_plan(
+                    UNIQUE_PROPERTY,
+                    PlannerPropertyValue::String("external-99999".to_string()),
+                    catalog::IndexUniqueness::Unique,
+                ),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("unique scale search survives restart"),
+        ),
+        vec![99_999]
+    );
+    assert_eq!(
+        projected_node_ids(
+            db.execute(
+                &text_search_plan("uniqueneedle"),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("paged scale text search survives restart"),
+        ),
+        vec![0]
+    );
+    for tenant_ordinal in 0..TENANT_COUNT {
+        let scope = DataScope::Tenant(TenantId::from_u128(
+            u128::try_from(tenant_ordinal + 1).expect("tenant ordinal fits u128"),
+        ));
+        assert!(!projected_node_ids(
+            db.execute_scoped(
+                &equality_search_plan(
+                    NON_UNIQUE_PROPERTY,
+                    PlannerPropertyValue::String("tenant-group-0".to_string()),
+                    catalog::IndexUniqueness::NonUnique,
+                ),
+                context::ParamBindings::default(),
+                scope,
+            )
+            .await
+            .expect("tenant scale search survives restart"),
+        )
+        .is_empty());
+    }
+
     for tenant_ordinal in 0..TENANT_COUNT {
         let scope = DataScope::Tenant(TenantId::from_u128(
             u128::try_from(tenant_ordinal + 1).expect("tenant ordinal fits u128"),
@@ -1320,7 +1398,7 @@ async fn run_vector_fixture(database: &str, entity_count: NonZeroUsize) {
         VECTOR_DIMENSION, 128,
         "vector release shape must remain fixed"
     );
-    let db = open_seeded_unscoped(database, entity_count).await;
+    let (token, mut db) = open_seeded_unscoped(database, entity_count).await;
     let property_key = catalog::ScopedPropertyKey::try_new(LABEL, VECTOR_PROPERTY)
         .expect("scale vector property key is valid");
 
@@ -1337,6 +1415,7 @@ async fn run_vector_fixture(database: &str, entity_count: NonZeroUsize) {
         },
     )
     .await;
+    reopen_process_local(&mut db, &token).await;
     let query = vector(0);
     let brute_force = (0..u64::try_from(entity_count.get()).expect("scale entity count fits u64"))
         .min_by(|left, right| {

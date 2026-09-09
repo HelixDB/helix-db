@@ -11,6 +11,54 @@ pub const DEFAULT_LOCAL_IMAGE_TAG: &str = "v0.0.4";
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
 pub const DEFAULT_S3_PREFIX: &str = "db/";
 
+/// The single length cap on an instance name, everywhere one is accepted:
+/// interactively (`prompts::input_name`), on the command line (`prune`, `add
+/// --name`, `init --name`), and loaded from `helix.toml`
+/// ([`HelixConfig::validate`]). One shared constant so those can't drift apart —
+/// a name the CLI validator accepts but the interactive prompt would have
+/// rejected (or vice versa) can be saved to `helix.toml` and then fail later
+/// during directory or container creation instead of at input time.
+pub const MAX_INSTANCE_NAME_LEN: usize = 32;
+
+/// Whether `name` uses only characters safe to build a container name or a
+/// `.helix/<name>` state directory from: ASCII letters, digits, `-`, and `_`.
+///
+/// This is shared by [`HelixConfig::validate`] and by every command that turns a
+/// raw CLI argument into an instance name before it reaches the filesystem
+/// (`prune`, `add`, `init`). TOML lets a quoted table key contain arbitrary
+/// characters (including `..` and `/`), and a CLI arg is any string, so both
+/// sources need the same charset check before the name is used to build a path.
+pub fn has_valid_instance_name_charset(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Validates a name supplied directly on the command line (`prune <name>`,
+/// `add --name <name>`, `init --name <name>`) against the same charset and
+/// length limit [`HelixConfig::validate`] enforces on names loaded from
+/// `helix.toml`, and that the interactive prompt (`prompts::input_name`) enforces
+/// on typed input. All three go through this one function (or its charset/length
+/// primitives) so none of them can drift out of agreement with the others.
+///
+/// Returns a human-readable message on failure; commands wrap it in whatever
+/// error type they use (`eyre`, `CliError`, ...).
+pub fn validate_instance_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("instance name cannot be empty".to_string());
+    }
+    if name.len() > MAX_INSTANCE_NAME_LEN {
+        return Err(format!(
+            "instance name '{name}' must be at most {MAX_INSTANCE_NAME_LEN} characters"
+        ));
+    }
+    if !has_valid_instance_name_charset(name) {
+        return Err(format!(
+            "instance name '{name}' must contain only ASCII letters, digits, '-', or '_'"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelixConfig {
@@ -520,6 +568,19 @@ impl HelixConfig {
                     path: relative_path.clone(),
                 });
             }
+            if !has_valid_instance_name_charset(name) {
+                return Err(ConfigError::InvalidInstanceName {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                });
+            }
+            if name.len() > MAX_INSTANCE_NAME_LEN {
+                return Err(ConfigError::InstanceNameTooLong {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                    max_len: MAX_INSTANCE_NAME_LEN,
+                });
+            }
         }
 
         for (name, config) in &self.local {
@@ -723,6 +784,49 @@ name = "demo"
         // Lenient validation (used by `helix add`) accepts it so the first
         // instance can be re-added after the last one was deleted.
         assert!(config.validate(path, false).is_ok());
+    }
+
+    #[test]
+    fn instance_name_with_path_traversal_characters_is_rejected() {
+        // Instance names are joined onto `.helix/` to build each instance's state
+        // directory (see `ProjectContext::instance_workspace`), which `prune`/`delete`
+        // then recursively remove. A name containing `..` or `/` must never reach
+        // that join unsanitized, so it's rejected here at config-validation time
+        // instead of at every path-building call site.
+        let config: HelixConfig = toml::from_str(
+            r#"
+[project]
+name = "demo"
+
+[local."../../evil"]
+"#,
+        )
+        .expect("TOML allows arbitrary quoted table keys");
+
+        let path = Path::new("helix.toml");
+        assert!(matches!(
+            config.validate(path, true),
+            Err(ConfigError::InvalidInstanceName { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_instance_name_rejects_path_traversal_and_empty_names() {
+        // This is the same guard `HelixConfig::validate` runs on names loaded from
+        // `helix.toml`, but callable directly by commands (`prune`, `add`, `init`)
+        // that build a path from a raw CLI argument instead of a config key.
+        for bad in ["../../evil", "a/b", "a\\b", "", "   ", "a.b"] {
+            assert!(
+                validate_instance_name(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        for good in ["dev", "prod-1", "my_instance", "A1"] {
+            assert!(
+                validate_instance_name(good).is_ok(),
+                "expected {good:?} to be accepted"
+            );
+        }
     }
 
     #[test]

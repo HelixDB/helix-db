@@ -166,4 +166,50 @@ mod tests {
             println!("sse test skipped");
         }
     }
+
+    /// The fixed vectors above are small integers, so every intermediate is
+    /// exactly representable and the kernel cannot disagree with the scalar
+    /// reference no matter how it rounds. This covers the inputs that can.
+    ///
+    /// Seeded identically to the NEON and AVX agreement tests, so a divergence
+    /// on one architecture and not another is a real difference in the kernel
+    /// rather than a different input.
+    #[test]
+    fn sse_kernels_agree_with_scalar_on_rounding_sensitive_input() {
+        use super::*;
+        use crate::search::vector::spaces::kernel_agreement::{
+            assert_agrees, dot_scale, TestRng, AGREEMENT_DIMENSIONS,
+        };
+
+        if !is_x86_feature_detected!("sse") {
+            return;
+        }
+
+        let mut rng = TestRng(0x2026_0904);
+        for dimension in AGREEMENT_DIMENSIONS {
+            let left_values = rng.vector(dimension);
+            let right_values = rng.vector(dimension);
+            let left = UnalignedVector::from_slice(&left_values[..]);
+            let right = UnalignedVector::from_slice(&right_values[..]);
+            let pair = SameDimensionPair::try_new(&left, &right).unwrap();
+
+            let euclid_scalar = euclidean_distance_non_optimized(&left, &right);
+            assert_agrees(
+                unsafe { euclid_similarity_sse(pair) },
+                euclid_scalar,
+                euclid_scalar,
+                "euclidean sse",
+                dimension,
+            );
+
+            let dot_scalar = dot_product_non_optimized(&left, &right);
+            assert_agrees(
+                unsafe { dot_similarity_sse(pair) },
+                dot_scalar,
+                dot_scale(&left_values, &right_values),
+                "dot sse",
+                dimension,
+            );
+        }
+    }
 }

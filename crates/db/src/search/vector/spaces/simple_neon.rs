@@ -128,4 +128,51 @@ mod tests {
             println!("neon test skipped");
         }
     }
+
+    /// The fixed vectors above are small integers, so every intermediate is
+    /// exactly representable and the kernel cannot disagree with the scalar
+    /// reference no matter how it rounds. This covers the inputs that can.
+    #[test]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    fn neon_kernels_agree_with_scalar_on_rounding_sensitive_input() {
+        use super::*;
+        use crate::search::vector::spaces::kernel_agreement::{
+            assert_agrees, dot_scale, TestRng, AGREEMENT_DIMENSIONS,
+        };
+        use crate::search::vector::spaces::simple::{
+            dot_product_non_optimized, euclidean_distance_non_optimized,
+        };
+        use crate::search::vector::unaligned_vector::UnalignedVector;
+
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            let mut rng = TestRng(0x2026_09_04);
+            for dimension in AGREEMENT_DIMENSIONS {
+                let left_values = rng.vector(dimension);
+                let right_values = rng.vector(dimension);
+                let left = UnalignedVector::from_slice(&left_values[..]);
+                let right = UnalignedVector::from_slice(&right_values[..]);
+                let pair = SameDimensionPair::try_new(&left, &right).unwrap();
+
+                let euclid_kernel = unsafe { euclid_similarity_neon(pair) };
+                let euclid_scalar = euclidean_distance_non_optimized(&left, &right);
+                assert_agrees(
+                    euclid_kernel,
+                    euclid_scalar,
+                    euclid_scalar,
+                    "euclidean",
+                    dimension,
+                );
+
+                let dot_kernel = unsafe { dot_similarity_neon(pair) };
+                let dot_scalar = dot_product_non_optimized(&left, &right);
+                assert_agrees(
+                    dot_kernel,
+                    dot_scalar,
+                    dot_scale(&left_values, &right_values),
+                    "dot",
+                    dimension,
+                );
+            }
+        }
+    }
 }

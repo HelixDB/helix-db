@@ -1,0 +1,21 @@
+---
+title: "SDK setup"
+description: "Choose a HelixDB SDK and connect it to a local or Cloud server"
+sidebarTitle: "Overview"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+HelixDB v3 uses one operation-tree request model across the Rust, TypeScript, Go, and Python SDKs.
+Choose a setup guide:
+
+- [Rust](/database/helix-db/start-here/sdk-setup/rust-project-setup) — typed DSL and async HTTP client.
+- [TypeScript](/database/helix-db/start-here/sdk-setup/typescript-project-setup) — typed DSL and JavaScript runtime support.
+- [Go](/database/helix-db/start-here/sdk-setup/go-project-setup) — server query builder and HTTP client.
+- [Python](/database/helix-db/start-here/sdk-setup/python-project-setup) — synchronous and asynchronous clients.
+
+For HTTP execution, all current SDKs can send dynamic requests to `POST /v2/query`. Rust,
+TypeScript, and Python also support embedded runtimes; the published Go SDK is currently HTTP-only.
+Use the same query guides after setup for reads, writes, indexes, traversals, search, projections,
+and typed parameters.
