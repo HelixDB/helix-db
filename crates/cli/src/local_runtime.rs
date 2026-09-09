@@ -88,16 +88,7 @@ impl LocalRuntime {
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(CliError::new(format!("{} is not running", runtime.label()))
-            .with_context(stderr.trim().to_string())
-            .with_hint(
-                "Start the daemon, then retry. macOS: `open -a Docker`, `colima start`, or \
-                 `podman machine start`. Linux/headless (CI, sandboxes): `sudo systemctl start \
-                 docker`, or run `sudo dockerd &` where there is no init system. Rootless Podman \
-                 needs newuidmap/subuid setup and often fails in restricted containers — install \
-                 Docker or use a privileged container there.",
-            )
-            .into())
+        Err(daemon_not_running_error(runtime, &stderr).into())
     }
 
     /// Returns `true` if the runtime daemon answers a bounded `info` probe.
@@ -1060,6 +1051,22 @@ fn runtime_unavailable_hint_for(
     }
 }
 
+fn daemon_not_running_error(runtime: ContainerRuntime, stderr: &str) -> CliError {
+    let os = std::env::consts::OS;
+    daemon_not_running_error_for(os, runtime, stderr, detected_docker_backend(os, runtime))
+}
+
+fn daemon_not_running_error_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    stderr: &str,
+    docker_backend: Option<DockerBackend>,
+) -> CliError {
+    CliError::new(format!("{} is not running", runtime.label()))
+        .with_context(stderr.trim().to_string())
+        .with_hint(runtime_unavailable_hint_for(os, runtime, docker_backend))
+}
+
 fn helix_run_args(
     name: &str,
     image: &str,
@@ -1402,6 +1409,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn daemon_failure_path_uses_runtime_aware_hint_and_keeps_stderr() {
+        let unknown_docker =
+            daemon_not_running_error_for("macos", ContainerRuntime::Docker, "boom", None);
+        let hint = unknown_docker.hint.expect("hint should be set");
+        assert!(hint.contains("docker info"));
+        for named in ["colima", "open -a"] {
+            assert!(!hint.contains(named), "unproven hint named {named}: {hint}");
+        }
+        assert_eq!(unknown_docker.context.as_deref(), Some("boom"));
+
+        let linux_podman =
+            daemon_not_running_error_for("linux", ContainerRuntime::Podman, "boom", None);
+        let hint = linux_podman.hint.expect("hint should be set");
+        assert!(hint.contains("podman info"));
+        assert!(!hint.to_lowercase().contains("docker"));
+        assert!(!hint.contains("colima"));
+        assert_eq!(linux_podman.context.as_deref(), Some("boom"));
+    }
     #[cfg(unix)]
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
