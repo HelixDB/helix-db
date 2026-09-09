@@ -134,7 +134,7 @@ async fn hash_suffixed_legacy_resources_are_adopted_on_upgrade() {
         .assert()
         .success();
 
-    let instance = "dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
     let config_path = project.join("helix.toml");
     let config = fs::read_to_string(&config_path).unwrap();
     fs::write(
@@ -151,7 +151,7 @@ async fn hash_suffixed_legacy_resources_are_adopted_on_upgrade() {
         .assert()
         .success();
 
-    let legacy = "helix-upgrade-corner-project-dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let legacy = "helix-upgrade-corner-project-14527b3cbdf37376ceb9eda41d2afac4";
     let log = fixture.runtime_log();
     assert!(
         log.contains(&format!("volume inspect {legacy}-minio-data")),
@@ -189,7 +189,7 @@ async fn fresh_hash_suffixed_names_get_their_own_digest() {
         .assert()
         .success();
 
-    let instance = "dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
     let config_path = project.join("helix.toml");
     let config = fs::read_to_string(&config_path).unwrap();
     fs::write(
@@ -207,11 +207,11 @@ async fn fresh_hash_suffixed_names_get_their_own_digest() {
         .success();
 
     let suffixed =
-        "helix-upgrade-corner-project-dev-14527b3cbdf37376ceb9eda41d2afac4-9205e6a18bfd6e20b5bdbc27e424de51";
+        "helix-upgrade-corner-project-14527b3cbdf37376ceb9eda41d2afac4-4d82fafccc46ce0a61a48599cc612258";
     let log = fixture.runtime_log();
     assert!(
         log.contains(&format!(
-            "volume create --label helixdb.identity=22:upgrade-corner-project/dev-14527b3cbdf37376ceb9eda41d2afac4 {suffixed}-minio-data"
+            "volume create --label helixdb.identity=22:upgrade-corner-project/14527b3cbdf37376ceb9eda41d2afac4 {suffixed}-minio-data"
         )),
         "expected a fresh labeled suffixed volume, got: {log}"
     );
@@ -249,7 +249,7 @@ async fn foreign_labeled_resources_are_not_adopted_or_removed() {
         .assert()
         .success();
 
-    let second = fixture.root().join("a-b");
+    let second = fixture.root().join("a-b-dev");
     fixture
         .command()
         .args(["init", "--path"])
@@ -260,7 +260,7 @@ async fn foreign_labeled_resources_are_not_adopted_or_removed() {
         .assert()
         .success();
 
-    let instance = "dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
     let config_path = second.join("helix.toml");
     let config = fs::read_to_string(&config_path).unwrap();
     fs::write(
@@ -288,7 +288,7 @@ async fn foreign_labeled_resources_are_not_adopted_or_removed() {
     let log = fixture.runtime_log();
     assert!(
         log.contains(&format!(
-            "--name {legacy}-23819930e79b83f50bd4063be2c00d1e -p"
+            "--name {legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea -p"
         )),
         "the second identity must use its own suffixed name, got: {log}"
     );
@@ -304,7 +304,7 @@ async fn foreign_labeled_resources_are_not_adopted_or_removed() {
     );
     assert!(
         log.contains(&format!(
-            "rm -f {legacy}-23819930e79b83f50bd4063be2c00d1e\n"
+            "rm -f {legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea\n"
         )),
         "stopping the second identity must only remove its own resources, got: {log}"
     );
