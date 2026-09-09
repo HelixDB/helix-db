@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 use tokio::process::Command as TokioCommand;
 
 pub const CONTAINER_PORT: u16 = 8080;
+const IDENTITY_LABEL: &str = "helixdb.identity";
+const CONTAINER_OWNER_FORMAT: &str =
+    r#"{{if .Config.Labels}}{{index .Config.Labels "helixdb.identity"}}{{end}}"#;
+const RESOURCE_OWNER_FORMAT: &str = r#"{{if .Labels}}{{index .Labels "helixdb.identity"}}{{end}}"#;
 /// How long to wait for a runtime daemon to become ready after we start it.
 /// Docker Desktop cold-boot can take 30–60s, so we allow generous headroom.
 const RUNTIME_START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -177,31 +181,50 @@ impl LocalRuntime {
 
     pub fn container_name(&self, instance_name: &str) -> String {
         let name = format!("{}-{}", self.project_name, instance_name);
+        let identity = self.instance_identity(instance_name);
         let sanitized = sanitize_docker_name(&name);
         let adopts = sanitized == name
             && ends_with_hash_suffix(&sanitized)
-            && self.adopts_legacy_name(&format!("helix-{name}"));
-        let identity = format!(
+            && self.adopts_legacy_name(&format!("helix-{name}"), &identity);
+        compose_resource_name(&name, &identity, adopts)
+    }
+
+    fn instance_identity(&self, instance_name: &str) -> String {
+        format!(
             "{}:{}/{}",
             self.project_name.len(),
             self.project_name,
             instance_name
-        );
-        compose_resource_name(&name, &identity, adopts)
+        )
     }
 
-    fn adopts_legacy_name(&self, legacy: &str) -> bool {
+    fn adopts_legacy_name(&self, legacy: &str, identity: &str) -> bool {
         let minio = format!("{legacy}-minio");
         let network = format!("{legacy}-net");
         let volume = format!("{legacy}-minio-data");
         [
-            ["container", "inspect", legacy],
-            ["container", "inspect", &minio],
-            ["network", "inspect", &network],
-            ["volume", "inspect", &volume],
+            ("container", CONTAINER_OWNER_FORMAT, legacy),
+            ("container", CONTAINER_OWNER_FORMAT, &minio),
+            ("network", RESOURCE_OWNER_FORMAT, &network),
+            ("volume", RESOURCE_OWNER_FORMAT, &volume),
         ]
         .into_iter()
-        .any(|probe| self.resource_exists(&probe))
+        .any(|(kind, owner_format, resource)| {
+            let Some(owner) =
+                self.resource_label(&[kind, "inspect", "--format", owner_format, resource])
+            else {
+                return false;
+            };
+            owner.is_empty() || owner == identity
+        })
+    }
+
+    fn resource_label(&self, args: &[&str]) -> Option<String> {
+        let output = self.runtime_command().args(args).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -256,7 +279,15 @@ impl LocalRuntime {
         };
         env.extend(telemetry_env());
 
-        let args = helix_run_args(&name, &image, config.port, true, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            true,
+            network.as_deref(),
+            &env,
+            &self.instance_identity(instance_name),
+        );
         let output = self
             .runtime_command()
             .args(&args)
@@ -295,7 +326,15 @@ impl LocalRuntime {
             (None, Vec::new())
         };
         env.extend(telemetry_env());
-        let args = helix_run_args(&name, &image, config.port, false, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            false,
+            network.as_deref(),
+            &env,
+            &self.instance_identity(instance_name),
+        );
 
         let mut child = self
             .runtime_tokio_command()
@@ -471,11 +510,12 @@ impl LocalRuntime {
         let resources = self.disk_resources(instance_name);
         self.pull_image_ref(MINIO_IMAGE)?;
         self.pull_image_ref(MINIO_MC_IMAGE)?;
-        self.ensure_network(&resources.network)?;
-        self.ensure_volume(&resources.volume)?;
+        let identity = self.instance_identity(instance_name);
+        self.ensure_network(&resources.network, &identity)?;
+        self.ensure_volume(&resources.volume, &identity)?;
         let _ = self.remove_container(&resources.minio_container);
 
-        let args = minio_run_args(&resources);
+        let args = minio_run_args(&resources, &identity);
         let output = self
             .runtime_command()
             .args(&args)
@@ -494,14 +534,17 @@ impl LocalRuntime {
         Ok(resources)
     }
 
-    fn ensure_network(&self, network: &str) -> Result<()> {
+    fn ensure_network(&self, network: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["network", "inspect", network]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["network", "create", network])
+            .args(["network", "create", "--label"])
+            .arg(&label)
+            .arg(network)
             .output()
             .map_err(|e| eyre!("Failed to create network {network}: {e}"))?;
 
@@ -515,14 +558,17 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_volume(&self, volume: &str) -> Result<()> {
+    fn ensure_volume(&self, volume: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["volume", "inspect", volume]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["volume", "create", volume])
+            .args(["volume", "create", "--label"])
+            .arg(&label)
+            .arg(volume)
             .output()
             .map_err(|e| eyre!("Failed to create volume {volume}: {e}"))?;
 
@@ -909,6 +955,7 @@ fn helix_run_args(
     detached: bool,
     network: Option<&str>,
     env: &[ContainerEnv],
+    identity: &str,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string()];
     if detached {
@@ -926,6 +973,8 @@ fn helix_run_args(
         name.to_string(),
         "-p".to_string(),
         format!("{port}:{CONTAINER_PORT}"),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
     ]);
 
     if let Some(network) = network {
@@ -939,7 +988,7 @@ fn helix_run_args(
     args
 }
 
-fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
+fn minio_run_args(resources: &DiskRuntimeResources, identity: &str) -> Vec<String> {
     vec![
         "run".to_string(),
         "-d".to_string(),
@@ -947,6 +996,8 @@ fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
         "unless-stopped".to_string(),
         "--name".to_string(),
         resources.minio_container.clone(),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
         "--network".to_string(),
         resources.network.clone(),
         "-e".to_string(),
@@ -1281,6 +1332,7 @@ mod tests {
             true,
             None,
             &[],
+            "4:demo/dev",
         );
 
         assert_eq!(
@@ -1294,6 +1346,8 @@ mod tests {
                 "helix-demo-dev",
                 "-p",
                 "9090:8080",
+                "--label",
+                "helixdb.identity=4:demo/dev",
                 "ghcr.io/helixdb/helixdb:v0.0.4",
             ]
             .into_iter()
@@ -1312,6 +1366,7 @@ mod tests {
             true,
             Some(&resources.network),
             &disk_env(&resources),
+            "4:demo/dev",
         );
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
@@ -1345,6 +1400,7 @@ mod tests {
             true,
             None,
             &env,
+            "4:demo/dev",
         );
 
         assert!(!args.contains(&"--network".to_string()));
@@ -1407,7 +1463,7 @@ mod tests {
     #[test]
     fn minio_args_include_persistent_volume() {
         let resources = disk_resources();
-        let args = minio_run_args(&resources);
+        let args = minio_run_args(&resources, "4:demo/dev");
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
         assert!(args.contains(&"MINIO_ROOT_USER=minioadmin".to_string()));

@@ -201,7 +201,7 @@ async fn fresh_hash_suffixed_names_get_their_own_digest() {
     fixture
         .command()
         .current_dir(&project)
-        .env("HELIX_TEST_RUNTIME_CONTAINER_INSPECT", "missing")
+        .env("HELIX_TEST_RUNTIME_LABEL_PROBE", "missing")
         .args(["start", instance])
         .assert()
         .success();
@@ -210,12 +210,103 @@ async fn fresh_hash_suffixed_names_get_their_own_digest() {
         "helix-upgrade-corner-project-dev-14527b3cbdf37376ceb9eda41d2afac4-9205e6a18bfd6e20b5bdbc27e424de51";
     let log = fixture.runtime_log();
     assert!(
-        log.contains(&format!("volume create {suffixed}-minio-data")),
-        "expected a fresh suffixed volume, got: {log}"
+        log.contains(&format!(
+            "volume create --label helixdb.identity=22:upgrade-corner-project/dev-14527b3cbdf37376ceb9eda41d2afac4 {suffixed}-minio-data"
+        )),
+        "expected a fresh labeled suffixed volume, got: {log}"
     );
     assert!(
         log.contains(&format!("--name {suffixed} -p")),
         "expected a fresh suffixed container, got: {log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_labeled_resources_are_not_adopted_or_removed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let first = fixture.root().join("a b");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&first)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--no-skills"])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&first)
+        .args(["start", "dev"])
+        .assert()
+        .success();
+
+    let second = fixture.root().join("a-b");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&second)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = second.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&second)
+        .env("HELIX_TEST_RUNTIME_LABEL_PROBE", "3:a b/dev")
+        .args(["start", instance])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&second)
+        .env("HELIX_TEST_RUNTIME_LABEL_PROBE", "3:a b/dev")
+        .args(["stop", instance])
+        .assert()
+        .success();
+
+    let legacy = "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let log = fixture.runtime_log();
+    assert!(
+        log.contains(&format!(
+            "--name {legacy}-23819930e79b83f50bd4063be2c00d1e -p"
+        )),
+        "the second identity must use its own suffixed name, got: {log}"
+    );
+    assert_eq!(
+        log.matches(&format!("--name {legacy} -p")).count(),
+        1,
+        "the legacy run line must belong to the first identity only, got: {log}"
+    );
+    assert_eq!(
+        log.matches(&format!("rm -f {legacy}\n")).count(),
+        1,
+        "the first identity's resources must not be removed again, got: {log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "rm -f {legacy}-23819930e79b83f50bd4063be2c00d1e\n"
+        )),
+        "stopping the second identity must only remove its own resources, got: {log}"
     );
 }
 
