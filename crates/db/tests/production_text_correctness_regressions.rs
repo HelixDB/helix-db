@@ -3883,3 +3883,54 @@ async fn recall_on_single_edit_typos_goes_from_nothing_to_everything() {
 
     db.close().await.expect("the recall fixture closes");
 }
+
+#[tokio::test]
+async fn a_fuzzy_query_reaches_across_every_split() {
+    const DATABASE: &str = "fts-fuzzy-multi-split";
+    let _page_barrier_guard = PAGE_BARRIER_TEST_LOCK.lock().await;
+    let fixture = open_drop_race_fixture(DATABASE).await;
+    fixture
+        .db
+        .flush_writer()
+        .await
+        .expect("active text state becomes reader-visible");
+
+    let object_store: Arc<dyn ObjectStore> = fixture.store.clone();
+    let reader = HelixDB::open_reader_with_object_store(DATABASE, object_store)
+        .await
+        .expect("multi split reader opens");
+    let warm = reader
+        .warm_fts_cache()
+        .await
+        .expect("multi split reader warms its text splits");
+    assert!(
+        warm.split_count >= 2,
+        "this fixture is only worth anything while it holds more than one split"
+    );
+
+    let exact = reader
+        .query(unscoped_node_text_ids_request("dropneadle"))
+        .await
+        .expect("an exact search for the misspelling runs");
+    assert!(
+        query_node_ids(&exact, "ids").is_empty(),
+        "the misspelling is in no split's dictionary"
+    );
+
+    let fuzzy = reader
+        .query(fuzzy_node_text_ids_request("dropneadle", 1))
+        .await
+        .expect("a fuzzy search across every split runs");
+    assert_eq!(
+        query_node_ids(&fuzzy, "ids"),
+        [0, 1],
+        "both documents are reachable, and they do not live in the same split"
+    );
+
+    reader.close().await.expect("multi split reader closes");
+    fixture
+        .db
+        .close()
+        .await
+        .expect("multi split fixture closes");
+}
