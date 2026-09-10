@@ -410,14 +410,14 @@ impl FtsPrefilterBenchmarkFixture {
             .expect("validated benchmark query has exact statistics");
         let split_hits = futures::stream::iter(self.readers(layout).iter())
             .map(|reader| async {
-                reader.warm(self.definition.analyzer(), query, 0).await?;
+                let _ = reader.warm(self.definition.analyzer(), query, 0).await?;
                 reader.search_candidates(
                     self.definition.analyzer(),
                     query,
                     k,
                     Some(statistics),
                     scope,
-                    0,
+                    None,
                 )
             })
             .buffered(8)

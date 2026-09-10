@@ -164,8 +164,7 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
-        /// Maximum edit distance for keyword matching. Zero is exact matching,
-        /// which is what a query that does not ask for fuzzy gets.
+        /// Maximum edit distance for keyword matching. Zero is exact.
         #[serde(default, skip_serializing_if = "is_exact_match")]
         fuzzy_distance: u8,
     },
@@ -196,8 +195,7 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
-        /// Maximum edit distance for keyword matching. Zero is exact matching,
-        /// which is what a query that does not ask for fuzzy gets.
+        /// Maximum edit distance for keyword matching. Zero is exact.
         #[serde(default, skip_serializing_if = "is_exact_match")]
         fuzzy_distance: u8,
     },
@@ -216,8 +214,7 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
-        /// Maximum edit distance for keyword matching. Zero is exact matching,
-        /// which is what a query that does not ask for fuzzy gets.
+        /// Maximum edit distance for keyword matching. Zero is exact.
         #[serde(default, skip_serializing_if = "is_exact_match")]
         fuzzy_distance: u8,
     },
@@ -236,8 +233,7 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
-        /// Maximum edit distance for keyword matching. Zero is exact matching,
-        /// which is what a query that does not ask for fuzzy gets.
+        /// Maximum edit distance for keyword matching. Zero is exact.
         #[serde(default, skip_serializing_if = "is_exact_match")]
         fuzzy_distance: u8,
     },
@@ -796,8 +792,8 @@ impl AstNode {
     }
 
     /// The edit distance slot of a text search step, so a later builder call
-    /// can widen a search that has already been written. Every other node
-    /// returns [None]: edit distance means nothing to them.
+    /// can widen a search that has already been written. Edit distance means
+    /// nothing to any other node, so they have no slot to hand back.
     pub(crate) fn fuzzy_distance_mut(&mut self) -> Option<&mut u8> {
         match self {
             Self::TextSearchNodes { fuzzy_distance, .. }
