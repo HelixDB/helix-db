@@ -903,19 +903,17 @@ fn classify_docker_endpoint(endpoint: &str) -> Option<DockerBackend> {
 /// Bounded by `RUNTIME_INFO_TIMEOUT` because this also runs on the advisory
 /// path, which must not stall `init`.
 fn active_docker_backend() -> Option<DockerBackend> {
-    if let Some(context) = nonempty_env("DOCKER_CONTEXT")
-        && let Some(endpoint) = docker_context_endpoint(Some(&context))
-    {
-        return select_docker_backend(Some(&endpoint), None, None);
+    if let Some(context) = nonempty_env("DOCKER_CONTEXT") {
+        let endpoint = docker_context_endpoint(Some(&context));
+        return select_docker_backend(Some(endpoint.as_deref()), None, None);
     }
 
     if let Some(host) = nonempty_env("DOCKER_HOST") {
         return select_docker_backend(None, Some(&host), None);
     }
 
-    docker_context_endpoint(None)
-        .as_deref()
-        .and_then(|endpoint| select_docker_backend(None, None, Some(endpoint)))
+    let endpoint = docker_context_endpoint(None);
+    select_docker_backend(None, None, endpoint.as_deref())
 }
 
 fn nonempty_env(key: &str) -> Option<String> {
@@ -937,13 +935,16 @@ fn docker_context_endpoint(name: Option<&str>) -> Option<String> {
     command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
 }
 
+/// The outer Option says whether DOCKER_CONTEXT was set; the inner one is the
+/// inspect result, so a set-but-unresolved context stays authoritative instead
+/// of falling back to the host.
 fn select_docker_backend(
-    explicit_context_endpoint: Option<&str>,
+    explicit_context_endpoint: Option<Option<&str>>,
     docker_host_endpoint: Option<&str>,
     configured_context_endpoint: Option<&str>,
 ) -> Option<DockerBackend> {
     if let Some(endpoint) = explicit_context_endpoint {
-        return classify_docker_endpoint(endpoint);
+        return endpoint.and_then(classify_docker_endpoint);
     }
     if let Some(endpoint) = docker_host_endpoint {
         return classify_docker_endpoint(endpoint);
@@ -1377,11 +1378,11 @@ mod tests {
         let desktop = "unix:///Users/me/.docker/run/docker.sock";
         let colima = "unix:///Users/me/.colima/default/docker.sock";
         assert_eq!(
-            select_docker_backend(Some(desktop), Some(colima), None),
+            select_docker_backend(Some(Some(desktop)), Some(colima), None),
             Some(DockerBackend::DockerDesktop)
         );
         assert_eq!(
-            select_docker_backend(Some(colima), Some(desktop), None),
+            select_docker_backend(Some(Some(colima)), Some(desktop), None),
             Some(DockerBackend::Colima)
         );
     }
@@ -1404,7 +1405,23 @@ mod tests {
     fn unknown_explicit_context_stays_neutral_instead_of_using_host() {
         let colima = "unix:///Users/me/.colima/default/docker.sock";
         assert_eq!(
-            select_docker_backend(Some("unix:///var/run/docker.sock"), Some(colima), None),
+            select_docker_backend(
+                Some(Some("unix:///var/run/docker.sock")),
+                Some(colima),
+                None
+            ),
+            None
+        );
+    }
+
+    /// A context that fails inspection is still authoritative. Docker errors on
+    /// a missing context rather than falling back to DOCKER_HOST, so auto-start
+    /// must not launch the host's backend either.
+    #[test]
+    fn unresolved_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(None), Some(colima), Some(colima)),
             None
         );
     }
