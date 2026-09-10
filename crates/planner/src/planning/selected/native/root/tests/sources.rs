@@ -56,6 +56,7 @@ fn native_root_lowers_access_sources_and_rejects_unsupported_wrappers() {
             tenant_value: Some(PropertyInput::from("tenant-a")),
             query_text: PropertyInput::from("needle"),
             k: StreamBound::Literal(3),
+            fuzzy_distance: 0,
         },
     )
     .unwrap()

@@ -37,6 +37,7 @@ fn search_inputs_reject_empty_names_from_raw_ast() {
                 tenant_value: Some(PropertyInput::param(String::new())),
                 query_text: PropertyInput::from("query"),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Param,
         ),
@@ -47,6 +48,7 @@ fn search_inputs_reject_empty_names_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::param(String::new()),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Param,
         ),
@@ -67,6 +69,7 @@ fn search_inputs_reject_empty_names_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::param(String::new()),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Param,
         ),
@@ -115,6 +118,7 @@ fn scoped_search_tenant_inputs_reject_empty_names_from_raw_ast() {
             tenant_value: Some(PropertyInput::param(String::new())),
             query_text: PropertyInput::from("query"),
             k: StreamBound::Literal(1),
+            fuzzy_distance: 0,
         },
         AstNode::VectorSearchEdges {
             label: "MENTIONS".to_string(),
@@ -129,6 +133,7 @@ fn scoped_search_tenant_inputs_reject_empty_names_from_raw_ast() {
             tenant_value: Some(PropertyInput::param(String::new())),
             query_text: PropertyInput::from("query"),
             k: StreamBound::Literal(1),
+            fuzzy_distance: 0,
         },
     ];
 
@@ -221,6 +226,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(PropertyValue::F32Array(vec![0.1])),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -234,6 +240,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(""),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -247,6 +254,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(Expr::val("")),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -273,6 +281,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(PropertyValue::F32Array(vec![0.1])),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -286,6 +295,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(Expr::val(vec![0.1_f32])),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -299,6 +309,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(""),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -312,6 +323,7 @@ fn search_inputs_reject_mismatched_literal_types_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from(Expr::val("")),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             PlannerError::InvalidSearchInput {
                 kind: SearchIndexKind::Text,
@@ -347,6 +359,7 @@ fn search_index_fields_reject_empty_names_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from("query"),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Label,
         ),
@@ -357,6 +370,7 @@ fn search_index_fields_reject_empty_names_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from("query"),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Property,
         ),
@@ -397,6 +411,7 @@ fn search_index_fields_reject_empty_names_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from("query"),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Label,
         ),
@@ -407,6 +422,7 @@ fn search_index_fields_reject_empty_names_from_raw_ast() {
                 tenant_value: None,
                 query_text: PropertyInput::from("query"),
                 k: StreamBound::Literal(1),
+                fuzzy_distance: 0,
             },
             NameField::Property,
         ),

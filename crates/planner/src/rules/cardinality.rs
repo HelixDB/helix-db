@@ -464,11 +464,13 @@ fn node_count_plans(
             index,
             query_text,
             k,
+            fuzzy_distance,
         } => exec::ExecCountPlan::NodeTextSearch(exec::ExecNodeTextSearchCountPlan {
             key: key.clone(),
             index: index.clone(),
             query_text: query_text.clone(),
             k: k.clone(),
+            fuzzy_distance: *fuzzy_distance,
             window,
         }),
         ir::NodeAccessPlan::Intersect(children) => {
@@ -553,11 +555,13 @@ fn edge_count_plans(
             index,
             query_text,
             k,
+            fuzzy_distance,
         } => exec::ExecCountPlan::EdgeTextSearch(exec::ExecEdgeTextSearchCountPlan {
             key: key.clone(),
             index: index.clone(),
             query_text: query_text.clone(),
             k: k.clone(),
+            fuzzy_distance: *fuzzy_distance,
             window,
         }),
         ir::EdgeAccessPlan::Intersect(children) => {
@@ -903,6 +907,7 @@ fn count_plan_cursor(
                 index: plan.index,
                 query_text: plan.query_text,
                 k: plan.k,
+                fuzzy_distance: plan.fuzzy_distance,
             })
         }
         exec::ExecCountPlan::EdgeTextSearch(plan) => {
@@ -911,6 +916,7 @@ fn count_plan_cursor(
                 index: plan.index,
                 query_text: plan.query_text,
                 k: plan.k,
+                fuzzy_distance: plan.fuzzy_distance,
             })
         }
         exec::ExecCountPlan::NodeDynamicEquality(plan) => {
@@ -1933,6 +1939,7 @@ mod tests {
             index: search_index(),
             query_text: ir::TextQueryInputPlan::new(PropertyInput::from("needle")).unwrap(),
             k: search_limit(),
+            fuzzy_distance: 0,
         })
     }
 
@@ -1962,6 +1969,7 @@ mod tests {
             index: search_index(),
             query_text: ir::TextQueryInputPlan::new(PropertyInput::from("needle")).unwrap(),
             k: search_limit(),
+            fuzzy_distance: 0,
         }
     }
 
@@ -1971,6 +1979,7 @@ mod tests {
             index: search_index(),
             query_text: ir::TextQueryInputPlan::new(PropertyInput::from("needle")).unwrap(),
             k: search_limit(),
+            fuzzy_distance: 0,
         }
     }
 

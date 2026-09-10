@@ -4755,6 +4755,7 @@ fn public_edge_indexed_read_plan(
             k: ir::SearchLimitPlan::Literal(
                 NonZeroUsize::new(10).expect("public edge text limit is positive"),
             ),
+            fuzzy_distance: 0,
         },
         PublicMutationFamily::Secondary => {
             unreachable!("secondary has a dedicated edge indexed-read matrix")
@@ -4845,6 +4846,7 @@ fn public_indexed_read_plan(family: PublicMutationFamily, ordinal: u64) -> exec:
             k: ir::SearchLimitPlan::Literal(
                 NonZeroUsize::new(10).expect("public lifecycle text limit is positive"),
             ),
+            fuzzy_distance: 0,
         },
     };
     public_executable(

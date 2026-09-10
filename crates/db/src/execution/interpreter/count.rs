@@ -13,7 +13,7 @@ use helix_ast::query::QueryValue;
 use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{exec, ir, properties};
 
-use super::access::SearchReadLimit;
+use super::access::{SearchReadLimit, TextSearchAccess};
 use super::*;
 use crate::config::{TextElementType, VectorElementType};
 
@@ -65,12 +65,14 @@ enum CountCursorLeaf<'a> {
         index: &'a ir::SearchIndexPlan,
         query_text: &'a ir::TextQueryInputPlan,
         k: &'a ir::SearchLimitPlan,
+        fuzzy_distance: u8,
     },
     EdgeTextSearch {
         key: &'a helix_planner::catalog::EdgeSearchIndexKey,
         index: &'a ir::SearchIndexPlan,
         query_text: &'a ir::TextQueryInputPlan,
         k: &'a ir::SearchLimitPlan,
+        fuzzy_distance: u8,
     },
     NodeDynamicEquality {
         index: &'a helix_planner::catalog::NodeEqualityIndexMeta,
@@ -365,11 +367,14 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecCountPlan::NodeTextSearch(plan) => {
                 let window = evaluated_window.expect("search counts carry a window");
                 let read = self.text_search_hits(
-                    TextElementType::Node,
-                    &plan.key.label,
-                    &plan.key.property,
-                    &plan.index,
-                    &plan.query_text,
+                    TextSearchAccess::new(
+                        TextElementType::Node,
+                        &plan.key.label,
+                        &plan.key.property,
+                        &plan.index,
+                        &plan.query_text,
+                        plan.fuzzy_distance,
+                    ),
                     SearchReadLimit::new(&plan.k, None),
                 );
                 let results = read.await?;
@@ -385,11 +390,14 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecCountPlan::EdgeTextSearch(plan) => {
                 let window = evaluated_window.expect("search counts carry a window");
                 let read = self.text_search_hits(
-                    TextElementType::Edge,
-                    &plan.key.label,
-                    &plan.key.property,
-                    &plan.index,
-                    &plan.query_text,
+                    TextSearchAccess::new(
+                        TextElementType::Edge,
+                        &plan.key.label,
+                        &plan.key.property,
+                        &plan.index,
+                        &plan.query_text,
+                        plan.fuzzy_distance,
+                    ),
                     SearchReadLimit::new(&plan.k, None),
                 );
                 let results = read.await?;
@@ -1017,14 +1025,18 @@ impl<'db> ExecutionContext<'db> {
                     index,
                     query_text,
                     k,
+                    fuzzy_distance,
                 } => {
                     let hits = self
                         .text_search_hits(
-                            TextElementType::Node,
-                            &key.label,
-                            &key.property,
-                            index,
-                            query_text,
+                            TextSearchAccess::new(
+                                TextElementType::Node,
+                                &key.label,
+                                &key.property,
+                                index,
+                                query_text,
+                                *fuzzy_distance,
+                            ),
                             SearchReadLimit::new(k, None),
                         )
                         .await?;
@@ -1042,14 +1054,18 @@ impl<'db> ExecutionContext<'db> {
                     index,
                     query_text,
                     k,
+                    fuzzy_distance,
                 } => {
                     let hits = self
                         .text_search_hits(
-                            TextElementType::Edge,
-                            &key.label,
-                            &key.property,
-                            index,
-                            query_text,
+                            TextSearchAccess::new(
+                                TextElementType::Edge,
+                                &key.label,
+                                &key.property,
+                                index,
+                                query_text,
+                                *fuzzy_distance,
+                            ),
                             SearchReadLimit::new(k, None),
                         )
                         .await?;
@@ -1249,12 +1265,14 @@ impl<'db> ExecutionContext<'db> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => self.count_cursor_leaf(
                 CountCursorLeaf::NodeTextSearch {
                     key,
                     index,
                     query_text,
                     k,
+                    fuzzy_distance: *fuzzy_distance,
                 },
                 dependency,
             ),
@@ -1263,12 +1281,14 @@ impl<'db> ExecutionContext<'db> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => self.count_cursor_leaf(
                 CountCursorLeaf::EdgeTextSearch {
                     key,
                     index,
                     query_text,
                     k,
+                    fuzzy_distance: *fuzzy_distance,
                 },
                 dependency,
             ),
@@ -1539,13 +1559,17 @@ impl<'db> ExecutionContext<'db> {
                     index,
                     query_text,
                     k,
+                    fuzzy_distance,
                 } => {
                     let read = self.text_search_hits(
-                        TextElementType::Node,
-                        &key.label,
-                        &key.property,
-                        index,
-                        query_text,
+                        TextSearchAccess::new(
+                            TextElementType::Node,
+                            &key.label,
+                            &key.property,
+                            index,
+                            query_text,
+                            fuzzy_distance,
+                        ),
                         SearchReadLimit::new(k, None),
                     );
                     let hits = read.await?;
@@ -1556,13 +1580,17 @@ impl<'db> ExecutionContext<'db> {
                     index,
                     query_text,
                     k,
+                    fuzzy_distance,
                 } => {
                     let read = self.text_search_hits(
-                        TextElementType::Edge,
-                        &key.label,
-                        &key.property,
-                        index,
-                        query_text,
+                        TextSearchAccess::new(
+                            TextElementType::Edge,
+                            &key.label,
+                            &key.property,
+                            index,
+                            query_text,
+                            fuzzy_distance,
+                        ),
                         SearchReadLimit::new(k, None),
                     );
                     let hits = read.await?;
@@ -3548,6 +3576,7 @@ mod tests {
                     index,
                     query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
                     k,
+                    fuzzy_distance: 0,
                 }),
             },
             exec::ExecCountCursorPlan::Variable {
@@ -3677,6 +3706,7 @@ mod tests {
                     index,
                     query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
                     k,
+                    fuzzy_distance: 0,
                 }),
             },
         ];
@@ -3821,6 +3851,7 @@ mod tests {
             index: node_text_index.clone(),
             query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
             k: access_support::literal_search_limit(2),
+            fuzzy_distance: 0,
             window: exec::ExecCountWindowPlan::identity(),
         };
         let edge_text = exec::ExecEdgeTextSearchCountPlan {
@@ -3828,6 +3859,7 @@ mod tests {
             index: edge_text_index.clone(),
             query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
             k: access_support::literal_search_limit(2),
+            fuzzy_distance: 0,
             window: exec::ExecCountWindowPlan::identity(),
         };
         for plan in [
@@ -3862,12 +3894,14 @@ mod tests {
                 index: node_text.index.clone(),
                 query_text: node_text.query_text.clone(),
                 k: node_text.k.clone(),
+                fuzzy_distance: 0,
             },
             exec::ExecCountCursorPlan::EdgeTextSearch {
                 key: edge_text.key.clone(),
                 index: edge_text.index.clone(),
                 query_text: edge_text.query_text.clone(),
                 k: edge_text.k.clone(),
+                fuzzy_distance: 0,
             },
             exec::ExecCountCursorPlan::VectorSearch {
                 input: Box::new(exec::ExecCountCursorPlan::NodePointReads(
@@ -3900,6 +3934,7 @@ mod tests {
                     index: node_text_index,
                     query_text: node_text.query_text,
                     k: node_text.k,
+                    fuzzy_distance: 0,
                 }),
             },
             exec::ExecCountCursorPlan::TextSearch {
@@ -3911,6 +3946,7 @@ mod tests {
                     index: edge_text_index,
                     query_text: edge_text.query_text,
                     k: edge_text.k,
+                    fuzzy_distance: 0,
                 }),
             },
         ] {
@@ -3969,6 +4005,7 @@ mod tests {
                 index: index.clone(),
                 query_text: text.clone(),
                 k: k.clone(),
+                fuzzy_distance: 0,
                 window: window.clone(),
             }),
             exec::ExecCountPlan::EdgeTextSearch(exec::ExecEdgeTextSearchCountPlan {
@@ -3976,6 +4013,7 @@ mod tests {
                 index: index.clone(),
                 query_text: text.clone(),
                 k: k.clone(),
+                fuzzy_distance: 0,
                 window: window.clone(),
             }),
         ];
@@ -4004,12 +4042,14 @@ mod tests {
                 index: index.clone(),
                 query_text: text.clone(),
                 k: k.clone(),
+                fuzzy_distance: 0,
             },
             exec::ExecCountCursorPlan::EdgeTextSearch {
                 key: edge_key,
                 index,
                 query_text: text,
                 k,
+                fuzzy_distance: 0,
             },
         ];
         for cursor in cursors {

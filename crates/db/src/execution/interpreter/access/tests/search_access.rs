@@ -350,6 +350,7 @@ async fn node_text_search_works_without_lifecycle_runtime_when_manifest_exists()
         k: ir::SearchLimitPlan::Expr(
             ir::SearchLimitExprPlan::new(Expr::param(limit.as_ref())).expect("valid limit expr"),
         ),
+        fuzzy_distance: 0,
     };
     assert_eq!(
         run_node_access_with_params(
@@ -421,6 +422,7 @@ async fn edge_text_search_works_without_lifecycle_runtime_when_manifest_exists()
         index: search_index(&index_name),
         query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
         k: literal_search_limit(1),
+        fuzzy_distance: 0,
     };
     assert_eq!(
         run_edge_access(&db, plan).await,
@@ -469,6 +471,7 @@ async fn ready_text_dispatch_returns_managed_node_and_edge_hits() {
             index: search_index(&node_index_name),
             query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
             k: literal_search_limit(1),
+            fuzzy_distance: 0,
         },
     )
     .await;
@@ -520,6 +523,7 @@ async fn ready_text_dispatch_returns_managed_node_and_edge_hits() {
             index: search_index(&edge_index_name),
             query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
             k: literal_search_limit(1),
+            fuzzy_distance: 0,
         },
     )
     .await;
@@ -543,6 +547,7 @@ async fn text_dispatch_reports_missing_definition_and_manifest_corruption() {
         index: search_index(&missing_index_name),
         query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
         k: literal_search_limit(1),
+        fuzzy_distance: 0,
     };
     assert!(matches!(
         missing_db
@@ -560,6 +565,7 @@ async fn text_dispatch_reports_missing_definition_and_manifest_corruption() {
             ir::SearchQueryExprPlan::new(Expr::param("missing")).unwrap(),
         ),
         k: literal_search_limit(1),
+        fuzzy_distance: 0,
     };
     assert!(matches!(
         missing_db
@@ -636,6 +642,7 @@ async fn text_dispatch_reports_missing_definition_and_manifest_corruption() {
         index: search_index(&index_name),
         query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
         k: literal_search_limit(1),
+        fuzzy_distance: 0,
     };
     assert!(matches!(
         db.execute(
@@ -753,6 +760,7 @@ async fn text_dispatch_returns_empty_for_an_absent_managed_tenant_partition() {
         },
         query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
         k: literal_search_limit(1),
+        fuzzy_distance: 0,
     };
 
     let result = db
@@ -847,6 +855,7 @@ async fn text_search_without_a_manifest_is_empty() {
         index: search_index(&index_name),
         query_text: ir::TextQueryInputPlan::Text(test_support::name("planner")),
         k: literal_search_limit(1),
+        fuzzy_distance: 0,
     };
     assert_eq!(
         run_node_access(&db, plan).await,

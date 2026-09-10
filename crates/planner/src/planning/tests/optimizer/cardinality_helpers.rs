@@ -476,6 +476,7 @@ fn search_and_bound_cardinality_use_literal_k_only() {
         },
         query_text: TextQueryInputPlan::Text(NonEmptyString::new("planner").unwrap()),
         k: SearchLimitPlan::new(StreamBound::from(9usize)).unwrap(),
+        fuzzy_distance: 0,
     };
     let node_vector = NodeAccessPlan::VectorSearch {
         key: NodeSearchIndexKey::try_new("Doc", "embedding").unwrap(),
@@ -503,6 +504,7 @@ fn search_and_bound_cardinality_use_literal_k_only() {
         },
         query_text: TextQueryInputPlan::Text(NonEmptyString::new("planner").unwrap()),
         k: SearchLimitPlan::new(StreamBound::from(7usize)).unwrap(),
+        fuzzy_distance: 0,
     };
 
     assert_eq!(

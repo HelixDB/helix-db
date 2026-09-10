@@ -222,6 +222,7 @@ fn restricted_text_contract_is_order_sensitive_materialized_and_score_ordered() 
                 ))
                 .unwrap(),
                 k: ir::SearchLimitPlan::Literal(std::num::NonZeroUsize::new(10).unwrap()),
+                fuzzy_distance: 0,
             }),
         },
         properties::DeliveredProperties {

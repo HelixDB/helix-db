@@ -78,6 +78,8 @@ pub enum NodeAccessPlan {
         query_text: ir::TextQueryInputPlan,
         /// Result count.
         k: ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
     /// Set intersection. A pure-secondary intersection is ordered only when a
     /// direct range child is selected as its executable driver; otherwise it
@@ -245,6 +247,7 @@ mod tests {
                 },
                 query_text: ir::TextQueryInputPlan::new(PropertyInput::from("hello")).unwrap(),
                 k: literal_limit(3),
+                fuzzy_distance: 0,
             },
         ] {
             assert_eq!(plan.direct_label(), Some(&user));

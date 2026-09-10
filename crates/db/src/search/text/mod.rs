@@ -175,7 +175,6 @@ impl<'a> TextSearchRequest<'a> {
     /// Opt this request into fuzzy keyword matching. Distances above
     /// [`MAX_FUZZY_DISTANCE`] are clamped, since the automaton cannot build
     /// past it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn with_fuzzy_distance(mut self, distance: u8) -> Self {
         self.fuzzy_distance = if distance > MAX_FUZZY_DISTANCE {
             MAX_FUZZY_DISTANCE
@@ -190,6 +189,12 @@ impl<'a> TextSearchRequest<'a> {
 /// memoises builders in a `[[OnceCell; 2]; 3]`, so anything above two is
 /// rejected outright rather than being slow.
 pub(crate) const MAX_FUZZY_DISTANCE: u8 = 2;
+
+/// The query surface advertises its own ceiling and cannot import this one,
+/// since the AST crate sits underneath this one. Drift between the two would
+/// mean a query is accepted and then quietly narrowed, so fail the build
+/// instead.
+const _: () = assert!(MAX_FUZZY_DISTANCE == helix_ast::traversal::MAX_FUZZY_DISTANCE);
 
 /// Most expanded terms a single query term may contribute.
 ///
@@ -674,7 +679,7 @@ pub async fn search_manifest(
     }
 
     let (_index, fields, reader) = open_manifest_index(store, db_path, manifest).await?;
-    warm_searcher(&reader, fields, manifest.analyzer, query).await?;
+    warm_searcher(&reader, fields, manifest.analyzer, query, 0).await?;
     search_split_index_bytes(
         &reader,
         fields,
@@ -797,7 +802,9 @@ async fn search_manifest_with_state_source(
     let opened = futures::stream::iter(manifest.split_refs().iter().cloned())
         .map(|split_ref| async {
             let index_reader = SplitSearchReader::open(&runtime, &split_ref).await?;
-            index_reader.warm(manifest.analyzer, query).await?;
+            index_reader
+                .warm(manifest.analyzer, query, fuzzy_distance)
+                .await?;
             let total_docs = index_reader.total_docs();
             Ok::<_, HelixDbError>(SplitSearchState {
                 split_ref,
@@ -976,16 +983,21 @@ impl SplitSearchReader {
         }
     }
 
-    async fn warm(&self, analyzer: TextAnalyzerKind, query: &str) -> Result<(), HelixDbError> {
+    async fn warm(
+        &self,
+        analyzer: TextAnalyzerKind,
+        query: &str,
+        fuzzy_distance: u8,
+    ) -> Result<(), HelixDbError> {
         match self {
-            Self::Cached(split) => split.warm(analyzer, query).await,
+            Self::Cached(split) => split.warm(analyzer, query, fuzzy_distance).await,
             Self::Direct {
                 index,
                 reader,
                 fields,
             } => {
                 register_analyzers(index, analyzer);
-                warm_searcher(reader, *fields, analyzer, query).await
+                warm_searcher(reader, *fields, analyzer, query, fuzzy_distance).await
             }
         }
     }
@@ -1747,8 +1759,9 @@ pub(crate) async fn warm_searcher(
     fields: TextSchemaFields,
     analyzer: TextAnalyzerKind,
     query: &str,
+    fuzzy_distance: u8,
 ) -> Result<(), HelixDbError> {
-    let mut warmup_info = query_warmup_info(fields, analyzer, query);
+    let mut warmup_info = query_warmup_info(fields, analyzer, query, fuzzy_distance);
     if warmup_info.terms_grouped_by_field.is_empty()
         && warmup_info.fast_fields.is_empty()
         && !warmup_info.field_norms
@@ -1767,9 +1780,19 @@ fn query_warmup_info(
     fields: TextSchemaFields,
     analyzer: TextAnalyzerKind,
     query: &str,
+    fuzzy_distance: u8,
 ) -> WarmupInfo {
     let terms = analyze_query_terms(analyzer, query);
     let mut warmup = WarmupInfo::default();
+    if fuzzy_distance > 0 {
+        // Which terms the automaton reaches is only known once it has walked the
+        // dictionary, so the dictionary and the postings behind it both have to
+        // be resident before the walk starts. Naming the typed terms is not
+        // enough: the terms that answer the query are the ones nobody typed.
+        // Only a query that asked for latitude pays for this.
+        warmup.term_dict_fields.insert(fields.body);
+        warmup.postings_full_fields.insert(fields.body);
+    }
     if !terms.is_empty() {
         warmup.terms_grouped_by_field.insert(
             fields.body,

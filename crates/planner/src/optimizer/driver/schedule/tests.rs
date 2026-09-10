@@ -134,6 +134,7 @@ fn stream_op(kind: logical::StreamPipelineOpKind) -> logical::StreamPipelineOp {
                 ))
                 .unwrap(),
                 k: ir::SearchLimitPlan::Literal(std::num::NonZeroUsize::MIN),
+                fuzzy_distance: 0,
             }),
         },
         logical::StreamPipelineOpKind::Variable => logical::StreamPipelineOp::Variable {

@@ -119,9 +119,10 @@ impl OpenedTextSplit {
         &self,
         analyzer: TextAnalyzerKind,
         query: &str,
+        fuzzy_distance: u8,
     ) -> Result<(), HelixDbError> {
         register_analyzers(&self.index, analyzer);
-        warm_searcher(&self.reader, self.fields, analyzer, query).await
+        warm_searcher(&self.reader, self.fields, analyzer, query, fuzzy_distance).await
     }
 
     pub(crate) fn total_docs(&self) -> usize {

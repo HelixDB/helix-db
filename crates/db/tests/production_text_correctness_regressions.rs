@@ -366,6 +366,7 @@ fn text_search_plan(label: &str, property: &str, query: &str) -> exec::Executabl
                         k: ir::SearchLimitPlan::Literal(
                             NonZeroUsize::new(32).expect("fixture limit is positive"),
                         ),
+                        fuzzy_distance: 0,
                     },
                 )),
             },
@@ -611,6 +612,84 @@ fn unscoped_node_text_ids_request(query: &str) -> QueryRequest {
             )
             .returning(["ids"]),
     )
+}
+
+fn fuzzy_node_text_ids_request(query: &str, distance: u8) -> QueryRequest {
+    QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "ids",
+                traversal::g()
+                    .text_search_nodes(LABEL, PROPERTY, query, 32, None)
+                    .fuzzy(distance)
+                    .id(),
+            )
+            .returning(["ids"]),
+    )
+}
+
+fn fuzzy_edge_text_ids_request(query: &str, distance: u8) -> QueryRequest {
+    QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "ids",
+                traversal::g()
+                    .text_search_edges(EDGE_LABEL, PROPERTY, query, 32, None)
+                    .fuzzy(distance)
+                    .id(),
+            )
+            .returning(["ids"]),
+    )
+}
+
+fn fuzzy_within_node_text_ids_request(query: &str, distance: u8) -> QueryRequest {
+    QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "ids",
+                traversal::g()
+                    .n_with_label(LABEL)
+                    .text_search(LABEL, PROPERTY, query, 32, None)
+                    .fuzzy(distance)
+                    .id(),
+            )
+            .returning(["ids"]),
+    )
+}
+
+fn fuzzy_within_edge_text_ids_request(query: &str, distance: u8) -> QueryRequest {
+    QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "ids",
+                traversal::g()
+                    .e_with_label(EDGE_LABEL)
+                    .text_search(EDGE_LABEL, PROPERTY, query, 32, None)
+                    .fuzzy(distance)
+                    .id(),
+            )
+            .returning(["ids"]),
+    )
+}
+
+fn fuzzy_node_text_count_request(query: &str, distance: u8) -> QueryRequest {
+    QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "total",
+                traversal::g()
+                    .text_search_nodes(LABEL, PROPERTY, query, 32, None)
+                    .fuzzy(distance)
+                    .count(),
+            )
+            .returning(["total"]),
+    )
+}
+
+fn query_count(db_response: &serde_json::Value, variable: &str) -> u64 {
+    db_response[variable]
+        .as_u64()
+        .unwrap_or_else(|| panic!("expected a count, got {}", db_response[variable]))
 }
 
 async fn open_current_v2_text_fixture(
@@ -3534,4 +3613,273 @@ async fn build_restart_after_upload_preserves_the_orphan_and_completes() {
         [0]
     );
     writer.close().await.expect("replacement writer closes");
+}
+
+#[tokio::test]
+async fn a_fuzzy_query_reaches_a_word_the_writer_misspelled() {
+    let (db, Some(spelled_correctly), _) =
+        open_current_v2_text_fixture("fts-fuzzy-misspelled-query", Some("levenshtein automaton"))
+            .await
+    else {
+        panic!("the fixture inserts one indexed node")
+    };
+    let unrelated = insert_node(&db, "quicksort partition pivot").await;
+
+    let exact = db
+        .query(unscoped_node_text_ids_request("levenshtain"))
+        .await
+        .expect("searching for a misspelling is still a legal query");
+    assert!(
+        query_node_ids(&exact, "ids").is_empty(),
+        "the misspelling is not a term in the dictionary, so an exact search has nothing to return"
+    );
+
+    let fuzzy = db
+        .query(fuzzy_node_text_ids_request("levenshtain", 1))
+        .await
+        .expect("the same query with one edit of latitude runs");
+    let hits = query_node_ids(&fuzzy, "ids");
+    assert_eq!(
+        hits,
+        [spelled_correctly],
+        "one substitution reaches the indexed spelling"
+    );
+    assert!(
+        !hits.contains(&unrelated),
+        "latitude on the query term is not latitude on the corpus"
+    );
+
+    db.close().await.expect("the fuzzy fixture closes");
+}
+
+#[tokio::test]
+async fn asking_for_no_edits_leaves_a_query_exactly_as_it_was() {
+    let (db, Some(spelled_correctly), _) =
+        open_current_v2_text_fixture("fts-fuzzy-zero-distance", Some("levenshtein automaton"))
+            .await
+    else {
+        panic!("the fixture inserts one indexed node")
+    };
+
+    let exact = db
+        .query(unscoped_node_text_ids_request("levenshtein"))
+        .await
+        .expect("the control query runs");
+    let through_the_new_path = db
+        .query(fuzzy_node_text_ids_request("levenshtein", 0))
+        .await
+        .expect("distance zero runs");
+    assert_eq!(
+        query_node_ids(&exact, "ids"),
+        query_node_ids(&through_the_new_path, "ids"),
+        "a query that does not ask for fuzzy takes the path it always took"
+    );
+    assert_eq!(query_node_ids(&exact, "ids"), [spelled_correctly]);
+
+    let still_a_miss = db
+        .query(fuzzy_node_text_ids_request("levenshtain", 0))
+        .await
+        .expect("distance zero on a misspelling runs");
+    assert!(
+        query_node_ids(&still_a_miss, "ids").is_empty(),
+        "zero edits cannot reach a spelling one edit away"
+    );
+
+    db.close().await.expect("the zero distance fixture closes");
+}
+
+#[tokio::test]
+async fn a_fuzzy_edge_search_reaches_a_word_the_writer_misspelled() {
+    let (db, _from, _to, Some(spelled_correctly), _) =
+        open_current_v2_edge_fixture("fts-fuzzy-edge-misspelled", Some("levenshtein automaton"))
+            .await
+    else {
+        panic!("the edge fixture inserts one indexed edge")
+    };
+
+    let exact = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "ids",
+                    traversal::g()
+                        .text_search_edges(EDGE_LABEL, PROPERTY, "levenshtain", 32, None)
+                        .id(),
+                )
+                .returning(["ids"]),
+        ))
+        .await
+        .expect("an exact edge search for a misspelling still runs");
+    assert!(query_node_ids(&exact, "ids").is_empty());
+
+    let fuzzy = db
+        .query(fuzzy_edge_text_ids_request("levenshtain", 1))
+        .await
+        .expect("a fuzzy edge search runs");
+    assert_eq!(
+        query_node_ids(&fuzzy, "ids"),
+        [spelled_correctly],
+        "edges reach the indexed spelling the same way nodes do"
+    );
+
+    db.close().await.expect("the fuzzy edge fixture closes");
+}
+
+#[tokio::test]
+async fn a_fuzzy_search_over_a_node_stream_reaches_a_word_the_writer_misspelled() {
+    let (db, Some(spelled_correctly), _) =
+        open_current_v2_text_fixture("fts-fuzzy-within-nodes", Some("levenshtein automaton")).await
+    else {
+        panic!("the fixture inserts one indexed node")
+    };
+    let unrelated = insert_node(&db, "quicksort partition pivot").await;
+
+    let exact = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "ids",
+                    traversal::g()
+                        .n_with_label(LABEL)
+                        .text_search(LABEL, PROPERTY, "levenshtain", 32, None)
+                        .id(),
+                )
+                .returning(["ids"]),
+        ))
+        .await
+        .expect("ranking a node stream by a misspelling still runs");
+    assert!(
+        query_node_ids(&exact, "ids").is_empty(),
+        "the restricted path has the same dictionary the unrestricted one does"
+    );
+
+    let fuzzy = db
+        .query(fuzzy_within_node_text_ids_request("levenshtain", 1))
+        .await
+        .expect("a fuzzy search over a node stream runs");
+    let hits = query_node_ids(&fuzzy, "ids");
+    assert_eq!(hits, [spelled_correctly]);
+    assert!(!hits.contains(&unrelated));
+
+    db.close().await.expect("the within fixture closes");
+}
+
+#[tokio::test]
+async fn a_fuzzy_search_over_an_edge_stream_reaches_a_word_the_writer_misspelled() {
+    let (db, _from, _to, Some(spelled_correctly), _) =
+        open_current_v2_edge_fixture("fts-fuzzy-within-edges", Some("levenshtein automaton")).await
+    else {
+        panic!("the edge fixture inserts one indexed edge")
+    };
+
+    let fuzzy = db
+        .query(fuzzy_within_edge_text_ids_request("levenshtain", 1))
+        .await
+        .expect("a fuzzy search over an edge stream runs");
+    assert_eq!(query_node_ids(&fuzzy, "ids"), [spelled_correctly]);
+
+    db.close().await.expect("the edge within fixture closes");
+}
+
+#[tokio::test]
+async fn counting_a_fuzzy_search_counts_the_rows_it_finds() {
+    let (db, _entity, _) =
+        open_current_v2_text_fixture("fts-fuzzy-count", Some("levenshtein automaton")).await;
+    insert_node(&db, "levenshtein distance").await;
+    insert_node(&db, "quicksort partition pivot").await;
+
+    let exact = db
+        .query(fuzzy_node_text_count_request("levenshtain", 0))
+        .await
+        .expect("counting an exact search for a misspelling runs");
+    assert_eq!(
+        query_count(&exact, "total"),
+        0,
+        "counting cannot find what searching cannot reach"
+    );
+
+    let fuzzy = db
+        .query(fuzzy_node_text_count_request("levenshtain", 1))
+        .await
+        .expect("counting a fuzzy search runs");
+    assert_eq!(
+        query_count(&fuzzy, "total"),
+        2,
+        "both documents hold the indexed spelling one edit away"
+    );
+
+    db.close().await.expect("the count fixture closes");
+}
+
+/// Each pair is one indexed term and the same term with one substitution. The
+/// terms are technical rather than English so the analyzer leaves them whole,
+/// and they are far enough apart that a one-edit walk from any typo can only
+/// land on its own document.
+const TYPO_CORPUS: &[(&str, &str)] = &[
+    ("levenshtein", "levenshtain"),
+    ("automaton", "automoton"),
+    ("quicksort", "quicksart"),
+    ("bloomfilter", "bloomfalter"),
+    ("roaringbitmap", "roaringbitmep"),
+    ("skiplist", "skiplest"),
+    ("hashjoin", "hashjoen"),
+    ("mergesort", "mergesart"),
+    ("bitpacker", "bitpacher"),
+    ("columnar", "columnor"),
+    ("hnswgraph", "hnswgroph"),
+    ("tokenizer", "tokenizor"),
+];
+
+#[tokio::test]
+async fn recall_on_single_edit_typos_goes_from_nothing_to_everything() {
+    let (first_term, _) = TYPO_CORPUS[0];
+    let (db, Some(first_id), _) =
+        open_current_v2_text_fixture("fts-fuzzy-recall", Some(first_term)).await
+    else {
+        panic!("the fixture inserts the first indexed node")
+    };
+
+    let mut indexed = vec![(first_id, TYPO_CORPUS[0])];
+    for pair in TYPO_CORPUS.iter().skip(1) {
+        let id = insert_node(&db, pair.0).await;
+        indexed.push((id, *pair));
+    }
+
+    let mut reached_exact = 0_usize;
+    let mut reached_fuzzy = 0_usize;
+    for (id, (spelled, typo)) in &indexed {
+        let exact = db
+            .query(unscoped_node_text_ids_request(typo))
+            .await
+            .expect("an exact search for a typo runs");
+        if !query_node_ids(&exact, "ids").is_empty() {
+            reached_exact += 1;
+        }
+
+        let fuzzy = db
+            .query(fuzzy_node_text_ids_request(typo, 1))
+            .await
+            .expect("a fuzzy search for a typo runs");
+        let hits = query_node_ids(&fuzzy, "ids");
+        if hits == [*id] {
+            reached_fuzzy += 1;
+        } else {
+            assert!(
+                hits.is_empty(),
+                "{typo} reached {hits:?} instead of the document holding {spelled}"
+            );
+        }
+    }
+
+    assert_eq!(
+        reached_exact, 0,
+        "none of these typos is a term in the dictionary, so exact search reaches nothing"
+    );
+    assert_eq!(
+        reached_fuzzy,
+        TYPO_CORPUS.len(),
+        "one edit of latitude reaches every one of them, and only its own document"
+    );
+
+    db.close().await.expect("the recall fixture closes");
 }

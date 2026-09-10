@@ -77,6 +77,7 @@ fn node_vector_and_text_searches_require_and_preserve_index_metadata() {
         index,
         query_text,
         k,
+        fuzzy_distance,
     }) = first_exec_access(&text_plan)
     else {
         panic!(
@@ -106,6 +107,10 @@ fn node_vector_and_text_searches_require_and_preserve_index_metadata() {
     assert_eq!(
         k,
         &SearchLimitPlan::Expr(SearchLimitExprPlan::new(Expr::param("limit")).unwrap())
+    );
+    assert_eq!(
+        *fuzzy_distance, 0,
+        "a search without FUZZY plans an exact match"
     );
 
     assert!(matches!(
