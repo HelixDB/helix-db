@@ -1145,11 +1145,7 @@ async fn prepare_build_upload(
     let next_progress =
         IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(next_stage));
     let uploaded =
-        crate::search::text::upload_blob(&runtime.object_store, &runtime.db_path, &payload)
-            .await
-            .map_err(|error| {
-                HelixDbError::InvariantViolation(format!("text split upload failed: {error}"))
-            })?;
+        crate::search::text::upload_blob(&runtime.object_store, &runtime.db_path, &payload).await?;
     if uploaded.sha256 != *split.blob().hash() || uploaded.size_bytes != split.blob().size() {
         return Err(corruption(
             "text split upload returned metadata for different content",
@@ -1439,11 +1435,7 @@ async fn prepare_compaction_step(
     let next_progress =
         IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(next_stage));
     let uploaded =
-        crate::search::text::upload_blob(&runtime.object_store, &runtime.db_path, &payload)
-            .await
-            .map_err(|error| {
-                HelixDbError::InvariantViolation(format!("text compaction upload failed: {error}"))
-            })?;
+        crate::search::text::upload_blob(&runtime.object_store, &runtime.db_path, &payload).await?;
     if uploaded.sha256 != *split.blob().hash() || uploaded.size_bytes != split.blob().size() {
         return Err(corruption(
             "text compaction upload returned metadata for different content",
