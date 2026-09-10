@@ -162,7 +162,7 @@ async fn execute_cloud_query(
     Ok(body)
 }
 
-fn print_response(body: &[u8], compact: bool) -> Result<()> {
+pub(super) fn print_response(body: &[u8], compact: bool) -> Result<()> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(());
     }

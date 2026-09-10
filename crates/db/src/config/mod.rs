@@ -19,7 +19,9 @@ pub use cache::{
     VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
     DEFAULT_VECTOR_MEMORY_BUDGET_BYTES,
 };
-pub use db::{DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution};
+pub use db::{
+    DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution, QueryTelemetry,
+};
 pub use definition_differences::{DefinitionDifference, NonEmptyDefinitionDifferences};
 pub use index_lifecycle_throughput::{
     IndexLifecycleConcurrency, IndexLifecycleScanTuning, IndexLifecycleThroughputTuning,

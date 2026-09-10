@@ -257,6 +257,10 @@ async fn general_projection_mixes_stored_properties_and_expressions() {
             alias: name("omitted"),
         },
         ir::ProjectionItem::Expr {
+            alias: name("explicit_null"),
+            expr: ir::ExprPlan::new(Expr::prop("missing")).expect("valid property expression"),
+        },
+        ir::ProjectionItem::Expr {
             alias: name("constant"),
             expr: ir::ExprPlan::new(Expr::val(42)).expect("valid constant expression"),
         },
@@ -288,8 +292,12 @@ async fn general_projection_mixes_stored_properties_and_expressions() {
                     DbPropertyValue::String("ada".to_string()),
                 ),
                 ("constant".to_string(), DbPropertyValue::I64(42)),
+                ("explicit_null".to_string(), DbPropertyValue::Null),
             ]),
-            BTreeMap::from([("constant".to_string(), DbPropertyValue::I64(42))]),
+            BTreeMap::from([
+                ("constant".to_string(), DbPropertyValue::I64(42)),
+                ("explicit_null".to_string(), DbPropertyValue::Null),
+            ]),
         ]
     );
 }

@@ -16,7 +16,10 @@ pub use self::{
     binding::{
         BindingProjectionItems, BindingProjectionPlan, BindingTargetPlan, BindingValueRefPlan,
     },
-    item::{ProjectionItem, ProjectionItems, ProjectionItemsError},
+    item::{
+        ProjectionItem, ProjectionItems, ProjectionItemsError, ResolvedProjection,
+        ResolvedProjectionKind,
+    },
     plan::{ProjectionDedupMode, ProjectionPlan},
     property::{PropertyNames, PropertyNamesError, PropertySelection},
 };

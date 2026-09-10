@@ -8,7 +8,7 @@
 mod config;
 mod driver;
 mod memoize;
-mod ordering;
+pub(crate) mod ordering;
 mod provenance;
 mod registry;
 mod result;

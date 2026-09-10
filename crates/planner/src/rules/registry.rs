@@ -13,6 +13,9 @@ use crate::optimizer;
 /// coupling optimizer scheduling to individual rule implementations.
 #[derive(Default)]
 pub struct SeedRuleSet {
+    rows: crate::relational::RowPipelineImplementationRule,
+    graph_pattern: crate::relational::GraphPatternImplementationRule,
+    graph_order: crate::relational::GraphPatternExplorationRule,
     static_predicate: StaticPredicateSimplificationRule,
     filter_merge: FilterMergeRule,
     filter_pushdown: FilterPushdownRule,
@@ -95,6 +98,9 @@ impl SeedRuleSet {
             &self.access_pipeline_order,
             &self.access_pipeline_simplification,
             &self.access_pipeline_implementation,
+            &self.rows,
+            &self.graph_pattern,
+            &self.graph_order,
             &self.root_pipeline_implementation,
             &self.root_mutation_implementation,
             &self.root_index_ddl_implementation,

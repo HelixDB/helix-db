@@ -14,6 +14,7 @@ mod mutation;
 pub(crate) mod read_view;
 mod reserved;
 mod row_mode;
+mod rows;
 mod runtime_context;
 mod scheduler;
 mod shortest_path;
@@ -36,7 +37,8 @@ pub use types::{
 };
 use types::{ExecutionValueSlot, ExecutionValueStore};
 
-use helix_ast::expr::{CompareOp, Expr, Predicate};
+#[cfg(test)]
+use helix_ast::expr::{Expr, Predicate};
 use helix_planner::{context, exec, ir};
 
 use self::runtime_context::ExecutionContext;

@@ -631,7 +631,7 @@ impl<'db> ExecutionContext<'db> {
                     read.await?
                 }
                 exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                    let read = self.eval_predicate(&row, predicate.predicate());
+                    let read = self.eval_predicate_plan(&row, predicate);
                     read.await?
                 }
             };
@@ -661,7 +661,7 @@ impl<'db> ExecutionContext<'db> {
                     read.await?
                 }
                 exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                    let read = self.eval_predicate(&row, predicate.predicate());
+                    let read = self.eval_predicate_plan(&row, predicate);
                     read.await?
                 }
             };
@@ -1115,7 +1115,7 @@ impl<'db> ExecutionContext<'db> {
                             break;
                         }
                         self.check_execution_deadline()?;
-                        if self.eval_predicate(&row, predicate.predicate()).await? {
+                        if self.eval_predicate_plan(&row, predicate).await? {
                             accepted = accepted.saturating_add(1);
                         }
                     }
@@ -1399,7 +1399,7 @@ impl<'db> ExecutionContext<'db> {
                                 read.await?
                             }
                             exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                let read = self.eval_predicate(&row, predicate.predicate());
+                                let read = self.eval_predicate_plan(&row, predicate);
                                 read.await?
                             }
                         };
@@ -1421,7 +1421,7 @@ impl<'db> ExecutionContext<'db> {
                                 read.await?
                             }
                             exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                let read = self.eval_predicate(&row, predicate.predicate());
+                                let read = self.eval_predicate_plan(&row, predicate);
                                 read.await?
                             }
                         };
@@ -1795,6 +1795,8 @@ pub(super) async fn run_production_contracts() {
 
 #[cfg(any(test, feature = "production-coverage"))]
 mod tests {
+    #[cfg(test)]
+    mod dynamic_membership;
     use helix_ast::expr::Predicate;
     use helix_ast::index::RangeIndexDirection;
     use helix_ast::query::QueryValue;

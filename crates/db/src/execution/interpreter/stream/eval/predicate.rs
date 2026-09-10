@@ -1,184 +1,21 @@
-//! Predicate evaluation contracts.
-
-use std::cmp::Ordering;
-
+//! Native collection equality semantics retained by the resolved evaluator.
 use super::*;
 
-impl<'db> ExecutionContext<'db> {
+#[cfg(test)]
+impl ExecutionContext<'_> {
     pub(in crate::execution::interpreter) async fn eval_predicate(
         &self,
         row: &ExecutionRow,
         predicate: &Predicate,
     ) -> Result<bool> {
-        let mut resolver = RowValueResolver::new(self);
-        self.eval_predicate_with_resolver(row, predicate, &mut resolver)
-            .await
-    }
-
-    pub(in crate::execution::interpreter::stream) async fn eval_predicate_with_resolver(
-        &self,
-        row: &ExecutionRow,
-        predicate: &Predicate,
-        resolver: &mut RowValueResolver<'_, 'db>,
-    ) -> Result<bool> {
-        match predicate {
-            Predicate::Eq { left, right } => {
-                Ok(Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                    .await?
-                    .eq_value(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?))
+        let plan = match ir::PredicatePlan::new(predicate.clone()) {
+            Ok(plan) => plan,
+            Err(ir::ExprPlanError::EmptyPredicateSet { op }) => {
+                return Ok(op == ir::PredicateSetOp::And)
             }
-            Predicate::Neq { left, right } => {
-                Ok(!Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                    .await?
-                    .eq_value(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?))
-            }
-            Predicate::Gt { left, right }
-            | Predicate::Compare {
-                left,
-                op: CompareOp::Gt,
-                right,
-            } => Ok(Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                .await?
-                .compare(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?)
-                == Some(Ordering::Greater)),
-            Predicate::Gte { left, right }
-            | Predicate::Compare {
-                left,
-                op: CompareOp::Gte,
-                right,
-            } => Ok(matches!(
-                Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                    .await?
-                    .compare(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?),
-                Some(Ordering::Greater | Ordering::Equal)
-            )),
-            Predicate::Lt { left, right }
-            | Predicate::Compare {
-                left,
-                op: CompareOp::Lt,
-                right,
-            } => Ok(Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                .await?
-                .compare(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?)
-                == Some(Ordering::Less)),
-            Predicate::Lte { left, right }
-            | Predicate::Compare {
-                left,
-                op: CompareOp::Lte,
-                right,
-            } => Ok(matches!(
-                Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                    .await?
-                    .compare(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?),
-                Some(Ordering::Less | Ordering::Equal)
-            )),
-            Predicate::Compare {
-                left,
-                op: CompareOp::Eq,
-                right,
-            } => Ok(Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                .await?
-                .eq_value(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?)),
-            Predicate::Compare {
-                left,
-                op: CompareOp::Neq,
-                right,
-            } => Ok(!Box::pin(self.eval_expr_with_resolver(row, left, resolver))
-                .await?
-                .eq_value(&Box::pin(self.eval_expr_with_resolver(row, right, resolver)).await?)),
-            Predicate::Between { value, min, max } => {
-                let value = Box::pin(self.eval_expr_with_resolver(row, value, resolver)).await?;
-                Ok(matches!(
-                    value.compare(
-                        &Box::pin(self.eval_expr_with_resolver(row, min, resolver)).await?
-                    ),
-                    Some(Ordering::Greater | Ordering::Equal)
-                ) && matches!(
-                    value.compare(
-                        &Box::pin(self.eval_expr_with_resolver(row, max, resolver)).await?
-                    ),
-                    Some(Ordering::Less | Ordering::Equal)
-                ))
-            }
-            Predicate::HasKey { property } => {
-                let property = non_empty_predicate_property(property)?;
-                Ok(resolver.row_property(row, &property).await?.is_some())
-            }
-            Predicate::IsNull { property } => {
-                let property = non_empty_predicate_property(property)?;
-                Ok(resolver
-                    .row_property(row, &property)
-                    .await?
-                    .is_none_or(|value| matches!(value, DbPropertyValue::Null)))
-            }
-            Predicate::IsNotNull { property } => {
-                let property = non_empty_predicate_property(property)?;
-                Ok(resolver
-                    .row_property(row, &property)
-                    .await?
-                    .is_some_and(|value| !matches!(value, DbPropertyValue::Null)))
-            }
-            Predicate::StartsWith { value, prefix } => {
-                Ok(Box::pin(self.eval_expr_with_resolver(row, value, resolver))
-                    .await?
-                    .as_str()
-                    .zip(
-                        Box::pin(self.eval_expr_with_resolver(row, prefix, resolver))
-                            .await?
-                            .as_str(),
-                    )
-                    .is_some_and(|(value, prefix)| value.starts_with(prefix)))
-            }
-            Predicate::EndsWith { value, suffix } => {
-                Ok(Box::pin(self.eval_expr_with_resolver(row, value, resolver))
-                    .await?
-                    .as_str()
-                    .zip(
-                        Box::pin(self.eval_expr_with_resolver(row, suffix, resolver))
-                            .await?
-                            .as_str(),
-                    )
-                    .is_some_and(|(value, suffix)| value.ends_with(suffix)))
-            }
-            Predicate::Contains { value, substring } => {
-                Ok(Box::pin(self.eval_expr_with_resolver(row, value, resolver))
-                    .await?
-                    .as_str()
-                    .zip(
-                        Box::pin(self.eval_expr_with_resolver(row, substring, resolver))
-                            .await?
-                            .as_str(),
-                    )
-                    .is_some_and(|(value, substring)| value.contains(substring)))
-            }
-            Predicate::IsIn { value, values } => {
-                let value = Box::pin(self.eval_expr_with_resolver(row, value, resolver)).await?;
-                let values = Box::pin(self.eval_expr_with_resolver(row, values, resolver)).await?;
-                Ok(property_value_is_in(&value, &values))
-            }
-            Predicate::And { predicates } => {
-                for predicate in predicates {
-                    if !Box::pin(self.eval_predicate_with_resolver(row, predicate, resolver))
-                        .await?
-                    {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            Predicate::Or { predicates } => {
-                for predicate in predicates {
-                    if Box::pin(self.eval_predicate_with_resolver(row, predicate, resolver)).await?
-                    {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
-            Predicate::Not { predicate } => {
-                Ok(!Box::pin(self.eval_predicate_with_resolver(row, predicate, resolver)).await?)
-            }
-        }
+            Err(error) => return Err(HelixDbError::Query(format!("predicate {error}"))),
+        };
+        self.eval_predicate_plan(row, &plan).await
     }
 }
 
@@ -210,9 +47,4 @@ pub(in crate::execution::interpreter) fn property_value_is_in(
         | DbPropertyValue::Bytes(_)
         | DbPropertyValue::Object(_)) => other.eq_value(value),
     }
-}
-
-fn non_empty_predicate_property(value: &str) -> Result<ir::NonEmptyString> {
-    ir::NonEmptyString::new(value.to_string())
-        .ok_or_else(|| HelixDbError::Query("predicate property name must not be empty".to_string()))
 }

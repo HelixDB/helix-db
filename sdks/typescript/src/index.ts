@@ -14,6 +14,12 @@ import { GraphSelection, NativeGraph, loadGraph } from "./graph.js";
 const DEFAULT_URL = "http://localhost:6969";
 const QUERY_PATH = "/v2/query";
 
+/** Graph IDs and large integers are lossless tagged values within each row. */
+export interface CypherResponse {
+  columns: string[];
+  rows: unknown[][];
+}
+
 /**
  * Error raised by the network {@link Client}.
  *
@@ -198,6 +204,7 @@ export type EmbeddedCacheConfig = {
 
 type NativeHelixDB = {
   query_json(request: Uint8Array): Promise<Uint8Array>;
+  cypher_json?(request: Uint8Array): Promise<Uint8Array>;
   graph?(request: Uint8Array, spec: unknown): Promise<unknown>;
   close(): Promise<void>;
 };
@@ -309,6 +316,48 @@ export class Client {
   /** Execute an SDK-built query. */
   query<R = unknown>(request: QueryRequest): QueryExecutionRequest<R> {
     return new QueryBuilder<R>(this.backend).query(request);
+  }
+
+  /** Execute Cypher, retaining tagged lossless values in the response. */
+  async cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): Promise<CypherResponse> {
+    let body: string;
+    try {
+      body = JSON.stringify({ query, parameters, query_name: queryName }, (_key, value: unknown) =>
+        typeof value === "bigint"
+          ? { $type: "integer", value: value.toString() }
+          : typeof value === "number" && !Number.isFinite(value)
+            ? { $type: "float", value: String(value) }
+            : value,
+      );
+    } catch (error) {
+      throw HelixError.serialization(String(error));
+    }
+    if (this.backend.kind === "embedded") {
+      if (!this.backend.native.cypher_json) throw HelixError.embeddedUnavailable("rebuild native bindings with Cypher support");
+      try {
+        return JSON.parse(
+          new TextDecoder().decode(await this.backend.native.cypher_json(new TextEncoder().encode(body))),
+        ) as CypherResponse;
+      } catch (error) {
+        throw embeddedError(error);
+      }
+    }
+    const url = new URL("/v2/cypher", this.backend.url);
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.backend.apiKey) headers.authorization = `Bearer ${this.backend.apiKey}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "POST", headers, body });
+    } catch (error) {
+      throw HelixError.network(String(error), url.toString());
+    }
+    const text = await response.text();
+    if (response.status !== 200) throw HelixError.remote(response.status, text, response.statusText);
+    try {
+      return JSON.parse(text) as CypherResponse;
+    } catch (error) {
+      throw HelixError.serialization(String(error));
+    }
   }
 
   /** Begin building an advanced server request whose 200 response body deserializes into `R`. */

@@ -264,3 +264,6 @@ fn server_query_metrics() -> (
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cypher_tests;

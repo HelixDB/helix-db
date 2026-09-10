@@ -3,13 +3,21 @@
 use crate::{cost, physical};
 
 type CostOrderingKey = (u64, u64, u64, u64, u64, u64, u64, u64, usize);
-pub(super) type AlternativeOrderingKey = (CostOrderingKey, u64);
+pub(crate) type AlternativeOrderingKey = (CostOrderingKey, u8, u64);
 
-pub(super) fn alternative_key_for_cost(
+pub(crate) fn alternative_key_for_cost(
     alternative: &physical::PhysicalAlternative,
     cost: cost::CostVector,
 ) -> AlternativeOrderingKey {
-    (cost_key(cost), alternative.digest.get())
+    // Equal estimates must not discard proven bounded execution just because a
+    // parameterized limit cannot be estimated. Cost still takes precedence;
+    // the stable digest breaks ties within the same execution strategy.
+    let materializes = u8::from(matches!(
+        &alternative.expr,
+        physical::PhysicalExpr::Rows(pipeline)
+            if pipeline.execution() == crate::relational::RowExecution::Materialized
+    ));
+    (cost_key(cost), materializes, alternative.digest.get())
 }
 
 fn cost_key(cost: cost::CostVector) -> CostOrderingKey {

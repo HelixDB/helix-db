@@ -11,6 +11,8 @@ pageType: "Reference"
 
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
 same contract is available from a local server and a Helix Cloud gateway.
+Local servers also accept Cypher statements at `POST /v2/cypher` and provide
+read-only planning at `POST /v2/cypher/explain`.
 
 ## Machine-readable specification
 
@@ -153,6 +155,88 @@ Local servers and Helix Cloud gateways return
 `payload_too_large` as its stable error code. See
 [Error handling](/database/helix-db/query-guides/error-handling) for local error
 codes and retry guidance.
+
+## Cypher on a local server
+
+Send a single statement with optional parameters and a query name. The server
+determines whether the statement reads or modifies data.
+
+```http
+POST /v2/cypher
+Content-Type: application/json
+```
+
+```json
+{
+  "query": "MATCH (n:Person) WHERE n.age >= $age RETURN n.name AS name",
+  "parameters": { "age": 30 },
+  "query_name": "adults"
+}
+```
+
+A successful response has ordered columns and rectangular rows:
+
+```json
+{ "columns": ["name"], "rows": [["Ada"], ["Grace"]] }
+```
+
+Each row has one cell per column. Duplicate rows are preserved unless removed
+by the query, and row order requires `ORDER BY`. Successful writes without
+`RETURN` produce empty `columns` and `rows`. Each modifying statement uses one
+atomic transaction. The read/write execution headers above apply; Cloud
+database-selection headers do not select a database on a standalone server.
+
+The profile includes fixed-length `MATCH` and `OPTIONAL MATCH`, `WHERE`, `WITH`,
+`RETURN`, `UNWIND`, aggregation, ordering and windows, and `CREATE`, property
+`SET`/`REMOVE`, `DELETE`, and `DETACH DELETE`. It requires exactly one nonempty
+label on created nodes and one nonempty type on created relationships. Unlabeled
+matching is supported. Multiple labels, label changes, and property names
+beginning with `$` are rejected. Assigning null removes a property. Plain node
+deletion fails if relationships remain; `DETACH DELETE` removes those relationships.
+
+`MERGE`, variable-length or shortest paths, `UNION`, subqueries, comprehensions,
+procedures, schema DDL, temporal/spatial functions, and Bolt are deferred. They
+produce specific unsupported-feature errors. Cypher Cloud gateway deployment
+is outside this local profile.
+
+### Lossless JSON values
+
+Null, booleans, strings, finite floats, lists, and ordinary maps use JSON values.
+Use these envelopes when plain JSON would lose meaning:
+
+| Value | Encoding |
+| --- | --- |
+| Integer outside the JavaScript safe range | `{"$type":"integer","value":"9223372036854775807"}` |
+| Nonfinite float | `{"$type":"float","value":"NaN"}`, `"Infinity"`, or `"-Infinity"` |
+| Literal map containing `$type` | `{"$type":"map","value":{"$type":"user value"}}` |
+| Node | `{"$type":"node","id":"7","labels":["Person"],"properties":{"name":"Ada"}}` |
+| Relationship | `{"$type":"relationship","id":"9","start":"7","end":"8","type":"KNOWS","properties":{}}` |
+| Path | `{"$type":"path","nodes":[...],"relationships":[...]}` |
+
+Graph IDs are unsigned decimal strings. `id()` checks signed 64-bit conversion
+and reports overflow. Path elements are ordered, while relationship endpoints
+retain their stored direction. Internal metadata is excluded from property maps.
+Scalar, list, and map values, including their envelopes, can be supplied as
+parameters. Graph elements cannot be passed as parameter values.
+
+### Cypher errors and planning
+
+Cypher errors include `error`, `msg`, and `details` with a specific `detail`,
+`phase` (`compile` or `runtime`), and a nullable UTF-8 byte `span`. Malformed
+requests and storage errors retain the native envelope. Resource limits return
+`429`; request/semantic errors return `400`; conflicts return `409`; internal
+failures return `500`; writer requirements or uncertain commits return `503`.
+An uncertain commit includes `retryable:false` and must not be retried automatically.
+
+The local request and response limits are 16 MiB, with a default 30-second query
+deadline. An oversized request returns `400` with `invalid_request_body`.
+Resource exhaustion returns an error instead of a truncated successful result.
+
+Send the same request to `POST /v2/cypher/explain` to inspect selected access
+paths, estimated cardinalities, blocking work, Cartesian products, and optimizer
+budget warnings. This endpoint returns planning data separately from query
+results and does not execute the statement, including writes. It uses read
+request options, so `X-Helix-Await-Durable:true` is invalid.
 
 ## Related resources
 

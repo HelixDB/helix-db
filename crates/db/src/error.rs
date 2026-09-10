@@ -181,6 +181,10 @@ pub enum HelixDbError {
     #[error("Query execution deadline exceeded")]
     QueryDeadlineExceeded,
 
+    /// Retaining an interpreter buffer would exceed the request's memory budget.
+    #[error("Query memory budget exceeded")]
+    QueryMemoryLimitExceeded,
+
     /// Reader retirement cancelled an admitted read before completion.
     #[error("Query was cancelled because its reader is retiring")]
     QueryCancelledByReaderRetirement,
@@ -498,6 +502,7 @@ impl HelixDbError {
             Self::TransactionConflict(_) => error_code::QueryErrorCode::TransactionConflict,
             Self::RequestReadViewChanged => error_code::QueryErrorCode::RequestReadViewChanged,
             Self::QueryDeadlineExceeded => error_code::QueryErrorCode::QueryDeadlineExceeded,
+            Self::QueryMemoryLimitExceeded => error_code::QueryErrorCode::QueryMemoryLimitExceeded,
             Self::QueryCancelledByReaderRetirement => {
                 error_code::QueryErrorCode::QueryCancelledByReaderRetirement
             }
@@ -785,6 +790,10 @@ mod tests {
             (
                 HelixDbError::QueryDeadlineExceeded,
                 Code::QueryDeadlineExceeded,
+            ),
+            (
+                HelixDbError::QueryMemoryLimitExceeded,
+                Code::QueryMemoryLimitExceeded,
             ),
             (
                 HelixDbError::QueryCancelledByReaderRetirement,

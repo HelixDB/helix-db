@@ -500,3 +500,23 @@ await withFakeNativeModule(async () => {
 });
 
 console.log("client.test.ts passed");
+
+{
+  const result = { columns: ["x"], rows: [[{ $type: "integer", value: "9223372036854775807" }]] };
+  const server = await spawnCaptureServer({ body: JSON.stringify(result) });
+  try {
+    const client = new Client(server.base).withApiKey("local-test");
+    assert.deepEqual(await client.cypher("RETURN $x AS x", { x: 9223372036854775807n, f: Infinity }, "parameter"), result);
+    const request = await server.captured;
+    assert.equal(request.path, "/v2/cypher");
+    assert.equal(request.headers.authorization, "Bearer local-test");
+    assert.deepEqual(JSON.parse(request.body), {
+      query: "RETURN $x AS x",
+      parameters: { x: { $type: "integer", value: "9223372036854775807" }, f: { $type: "float", value: "Infinity" } },
+      query_name: "parameter",
+    });
+    assert.equal(server.requestCount(), 1);
+  } finally {
+    await server.close();
+  }
+}

@@ -1,6 +1,7 @@
 //! Validated expression and predicate IR contracts.
 
 mod error;
+pub mod native;
 mod plan;
 mod predicate;
 mod validation;

@@ -14,7 +14,7 @@ use crate::encoding::v2::values;
 
 impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) async fn expand(
-        &mut self,
+        &self,
         input: ExecutionValue,
         plan: &ir::ExpandPlan,
     ) -> Result<ExecutionValue> {
@@ -111,6 +111,26 @@ impl<'db> ExecutionContext<'db> {
         Ok(ExecutionValue::Stream(expanded))
     }
 
+    /// IDs for a concrete edge expansion, preserving compressed storage sets.
+    /// Row and native traversal executors share these snapshot-aware primitives.
+    pub(in crate::execution::interpreter) async fn expand_edge_ids(
+        &self,
+        node_id: u64,
+        direction: ir::ExpandDirection,
+        label: &ir::ExpandLabelPlan,
+    ) -> Result<roaring::RoaringTreemap> {
+        let Some(label) = self.edge_output_label(label).await? else {
+            return Ok(roaring::RoaringTreemap::new());
+        };
+        match label {
+            EdgeOutputExpansionLabel::Any => self.expand_any_edge_ids(node_id, direction).await,
+            EdgeOutputExpansionLabel::Label { label, edge_ids } => {
+                self.expand_labeled_edge_ids(node_id, direction, label, &edge_ids)
+                    .await
+            }
+        }
+    }
+
     async fn edge_output_label<'a>(
         &self,
         label: &'a ir::ExpandLabelPlan,
@@ -155,17 +175,17 @@ impl<'db> ExecutionContext<'db> {
         &self,
         node_id: u64,
         direction: ir::ExpandDirection,
-    ) -> Result<BTreeSet<u64>> {
+    ) -> Result<roaring::RoaringTreemap> {
         let key = keys::DataKey::Data {
             scope: self.tenant_scope,
             kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(node_id)),
         }
         .to_bytes();
         let Some(value) = self.get_raw(&key).await? else {
-            return Ok(BTreeSet::new());
+            return Ok(roaring::RoaringTreemap::new());
         };
         let edges = values::adjacency::decode_edges(&value)?;
-        let mut out = BTreeSet::new();
+        let mut out = roaring::RoaringTreemap::new();
         if matches!(
             direction,
             ir::ExpandDirection::Out | ir::ExpandDirection::Both
@@ -223,8 +243,8 @@ impl<'db> ExecutionContext<'db> {
         direction: ir::ExpandDirection,
         label: &ir::NonEmptyString,
         label_edge_ids: &roaring::RoaringTreemap,
-    ) -> Result<BTreeSet<u64>> {
-        let mut out = BTreeSet::new();
+    ) -> Result<roaring::RoaringTreemap> {
+        let mut out = roaring::RoaringTreemap::new();
         if matches!(
             direction,
             ir::ExpandDirection::Out | ir::ExpandDirection::Both
@@ -256,7 +276,7 @@ impl<'db> ExecutionContext<'db> {
 
     async fn extend_pair_edge_ids(
         &self,
-        out: &mut BTreeSet<u64>,
+        out: &mut roaring::RoaringTreemap,
         from: u64,
         to: u64,
         filter: Option<&roaring::RoaringTreemap>,
@@ -294,7 +314,7 @@ mod tests {
         let carol = test_support::add_user(&db, "carol").await;
         test_support::add_edge(&db, alice, bob, "KNOWS").await;
         test_support::add_edge(&db, carol, alice, "FOLLOWS").await;
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
         let node_ids = |value: ExecutionValue| {
             let ExecutionValue::Stream(rows) = value else {
                 panic!("expansion should return a stream");
@@ -347,7 +367,7 @@ mod tests {
         let bob = test_support::add_user(&db, "bob").await;
         let edge = test_support::add_edge(&db, alice, bob, "KNOWS").await;
         let self_edge = test_support::add_edge(&db, alice, alice, "SELF").await;
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
         let node_ids = |value: ExecutionValue| {
             let ExecutionValue::Stream(rows) = value else {
                 panic!("expansion should return a stream");
@@ -409,7 +429,7 @@ mod tests {
         let alice = test_support::add_user(&db, "alice").await;
         let bob = test_support::add_user(&db, "bob").await;
         let edge = test_support::add_edge(&db, alice, bob, "KNOWS").await;
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
 
         let absent_label = context
             .expand(

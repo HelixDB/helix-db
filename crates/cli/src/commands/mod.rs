@@ -3,6 +3,7 @@ pub mod auth;
 pub mod chef;
 pub mod cloud_resources;
 pub mod config;
+pub mod cypher;
 pub mod delete;
 pub mod feedback;
 pub mod init;

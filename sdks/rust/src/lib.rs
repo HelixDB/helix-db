@@ -208,6 +208,71 @@ impl fmt::Debug for Client {
 /// Backwards-compatible alias for [`Client`].
 pub type HelixDBClient = Client;
 
+/// Lossless Cypher result. Graph IDs and integers outside the JSON safe range
+/// use tagged values; applications may retain these envelopes unchanged.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CypherResponse {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+impl Client {
+    /// Execute Cypher against a local server or embedded handle.
+    pub async fn cypher(
+        &self,
+        query: &str,
+        parameters: std::collections::BTreeMap<String, serde_json::Value>,
+        query_name: Option<&str>,
+    ) -> Result<CypherResponse, HelixError> {
+        let body = sonic_rs::to_vec(
+            &serde_json::json!({"query":query,"parameters":parameters,"query_name":query_name}),
+        )?;
+        let bytes =
+            match &self.backend {
+                ClientBackend::Server(server) => {
+                    let url = server
+                        .url
+                        .join("/v2/cypher")
+                        .map_err(|e| HelixError::InvalidURL(e.to_string()))?;
+                    let mut request = server
+                        .client
+                        .post(url)
+                        .header("content-type", "application/json")
+                        .body(body);
+                    if let Some(key) = &server.api_key {
+                        request = request.bearer_auth(key);
+                    }
+                    let response = request.send().await?;
+                    if response.status() != StatusCode::OK {
+                        return Err(remote_error(
+                            response.status(),
+                            response.text().await.unwrap_or_default(),
+                        ));
+                    }
+                    response.bytes().await?.to_vec()
+                }
+                #[cfg(feature = "embedded")]
+                ClientBackend::Embedded(database) => {
+                    let request = sonic_rs::from_slice::<db::cypher::Request>(&body)?;
+                    let response = database.cypher(request).await.map_err(|error| {
+                        HelixError::EmbeddedError {
+                            code: match &error {
+                                db::cypher::Error::Query(e) => {
+                                    format!("{}:{:?}:{}", e.category, e.phase, e.detail)
+                                }
+                                db::cypher::Error::Storage(e) => e.error_code().to_string(),
+                                db::cypher::Error::Json(_) => "response_serialization_error".into(),
+                            },
+                            details: error.to_string(),
+                        }
+                    })?;
+                    sonic_rs::to_vec(&response)?
+                }
+            };
+        Ok(sonic_rs::from_slice(&bytes)?)
+    }
+}
+
 /// Metadata returned when the server responds with a status other than `200`
 /// or the Cloud warm-success status `204`.
 #[derive(Debug)]
@@ -1517,6 +1582,27 @@ mod client_tests {
             target
         });
         (base, handle)
+    }
+
+    #[tokio::test]
+    async fn cypher_routes_and_preserves_lossless_values() {
+        let (base, handle) = spawn_capture_server(
+            200,
+            r#"{"columns":["x"],"rows":[[{"$type":"integer","value":"9223372036854775807"}]]}"#,
+        )
+        .await;
+        let result = Client::new(Some(&base))
+            .unwrap()
+            .cypher(
+                "RETURN $x AS x",
+                std::collections::BTreeMap::from([("x".into(), serde_json::json!(i64::MAX))]),
+                Some("parameter"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.await.unwrap(), "/v2/cypher");
+        assert_eq!(result.columns, vec!["x"]);
+        assert_eq!(result.rows[0][0]["value"], "9223372036854775807");
     }
 
     async fn request_remote_error(status: u16, body: &str) -> HelixError {

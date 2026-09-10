@@ -87,7 +87,7 @@ impl<'db> ExecutionContext<'db> {
                                 self.scoped_null_matches(&row, key).await?
                             }
                             exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                self.eval_predicate(&row, predicate.predicate()).await?
+                                self.eval_predicate_plan(&row, predicate).await?
                             }
                         };
                         if accepted {
@@ -196,7 +196,7 @@ impl<'db> ExecutionContext<'db> {
                                 self.scoped_null_matches(&row, key).await?
                             }
                             exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                self.eval_predicate(&row, predicate.predicate()).await?
+                                self.eval_predicate_plan(&row, predicate).await?
                             }
                         };
                         if accepted {

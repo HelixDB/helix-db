@@ -1,0 +1,74 @@
+= Named Graphs
+
+This document describes how to use the named graph descriptions and metadata to properly set up the graphs for use by the TCK.
+
+== Metadata File
+
+Each named graph is described using a JSON file (the metadata file), which references various Cypher script files for creating the graph.
+The metadata file also includes statistical information describing the graph composition.
+
+The metadata file follows the below structure:
+
+[source]
+----
+{
+  "name":                 // the graph name
+  "scripts": []           // a list of file names containing queries that create the graph
+  "nodes": [              // a list of descriptions of the graph's label/property combinations
+    {
+      "label":            // label name
+      "key":              // property key
+      "count":            // number of existing combinations
+      "distinct":         // number of distinct combinations
+      "advice": []        // an optional list of characteristics for the combination
+    }
+  ],
+  "relationships": [      // a list of descriptions of the graphs type/property combinations
+    {
+      "type":             // type name
+      "key":              // property key
+      "count":            // number of existing combinations
+      "distinct":         // number of distinct combinations
+      "advice": []        // an optional list of characteristics for the combination
+    }
+  ],
+  "labels": [             // a list of all labels and their correlations with other labels
+    {
+      "label":            // the label name
+      "count":            // the number of nodes with the label
+      "sublabels": [      // a list of sublabels that exist on nodes with the label
+        {
+          "label":        // the sublabel name
+          "count":        // the number of nodes with the sublabel and the label
+          "advice": []    // an optional list of characteristics for the label/sublabel combination
+        }
+      ]
+    }
+  ]
+}
+----
+
+The empty string is used as an 'any' wildcard for label names and property keys (i.e. for describing any property key, or any node with or without labels).
+
+=== Advice
+
+For some statistical combinations, the metadata file contains an optional piece of information (that may be disregarded), which can be useful for imposing constraints on the graph.
+This is called 'advice'.
+For label/property and type/property combinations, the supported advice are:
+
+* `exists`
+** This indicates that each entity in the entry's context has the property. Additionally, the advice indicates that no included scenario will ever violate this constraint by performing updates to the graph.
+* `unique`
+** This indicates that each possible property value is at most assigned to one entity in the entry's context. Additionally, the advice guarantees that no included scenario will ever violate this constraint by performing updates to the graph.
+* `index`
+** This indicates that some scenarios include queries that try to match on entities in the entry's context via a property comparison (e.g. `MATCH (n:Label {prop: {value}}) ...`).
+
+For label/sublabel combinations, the supported advice is:
+
+* `implies`
+** This indicates that the existence of the label on a node implies the existence of the sublabel. In other words, if a node has the label, it will always have the sublabel.
+
+=== Scripts
+
+The metadata file will specify one or more script files that contain Cypher statements which are used to create the named graph.
+The statements in the script files are separated by the semicolon character.

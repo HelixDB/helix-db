@@ -36,26 +36,43 @@ impl<'db> ExecutionContext<'db> {
         key: &[u8],
     ) -> Result<Option<Bytes>> {
         self.check_execution_deadline()?;
+        let _request_memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget
+                    .reserve(key.len().saturating_add(size_of::<Bytes>()))
+                    .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)
+            })
+            .transpose()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                point_gets: 1,
+                ..Default::default()
+            });
+        }
         let key = Bytes::copy_from_slice(key);
-        if let Some(active) = self.active_write_tx() {
-            return Ok(active.txn.get(&key).await?);
-        }
-        if let Some(view) = self.request_read_view() {
-            return Ok(view.get(&key).await?);
-        }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => Ok(reader.get(&key).await?),
-                HelixStorage::Writer(writer) => Ok(writer.get(&key).await?),
+        let value = match (
+            self.active_write_tx(),
+            self.request_read_view(),
+            self.db.storage(),
+        ) {
+            (Some(active), _, _) => active.txn.get(&key).await?,
+            (None, Some(view), _) => view.get(&key).await?,
+            #[cfg(test)]
+            (None, None, HelixStorage::Reader(reader)) => reader.get(&key).await?,
+            #[cfg(test)]
+            (None, None, HelixStorage::Writer(writer)) => writer.get(&key).await?,
+            #[cfg(not(test))]
+            (None, None, _) => {
+                return Err(HelixDbError::InvariantViolation(
+                    "storage read escaped its request read view".to_string(),
+                ))
             }
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
-                "storage read escaped its request read view".to_string(),
-            ))
-        }
+        };
+        value
+            .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
+            .transpose()
     }
 
     pub(in crate::execution::interpreter) async fn multi_get_raw<K>(
@@ -66,22 +83,50 @@ impl<'db> ExecutionContext<'db> {
         K: AsRef<[u8]> + Send + Sync,
     {
         self.check_execution_deadline()?;
-        match (
+        // Bound the request/result handle vectors before backend allocation,
+        // including all-missing batches that have no value owner to charge.
+        let _request_memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget
+                    .reserve(keys.len().saturating_mul(2 * size_of::<Option<Bytes>>()))
+                    .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)
+            })
+            .transpose()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                multi_get_batches: usize::from(!keys.is_empty()),
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            });
+        }
+        let values = match (
             self.active_write_tx(),
             self.request_read_view(),
             self.db.storage(),
         ) {
-            (Some(active), _, _) => Ok(active.txn.multi_get(keys).await?),
-            (None, Some(view), _) => Ok(view.multi_get(keys).await?),
+            (Some(active), _, _) => active.txn.multi_get(keys).await?,
+            (None, Some(view), _) => view.multi_get(keys).await?,
             #[cfg(test)]
-            (None, None, HelixStorage::Reader(reader)) => Ok(reader.multi_get(keys).await?),
+            (None, None, HelixStorage::Reader(reader)) => reader.multi_get(keys).await?,
             #[cfg(test)]
-            (None, None, HelixStorage::Writer(writer)) => Ok(writer.multi_get(keys).await?),
+            (None, None, HelixStorage::Writer(writer)) => writer.multi_get(keys).await?,
             #[cfg(not(test))]
-            (None, None, _) => Err(HelixDbError::InvariantViolation(
-                "storage multi-get escaped its request read view".to_string(),
-            )),
-        }
+            (None, None, _) => {
+                return Err(HelixDbError::InvariantViolation(
+                    "storage multi-get escaped its request read view".to_string(),
+                ))
+            }
+        };
+        values
+            .into_iter()
+            .map(|value| {
+                value
+                    .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
+                    .transpose()
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -99,6 +144,12 @@ impl<'db> ExecutionContext<'db> {
         end: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
         let (start, end) = keys::DataKey::data_range(self.tenant_scope, start, end);
         if let Some(active) = self.active_write_tx() {
             let mut iter = active.txn.scan(start..end).await?;
@@ -107,6 +158,7 @@ impl<'db> ExecutionContext<'db> {
                 limit,
                 self.tenant_scope,
                 self.execution_control.clone(),
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -117,6 +169,7 @@ impl<'db> ExecutionContext<'db> {
                 limit,
                 self.tenant_scope,
                 self.execution_control.clone(),
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -131,6 +184,7 @@ impl<'db> ExecutionContext<'db> {
                 limit,
                 self.tenant_scope,
                 self.execution_control.clone(),
+                self.row_memory.as_ref(),
             )
             .await
         }
@@ -155,6 +209,12 @@ impl<'db> ExecutionContext<'db> {
         prefix: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
         let prefix = keys::DataKey::data_prefix(self.tenant_scope, prefix);
         if let Some(active) = self.active_write_tx() {
             let mut iter = active.txn.scan_prefix(prefix, ..).await?;
@@ -163,6 +223,7 @@ impl<'db> ExecutionContext<'db> {
                 limit,
                 self.tenant_scope,
                 self.execution_control.clone(),
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -173,6 +234,7 @@ impl<'db> ExecutionContext<'db> {
                 limit,
                 self.tenant_scope,
                 self.execution_control.clone(),
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -187,6 +249,7 @@ impl<'db> ExecutionContext<'db> {
                 limit,
                 self.tenant_scope,
                 self.execution_control.clone(),
+                self.row_memory.as_ref(),
             )
             .await
         }
@@ -208,21 +271,39 @@ async fn collect_limited(
     limit: Option<usize>,
     tenant_scope: crate::encoding::keys::scope::DataScope,
     execution_control: crate::execution_control::ExecutionControl,
+    budget: Option<&super::rows::memory::Budget>,
 ) -> Result<Vec<(Bytes, Bytes)>> {
     let mut rows = Vec::new();
     while let Some(kv) = iter.next().await? {
         execution_control.check()?;
+        if let Some(budget) = budget {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scan_rows: 1,
+                ..Default::default()
+            });
+        }
         let Some(key) = tenant_scope.strip_key(&kv.key) else {
             return Err(HelixDbError::InvariantViolation(
                 "tenant-scoped scan returned key outside tenant prefix".to_string(),
             ));
         };
-        rows.push((Bytes::copy_from_slice(key), kv.value));
+        let key = retain_read(kv.key.slice(kv.key.len() - key.len()..), budget)?;
+        let value = retain_read(kv.value, budget)?;
+        rows.push((key, value));
         if limit.is_some_and(|limit| rows.len() >= limit) {
             break;
         }
     }
     Ok(rows)
+}
+
+fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Result<Bytes> {
+    let Some(budget) = budget else {
+        return Ok(bytes);
+    };
+    budget
+        .retain_read(bytes)
+        .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)
 }
 
 fn writer_from_storage(db: &HelixDB) -> std::result::Result<&HelixWriter, crate::HelixDbMode> {

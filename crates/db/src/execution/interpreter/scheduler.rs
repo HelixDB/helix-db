@@ -126,6 +126,9 @@ impl<'db> ExecutionContext<'db> {
         }
         Ok(Self {
             db: self.db,
+            row_memory: self.row_memory.clone(),
+            // Isolated native DAG steps cannot own a Cypher mutation boundary.
+            row_relationship_types: BTreeMap::new(),
             tenant_scope: self.tenant_scope,
             params: self.params.shallow_snapshot(),
             variables: self.variables.shallow_snapshot(),

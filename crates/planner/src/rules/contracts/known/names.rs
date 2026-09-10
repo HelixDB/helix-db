@@ -6,6 +6,9 @@ impl KnownRuleId {
     /// Stable serialized identifier for this production rule.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::SeedRows => "seed_rows",
+            Self::SeedGraphPattern => "seed_graph_pattern",
+            Self::GraphPatternOrder => "graph_pattern_order",
             Self::FilterPushdown => "filter_pushdown",
             Self::PurePipelineSimplification => "pure_pipeline_simplification",
             Self::StaticPredicateSimplification => "static_predicate_simplification",
@@ -59,6 +62,9 @@ impl KnownRuleId {
     /// Resolve a stable serialized identifier to a production rule ID.
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
+            "seed_rows" => Some(Self::SeedRows),
+            "seed_graph_pattern" => Some(Self::SeedGraphPattern),
+            "graph_pattern_order" => Some(Self::GraphPatternOrder),
             "filter_pushdown" => Some(Self::FilterPushdown),
             "pure_pipeline_simplification" => Some(Self::PurePipelineSimplification),
             "static_predicate_simplification" => Some(Self::StaticPredicateSimplification),

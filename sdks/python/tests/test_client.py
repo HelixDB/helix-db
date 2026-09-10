@@ -204,6 +204,7 @@ class ClientTests(unittest.TestCase):
                 "with_api_key",
                 "request_builder",
                 "query",
+                "cypher",
                 "base_url",
                 "execute",
                 "graph",

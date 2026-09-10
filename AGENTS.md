@@ -12,7 +12,7 @@
 - Be wary of things that don't scale. If you have reason to believe why it wont, report back to the user explaining why.
 - instead of if let { ... } use let Some(…) = … else { }
 - avoid over using helper functions where possible. duplicating a single line of code is clearer than polluting with helper functions. if a large piece of functionality is shared or repeated multiple times then it can be abstracted but you should favour inline code where possible. small pieces of functionality should be inlined instead of abstracted.
-- Stage and commit code locally in phases as you go. 
+- Do not stage, commit (including locally), push, publish artifacts, or trigger remote CI unless explicitly instructed. Keep work-session timestamps out of authored reports and documentation.
 - As you make changes, if it is small (e.g. single/couple line addition) or if it is critical to your implementation, make the change.
 - Clean up any temporary files or directories you create during your work (including in /private/tmp)
 - ⁠match { Example(_) => ExampleVariant } -> use derive macro for Variant and the conversions instead of littering our code with the extra types and functions
@@ -49,9 +49,9 @@ you should run formatting and clippy before finishing your work. Rust crates in 
 
 ### Database Key/Value Construction, Parsing, and Use
 
-- ALL database key construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v1 
+- ALL database key construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v2
     - There are structs here that make building invalid keys impossible and it ensures call sites remain standardised and improves testability
-- ALL database value construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v1/values
+- ALL database value construction, parsing, and serialisation should be done using the structs in crates/db/src/encoding/v2/values
     - There are structs here that make building invalid keys impossible and it ensures call sites remain standardised and improves testability
-    - We are in the process of moving more values to this dir. If you notice inline value use, please either add it to crates/db/src/encoding/v1/values if it is small (e.g. single variant addition) or if it is a major change just note it down. 
+    - We are in the process of moving more values to this dir. If you notice inline value use, please either add it to crates/db/src/encoding/v2/values if it is small (e.g. single variant addition) or if it is a major change just note it down.
 

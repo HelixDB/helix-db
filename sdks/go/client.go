@@ -29,12 +29,13 @@ var ErrConflict = errors.New("helix: conflict")
 var ErrNativeBindingsUnavailable = errors.New("helix embedded native bindings are not linked")
 
 type HelixError struct {
-	Kind       ErrorKind
-	Code       QueryErrorCode
-	Details    string
-	StatusCode int
-	Retryable  *bool
-	Err        error
+	ServerDetails json.RawMessage
+	Kind          ErrorKind
+	Code          QueryErrorCode
+	Details       string
+	StatusCode    int
+	Retryable     *bool
+	Err           error
 }
 
 func (e *HelixError) Error() string {
@@ -344,19 +345,21 @@ func (c *Client) Close() error {
 
 func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError {
 	var envelope struct {
-		Error     string  `json:"error"`
-		Msg       *string `json:"msg"`
-		Code      *string `json:"code"`
-		Retryable *bool   `json:"retryable"`
+		Details   json.RawMessage `json:"details"`
+		Error     string          `json:"error"`
+		Msg       *string         `json:"msg"`
+		Code      *string         `json:"code"`
+		Retryable *bool           `json:"retryable"`
 	}
 	if json.Unmarshal(body, &envelope) == nil && envelope.Error != "" {
 		if envelope.Msg != nil {
 			return &HelixError{
-				Kind:       ErrorRemote,
-				Code:       QueryErrorCode(envelope.Error),
-				Details:    *envelope.Msg,
-				StatusCode: statusCode,
-				Retryable:  envelope.Retryable,
+				Kind:          ErrorRemote,
+				Code:          QueryErrorCode(envelope.Error),
+				Details:       *envelope.Msg,
+				StatusCode:    statusCode,
+				Retryable:     envelope.Retryable,
+				ServerDetails: envelope.Details,
 			}
 		}
 		code := QueryErrorCode("")
@@ -364,11 +367,12 @@ func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError
 			code = QueryErrorCode(*envelope.Code)
 		}
 		return &HelixError{
-			Kind:       ErrorRemote,
-			Code:       code,
-			Details:    envelope.Error,
-			StatusCode: statusCode,
-			Retryable:  envelope.Retryable,
+			Kind:          ErrorRemote,
+			Code:          code,
+			Details:       envelope.Error,
+			StatusCode:    statusCode,
+			Retryable:     envelope.Retryable,
+			ServerDetails: envelope.Details,
 		}
 	}
 	details := string(body)

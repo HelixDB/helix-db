@@ -6,6 +6,7 @@
 extern crate self as db;
 
 pub mod config;
+pub mod cypher;
 pub mod encoding;
 pub mod error;
 pub mod execution;
@@ -2225,7 +2226,9 @@ impl HelixDB {
     }
 
     async fn with_embedded_query_metrics(self) -> Self {
-        if cfg!(test) {
+        if cfg!(test)
+            || self.inner.config.db().query_telemetry() == config::QueryTelemetry::Disabled
+        {
             return self;
         }
         match helix_metrics::query::transport::start_oss_from_env(telemetry::Source::Embedded) {

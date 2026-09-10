@@ -71,6 +71,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::IndexOperationNotFound { .. }
             | HelixDbError::IndexOperationNotAbortable { .. }
             | HelixDbError::ActiveTextMutationLimitExceeded { .. }
+            | HelixDbError::QueryMemoryLimitExceeded
             | HelixDbError::InvalidIndexSourceData { .. }
             | HelixDbError::SecondaryIndexValue(_)
             | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode

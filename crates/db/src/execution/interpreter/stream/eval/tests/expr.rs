@@ -1,6 +1,80 @@
 use super::*;
 
 #[tokio::test]
+async fn resolved_native_semantics_preserve_values_laziness_and_checked_boundaries() {
+    let db = test_support::open_db("native-scalar-domain").await;
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let row = current_node(u64::MAX);
+    assert_eq!(
+        ctx.eval_expr(&row, &Expr::Id).await.unwrap(),
+        DbPropertyValue::I64(i64::MAX)
+    );
+    for value in [
+        PropertyValue::Null,
+        PropertyValue::DateTime(17),
+        PropertyValue::Bytes(vec![0, 255]),
+        PropertyValue::F32(0.5),
+        PropertyValue::F32Array(vec![1.0, 2.0]),
+        PropertyValue::F64Array(vec![1.5]),
+        PropertyValue::I64Array(vec![i64::MIN, i64::MAX]),
+        PropertyValue::StringArray(vec!["x".into()]),
+        PropertyValue::Object(std::collections::BTreeMap::from([(
+            "value".into(),
+            PropertyValue::Null,
+        )])),
+    ] {
+        assert_eq!(
+            ctx.eval_expr(&row, &Expr::Constant(value.clone()))
+                .await
+                .unwrap(),
+            super::super::super::values::ast_to_db_value(value)
+        );
+    }
+    let missing = Expr::param("missing");
+    let short_circuit = Predicate::or(vec![
+        Predicate::Compare {
+            left: Expr::val(PropertyValue::Null),
+            op: CompareOp::Eq,
+            right: Expr::val(PropertyValue::Null),
+        },
+        Predicate::Compare {
+            left: missing.clone(),
+            op: CompareOp::Eq,
+            right: Expr::val(1),
+        },
+    ]);
+    assert!(ctx.eval_predicate(&row, &short_circuit).await.unwrap());
+    assert!(!ctx
+        .eval_predicate(
+            &row,
+            &Predicate::Between {
+                value: Expr::val(0),
+                min: Expr::val(1),
+                max: missing.clone()
+            }
+        )
+        .await
+        .unwrap());
+    for expression in [
+        Expr::val(1).modulo(Expr::val(0)),
+        Expr::val(i64::MIN).modulo(Expr::val(-1)),
+        Expr::val(i64::MIN).neg_expr(),
+    ] {
+        assert!(matches!(
+            ctx.eval_expr(&row, &expression).await,
+            Err(HelixDbError::Query(_))
+        ));
+    }
+    assert!(ctx
+        .eval_expr(&row, &Expr::val("bad").modulo(missing))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("mod left expression must be i64"));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn expressions_cover_arithmetic_case_parameters_and_errors() {
     let db = test_support::open_db("stream-eval-expressions").await;
     let id =

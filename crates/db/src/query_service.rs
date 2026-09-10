@@ -32,6 +32,29 @@ pub struct HelixQueryService {
 }
 
 impl HelixQueryService {
+    /// Explain a Cypher statement without executing the query.
+    pub async fn explain_cypher_scoped_controlled(
+        &self,
+        request: crate::cypher::Request,
+        scope: DataScope,
+        control: ExecutionControl,
+        limits: crate::cypher::Limits,
+    ) -> crate::cypher::Result<crate::cypher::Explanation> {
+        crate::cypher::explain(&self.db, request, scope, control, limits).await
+    }
+
+    /// Execute an additive Cypher request under explicit storage and cancellation authority.
+    pub async fn execute_cypher_scoped_controlled(
+        &self,
+        request: crate::cypher::Request,
+        mode: QueryMode,
+        scope: DataScope,
+        control: ExecutionControl,
+        limits: crate::cypher::Limits,
+    ) -> crate::cypher::Result<crate::cypher::Response> {
+        crate::cypher::execute(&self.db, request, scope, mode, control, limits).await
+    }
+
     /// Create a query service.
     pub fn new(db: Arc<HelixDB>) -> Self {
         Self {

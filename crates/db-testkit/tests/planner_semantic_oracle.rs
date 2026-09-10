@@ -85,6 +85,14 @@ async fn planner_interpreter_results_match_the_independent_graph_model() {
         .unwrap();
     assert_eq!(label_source_count["result"], expected_count);
     assert_eq!(filtered_count, label_source_count);
+    let cypher_count = db
+        .cypher(db::cypher::Request::new("MATCH (n:Person) RETURN count(n)"))
+        .await
+        .unwrap();
+    assert_eq!(
+        cypher_count.rows,
+        vec![vec![serde_json::json!(expected_count)]]
+    );
 
     let expected_traversal = model
         .read(&ReadAction::Traversal {
@@ -112,6 +120,14 @@ async fn planner_interpreter_results_match_the_independent_graph_model() {
         .await
         .unwrap();
     assert_eq!(actual_traversal["result"], serde_json::json!([bob]));
+    let cypher_traversal = db
+        .cypher(db::cypher::Request::new(
+            "MATCH (a:Person {name:'alice'})-[:KNOWS]->(b) RETURN b",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cypher_traversal.rows.len(), expected_traversal.len());
+    assert_eq!(cypher_traversal.rows[0][0]["id"], bob.to_string());
 
     let invalid_write = QueryRequest::write(
         batch::write_batch()

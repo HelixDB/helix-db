@@ -210,6 +210,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         compact: bool,
     },
 
+    /// Execute or explain Cypher against a local Helix instance
+    Cypher(commands::cypher::Args),
+
     /// Open an interactive v3 JSON query shell
     Shell {
         /// Instance or typed database; defaults to dev or the sole linked target
@@ -707,6 +710,7 @@ async fn main() -> Result<()> {
         }) => {
             commands::query::run(instance, file, json, ts, ts_file, warm, host, port, compact).await
         }
+        Some(Commands::Cypher(args)) => commands::cypher::run(args).await,
         Some(Commands::Shell { instance, compact }) => {
             commands::shell::run(instance, compact).await
         }

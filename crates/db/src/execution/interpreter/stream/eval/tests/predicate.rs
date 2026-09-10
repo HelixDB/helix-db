@@ -199,6 +199,19 @@ async fn predicates_cover_alias_comparisons_membership_arrays_and_errors() {
             },
         ],
     };
+    assert!(ir::PredicatePlan::new(false_and).is_err());
+    let false_and = Predicate::and(vec![
+        Predicate::Compare {
+            left: Expr::val(1),
+            op: CompareOp::Eq,
+            right: Expr::val(2),
+        },
+        Predicate::Compare {
+            left: Expr::param("unselected"),
+            op: CompareOp::Eq,
+            right: Expr::val(0),
+        },
+    ]);
     assert!(!ctx.eval_predicate(&row, &false_and).await.unwrap());
     let false_or = Predicate::Or {
         predicates: vec![

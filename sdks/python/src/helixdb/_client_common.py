@@ -13,6 +13,29 @@ DEFAULT_URL = "http://localhost:6969"
 QUERY_PATH = "/v2/query"
 
 
+def serialize_cypher(
+    query: str, parameters: dict[str, Any] | None, query_name: str | None
+) -> bytes:
+    """Serialize the additive Cypher request; lossless envelopes remain explicit."""
+    if not isinstance(query, str):
+        raise HelixError.invalid_request("Cypher query must be a string")
+    if parameters is not None and not isinstance(parameters, dict):
+        raise HelixError.invalid_request("Cypher parameters must be a dictionary")
+    if query_name is not None and not isinstance(query_name, str):
+        raise HelixError.invalid_request("Cypher query_name must be a string")
+    try:
+        return json.dumps(
+            {
+                "query": query,
+                "parameters": {} if parameters is None else parameters,
+                "query_name": query_name,
+            },
+            allow_nan=False,
+        ).encode("utf-8")
+    except (ValueError, TypeError) as exc:
+        raise HelixError.serialization(str(exc), cause=exc) from exc
+
+
 class HelixError(Exception):
     """Error raised by the HelixDB clients."""
 
@@ -28,6 +51,7 @@ class HelixError(Exception):
         cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
+        self.server_details: Any = None
         self.kind = kind
         self.details = details
         self.code = code
@@ -243,12 +267,14 @@ def remote_error(
         retryable = payload.get("retryable")
         explicit_retryable = retryable if isinstance(retryable, bool) else None
         if isinstance(error, str) and isinstance(msg, str):
-            return HelixError.remote(
+            result = HelixError.remote(
                 msg,
                 code=error,
                 status_code=status_code,
                 retryable=explicit_retryable,
             )
+            result.server_details = payload.get("details")
+            return result
         if isinstance(error, str):
             return HelixError.remote(
                 error,

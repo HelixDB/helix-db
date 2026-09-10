@@ -26,7 +26,7 @@ impl<'db> ExecutionContext<'db> {
         let mut filtered = Vec::new();
         for row in rows {
             self.check_execution_deadline()?;
-            if self.eval_predicate(&row, predicate.predicate()).await? {
+            if self.eval_predicate_plan(&row, predicate).await? {
                 filtered.push(row);
             }
         }

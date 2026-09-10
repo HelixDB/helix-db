@@ -7,6 +7,7 @@ edition = "2024"
 slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
+helix-cypher = { path = "../cypher" }
 helix-value-semantics = { path = "../value-semantics" }
 helix-metrics = { path = "../metrics" }
 # Async runtime

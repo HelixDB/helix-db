@@ -3,6 +3,36 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use helix_planner::relational as r;
+
+struct NativeProjectionEvaluator<'row, 'db> {
+    context: &'row ExecutionContext<'db>,
+    row: &'row ExecutionRow,
+    resolver: eval::RowValueResolver<'row, 'db>,
+}
+impl r::ProjectionEvaluator<ir::ResolvedProjection> for NativeProjectionEvaluator<'_, '_> {
+    type Value = Option<DbPropertyValue>;
+    type Error = HelixDbError;
+
+    fn prepare(&mut self, _columns: usize) -> Result<()> {
+        self.context.check_execution_deadline()
+    }
+    async fn evaluate(&mut self, expression: &ir::ResolvedProjection) -> Result<Self::Value> {
+        self.context.check_execution_deadline()?;
+        match expression.kind() {
+            ir::ResolvedProjectionKind::Property { input, source } => {
+                assert_eq!(*input, ir::native::CURRENT, "validated native input");
+                self.resolver.row_property(self.row, source).await
+            }
+            ir::ResolvedProjectionKind::Expression(expression) => Box::pin(
+                self.context
+                    .eval_resolved(self.row, expression, &mut self.resolver),
+            )
+            .await
+            .map(Some),
+        }
+    }
+}
 
 impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter::stream::projection) async fn project_stream_rows(
@@ -105,24 +135,20 @@ impl<'db> ExecutionContext<'db> {
         let mut scalars = Vec::with_capacity(rows.len());
         for row in rows {
             self.check_execution_deadline()?;
-            let mut resolver = eval::RowValueResolver::new(self);
+            let mut evaluator = NativeProjectionEvaluator {
+                context: self,
+                row,
+                resolver: eval::RowValueResolver::new(self),
+            };
+            let values = items.program().evaluate(&mut evaluator).await?;
             let mut object = BTreeMap::new();
-            for item in items.as_ref() {
-                self.check_execution_deadline()?;
-                match item {
-                    ir::ProjectionItem::Property { source, alias } => {
-                        if let Some(value) = resolver.row_property(row, source).await? {
-                            object.insert(alias.as_ref().to_string(), value);
-                        }
-                    }
-                    ir::ProjectionItem::Expr { alias, expr } => {
-                        object.insert(
-                            alias.as_ref().to_string(),
-                            self.eval_expr_with_resolver(row, expr.expr(), &mut resolver)
-                                .await?,
-                        );
-                    }
-                }
+            for (item, value) in items.as_ref().iter().zip(values) {
+                let Some(value) = value else {
+                    continue;
+                };
+                let (ir::ProjectionItem::Property { alias, .. }
+                | ir::ProjectionItem::Expr { alias, .. }) = item;
+                object.insert(alias.as_ref().to_string(), value);
             }
             scalars.push(ExecutionScalar::Object(object));
         }

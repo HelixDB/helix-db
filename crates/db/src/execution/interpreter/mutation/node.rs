@@ -419,7 +419,7 @@ impl<'db> ExecutionContext<'db> {
         Ok(())
     }
 
-    async fn incident_edge_ids(
+    pub(super) async fn incident_edge_ids(
         &self,
         txn: &DbTransaction,
         node_id: u64,

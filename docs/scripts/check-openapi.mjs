@@ -192,6 +192,54 @@ if (
   errors.push('openapi.json: QueryError must require only error and msg');
 }
 
+for (const [route, response, statuses] of [
+  ['/v2/cypher', 'CypherResponse', '200,400,409,429,500,503'],
+  ['/v2/cypher/explain', 'CypherExplanation', '200,400,429,500,503'],
+]) {
+  const operation = spec.paths?.[route]?.post;
+  if (operation?.servers || operation?.['x-helix-request-body-limits']?.helixCloudBytes) {
+    errors.push(`openapi.json: ${route} must inherit only the local server`);
+  }
+  if (operation?.['x-helix-request-body-limits']?.localBytes !== 16 * 1024 * 1024) {
+    errors.push(`openapi.json: ${route} must document the local 16 MiB body limit`);
+  }
+  if (Object.keys(operation?.responses ?? {}).sort().join(',') !== statuses) {
+    errors.push(`openapi.json: ${route} response codes must be ${statuses}`);
+  }
+  if (operation?.requestBody?.content?.['application/json']?.schema?.$ref !== '#/components/schemas/CypherRequest') {
+    errors.push(`openapi.json: ${route} must use CypherRequest`);
+  }
+  for (const [status, item] of Object.entries(operation?.responses ?? {})) {
+    const expected = status === '200' ? response : 'CypherError';
+    if (item.content?.['application/json']?.schema?.$ref !== `#/components/schemas/${expected}`) {
+      errors.push(`openapi.json: ${route} ${status} must use ${expected}`);
+    }
+  }
+}
+const cypherResponse = spec.components?.schemas?.CypherResponse;
+if (cypherResponse?.additionalProperties !== false || cypherResponse?.required?.join(',') !== 'columns,rows') {
+  errors.push('openapi.json: CypherResponse must contain only ordered columns and rows');
+}
+const cypherRequest = spec.components?.schemas?.CypherRequest;
+if (cypherRequest?.additionalProperties !== false || cypherRequest?.required?.join(',') !== 'query') {
+  errors.push('openapi.json: CypherRequest must require query and close over its optional fields');
+}
+
+// Validate every local reference, including recursive lossless Cypher values.
+// Walk the document itself instead of following references, so cycles terminate.
+const pending = [spec];
+while (pending.length > 0) {
+  const value = pending.pop();
+  if (!value || typeof value !== 'object') continue;
+  if (typeof value.$ref === 'string' && value.$ref.startsWith('#/')) {
+    const resolved = value.$ref.slice(2).split('/').reduce(
+      (parent, key) => parent?.[key.replaceAll('~1', '/').replaceAll('~0', '~')], spec,
+    );
+    if (resolved === undefined) errors.push(`openapi.json: unresolved reference ${value.$ref}`);
+  }
+  pending.push(...Object.values(value));
+}
+
 const scalarParameterTypes = spec.components?.schemas?.QueryParameterType?.oneOf?.find(
   (variant) => Array.isArray(variant.enum),
 )?.enum;
@@ -218,5 +266,5 @@ if (errors.length > 0) {
 }
 
 console.log(
-  `openapi.json matches ${routerOperations.size} local operations and validates the Helix Cloud query contract.`,
+  `openapi.json matches ${routerOperations.size} local operations and validates the local Cypher and Helix Cloud query contracts.`,
 );

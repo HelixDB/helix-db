@@ -6,6 +6,39 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::super::{AtLeast, ExprPlan, NonEmptyString};
+use crate::{ir::native, relational as r};
+
+/// Native projection semantics over the shared row program. Only the native
+/// adapter constructs these values; direct property selection omits absence,
+/// whereas expression property access preserves the native null result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedProjection(ResolvedProjectionKind);
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedProjectionKind {
+    Property {
+        input: r::Slot,
+        source: NonEmptyString,
+    },
+    Expression(native::Expression),
+}
+impl ResolvedProjection {
+    pub fn kind(&self) -> &ResolvedProjectionKind {
+        &self.0
+    }
+}
+impl r::ProjectionInput for ResolvedProjection {
+    fn validate(&self) -> r::Result<()> {
+        // Private construction follows NonEmptyString / ExprPlan validation.
+        Ok(())
+    }
+    fn references(&self) -> BTreeSet<r::Slot> {
+        match &self.0 {
+            ResolvedProjectionKind::Property { input, .. } => BTreeSet::from([*input]),
+            ResolvedProjectionKind::Expression(expression) => expression.slots(),
+        }
+    }
+}
 
 /// One general projection item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +104,7 @@ pub enum ProjectionItemsError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectionItems {
     items: AtLeast<ProjectionItem, 1>,
+    program: r::ProjectionProgram<ResolvedProjection>,
 }
 
 impl ProjectionItems {
@@ -89,7 +123,43 @@ impl ProjectionItems {
                 });
             }
         }
-        Ok(Self { items })
+        let program = r::ProjectionProgram::new(
+            items
+                .as_ref()
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let expression = ResolvedProjection(match item {
+                        ProjectionItem::Property { source, .. } => {
+                            ResolvedProjectionKind::Property {
+                                input: native::CURRENT,
+                                source: source.clone(),
+                            }
+                        }
+                        ProjectionItem::Expr { expr, .. } => {
+                            ResolvedProjectionKind::Expression(expr.resolved().clone())
+                        }
+                    });
+                    r::Projection {
+                        slot: r::Slot(
+                            u32::try_from(index).expect("projection list fits slot catalog"),
+                        ),
+                        expression,
+                    }
+                })
+                .collect(),
+        )
+        .expect("native projections have unique sequential destinations");
+        program
+            .validate_input(&BTreeSet::from([native::CURRENT]))
+            .expect("native expressions reference the current input");
+        Ok(Self { items, program })
+    }
+
+    /// Canonical execution program; aliases and serialized native plans remain
+    /// in the compatibility view returned by `as_ref`.
+    pub fn program(&self) -> &r::ProjectionProgram<ResolvedProjection> {
+        &self.program
     }
 }
 

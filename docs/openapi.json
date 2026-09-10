@@ -3,8 +3,8 @@
   "info": {
     "title": "HelixDB HTTP API",
     "version": "2.0.0",
-    "summary": "Execute operation-tree queries against HelixDB",
-    "description": "The HelixDB HTTP API exposes the same v2 query contract on local servers and Helix Cloud gateways. Typed SDKs build the nested operation tree; clients send the serialized QueryRequest to POST /v2/query.",
+    "summary": "Execute operation-tree and Cypher queries against HelixDB",
+    "description": "The v2 operation-tree query contract is available on local servers and Helix Cloud gateways. Local servers additionally expose Cypher execution and read-only planning. Cypher gateway deployment is outside the local MVP contract.",
     "termsOfService": "https://www.helix-db.com/terms",
     "contact": {
       "name": "HelixDB",
@@ -29,6 +29,10 @@
     {
       "name": "Queries",
       "description": "Execute serialized HelixDB operation trees."
+    },
+    {
+      "name": "Cypher",
+      "description": "Execute or explain the supported Cypher profile on a local HelixDB server."
     },
     {
       "name": "Health",
@@ -270,6 +274,233 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/cypher": {
+      "post": {
+        "operationId": "executeCypher",
+        "summary": "Execute a Cypher statement",
+        "description": "Executes the supported Cypher read/CRUD profile. The server derives read/write effects from the statement. Modifying statements execute atomically in one write transaction. X-Helix-Warm is valid only for reads; X-Helix-Await-Durable:true is valid only for writes. This operation is available on the standalone local server; Cloud gateway deployment is outside the MVP. The body limit is 16 MiB, the default deadline is 30 seconds, and the response limit is 16 MiB. Resource exhaustion returns an error instead of truncation.",
+        "tags": [
+          "Cypher"
+        ],
+        "security": [
+          {}
+        ],
+        "x-helix-request-body-limits": {
+          "localBytes": 16777216
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WarmOnly"
+          },
+          {
+            "$ref": "#/components/parameters/RequireWriter"
+          },
+          {
+            "$ref": "#/components/parameters/AwaitDurable"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CypherRequest"
+              },
+              "examples": {
+                "read": {
+                  "summary": "Find people by a parameter",
+                  "value": {
+                    "query": "MATCH (n:Person) WHERE n.age >= $age RETURN n.name AS name",
+                    "parameters": {
+                      "age": 30
+                    },
+                    "query_name": "adults"
+                  }
+                },
+                "write": {
+                  "summary": "Create a labeled node",
+                  "value": {
+                    "query": "CREATE (n:Person {name:$name}) RETURN n",
+                    "parameters": {
+                      "name": "Ada"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Statement executed successfully, including writes without RETURN.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or oversized body, invalid request options, or a classified Cypher compile/runtime error. The local 16 MiB body limit returns invalid_request_body with this status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Native storage transaction conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Cypher resource limit exceeded; inspect details.detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal planner, storage, execution-control, or serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Writer required, server access mode unavailable, or uncertain write commit. An uncertain outcome carries retryable:false.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/cypher/explain": {
+      "post": {
+        "operationId": "explainCypher",
+        "summary": "Explain a Cypher statement",
+        "description": "Parses, binds, and plans one statement against the current catalog without executing it. Uses read request options even for a modifying statement. X-Helix-Await-Durable:true is invalid. This operation is available on the standalone local server; Cloud gateway deployment is outside the MVP. The body limit is 16 MiB, the default deadline is 30 seconds, and the response limit is 16 MiB. Resource exhaustion returns an error instead of truncation.",
+        "tags": [
+          "Cypher"
+        ],
+        "security": [
+          {}
+        ],
+        "x-helix-request-body-limits": {
+          "localBytes": 16777216
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WarmOnly"
+          },
+          {
+            "$ref": "#/components/parameters/RequireWriter"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CypherRequest"
+              },
+              "examples": {
+                "read": {
+                  "summary": "Find people by a parameter",
+                  "value": {
+                    "query": "MATCH (n:Person) WHERE n.age >= $age RETURN n.name AS name",
+                    "parameters": {
+                      "age": 30
+                    },
+                    "query_name": "adults"
+                  }
+                },
+                "write": {
+                  "summary": "Create a labeled node (plan only)",
+                  "value": {
+                    "query": "CREATE (n:Person {name:$name}) RETURN n",
+                    "parameters": {
+                      "name": "Ada"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Statement planned without execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherExplanation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or oversized body, invalid request options, or a classified Cypher compile/runtime error. The local 16 MiB body limit returns invalid_request_body with this status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Cypher resource limit exceeded; inspect details.detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal planner, storage, execution-control, or serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A request option requires a writer but the server is read-only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
                 }
               }
             }
@@ -858,6 +1089,551 @@
           "mode": "writer",
           "index_runtime": "ready"
         }
+      },
+      "CypherInteger": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "value"
+        ],
+        "properties": {
+          "$type": {
+            "const": "integer"
+          },
+          "value": {
+            "type": "string",
+            "pattern": "^[+-]?[0-9]+$",
+            "description": "Signed 64-bit decimal integer. Use this envelope outside the JavaScript safe integer range to avoid precision loss."
+          }
+        }
+      },
+      "CypherFloat": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "value"
+        ],
+        "properties": {
+          "$type": {
+            "const": "float"
+          },
+          "value": {
+            "type": "string",
+            "enum": [
+              "NaN",
+              "Infinity",
+              "-Infinity"
+            ]
+          }
+        }
+      },
+      "CypherParameterMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "value"
+        ],
+        "properties": {
+          "$type": {
+            "const": "map"
+          },
+          "value": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherParameterValue"
+            }
+          }
+        }
+      },
+      "CypherParameterValue": {
+        "oneOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "number",
+            "description": "Finite JSON number. Signed integers outside ±9007199254740991 should use the integer envelope. Fractional or exponent-form values retain floating-point semantics."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CypherParameterValue"
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherParameterValue"
+            },
+            "not": {
+              "required": [
+                "$type"
+              ],
+              "properties": {
+                "$type": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "$ref": "#/components/schemas/CypherInteger"
+          },
+          {
+            "$ref": "#/components/schemas/CypherFloat"
+          },
+          {
+            "$ref": "#/components/schemas/CypherParameterMap"
+          }
+        ],
+        "description": "Scalar, list, or map parameter. Graph elements cannot be supplied as parameters. Escape a map whose $type is a string with the map envelope. Integer input must fit signed 64-bit range."
+      },
+      "CypherMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "value"
+        ],
+        "properties": {
+          "$type": {
+            "const": "map"
+          },
+          "value": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherValue"
+            }
+          }
+        }
+      },
+      "CypherValue": {
+        "oneOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "number",
+            "description": "Finite JSON number. Signed integers outside ±9007199254740991 should use the integer envelope. Fractional or exponent-form values retain floating-point semantics."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CypherValue"
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherValue"
+            },
+            "propertyNames": {
+              "not": {
+                "const": "$type"
+              }
+            }
+          },
+          {
+            "$ref": "#/components/schemas/CypherInteger"
+          },
+          {
+            "$ref": "#/components/schemas/CypherFloat"
+          },
+          {
+            "$ref": "#/components/schemas/CypherMap"
+          },
+          {
+            "$ref": "#/components/schemas/CypherNode"
+          },
+          {
+            "$ref": "#/components/schemas/CypherRelationship"
+          },
+          {
+            "$ref": "#/components/schemas/CypherPath"
+          }
+        ],
+        "description": "Lossless recursive result value. Escape literal maps containing $type with the map envelope. Graph IDs are unsigned decimal strings; id() instead uses checked signed conversion."
+      },
+      "CypherId": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]{0,19})$",
+        "maxLength": 20,
+        "description": "Unsigned 64-bit graph identifier, 0 through 18446744073709551615, encoded as a decimal string. Never convert implicitly to a JavaScript number."
+      },
+      "CypherNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "id",
+          "labels",
+          "properties"
+        ],
+        "properties": {
+          "$type": {
+            "const": "node"
+          },
+          "id": {
+            "$ref": "#/components/schemas/CypherId"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherValue"
+            },
+            "description": "User properties only; internal Helix metadata is omitted."
+          }
+        }
+      },
+      "CypherRelationship": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "id",
+          "start",
+          "end",
+          "type",
+          "properties"
+        ],
+        "properties": {
+          "$type": {
+            "const": "relationship"
+          },
+          "id": {
+            "$ref": "#/components/schemas/CypherId"
+          },
+          "start": {
+            "$ref": "#/components/schemas/CypherId"
+          },
+          "end": {
+            "$ref": "#/components/schemas/CypherId"
+          },
+          "type": {
+            "type": "string",
+            "description": "Stored relationship type."
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherValue"
+            }
+          }
+        }
+      },
+      "CypherPath": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "$type",
+          "nodes",
+          "relationships"
+        ],
+        "properties": {
+          "$type": {
+            "const": "path"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CypherNode"
+            },
+            "minItems": 1
+          },
+          "relationships": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CypherRelationship"
+            }
+          }
+        },
+        "description": "Ordered walk with exactly one more node than relationship. Relationship endpoints retain their stored direction, including when traversed backwards."
+      },
+      "CypherRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "One statement in the supported Cypher profile; empty or unsupported statements return a classified query error."
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CypherParameterValue"
+            },
+            "default": {}
+          },
+          "query_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional caller-supplied query name."
+          }
+        }
+      },
+      "CypherResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CypherValue"
+              }
+            }
+          }
+        },
+        "description": "Column order defines each row. Every row has exactly columns.length cells. Duplicates are preserved unless the query removes them. Row order is guaranteed only by ORDER BY. A successful statement without RETURN has empty columns and rows. Planner diagnostics are returned separately by the explain operation."
+      },
+      "CypherErrorDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "detail",
+          "phase",
+          "span"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "compile",
+              "runtime"
+            ]
+          },
+          "span": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "start",
+                  "end"
+                ],
+                "properties": {
+                  "start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            ],
+            "description": "Optional half-open source span [start,end), measured in UTF-8 bytes; null when unavailable."
+          }
+        }
+      },
+      "CypherError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "msg"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine-readable query category or native transport/storage error code."
+          },
+          "msg": {
+            "type": "string"
+          },
+          "details": {
+            "$ref": "#/components/schemas/CypherErrorDetails"
+          },
+          "retryable": {
+            "const": false,
+            "description": "Present for a native uncertain commit outcome. Do not retry the modifying statement automatically."
+          }
+        },
+        "description": "Query errors include details. Request, storage, and transaction errors retain the native envelope without details. An uncertain commit returns retryable:false; other missing retryable values are not permission to retry."
+      },
+      "CypherExplainedOperator": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "position",
+          "logical",
+          "contract",
+          "graph",
+          "batch_consumer",
+          "blocking"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "logical": {
+            "type": "object",
+            "description": "Resolved frontend-independent logical operator; detailed planner representation may evolve."
+          },
+          "contract": {
+            "type": "object",
+            "description": "Derived input/output slots, effects, references, correlation, multiplicity, and optimization boundaries."
+          },
+          "graph": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Selected access steps and sources, estimated_rows_per_input, and cartesian_products for MATCH; null for other operators."
+          },
+          "batch_consumer": {
+            "type": [
+              "string",
+              "object",
+              "null"
+            ],
+            "description": "Selected downstream batch consumer, or null when the selected plan materializes the relation."
+          },
+          "blocking": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "aggregation",
+                "distinct",
+                "ordering",
+                "hash_build",
+                "materialized_relation",
+                "input_before_mutation"
+              ]
+            }
+          }
+        }
+      },
+      "CypherExplanation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "effect",
+          "bindings",
+          "returns",
+          "operators",
+          "planner",
+          "notices"
+        ],
+        "properties": {
+          "effect": {
+            "type": "string",
+            "enum": [
+              "Read",
+              "Write"
+            ]
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "returns": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "operators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CypherExplainedOperator"
+            }
+          },
+          "planner": {
+            "type": "object",
+            "description": "Selected costs, cardinality/cost estimates, memo/rule work, and guardrail exhaustion. Estimates do not limit results."
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "optimizer_budget_exhausted",
+                    "cartesian_product",
+                    "cursor_dependent_batching",
+                    "buffered_response"
+                  ]
+                },
+                "operator": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "description": "Read-only planning response. Explaining a modifying statement does not execute it. Planner internals may evolve independently of the stable columns/rows execution response."
       }
     }
   }

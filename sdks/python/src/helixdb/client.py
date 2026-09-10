@@ -132,6 +132,41 @@ class Client:
 
         return load_graph(self, selection)
 
+    def cypher(
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        query_name: str | None = None,
+        timeout: float = 30,
+    ) -> Any:
+        """Execute Cypher and retain lossless tagged values in rectangular rows."""
+        body = _client_common.serialize_cypher(query, parameters, query_name)
+        if self._mode == "embedded":
+            if self._native is None or not hasattr(self._native, "cypher_json"):
+                raise HelixError(
+                    "EmbeddedUnavailable", "rebuild native bindings with Cypher support"
+                )
+            try:
+                return decode_response(bytes(_run_native(self._native.cypher_json(body))))
+            except Exception as exc:
+                raise HelixError.from_embedded(exc) from exc
+        from urllib.parse import urljoin
+
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = "Bearer " + self._api_key
+        request = Request(
+            urljoin(self._base_url, "/v2/cypher"), data=body, headers=headers, method="POST"
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return decode_response(response.read())
+        except HTTPError as exc:
+            raise remote_error(exc.read(), str(exc.reason), status_code=exc.code) from exc
+        except (URLError, TimeoutError) as exc:
+            raise HelixError.network(str(exc), cause=exc) from exc
+
     def _graph_response(self, request: QueryRequest, native_spec: Any) -> Any:
         if self._mode == "embedded":
             if self._native is None:
