@@ -88,16 +88,7 @@ impl LocalRuntime {
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(CliError::new(format!("{} is not running", runtime.label()))
-            .with_context(stderr.trim().to_string())
-            .with_hint(
-                "Start the daemon, then retry. macOS: `open -a Docker`, `colima start`, or \
-                 `podman machine start`. Linux/headless (CI, sandboxes): `sudo systemctl start \
-                 docker`, or run `sudo dockerd &` where there is no init system. Rootless Podman \
-                 needs newuidmap/subuid setup and often fails in restricted containers — install \
-                 Docker or use a privileged container there.",
-            )
-            .into())
+        Err(daemon_not_running_error(runtime, &stderr).into())
     }
 
     /// Returns `true` if the runtime daemon answers a bounded `info` probe.
@@ -909,22 +900,56 @@ fn classify_docker_endpoint(endpoint: &str) -> Option<DockerBackend> {
 
 /// The backend the Docker CLI would actually talk to right now.
 ///
-/// `DOCKER_HOST` wins when it is set, the same way the CLI treats it; otherwise
-/// the active context's endpoint is read. Bounded by `RUNTIME_INFO_TIMEOUT`
-/// because this also runs on the advisory path, which must not stall `init`.
+/// Bounded by `RUNTIME_INFO_TIMEOUT` because this also runs on the advisory
+/// path, which must not stall `init`.
 fn active_docker_backend() -> Option<DockerBackend> {
-    if let Some(host) = std::env::var_os("DOCKER_HOST") {
-        return classify_docker_endpoint(&host.to_string_lossy());
+    if let Some(context) = nonempty_env("DOCKER_CONTEXT") {
+        let endpoint = docker_context_endpoint(Some(&context));
+        return select_docker_backend(Some(endpoint.as_deref()), None, None);
     }
 
+    if let Some(host) = nonempty_env("DOCKER_HOST") {
+        return select_docker_backend(None, Some(&host), None);
+    }
+
+    let endpoint = docker_context_endpoint(None);
+    select_docker_backend(None, None, endpoint.as_deref())
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    let value = std::env::var_os(key)?.to_string_lossy().into_owned();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn docker_context_endpoint(name: Option<&str>) -> Option<String> {
     let mut command = Command::new("docker");
-    command.args([
-        "context",
-        "inspect",
-        "--format",
-        "{{.Endpoints.docker.Host}}",
-    ]);
-    classify_docker_endpoint(&command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)?)
+    command.arg("context").arg("inspect");
+    if let Some(name) = name {
+        command.arg(name);
+    }
+    command.args(["--format", "{{.Endpoints.docker.Host}}"]);
+    command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
+}
+
+/// The outer Option says whether DOCKER_CONTEXT was set; the inner one is the
+/// inspect result, so a set-but-unresolved context stays authoritative instead
+/// of falling back to the host.
+fn select_docker_backend(
+    explicit_context_endpoint: Option<Option<&str>>,
+    docker_host_endpoint: Option<&str>,
+    configured_context_endpoint: Option<&str>,
+) -> Option<DockerBackend> {
+    if let Some(endpoint) = explicit_context_endpoint {
+        return endpoint.and_then(classify_docker_endpoint);
+    }
+    if let Some(endpoint) = docker_host_endpoint {
+        return classify_docker_endpoint(endpoint);
+    }
+    configured_context_endpoint.and_then(classify_docker_endpoint)
 }
 
 /// Resolve the active backend only where it can change the answer, so Podman
@@ -1025,6 +1050,22 @@ fn runtime_unavailable_hint_for(
             runtime.binary()
         ),
     }
+}
+
+fn daemon_not_running_error(runtime: ContainerRuntime, stderr: &str) -> CliError {
+    let os = std::env::consts::OS;
+    daemon_not_running_error_for(os, runtime, stderr, detected_docker_backend(os, runtime))
+}
+
+fn daemon_not_running_error_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    stderr: &str,
+    docker_backend: Option<DockerBackend>,
+) -> CliError {
+    CliError::new(format!("{} is not running", runtime.label()))
+        .with_context(stderr.trim().to_string())
+        .with_hint(runtime_unavailable_hint_for(os, runtime, docker_backend))
 }
 
 fn helix_run_args(
@@ -1330,6 +1371,79 @@ mod tests {
         assert!(hint.contains("podman info"));
         assert!(!hint.contains("Start it"));
         assert!(!hint.to_lowercase().contains("docker"));
+    }
+
+    #[test]
+    fn explicit_docker_context_wins_over_docker_host() {
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(Some(desktop)), Some(colima), None),
+            Some(DockerBackend::DockerDesktop)
+        );
+        assert_eq!(
+            select_docker_backend(Some(Some(colima)), Some(desktop), None),
+            Some(DockerBackend::Colima)
+        );
+    }
+
+    #[test]
+    fn docker_host_wins_over_configured_context_without_explicit_context() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        assert_eq!(
+            select_docker_backend(None, Some(colima), Some(desktop)),
+            Some(DockerBackend::Colima)
+        );
+        assert_eq!(
+            select_docker_backend(None, None, Some(desktop)),
+            Some(DockerBackend::DockerDesktop)
+        );
+    }
+
+    #[test]
+    fn unknown_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(
+                Some(Some("unix:///var/run/docker.sock")),
+                Some(colima),
+                None
+            ),
+            None
+        );
+    }
+
+    /// A context that fails inspection is still authoritative. Docker errors on
+    /// a missing context rather than falling back to DOCKER_HOST, so auto-start
+    /// must not launch the host's backend either.
+    #[test]
+    fn unresolved_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(None), Some(colima), Some(colima)),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_failure_path_uses_runtime_aware_hint_and_keeps_stderr() {
+        let unknown_docker =
+            daemon_not_running_error_for("macos", ContainerRuntime::Docker, "boom", None);
+        let hint = unknown_docker.hint.expect("hint should be set");
+        assert!(hint.contains("docker info"));
+        for named in ["colima", "open -a"] {
+            assert!(!hint.contains(named), "unproven hint named {named}: {hint}");
+        }
+        assert_eq!(unknown_docker.context.as_deref(), Some("boom"));
+
+        let linux_podman =
+            daemon_not_running_error_for("linux", ContainerRuntime::Podman, "boom", None);
+        let hint = linux_podman.hint.expect("hint should be set");
+        assert!(hint.contains("podman info"));
+        assert!(!hint.to_lowercase().contains("docker"));
+        assert!(!hint.contains("colima"));
+        assert_eq!(linux_podman.context.as_deref(), Some("boom"));
     }
     #[cfg(unix)]
     #[test]
