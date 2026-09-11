@@ -1,7 +1,11 @@
 //! Canonical ordered node secondary-index key codecs.
 //!
-//! Ascending values retain their UTF-8 bytes. Descending values invert bytes,
-//! escape embedded zeroes, and end with a fixed terminator. V2 generation
+//! Ascending values escape embedded zeroes and end with a fixed terminator.
+//! Descending values additionally invert every byte. Both directions need
+//! the terminator: without it, a value that is a proper prefix of another
+//! value in the same index can compare incorrectly once the comparison
+//! reaches the trailing node id, since nothing marks where the value ends
+//! and the id begins. V2 generation
 //! Generation-qualified entries reuse this value encoding through [`decode_range_value`], keeping
 //! ordering and validation identical across both physical namespaces.
 
@@ -24,7 +28,34 @@ pub(crate) fn decode_range_value(
     value_bytes: &[u8],
 ) -> Result<Cow<'_, str>, EncodingError> {
     match direction {
-        RangeIndexDirection::Asc => Ok(Cow::Borrowed(std::str::from_utf8(value_bytes)?)),
+        RangeIndexDirection::Asc => {
+            if !value_bytes.ends_with(&[0x00, 0x00]) {
+                return Err(EncodingError::InvalidIndexKey(
+                    "ascending range value missing terminator".to_string(),
+                ));
+            }
+
+            let mut decoded = Vec::with_capacity(value_bytes.len().saturating_sub(2));
+            let mut index = 0;
+            let value_body_len = value_bytes.len() - 2;
+            while index < value_body_len {
+                let byte = value_bytes[index];
+                if byte == 0x00 {
+                    if value_bytes.get(index + 1) != Some(&0xFF) {
+                        return Err(EncodingError::InvalidIndexKey(
+                            "invalid ascending range value escape".to_string(),
+                        ));
+                    }
+                    decoded.push(0x00);
+                    index += 2;
+                } else {
+                    decoded.push(byte);
+                    index += 1;
+                }
+            }
+
+            Ok(Cow::Owned(std::str::from_utf8(&decoded)?.to_owned()))
+        }
         RangeIndexDirection::Desc => {
             if !value_bytes.ends_with(&[0xFF, 0xFE]) {
                 return Err(EncodingError::InvalidIndexKey(
@@ -88,7 +119,7 @@ impl RangeIndexDirection {
 /// Range index: property+value+nodeId -> presence
 ///
 /// ```text
-/// Asc:  [0x03][0x01][prop_hash:4][value:var][node_id:8]
+/// Asc:  [0x03][0x01][prop_hash:4][asc_value:var][node_id:8]
 /// Desc: [0x03][0x05][prop_hash:4][desc_value:var][node_id:8]
 /// Value: empty/presence
 /// ```
@@ -146,7 +177,7 @@ impl<'a> RangeIndexKey<'a> {
 
     /// Parse a range index key from a slice.
     ///
-    /// key is `[0x03][0x01][prop_hash:4][value:var][node_id:8]`
+    /// key is `[0x03][0x01][prop_hash:4][asc_value:var][node_id:8]`
     pub fn parse_from_slice(slice: &'a [u8]) -> Result<Self, EncodingError> {
         // Checks AT LEAST the expected length
         // Variable length value means `value` and `node_id` access should be checked
@@ -204,18 +235,32 @@ impl<'a> RangeIndexKey<'a> {
 
     /// Encode the range key into a buffer.
     ///
+    /// For ascending direction, the value is encoded as follows:
+    /// - Each byte is written as-is
+    /// - If a byte is 0x00, it is escaped with 0x00 0xFF
+    /// - The final bytes are 0x00 0x00 to indicate the end of the value.
+    ///
     /// For descending direction, the value is encoded as follows:
     /// - Each byte is inverted (0x00 -> 0xFF, 0xFF -> 0x00)
     /// - If a byte is 0x00, it is escaped with 0xFF 0x00
     /// - The final bytes are 0xFF 0xFE to indicate the end of the value.
     ///
-    /// size of descending value is `2 + number of 0x00 bytes` longer than ascending value
+    /// both directions carry the same `2 + number of 0x00 bytes` overhead over the raw value
     pub fn encode_into<B: BufMut>(&self, buf: &mut B) {
         buf.put_u8(KeyPrefix::PropertyIndex.as_u8());
         buf.put_u8(self.range_direction.as_u8());
         buf.put_slice(&self.property_hash);
         match self.range_direction {
-            RangeIndexDirection::Asc => buf.put_slice(self.value.as_bytes()),
+            RangeIndexDirection::Asc => {
+                for byte in self.value.as_bytes().iter() {
+                    buf.put_u8(*byte);
+                    if *byte == 0x00 {
+                        buf.put_u8(0xFF);
+                    }
+                }
+                buf.put_u8(0x00);
+                buf.put_u8(0x00);
+            }
             RangeIndexDirection::Desc => {
                 for byte in self.value.as_bytes().iter() {
                     buf.put_u8(!byte);

@@ -116,13 +116,7 @@ impl<'a> RangeScanValuePrefix<'a> {
     }
 
     fn encoded_len(&self) -> usize {
-        PREFIX_LEN
-            + INDEX_PREFIX_LEN
-            + PROPERTY_HASH_MAX_LEN
-            + ordered_value_len(
-                matches!(self.direction, RangeIndexDirection::Desc),
-                self.value,
-            )
+        PREFIX_LEN + INDEX_PREFIX_LEN + PROPERTY_HASH_MAX_LEN + ordered_value_len(self.value)
     }
 }
 
@@ -225,13 +219,7 @@ impl<'a> GlobalEdgeRangeScanValuePrefix<'a> {
     }
 
     fn encoded_len(&self) -> usize {
-        PREFIX_LEN
-            + INDEX_PREFIX_LEN
-            + PROPERTY_HASH_MAX_LEN
-            + ordered_value_len(
-                matches!(self.direction, RangeIndexDirection::Desc),
-                self.value,
-            )
+        PREFIX_LEN + INDEX_PREFIX_LEN + PROPERTY_HASH_MAX_LEN + ordered_value_len(self.value)
     }
 }
 
@@ -385,16 +373,22 @@ impl<'a> EdgeRangeScanValuePrefix<'a> {
             + core::mem::size_of::<RangeEdgeDirection>()
             + NODE_ID_MAX_LEN
             + PROPERTY_HASH_MAX_LEN
-            + ordered_value_len(
-                matches!(self.range_direction, EdgeRangeIndexDirection::Desc),
-                self.value,
-            )
+            + ordered_value_len(self.value)
     }
 }
 
 fn put_ordered_value<B: BufMut>(buf: &mut B, descending: bool, value: &str) {
     match descending {
-        false => buf.put_slice(value.as_bytes()),
+        false => {
+            for byte in value.as_bytes() {
+                buf.put_u8(*byte);
+                if *byte == 0x00 {
+                    buf.put_u8(0xFF);
+                }
+            }
+            buf.put_u8(0x00);
+            buf.put_u8(0x00);
+        }
         true => {
             for byte in value.as_bytes() {
                 buf.put_u8(!byte);
@@ -408,16 +402,11 @@ fn put_ordered_value<B: BufMut>(buf: &mut B, descending: bool, value: &str) {
     }
 }
 
-fn ordered_value_len(descending: bool, value: &str) -> usize {
-    match descending {
-        false => value.len(),
-        true => {
-            value
-                .as_bytes()
-                .iter()
-                .map(|byte| if *byte == 0x00 { 2 } else { 1 })
-                .sum::<usize>()
-                + 2
-        }
-    }
+fn ordered_value_len(value: &str) -> usize {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| if *byte == 0x00 { 2 } else { 1 })
+        .sum::<usize>()
+        + 2
 }
