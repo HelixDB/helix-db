@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::ops::Bound;
 #[cfg(any(test, feature = "production-coverage"))]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{self, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -99,14 +99,14 @@ pub(crate) use exact::{
     lookup_active_equality_literal_batch, lookup_active_equality_point_literal,
 };
 
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_POINT_READS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_MULTI_GETS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_SCANS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_GRAPH_READS: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_POINT_READS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_MULTI_GETS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_SCANS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_GRAPH_READS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// Exact storage operations issued by managed equality serving while the
 /// production-coverage benchmark is measuring it.
@@ -7618,3 +7618,12 @@ pub(crate) use exact::RangeScanCounters;
 
 #[cfg(test)]
 mod ordered_tests;
+
+#[cfg(test)]
+mod test_read_counters;
+
+#[cfg(test)]
+use test_read_counters::{
+    ThreadLocalCounter, BENCHMARK_GRAPH_READS, BENCHMARK_MULTI_GETS, BENCHMARK_POINT_READS,
+    BENCHMARK_SCANS,
+};
