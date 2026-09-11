@@ -44,7 +44,7 @@ routes, registration, or query-bundle APIs.
 Server mode uses the built-in global `fetch`:
 
 ```ts
-const client = Client.server("https://cluster.helix-db.com").withApiKey("hx_secret");
+const client = Client.managed("https://cluster.helix-db.com", "db_your_database_id").withApiKey("hx_secret");
 const result = await client.query<MyResponse>(request).send();
 ```
 

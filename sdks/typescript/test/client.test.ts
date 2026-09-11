@@ -198,11 +198,18 @@ assert.throws(
   (error: unknown) => error instanceof HelixError && error.kind === "InvalidUrl",
 );
 
+for (const databaseId of ["", "   "]) {
+  assert.throws(
+    () => Client.managed("https://cluster.helix-db.com", databaseId),
+    (error: unknown) => error instanceof HelixError && error.kind === "InvalidRequest",
+  );
+}
+
 // ---- Request routing + headers ----------------------------------------------
 
 {
   const server = await spawnCaptureServer();
-  const client = new Client(server.base).withApiKey("hx_secret");
+  const client = Client.managed(server.base, "db_123").withApiKey("hx_secret");
   const result = await client.requestBuilder<Record<string, unknown>>().warmOnly().writerOnly().query(sampleRequest()).send();
 
   const req = await server.captured;
@@ -212,10 +219,41 @@ assert.throws(
   assert.equal(req.path, "/v2/query");
   assert.equal(req.headers["content-type"], "application/json");
   assert.equal(req.headers["authorization"], "Bearer hx_secret");
+  assert.equal(req.headers["x-helix-database-id"], "db_123");
   assert.equal(req.headers["x-helix-warm"], "true");
   assert.equal(req.headers["x-helix-require-writer"], "true");
   assert.equal(req.body, sampleRequest().toJsonString());
   assert.deepEqual(result, {});
+}
+
+{
+  const server = await spawnCaptureServer();
+  const client = new Client(server.base).withDatabaseId("db_123");
+  await client.query(sampleRequest()).send();
+  const req = await server.captured;
+  await server.close();
+  assert.equal(req.headers["x-helix-database-id"], "db_123");
+}
+
+{
+  const server = await spawnCaptureServer();
+  const client = Client.managed(server.base, "db_initial");
+  const request = client.query(sampleRequest());
+  client.withDatabaseId("db_later");
+  await request.send();
+  const req = await server.captured;
+  await server.close();
+  assert.equal(req.headers["x-helix-database-id"], "db_initial");
+}
+
+{
+  const server = await spawnCaptureServer();
+  const client = new Client(server.base).withDatabaseId(" ");
+  await assert.rejects(
+    client.query(sampleRequest()).send(),
+    (error: unknown) => error instanceof HelixError && error.kind === "InvalidRequest",
+  );
+  await server.close();
 }
 
 // ---- Durability header -------------------------------------------------------

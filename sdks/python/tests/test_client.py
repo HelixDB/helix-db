@@ -201,7 +201,9 @@ class ClientTests(unittest.TestCase):
                 "server",
                 "embedded",
                 "embedded_reader",
+                "managed",
                 "with_api_key",
+                "with_database_id",
                 "request_builder",
                 "query",
                 "base_url",
@@ -272,7 +274,9 @@ class ClientTests(unittest.TestCase):
 
         with patch("helixdb.client.urlopen", fake_urlopen):
             result = (
-                Client("http://127.0.0.1:6969", api_key="hx_secret")
+                Client.managed(
+                    "http://127.0.0.1:6969", api_key="hx_secret", database_id="db_123"
+                )
                 .request_builder()
                 .writer_only()
                 .warm_only()
@@ -285,10 +289,30 @@ class ClientTests(unittest.TestCase):
         req = calls[0]
         self.assertEqual(req.full_url, "http://127.0.0.1:6969/v2/query")
         self.assertEqual(req.headers["Authorization"], "Bearer hx_secret")
+        self.assertEqual(req.headers["X-helix-tenant-id"], "db_123")
         self.assertEqual(req.headers["X-helix-require-writer"], "true")
         self.assertEqual(req.headers["X-helix-warm"], "true")
         self.assertEqual(req.headers["X-helix-await-durable"], "false")
         self.assertEqual(json.loads(req.data.decode("utf-8"))["request_type"], "read")
+
+    def test_managed_client_rejects_missing_or_empty_database_id(self) -> None:
+        for database_id in ("", "   "):
+            with self.subTest(database_id=database_id):
+                with self.assertRaisesRegex(HelixError, "database ID"):
+                    Client.managed("http://127.0.0.1:6969", database_id=database_id)
+
+        calls = []
+
+        def fake_urlopen(req):
+            calls.append(req)
+            return FakeResponse()
+
+        with patch("helixdb.client.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(HelixError, "database ID"):
+                Client("http://127.0.0.1:6969").with_database_id(" ").query(
+                    QueryRequest.read(read_batch())
+                )
+        self.assertEqual(calls, [])
 
     def test_remote_error_includes_status_and_details(self) -> None:
         request = QueryRequest.read(read_batch())
