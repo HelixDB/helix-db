@@ -63,11 +63,13 @@ impl shared::AccessWindowFamily for EdgeWindowFamily {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => Some(shared::AccessSearchParts::Text {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance: *fuzzy_distance,
             }),
             _ => None,
         }
@@ -92,12 +94,14 @@ impl shared::AccessWindowFamily for EdgeWindowFamily {
         index: ir::SearchIndexPlan,
         query_text: ir::TextQueryInputPlan,
         k: ir::SearchLimitPlan,
+        fuzzy_distance: u8,
     ) -> Self::Source {
         ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::TextSearch {
             key,
             index,
             query_text,
             k,
+            fuzzy_distance,
         })
     }
 }
@@ -133,6 +137,7 @@ mod tests {
             ))
             .unwrap(),
             k,
+            fuzzy_distance: 0,
         }
     }
 
@@ -180,6 +185,7 @@ mod tests {
                     source.as_ref(),
                     ir::EdgeAccessPlan::TextSearch {
                         k: ir::SearchLimitPlan::Literal(k),
+                        fuzzy_distance: 0,
                         ..
                     } if k.get() == 3
                 )

@@ -43,6 +43,7 @@ pub fn node_text_search(
     tenant_value: Option<&PropertyInput>,
     query_text: &PropertyInput,
     k: &StreamBound,
+    fuzzy_distance: u8,
 ) -> Result<contracts::SearchAccessPlan<ir::NodeAccessPlan>, error::PlannerError> {
     let key = node_search_key(label, property)?;
     let index = lookup::text_index(indexes, &catalog::SearchIndexKey::from(key.clone()))?;
@@ -58,6 +59,7 @@ pub fn node_text_search(
             )?,
             query_text: input::text_query(query_text)?,
             k: input::search_limit(catalog::SearchIndexKind::Text, k)?,
+            fuzzy_distance,
         },
         index_id,
     })

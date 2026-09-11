@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{future::try_join_all, StreamExt};
+use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use range_cache::{CacheCapacity, RangeCache};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,13 +24,14 @@ use slatedb::object_store::{
 use tantivy::collector::{FilterCollector, TopDocs};
 use tantivy::directory::RamDirectory;
 use tantivy::merge_policy::NoMergePolicy;
-use tantivy::query::{BooleanQuery, Occur, TermQuery};
+use tantivy::query::{Bm25StatisticsProvider, BooleanQuery, BoostQuery, Occur, TermQuery};
 use tantivy::schema::{IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions};
 use tantivy::tokenizer::{
     Language, LowerCaser, PreTokenizedString, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
     WhitespaceTokenizer, MAX_TOKEN_LEN,
 };
 use tantivy::{Index, IndexReader, IndexSettings, ReloadPolicy, TantivyDocument, Term};
+use tantivy_fst::Automaton;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -155,12 +157,300 @@ pub(crate) struct TextSearchRequest<'a> {
     query: &'a str,
     k: usize,
     scope: TextSearchScope,
+    /// Maximum edit distance for keyword matching. Zero keeps the exact
+    /// behaviour, which is what every caller gets unless it opts in.
+    fuzzy_distance: u8,
 }
 
 impl<'a> TextSearchRequest<'a> {
     pub(crate) const fn new(query: &'a str, k: usize, scope: TextSearchScope) -> Self {
-        Self { query, k, scope }
+        Self {
+            query,
+            k,
+            scope,
+            fuzzy_distance: 0,
+        }
     }
+
+    /// Opt this request into fuzzy keyword matching. Distances above
+    /// [`MAX_FUZZY_DISTANCE`] are clamped, since the automaton cannot build
+    /// past it.
+    pub(crate) const fn with_fuzzy_distance(mut self, distance: u8) -> Self {
+        self.fuzzy_distance = if distance > MAX_FUZZY_DISTANCE {
+            MAX_FUZZY_DISTANCE
+        } else {
+            distance
+        };
+        self
+    }
+}
+
+/// Largest edit distance a Levenshtein automaton can be built for. tantivy
+/// memoises builders in a `[[OnceCell; 2]; 3]`, so anything above two is
+/// rejected outright rather than being slow.
+pub(crate) const MAX_FUZZY_DISTANCE: u8 = 2;
+
+/// The query surface advertises its own ceiling and cannot import this one,
+/// since the AST crate sits underneath this one. Drift between the two would
+/// mean a query is accepted and then quietly narrowed, so fail the build
+/// instead.
+const _: () = assert!(MAX_FUZZY_DISTANCE == helix_ast::traversal::MAX_FUZZY_DISTANCE);
+
+/// Most expanded terms a single query term may contribute.
+///
+/// Every expansion becomes another clause in the boolean query, so without a
+/// ceiling a short query term would let the caller decide how much work the
+/// server does.
+const MAX_EXPANDED_TERMS: usize = 50;
+
+/// Ceiling on how many matching terms one segment may hand back for a single
+/// query term. The automaton is intersected with the FST, so the walk is
+/// already bounded by the dictionary itself and this bounds what a pathological
+/// vocabulary can produce from it. [`MAX_EXPANDED_TERMS`] then keeps the
+/// closest of whatever survives. The budget is per segment, so recall does not
+/// depend on how many segments a merge happened to leave behind.
+const MAX_EXPANSION_SCAN: usize = 4096;
+
+/// The distance actually used for a term of this length.
+///
+/// A two character term at distance two matches nearly every short entry in the
+/// dictionary, which is both ruinous and useless: the matches have no
+/// relationship to what was typed. Shorter terms therefore get less latitude,
+/// the same shape Lucene's automatic fuzziness uses.
+fn effective_distance(term: &str, requested: u8) -> u8 {
+    let length = term.chars().count();
+    let allowed = if length < 3 {
+        0
+    } else if length <= 5 {
+        1
+    } else {
+        MAX_FUZZY_DISTANCE
+    };
+    requested.min(allowed)
+}
+
+/// A Levenshtein DFA presented as the automaton the term dictionary expects.
+///
+/// tantivy has an identical wrapper behind `FuzzyTermQuery`, but it is
+/// `pub(crate)`. It is not reused here anyway: `FuzzyTermQuery` builds an
+/// `AutomatonWeight`, whose scorer is a `ConstScorer`, so every match scores
+/// the same and BM25 ordering is lost. Driving the automaton over the term
+/// dictionary and scoring the terms it finds with ordinary `TermQuery` keeps
+/// ranking intact.
+#[derive(Clone)]
+struct FuzzyAutomaton(Arc<DFA>);
+
+impl Automaton for FuzzyAutomaton {
+    type State = u32;
+
+    fn start(&self) -> Self::State {
+        self.0.initial_state()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        matches!(self.0.distance(*state), Distance::Exact(_))
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        *state != levenshtein_automata::SINK_STATE
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.0.transition(*state, byte)
+    }
+}
+
+/// Every indexed term within exactly `distance` edits of `term`, paired with
+/// the edit distance that matched it.
+///
+/// Term dictionaries are per segment, so each segment is swept and the results
+/// unioned. A term reachable from several segments keeps its smallest distance.
+fn expand_term_at(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    term: &str,
+    distance: u8,
+) -> Result<BTreeMap<String, u8>, HelixDbError> {
+    let dfa = Arc::new(LevenshteinAutomatonBuilder::new(distance, true).build_dfa(term));
+    let mut matches: BTreeMap<String, u8> = BTreeMap::new();
+
+    for segment_reader in searcher.segment_readers() {
+        let mut scanned = 0usize;
+        let inverted = segment_reader.inverted_index(field).map_err(|err| {
+            HelixDbError::InvariantViolation(format!(
+                "text inverted index for fuzzy expansion is unavailable: {err}"
+            ))
+        })?;
+        let mut stream = inverted
+            .terms()
+            .search(FuzzyAutomaton(Arc::clone(&dfa)))
+            .into_stream()
+            .map_err(|err| {
+                HelixDbError::InvariantViolation(format!(
+                    "text term dictionary stream failed during fuzzy expansion: {err}"
+                ))
+            })?;
+        while stream.advance() {
+            scanned += 1;
+            if scanned > MAX_EXPANSION_SCAN {
+                break;
+            }
+            let Ok(text) = std::str::from_utf8(stream.key()) else {
+                continue;
+            };
+            let edits = match dfa.eval(text.as_bytes()) {
+                Distance::Exact(edits) => edits,
+                Distance::AtLeast(_) => continue,
+            };
+            matches
+                .entry(text.to_owned())
+                .and_modify(|best| {
+                    if edits < *best {
+                        *best = edits;
+                    }
+                })
+                .or_insert(edits);
+        }
+    }
+
+    if matches.len() > MAX_EXPANDED_TERMS {
+        // Keep the closest matches. Ties break on the term itself so the result
+        // does not depend on which segment happened to be read first.
+        let mut ranked: Vec<(String, u8)> = matches.into_iter().collect();
+        ranked.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        ranked.truncate(MAX_EXPANDED_TERMS);
+        return Ok(ranked.into_iter().collect());
+    }
+
+    Ok(matches)
+}
+
+/// Closest indexed terms to `term`, searching no further than it has to.
+///
+/// The automaton hands back terms in dictionary order rather than by distance,
+/// so "the closest fifty" cannot be taken from a single sweep without walking
+/// everything first. Running the tighter automaton and only widening when it
+/// found nothing gives the same answer and usually costs one narrow sweep.
+fn expand_term(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    term: &str,
+    max_distance: u8,
+) -> Result<BTreeMap<String, u8>, HelixDbError> {
+    let allowed = effective_distance(term, max_distance);
+    if allowed == 0 {
+        let mut exact = BTreeMap::new();
+        exact.insert(term.to_owned(), 0);
+        return Ok(exact);
+    }
+
+    for distance in 1..=allowed {
+        let found = expand_term_at(searcher, field, term, distance)?;
+        if !found.is_empty() || distance == allowed {
+            return Ok(found);
+        }
+    }
+
+    Ok(BTreeMap::new())
+}
+
+/// Boost applied to a term found at `edits` distance from what was typed.
+///
+/// This cannot order one group. Expansion runs only for a term the index does
+/// not have and stops at the first tier that finds anything, so every term in a
+/// group sits at the same distance and shares one boost. What it decides is the
+/// weight between groups: a query word reached only at two edits counts for
+/// less than one reached at a single edit.
+fn fuzzy_boost(edits: u8) -> f32 {
+    1.0 / f32::from(edits + 1)
+}
+
+/// BM25's inverse document frequency, matching tantivy's own formula so the
+/// ratio below cancels exactly against what the term query will compute.
+fn bm25_idf(doc_freq: u64, doc_count: u64) -> f32 {
+    let doc_freq = doc_freq.min(doc_count);
+    let x = ((doc_count - doc_freq) as f32 + 0.5) / (doc_freq as f32 + 0.5);
+    (1.0 + x).ln()
+}
+
+/// Per-term boosts for one expanded group, with the group's term statistics
+/// blended.
+///
+/// Scoring each neighbour on its own statistics gets the answer backwards. BM25
+/// pays for rarity, so the rarest neighbour wins, and a typo is almost always a
+/// typo of a common word. On a 202 document fixture the junk neighbour beat the
+/// intended one by 355x.
+///
+/// Lucene handles this by scoring the whole group off one blended document
+/// frequency. tantivy builds a term query's weight internally and gives no way
+/// to hand it one, so the same effect comes through the boost: score scales with
+/// idf, so multiplying by `reference_idf / term_idf` leaves every neighbour
+/// scoring as though it had the reference's statistics. The reference is the
+/// most common term in the group, so the ratio never exceeds one and a rare
+/// neighbour can only be damped, never lifted.
+///
+/// This does not make the common word win by a margin. It stops rarity from
+/// deciding, and leaves the ordering to term frequency and field length.
+///
+/// When every neighbour is rare the reference is itself rare, the ratios sit
+/// near one, and nothing is damped. That is correct: there is no common word to
+/// prefer.
+///
+/// The statistics must be the provider the search is scored with, or the ratio
+/// cancels against numbers the query never uses. Production scores against
+/// corpus statistics, so a search resolved across splits passes those here.
+fn blended_boosts(
+    statistics: &dyn Bm25StatisticsProvider,
+    field: tantivy::schema::Field,
+    expanded: &BTreeMap<String, u8>,
+) -> Result<BTreeMap<String, f32>, HelixDbError> {
+    let doc_count = statistics.total_num_docs().map_err(|err| {
+        HelixDbError::InvariantViolation(format!(
+            "text document count lookup failed during fuzzy expansion: {err}"
+        ))
+    })?;
+    if doc_count == 0 {
+        return Ok(expanded
+            .iter()
+            .map(|(term, edits)| (term.clone(), fuzzy_boost(*edits)))
+            .collect());
+    }
+
+    let mut frequencies: BTreeMap<&str, u64> = BTreeMap::new();
+    for term in expanded.keys() {
+        frequencies.insert(term.as_str(), provider_doc_freq(statistics, field, term)?);
+    }
+
+    let reference_idf = bm25_idf(frequencies.values().copied().max().unwrap_or(0), doc_count);
+
+    Ok(expanded
+        .iter()
+        .map(|(term, edits)| {
+            let term_idf = bm25_idf(frequencies[term.as_str()], doc_count);
+            let blend = if term_idf > 0.0 {
+                (reference_idf / term_idf).min(1.0)
+            } else {
+                1.0
+            };
+            (term.clone(), fuzzy_boost(*edits) * blend)
+        })
+        .collect())
+}
+
+/// Document frequency of one term from whichever statistics the search is
+/// scored with, so absence and blending are judged on the numbers BM25 uses.
+fn provider_doc_freq(
+    statistics: &dyn Bm25StatisticsProvider,
+    field: tantivy::schema::Field,
+    term: &str,
+) -> Result<u64, HelixDbError> {
+    statistics
+        .doc_freq(&Term::from_field_text(field, term))
+        .map_err(|err| {
+            HelixDbError::InvariantViolation(format!(
+                "text document frequency lookup failed: {err}"
+            ))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,7 +702,7 @@ pub async fn search_manifest(
     }
 
     let (_index, fields, reader) = open_manifest_index(store, db_path, manifest).await?;
-    warm_searcher(&reader, fields, manifest.analyzer, query).await?;
+    let _ = warm_searcher(&reader, fields, manifest.analyzer, query, 0).await?;
     search_split_index_bytes(
         &reader,
         fields,
@@ -512,7 +802,12 @@ async fn search_manifest_with_state_source(
 ) -> Result<Vec<TextSearchHit>, HelixDbError> {
     const SPLIT_READ_CONCURRENCY: usize = 8;
     const STATE_BATCH_SIZE: usize = 512;
-    let TextSearchRequest { query, k, scope } = request;
+    let TextSearchRequest {
+        query,
+        k,
+        scope,
+        fuzzy_distance,
+    } = request;
     if k == 0 || scope.is_empty_restricted() {
         return Ok(Vec::new());
     }
@@ -520,6 +815,11 @@ async fn search_manifest_with_state_source(
     struct SplitSearchState {
         split_ref: TextSplitRef,
         reader: Arc<SplitSearchReader>,
+        /// Resolved when this split was warmed, and again across every split
+        /// once corpus statistics for what they reached are loaded. The loop
+        /// below can search a split several times, and none of those rounds
+        /// should walk it or resolve it again.
+        fuzzy: Option<Arc<FuzzyClauses>>,
         total_docs: usize,
         candidate_limit: usize,
         processed_candidates: usize,
@@ -530,11 +830,15 @@ async fn search_manifest_with_state_source(
     let opened = futures::stream::iter(manifest.split_refs().iter().cloned())
         .map(|split_ref| async {
             let index_reader = SplitSearchReader::open(&runtime, &split_ref).await?;
-            index_reader.warm(manifest.analyzer, query).await?;
+            let fuzzy = index_reader
+                .warm(manifest.analyzer, query, fuzzy_distance)
+                .await?
+                .map(Arc::new);
             let total_docs = index_reader.total_docs();
             Ok::<_, HelixDbError>(SplitSearchState {
                 split_ref,
                 reader: Arc::new(index_reader),
+                fuzzy,
                 total_docs,
                 candidate_limit: k.min(total_docs).max(1),
                 processed_candidates: 0,
@@ -546,6 +850,52 @@ async fn search_manifest_with_state_source(
         .collect::<Vec<_>>()
         .await;
     let mut splits = opened.into_iter().collect::<Result<Vec<_>, _>>()?;
+
+    // Production scores against corpus statistics, and those only know the
+    // typed query terms, so every term a dictionary reached would score as if
+    // no document held it and outrank the words that were actually typed. Load
+    // the reached terms' corpus frequencies, then resolve once so every split
+    // scores the same term with the same boost against the same numbers. Boxed
+    // so an exact query's search future carries none of it.
+    if fuzzy_distance > 0
+        && let (Some(corpus), TextLiveStateSource::V2(root)) = (statistics, state_source)
+    {
+        Box::pin(async {
+            let mut merged = FuzzyExpansion::default();
+            for split in &splits {
+                if let Some(fuzzy) = &split.fuzzy {
+                    merged.merge(fuzzy.reached.clone());
+                }
+            }
+            merged.settle();
+            let unknown = merged
+                .absent_candidates(corpus)
+                .filter(|candidate| corpus.document_frequency(candidate.as_bytes()).is_none())
+                .map(|candidate| Bytes::copy_from_slice(candidate.as_bytes()))
+                .collect::<BTreeSet<_>>();
+            let reached = crate::index_lifecycle::text::statistics::load_term_frequencies(
+                reader,
+                root.scope(),
+                root.index_id(),
+                root.generation(),
+                root.partition(),
+                corpus.total_document_count(),
+                unknown,
+            )
+            .await?;
+            let extended = corpus.with_frequencies(reached);
+            let Some(field) = splits.first().map(|split| split.reader.fields().body) else {
+                return Ok(());
+            };
+            let resolved = Arc::new(resolve_across_splits(&merged, field, extended)?);
+            for split in &mut splits {
+                split.fuzzy = Some(Arc::clone(&resolved));
+            }
+            Ok::<_, HelixDbError>(())
+        })
+        .await?;
+    }
+
     let mut live_states = BTreeMap::new();
     let mut hits_by_entity = BTreeMap::new();
     loop {
@@ -573,6 +923,7 @@ async fn search_manifest_with_state_source(
                     index,
                     Arc::clone(&split.reader),
                     split.candidate_limit,
+                    split.fuzzy.clone(),
                 ))
             })
             .collect::<Vec<_>>();
@@ -583,14 +934,26 @@ async fn search_manifest_with_state_source(
         let analyzer = manifest.analyzer;
         let scope = scope.clone();
         let searched = futures::stream::iter(selected)
-            .map(|(index, split_reader, limit)| {
+            .map(|(index, split_reader, limit, fuzzy)| {
                 let query = query.to_owned();
-                let statistics = statistics.cloned();
+                // Clauses resolved across splits carry the corpus statistics
+                // they were resolved against, extended with the reached terms.
+                let statistics = fuzzy
+                    .as_deref()
+                    .and_then(|fuzzy| fuzzy.statistics.clone())
+                    .or_else(|| statistics.cloned());
                 let scope = scope.clone();
                 async move {
                     tokio::task::spawn_blocking(move || {
                         split_reader
-                            .search_candidates(analyzer, &query, limit, statistics.as_ref(), &scope)
+                            .search_candidates(
+                                analyzer,
+                                &query,
+                                limit,
+                                statistics.as_ref(),
+                                &scope,
+                                fuzzy.as_deref(),
+                            )
                             .map(|candidates| (index, limit, candidates))
                     })
                     .await
@@ -702,17 +1065,29 @@ impl SplitSearchReader {
         }
     }
 
-    async fn warm(&self, analyzer: TextAnalyzerKind, query: &str) -> Result<(), HelixDbError> {
+    async fn warm(
+        &self,
+        analyzer: TextAnalyzerKind,
+        query: &str,
+        fuzzy_distance: u8,
+    ) -> Result<Option<FuzzyClauses>, HelixDbError> {
         match self {
-            Self::Cached(split) => split.warm(analyzer, query).await,
+            Self::Cached(split) => split.warm(analyzer, query, fuzzy_distance).await,
             Self::Direct {
                 index,
                 reader,
                 fields,
             } => {
                 register_analyzers(index, analyzer);
-                warm_searcher(reader, *fields, analyzer, query).await
+                warm_searcher(reader, *fields, analyzer, query, fuzzy_distance).await
             }
+        }
+    }
+
+    fn fields(&self) -> TextSchemaFields {
+        match self {
+            Self::Cached(split) => split.fields(),
+            Self::Direct { fields, .. } => *fields,
         }
     }
 
@@ -730,11 +1105,12 @@ impl SplitSearchReader {
         limit: usize,
         statistics: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
         scope: &TextSearchScope,
+        fuzzy: Option<&FuzzyClauses>,
     ) -> Result<Vec<TextSearchCandidate>, HelixDbError> {
         match self {
-            Self::Cached(split) => {
-                split.search_candidates_with_statistics(analyzer, query, limit, statistics, scope)
-            }
+            Self::Cached(split) => split.search_candidates_with_statistics(
+                analyzer, query, limit, statistics, scope, fuzzy,
+            ),
             Self::Direct {
                 index,
                 reader,
@@ -742,7 +1118,7 @@ impl SplitSearchReader {
             } => {
                 register_analyzers(index, analyzer);
                 search_reader_candidates_with_statistics(
-                    reader, *fields, analyzer, query, limit, statistics, scope,
+                    reader, *fields, analyzer, query, limit, statistics, scope, fuzzy,
                 )
             }
         }
@@ -1460,29 +1836,95 @@ pub(crate) async fn warm_searcher(
     fields: TextSchemaFields,
     analyzer: TextAnalyzerKind,
     query: &str,
-) -> Result<(), HelixDbError> {
-    let mut warmup_info = query_warmup_info(fields, analyzer, query);
+    fuzzy_distance: u8,
+) -> Result<Option<FuzzyClauses>, HelixDbError> {
+    // Branch before anything is awaited. The search pipeline heap allocates one
+    // warm future per split, and a future is as large as the most it ever holds
+    // across an await. So the fuzzy path sits behind a box, and the exact path
+    // below keeps nothing alive past its one await.
+    if fuzzy_distance > 0 {
+        return Box::pin(warm_fuzzy_searcher(
+            reader,
+            fields,
+            analyzer,
+            query,
+            fuzzy_distance,
+        ))
+        .await
+        .map(Some);
+    }
+
+    let mut warmup_info = query_warmup_info(fields, analyzer, query, 0);
     if warmup_info.terms_grouped_by_field.is_empty()
         && warmup_info.fast_fields.is_empty()
         && !warmup_info.field_norms
         && warmup_info.term_dict_fields.is_empty()
         && warmup_info.postings_full_fields.is_empty()
     {
-        return Ok(());
+        return Ok(None);
     }
 
     warmup_info.merge(collector_warmup_info());
     warmup_info.simplify();
-    execute_warmup(reader, warmup_info).await
+    execute_warmup(reader, warmup_info).await?;
+    Ok(None)
+}
+
+/// Warmup for a query with edit latitude, in two phases. The automaton walks
+/// the term dictionary, so the first phase makes that resident alongside what
+/// an exact query needs. Only then can it say which terms the query really
+/// reaches, and the second phase warms their postings rather than the whole
+/// inverted index for the field.
+async fn warm_fuzzy_searcher(
+    reader: &IndexReader,
+    fields: TextSchemaFields,
+    analyzer: TextAnalyzerKind,
+    query: &str,
+    fuzzy_distance: u8,
+) -> Result<FuzzyClauses, HelixDbError> {
+    let mut warmup_info = query_warmup_info(fields, analyzer, query, fuzzy_distance);
+    warmup_info.merge(collector_warmup_info());
+    warmup_info.simplify();
+    execute_warmup(reader, warmup_info).await?;
+
+    let searcher = reader.searcher();
+    let terms = analyze_query_terms(analyzer, query);
+    let resolved = resolve_fuzzy_clauses(&searcher, fields.body, &terms, fuzzy_distance)?;
+    if resolved.is_empty() {
+        return Ok(resolved);
+    }
+
+    let mut postings = WarmupInfo::default();
+    postings.terms_grouped_by_field.insert(
+        fields.body,
+        resolved
+            .boosts
+            .keys()
+            .map(|candidate| (Term::from_field_text(fields.body, candidate), false))
+            .collect(),
+    );
+    postings.simplify();
+    execute_warmup(reader, postings).await?;
+
+    Ok(resolved)
 }
 
 fn query_warmup_info(
     fields: TextSchemaFields,
     analyzer: TextAnalyzerKind,
     query: &str,
+    fuzzy_distance: u8,
 ) -> WarmupInfo {
     let terms = analyze_query_terms(analyzer, query);
     let mut warmup = WarmupInfo::default();
+    if fuzzy_distance > 0 {
+        // The automaton walks the term dictionary, so that has to be resident
+        // first. Which postings it then reads is not knowable until the walk has
+        // happened, and warming all of them to reach at most MAX_EXPANDED_TERMS
+        // would pull the whole inverted index across the object store for one
+        // typo. warm_searcher does the walk and asks for those instead.
+        warmup.term_dict_fields.insert(fields.body);
+    }
     if !terms.is_empty() {
         warmup.terms_grouped_by_field.insert(
             fields.body,
@@ -1739,9 +2181,178 @@ pub(crate) fn search_reader_candidates(
         k,
         None,
         &TextSearchScope::Unrestricted,
+        None,
     )
 }
 
+/// The terms a fuzzy query will actually search, each with the boost that puts
+/// it on its reference's statistics.
+///
+/// Warmup has to know this set to make the right postings resident, and the
+/// clause builder has to know it to build the query, so it is worked out once
+/// and handed down rather than derived twice. A search with corpus statistics
+/// then resolves every split's reach together, and carries the statistics it
+/// resolved against so the search scores with the same numbers.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FuzzyClauses {
+    boosts: BTreeMap<String, f32>,
+    /// What this split's dictionary reached, kept so a search with corpus
+    /// statistics can resolve every split at once.
+    reached: FuzzyExpansion,
+    /// Corpus statistics extended with the reached terms. Present only once
+    /// the clauses have been resolved across splits.
+    statistics: Option<crate::index_lifecycle::text::statistics::TextBm25Statistics>,
+}
+
+impl FuzzyClauses {
+    fn is_empty(&self) -> bool {
+        self.boosts.is_empty()
+    }
+}
+
+/// The analysed query terms, and for each one a split's dictionary lacks, the
+/// indexed words within reach with the edits that found each.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FuzzyExpansion {
+    terms: Vec<String>,
+    reached: BTreeMap<String, BTreeMap<String, u8>>,
+}
+
+impl FuzzyExpansion {
+    /// Fold in another split's reach for the same query.
+    fn merge(&mut self, other: Self) {
+        if self.terms.is_empty() {
+            self.terms = other.terms;
+        }
+        for (term, group) in other.reached {
+            let mine = self.reached.entry(term).or_default();
+            for (candidate, edits) in group {
+                mine.entry(candidate)
+                    .and_modify(|best| *best = (*best).min(edits))
+                    .or_insert(edits);
+            }
+        }
+    }
+
+    /// Reduce a union of splits to what one index holding the whole corpus
+    /// would have kept: only the closest tier any split reached, and at most
+    /// [`MAX_EXPANDED_TERMS`] of it, ties broken on the term the way a single
+    /// split breaks them.
+    fn settle(&mut self) {
+        for group in self.reached.values_mut() {
+            let Some(closest) = group.values().copied().min() else {
+                continue;
+            };
+            group.retain(|_, edits| *edits == closest);
+            while group.len() > MAX_EXPANDED_TERMS {
+                group.pop_last();
+            }
+        }
+    }
+
+    /// Every word reached for a query term the corpus does not have.
+    fn absent_candidates<'a>(
+        &'a self,
+        corpus: &'a crate::index_lifecycle::text::statistics::TextBm25Statistics,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.terms
+            .iter()
+            .filter(move |term| corpus.document_frequency(term.as_bytes()).unwrap_or(0) == 0)
+            .filter_map(move |term| self.reached.get(term))
+            .flat_map(|group| group.keys().map(String::as_str))
+    }
+}
+
+fn keep_strongest(boosts: &mut BTreeMap<String, f32>, term: String, boost: f32) {
+    boosts
+        .entry(term)
+        .and_modify(|best| {
+            if boost > *best {
+                *best = boost;
+            }
+        })
+        .or_insert(boost);
+}
+
+/// Work out what the query resolves to against one searcher's dictionary.
+///
+/// Only a term the index has never seen is worth expanding. A term that is
+/// present was spelled correctly, so it costs exactly what it does today and
+/// the common path is untouched. Absence is the signal, and rarity would only
+/// be a proxy for it needing a threshold nobody can defend.
+///
+/// The inversion the trigger does not solve is between the neighbours
+/// themselves. They are all equally distant, so the boost cannot separate them
+/// and BM25 alone decides, which hands it to whichever is rarest. A typo is
+/// usually a typo of a common word, so that is backwards, and blended_boosts is
+/// what puts the group on one footing.
+///
+/// Two query terms can also reach the same indexed term. Keep the stronger
+/// boost rather than adding the clause twice, which would count one document's
+/// match more than once.
+///
+/// The boosts here are against this split's own counts, which is what a search
+/// without corpus statistics scores with. A search with them re-resolves the
+/// reach across every split in [`resolve_across_splits`].
+fn resolve_fuzzy_clauses(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    terms: &[String],
+    fuzzy_distance: u8,
+) -> Result<FuzzyClauses, HelixDbError> {
+    let mut boosts: BTreeMap<String, f32> = BTreeMap::new();
+    let mut reached = BTreeMap::new();
+    for term in terms {
+        if provider_doc_freq(searcher, field, term)? > 0 {
+            keep_strongest(&mut boosts, term.clone(), 1.0);
+            continue;
+        }
+        let group = expand_term(searcher, field, term, fuzzy_distance)?;
+        for (candidate, boost) in blended_boosts(searcher, field, &group)? {
+            keep_strongest(&mut boosts, candidate, boost);
+        }
+        reached.insert(term.clone(), group);
+    }
+    Ok(FuzzyClauses {
+        boosts,
+        reached: FuzzyExpansion {
+            terms: terms.to_vec(),
+            reached,
+        },
+        statistics: None,
+    })
+}
+
+/// Resolve every split's reach at once against corpus statistics that know the
+/// reached terms. A term then scores the same wherever it lives, and a guessed
+/// word is weighed on how common it really is rather than on a count that was
+/// never loaded for it.
+fn resolve_across_splits(
+    expansion: &FuzzyExpansion,
+    field: tantivy::schema::Field,
+    corpus: crate::index_lifecycle::text::statistics::TextBm25Statistics,
+) -> Result<FuzzyClauses, HelixDbError> {
+    let mut boosts: BTreeMap<String, f32> = BTreeMap::new();
+    for term in &expansion.terms {
+        if provider_doc_freq(&corpus, field, term)? > 0 {
+            keep_strongest(&mut boosts, term.clone(), 1.0);
+            continue;
+        }
+        let Some(group) = expansion.reached.get(term) else {
+            continue;
+        };
+        for (candidate, boost) in blended_boosts(&corpus, field, group)? {
+            keep_strongest(&mut boosts, candidate, boost);
+        }
+    }
+    Ok(FuzzyClauses {
+        boosts,
+        reached: FuzzyExpansion::default(),
+        statistics: Some(corpus),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_reader_candidates_with_statistics(
     reader: &IndexReader,
     fields: TextSchemaFields,
@@ -1750,6 +2361,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
     k: usize,
     statistics: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
     scope: &TextSearchScope,
+    fuzzy: Option<&FuzzyClauses>,
 ) -> Result<Vec<TextSearchCandidate>, HelixDbError> {
     let terms = analyze_query_terms(analyzer, query);
     if terms.is_empty() || k == 0 {
@@ -1785,18 +2397,39 @@ pub(crate) fn search_reader_candidates_with_statistics(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let clauses = terms
-        .into_iter()
-        .map(|term| {
-            (
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.body, &term),
+    let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = match fuzzy {
+        None => terms
+            .into_iter()
+            .map(|term| {
+                (
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.body, &term),
+                        IndexRecordOption::WithFreqs,
+                    )) as Box<dyn tantivy::query::Query>,
+                )
+            })
+            .collect(),
+        Some(fuzzy) => {
+            let mut expanded: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for (candidate, boost) in &fuzzy.boosts {
+                let scored = TermQuery::new(
+                    Term::from_field_text(fields.body, candidate),
                     IndexRecordOption::WithFreqs,
-                )) as Box<dyn tantivy::query::Query>,
-            )
-        })
-        .collect::<Vec<_>>();
+                );
+                let scored: Box<dyn tantivy::query::Query> = if (boost - 1.0).abs() < f32::EPSILON {
+                    Box::new(scored)
+                } else {
+                    Box::new(BoostQuery::new(Box::new(scored), *boost))
+                };
+                expanded.push((Occur::Should, scored));
+            }
+            if expanded.is_empty() {
+                return Ok(Vec::new());
+            }
+            expanded
+        }
+    };
     let query = BooleanQuery::new(clauses);
     let collector = TopDocs::with_limit(k).tweak_score(|segment_reader| {
         let entity_ids = segment_reader
@@ -2198,6 +2831,27 @@ fn sha256_hex(sha256: [u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Resolve the clauses the way warm_searcher does, so a unit test drives the
+    /// same derivation the search path is handed in production. A distance of
+    /// zero has no plan at all, which is what an ordinary query passes.
+    fn resolved_clauses(
+        reader: &super::IndexReader,
+        fields: super::TextSchemaFields,
+        analyzer: super::TextAnalyzerKind,
+        query: &str,
+        distance: u8,
+    ) -> Option<super::FuzzyClauses> {
+        if distance == 0 {
+            return None;
+        }
+        let searcher = reader.searcher();
+        let terms = super::analyze_query_terms(analyzer, query);
+        Some(
+            super::resolve_fuzzy_clauses(&searcher, fields.body, &terms, distance)
+                .expect("fuzzy clauses resolve for the test fixture"),
+        )
+    }
+
     use super::*;
     use crate::config::{TextAnalyzerKind, TextIndexDefinition};
     use crate::encoding::keys::scope::TenantId;
@@ -2388,6 +3042,7 @@ mod tests {
             3,
             None,
             &scope,
+            None,
         )
         .unwrap();
 
@@ -2449,11 +3104,560 @@ mod tests {
                 requested_k,
                 None,
                 &scope,
+                None,
             )
             .unwrap();
 
             prop_assert_eq!(restricted, oracle);
         }
+    }
+
+    /// Searching with a distance of zero has to leave the existing behaviour
+    /// exactly as it was, since that is what every caller gets by default.
+    #[test]
+    fn fuzzy_off_is_identical_to_exact_search() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![
+            TextDocumentInput::new(1, "the helix database".to_string()),
+            TextDocumentInput::new(2, "a helox typo".to_string()),
+            TextDocumentInput::new(3, "unrelated content".to_string()),
+        ];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let exact = search_reader_candidates(&reader, fields, definition.analyzer(), "helix", 10)
+            .expect("exact search");
+        let off = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helix",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            None,
+        )
+        .expect("fuzzy disabled search");
+
+        assert_eq!(off, exact);
+        assert_eq!(off.len(), 1, "only the exact document should match");
+        assert_eq!(off[0].entity_id, 1);
+    }
+
+    /// Turning fuzzy on must change nothing at all for a query whose terms the
+    /// index already has. This is the property the whole feature rests on: it
+    /// is what makes the change safe to merge before anything can switch it on.
+    ///
+    /// Scores are compared, not just the order. Floating point addition is not
+    /// associative, so a reordering of the boolean clauses shows up in the last
+    /// bits of the score and nowhere else, and asserting on identifiers alone
+    /// would sail straight past it. The query terms are deliberately not in
+    /// alphabetical order, so the map that collects them genuinely permutes
+    /// them rather than handing them back in the order they arrived.
+    #[test]
+    fn fuzzy_on_is_inert_when_every_term_is_present() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        // Documents 6 and 7 hold near misses of the query terms and nothing
+        // else. Without the absence trigger the expansion reaches them and they
+        // join the result, so this fixture can tell the two behaviours apart.
+        // A corpus whose terms have no near neighbours cannot.
+        let documents = vec![
+            TextDocumentInput::new(1, "zebra apple mango".to_string()),
+            TextDocumentInput::new(2, "apple banana quartz".to_string()),
+            TextDocumentInput::new(3, "mango quartz zebra banana".to_string()),
+            TextDocumentInput::new(4, "quartz zebra".to_string()),
+            TextDocumentInput::new(5, "banana mango apple quartz zebra".to_string()),
+            TextDocumentInput::new(6, "zebro apyle".to_string()),
+            TextDocumentInput::new(7, "mangi banaka quartv".to_string()),
+        ];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        // Query order is zebra, apple, mango, banana, quartz. Sorted order is
+        // apple, banana, mango, quartz, zebra. Every term is in the index.
+        let query = "zebra apple mango banana quartz";
+
+        let off = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            query,
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            None,
+        )
+        .expect("exact search");
+        let on = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            query,
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), query, 2).as_ref(),
+        )
+        .expect("fuzzy search");
+
+        assert!(!off.is_empty(), "the fixture should return something");
+        assert!(
+            off.iter().all(|hit| hit.entity_id <= 5),
+            "the exact path must not reach the near-miss documents"
+        );
+        // Exact float comparison is deliberate. This is checking that the
+        // summation order of the boolean clauses did not change, not that the
+        // scores are approximately equal, and an epsilon would hide exactly the
+        // reordering it is looking for.
+        assert_eq!(
+            off, on,
+            "fuzzy changed the result for a query the index already satisfies"
+        );
+    }
+
+    /// The point of the feature: a term one edit away is unreachable without it.
+    #[test]
+    fn fuzzy_reaches_a_typo_that_exact_search_cannot() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![TextDocumentInput::new(1, "a helox typo".to_string())];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let exact = search_reader_candidates(&reader, fields, definition.analyzer(), "helix", 10)
+            .expect("exact search");
+        assert!(exact.is_empty(), "exact search must not reach the typo");
+
+        let fuzzy = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helix",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), "helix", 1).as_ref(),
+        )
+        .expect("fuzzy search");
+        assert_eq!(fuzzy.len(), 1);
+        assert_eq!(fuzzy[0].entity_id, 1);
+    }
+
+    /// The property a user actually feels. Someone types a typo, it expands to
+    /// several real words, and the one they meant has to come back first.
+    ///
+    /// BM25 pays for rarity, so left alone the rarest neighbour wins, and a typo
+    /// is usually a typo of a common word. On a large index the junk neighbour
+    /// beats the intended one by roughly its idf ratio, which is the wrong
+    /// answer in exactly the situation the feature exists to serve.
+    ///
+    /// Blending the group's statistics puts every neighbour on the same idf, so
+    /// rarity stops deciding. It does not make the common word win by a margin,
+    /// it stops the rare one from winning on frequency alone, so this asserts
+    /// that rather than a gap.
+    #[test]
+    fn a_rare_neighbour_does_not_outrank_the_common_one() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+
+        // "helox" is absent, so it expands. Both "helix" and "heloz" sit one
+        // edit away from it, but "helix" is a hundred times more common.
+        let mut documents = Vec::new();
+        let mut entity_id = 1u64;
+        for _ in 0..200 {
+            documents.push(TextDocumentInput::new(entity_id, "helix".to_string()));
+            entity_id += 1;
+        }
+        let first_rare_id = entity_id;
+        for _ in 0..2 {
+            documents.push(TextDocumentInput::new(entity_id, "heloz".to_string()));
+            entity_id += 1;
+        }
+
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helox",
+            250,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), "helox", 1).as_ref(),
+        )
+        .expect("fuzzy search");
+
+        let best_common = hits
+            .iter()
+            .filter(|hit| hit.entity_id < first_rare_id)
+            .map(|hit| hit.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let best_rare = hits
+            .iter()
+            .filter(|hit| hit.entity_id >= first_rare_id)
+            .map(|hit| hit.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        assert!(
+            best_common.is_finite() && best_rare.is_finite(),
+            "both neighbours should be reachable from the typo"
+        );
+        assert!(
+            best_common >= best_rare,
+            "the rare neighbour outranked the word the user meant: \
+             common {best_common}, rare {best_rare}"
+        );
+    }
+
+    /// What the distance boost actually buys, and all it buys.
+    ///
+    /// It cannot hold a common present term above a rare expanded one; on a
+    /// skewed index the idf gap is hundreds of times wider than any boost worth
+    /// picking, and BM25 is right that matching a rare term is more informative.
+    /// Lucene accepts the same thing. With document frequency held equal though,
+    /// a term the user actually typed outranks a term that was guessed for them.
+    #[test]
+    fn a_typed_term_outranks_an_equally_common_guessed_one() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+
+        // "quartz" is present and "helox" is absent, and the word "helox"
+        // expands to is exactly as common as "quartz", so only the boost
+        // separates them.
+        let mut documents = Vec::new();
+        let mut entity_id = 1u64;
+        for _ in 0..5 {
+            documents.push(TextDocumentInput::new(entity_id, "quartz".to_string()));
+            entity_id += 1;
+        }
+        let first_guessed_id = entity_id;
+        for _ in 0..5 {
+            documents.push(TextDocumentInput::new(entity_id, "helix".to_string()));
+            entity_id += 1;
+        }
+
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "quartz helox",
+            20,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), "quartz helox", 1).as_ref(),
+        )
+        .expect("fuzzy search");
+
+        let typed = hits
+            .iter()
+            .filter(|hit| hit.entity_id < first_guessed_id)
+            .map(|hit| hit.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let guessed = hits
+            .iter()
+            .filter(|hit| hit.entity_id >= first_guessed_id)
+            .map(|hit| hit.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        assert!(
+            typed.is_finite() && guessed.is_finite(),
+            "both the typed term and the guessed one should be reachable"
+        );
+        assert!(
+            typed > guessed,
+            "a guessed term outranked one the user typed: typed {typed}, guessed {guessed}"
+        );
+    }
+
+    /// The mirror of the ranking tests, and the case the feature exists for.
+    ///
+    /// Damping a rare expansion could be taken too far and quietly stop fuzzy
+    /// retrieval working at all, which every ranking test here would still pass.
+    /// This checks the document is returned and carries a real score.
+    #[test]
+    fn a_typo_still_retrieves_the_correctly_spelled_document() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let mut documents = vec![TextDocumentInput::new(1, "helix".to_string())];
+        for entity_id in 2..=60u64 {
+            documents.push(TextDocumentInput::new(entity_id, "unrelated".to_string()));
+        }
+
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helox",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), "helox", 1).as_ref(),
+        )
+        .expect("fuzzy search");
+
+        assert_eq!(hits.len(), 1, "the typo should reach the document");
+        assert_eq!(hits[0].entity_id, 1);
+        assert!(
+            hits[0].score > 0.0,
+            "the hit came back with no score, so retrieval works but ranking does not: {}",
+            hits[0].score
+        );
+    }
+
+    /// The automaton builder is memoised for distances zero through two, so a
+    /// larger request has to be clamped rather than passed through and rejected.
+    #[test]
+    fn fuzzy_distance_is_clamped_to_what_the_automaton_supports() {
+        let request =
+            TextSearchRequest::new("q", 10, TextSearchScope::Unrestricted).with_fuzzy_distance(9);
+        assert_eq!(request.fuzzy_distance, MAX_FUZZY_DISTANCE);
+
+        let request =
+            TextSearchRequest::new("q", 10, TextSearchScope::Unrestricted).with_fuzzy_distance(1);
+        assert_eq!(request.fuzzy_distance, 1);
+
+        let request = TextSearchRequest::new("q", 10, TextSearchScope::Unrestricted);
+        assert_eq!(
+            request.fuzzy_distance, 0,
+            "callers that do not opt in must stay exact"
+        );
+    }
+
+    /// A short term at a large distance matches most of the dictionary, and the
+    /// matches have nothing to do with what was typed. Shorter terms get less
+    /// latitude, so this cannot be used to make the server do arbitrary work.
+    #[test]
+    fn short_terms_get_less_fuzzy_latitude() {
+        assert_eq!(
+            effective_distance("ab", 2),
+            0,
+            "two characters is too short"
+        );
+        assert_eq!(effective_distance("abc", 2), 1);
+        assert_eq!(effective_distance("abcde", 2), 1);
+        assert_eq!(effective_distance("abcdef", 2), 2);
+        assert_eq!(
+            effective_distance("abcdef", 1),
+            1,
+            "the caller's request is still an upper bound"
+        );
+    }
+
+    /// Every expanded term becomes another clause in the boolean query, so the
+    /// expansion has to be bounded no matter how much of the dictionary the
+    /// automaton can reach. The earlier tests all use vocabularies too small for
+    /// this to show up.
+    #[test]
+    fn expansion_is_capped_on_a_large_vocabulary() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+
+        // 676 distinct terms, every one of them within two edits of "helixq".
+        let mut documents = Vec::new();
+        let mut entity_id = 1u64;
+        for first in b'a'..=b'z' {
+            for second in b'a'..=b'z' {
+                documents.push(TextDocumentInput::new(
+                    entity_id,
+                    format!("he{}{}xq", first as char, second as char),
+                ));
+                entity_id += 1;
+            }
+        }
+        assert_eq!(documents.len(), 676);
+
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+        let searcher = reader.searcher();
+
+        let expanded =
+            expand_term(&searcher, fields.body, "helixq", 2).expect("expansion succeeds");
+        assert!(
+            expanded.len() <= MAX_EXPANDED_TERMS,
+            "expansion returned {} terms, cap is {}",
+            expanded.len(),
+            MAX_EXPANDED_TERMS
+        );
+
+        // The cap must keep the closest matches rather than an arbitrary slice.
+        let worst = expanded.values().copied().max().unwrap_or(0);
+        assert!(
+            worst <= 2,
+            "kept a term further than the requested distance: {worst}"
+        );
+
+        // And the whole search still works rather than falling over.
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helixq",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), "helixq", 2).as_ref(),
+        )
+        .expect("bounded fuzzy search");
+        assert!(!hits.is_empty());
+        assert!(hits.len() <= 10);
+    }
+
+    /// Term dictionaries are per segment, so the expansion sweeps every segment
+    /// and unions what it finds. `populate_index` commits once and therefore
+    /// only ever produces a single segment, so nothing else here exercises that
+    /// union. A real index has many: the prefilter benchmark alone uses ten.
+    #[test]
+    fn expansion_unions_matches_across_segments() {
+        use tantivy::TantivyDocument;
+
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+
+        // One commit per document, so each lands in its own segment.
+        let mut writer = index.writer(15_000_000).expect("writer");
+        writer.set_merge_policy(Box::new(NoMergePolicy));
+        for (entity_id, text) in [(1u64, "helixa"), (2, "helixb"), (3, "helixc")] {
+            let mut document = TantivyDocument::default();
+            document.add_u64(fields.entity_id, entity_id);
+            document.add_u64(fields.logical_version, 0);
+            document.add_text(fields.body, text);
+            writer.add_document(document).expect("add document");
+            writer.commit().expect("commit");
+        }
+        drop(writer);
+
+        let reader = build_reader(&index).expect("reader");
+        let searcher = reader.searcher();
+        assert!(
+            searcher.segment_readers().len() > 1,
+            "this test is pointless without several segments, got {}",
+            searcher.segment_readers().len()
+        );
+
+        let expanded =
+            expand_term(&searcher, fields.body, "helixq", 2).expect("expansion succeeds");
+        for term in ["helixa", "helixb", "helixc"] {
+            assert!(
+                expanded.contains_key(term),
+                "{term} lives in its own segment and was missed, got {expanded:?}"
+            );
+        }
+
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            "helixq",
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), "helixq", 2).as_ref(),
+        )
+        .expect("fuzzy search across segments");
+        let mut found: Vec<u64> = hits.iter().map(|hit| hit.entity_id).collect();
+        found.sort_unstable();
+        assert_eq!(found, vec![1, 2, 3], "every segment should contribute");
+    }
+
+    /// A term too short for any latitude skips the automaton entirely and
+    /// resolves to itself, so opting in cannot make a two character query
+    /// sweep the dictionary.
+    #[test]
+    fn a_too_short_term_expands_only_to_itself() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![
+            TextDocumentInput::new(1, "an ax by cd".to_string()),
+            TextDocumentInput::new(2, "ab cd ef".to_string()),
+        ];
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+        let searcher = reader.searcher();
+
+        let expanded = expand_term(&searcher, fields.body, "ab", 2).expect("expansion succeeds");
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded.get("ab").copied(), Some(0));
+    }
+
+    /// A boost of one leaves the exact hit's BM25 score untouched, and each
+    /// further edit halves it. Arithmetic only: the test below is the one that
+    /// says whether any of it reaches a query.
+    #[test]
+    fn fuzzy_boost_decays_with_distance() {
+        assert_eq!(fuzzy_boost(0), 1.0);
+        assert_eq!(fuzzy_boost(1), 0.5);
+        assert!(fuzzy_boost(2) < fuzzy_boost(1));
+    }
+
+    /// Two absent query words, reached at different distances, must not weigh
+    /// the same.
+    ///
+    /// Both documents hold one term of equal length and equal document
+    /// frequency, so BM25 scores them identically and every input to the score
+    /// except the boost is matched. "helixdc" is one edit from an indexed term
+    /// and finds it on the first tier. "postgrxx" has nothing one edit away, so
+    /// it widens and matches at two. If the boost stopped reaching the clauses
+    /// the two documents would score exactly the same and the ordering would
+    /// fall to entity id, which would still put them in this order. The
+    /// assertion is therefore on the scores rather than the order.
+    #[test]
+    fn a_word_reached_at_two_edits_weighs_less_than_one_reached_at_one() {
+        let definition =
+            TextIndexDefinition::new_node("Doc", "body").expect("test text definition is valid");
+        let documents = vec![
+            TextDocumentInput::new(1, "helixdb".to_string()),
+            TextDocumentInput::new(2, "postgres".to_string()),
+        ];
+
+        let (index, fields) = create_ram_index(&definition).expect("ram index");
+        populate_index(&index, fields, &documents).expect("populate");
+        let reader = build_reader(&index).expect("reader");
+
+        let query = "helixdc postgrxx";
+        let hits = search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            query,
+            10,
+            None,
+            &TextSearchScope::Unrestricted,
+            resolved_clauses(&reader, fields, definition.analyzer(), query, 2).as_ref(),
+        )
+        .expect("fuzzy search");
+
+        let score_of = |entity_id: u64| {
+            hits.iter()
+                .find(|hit| hit.entity_id == entity_id)
+                .unwrap_or_else(|| panic!("entity {entity_id} is missing from {hits:?}"))
+                .score
+        };
+
+        assert!(
+            score_of(1) > score_of(2),
+            "one edit should outweigh two: {} against {}",
+            score_of(1),
+            score_of(2)
+        );
     }
 
     #[test]

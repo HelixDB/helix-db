@@ -13,6 +13,7 @@ mod tenant;
 
 use super::super::*;
 
+pub(in crate::execution::interpreter) use self::dispatch::TextSearchAccess;
 #[cfg(any(test, feature = "production-coverage"))]
 pub(super) use self::input::{db_value_to_query_vector, validate_query_vector};
 #[cfg(any(test, feature = "production-coverage"))]

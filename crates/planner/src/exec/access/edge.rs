@@ -82,6 +82,8 @@ pub enum ExecEdgeAccessPlan {
         query_text: ir::TextQueryInputPlan,
         /// Result count.
         k: ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
 }
 

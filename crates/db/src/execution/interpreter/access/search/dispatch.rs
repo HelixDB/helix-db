@@ -47,12 +47,34 @@ impl<'a> RestrictedTextSearchRead<'a> {
     }
 }
 
-struct TextSearchAccess<'a> {
+pub(in crate::execution::interpreter) struct TextSearchAccess<'a> {
     element_type: TextElementType,
     label: &'a ir::NonEmptyString,
     property: &'a ir::NonEmptyString,
     index: &'a ir::SearchIndexPlan,
     query_text: &'a ir::TextQueryInputPlan,
+    /// Maximum edit distance for keyword matching. Zero is exact.
+    fuzzy_distance: u8,
+}
+
+impl<'a> TextSearchAccess<'a> {
+    pub(in crate::execution::interpreter) const fn new(
+        element_type: TextElementType,
+        label: &'a ir::NonEmptyString,
+        property: &'a ir::NonEmptyString,
+        index: &'a ir::SearchIndexPlan,
+        query_text: &'a ir::TextQueryInputPlan,
+        fuzzy_distance: u8,
+    ) -> Self {
+        Self {
+            element_type,
+            label,
+            property,
+            index,
+            query_text,
+            fuzzy_distance,
+        }
+    }
 }
 
 impl<'db> ExecutionContext<'db> {
@@ -216,40 +238,18 @@ impl<'db> ExecutionContext<'db> {
 
     pub(in crate::execution::interpreter) async fn text_search_hits(
         &self,
-        element_type: TextElementType,
-        label: &ir::NonEmptyString,
-        property: &ir::NonEmptyString,
-        index: &ir::SearchIndexPlan,
-        query_text: &ir::TextQueryInputPlan,
+        access: TextSearchAccess<'_>,
         limit: SearchReadLimit<'_>,
     ) -> Result<Vec<crate::search::text::TextSearchHit>> {
-        let access = TextSearchAccess {
-            element_type,
-            label,
-            property,
-            index,
-            query_text,
-        };
         self.text_search_hits_with_scope(&access, limit, TextSearchScope::Unrestricted)
             .await
     }
 
     pub(in crate::execution::interpreter::access) async fn restricted_text_search_hits(
         &self,
-        element_type: TextElementType,
-        label: &ir::NonEmptyString,
-        property: &ir::NonEmptyString,
-        index: &ir::SearchIndexPlan,
-        query_text: &ir::TextQueryInputPlan,
+        access: TextSearchAccess<'_>,
         read: RestrictedTextSearchRead<'_>,
     ) -> Result<Vec<crate::search::text::TextSearchHit>> {
-        let access = TextSearchAccess {
-            element_type,
-            label,
-            property,
-            index,
-            query_text,
-        };
         self.text_search_hits_with_scope(
             &access,
             read.limit,
@@ -280,7 +280,7 @@ impl<'db> ExecutionContext<'db> {
         let Some(manifest) = self.load_text_manifest_root(generation.as_ref()).await? else {
             return Ok(Vec::new());
         };
-        self.search_text_manifest_with_scope(&manifest, &query, k, scope)
+        self.search_text_manifest_with_scope(&manifest, &query, k, scope, access.fuzzy_distance)
             .await
     }
 }

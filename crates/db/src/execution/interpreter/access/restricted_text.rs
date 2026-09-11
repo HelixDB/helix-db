@@ -6,7 +6,7 @@ use std::sync::Arc;
 use helix_planner::ir;
 
 use super::super::{ElementRef, ExecutionContext, ExecutionRow, ExecutionValue};
-use super::search::{RestrictedTextSearchRead, SearchReadLimit};
+use super::search::{RestrictedTextSearchRead, SearchReadLimit, TextSearchAccess};
 use crate::config::TextElementType;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::error::{HelixDbError, Result};
@@ -92,12 +92,13 @@ impl<'db> ExecutionContext<'db> {
             return Ok(ExecutionValue::Stream(Vec::new()));
         }
 
-        let (element_type, label, property, index, query_text, k) = match plan {
+        let (element_type, label, property, index, query_text, k, fuzzy_distance) = match plan {
             ir::RestrictedTextSearchPlan::Nodes {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => (
                 TextElementType::Node,
                 &key.label,
@@ -105,12 +106,14 @@ impl<'db> ExecutionContext<'db> {
                 index,
                 query_text,
                 k,
+                *fuzzy_distance,
             ),
             ir::RestrictedTextSearchPlan::Edges {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => (
                 TextElementType::Edge,
                 &key.label,
@@ -118,6 +121,7 @@ impl<'db> ExecutionContext<'db> {
                 index,
                 query_text,
                 k,
+                *fuzzy_distance,
             ),
         };
 
@@ -128,11 +132,14 @@ impl<'db> ExecutionContext<'db> {
         let candidates = Arc::new(candidates);
         let results = self
             .restricted_text_search_hits(
-                element_type,
-                label,
-                property,
-                index,
-                query_text,
+                TextSearchAccess::new(
+                    element_type,
+                    label,
+                    property,
+                    index,
+                    query_text,
+                    fuzzy_distance,
+                ),
                 RestrictedTextSearchRead::new(SearchReadLimit::new(k, None), candidates),
             )
             .await?;

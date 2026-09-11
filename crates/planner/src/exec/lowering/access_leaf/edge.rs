@@ -36,6 +36,8 @@ pub(in crate::exec) enum SimpleEdgeAccessLeaf<'a> {
         index: &'a ir::SearchIndexPlan,
         query_text: &'a ir::TextQueryInputPlan,
         k: &'a ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
 }
 
@@ -79,11 +81,13 @@ impl<'a> TryFrom<&'a ir::EdgeAccessPlan> for SimpleEdgeAccessLeaf<'a> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => Ok(Self::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance: *fuzzy_distance,
             }),
             ir::EdgeAccessPlan::PointIds { .. }
             | ir::EdgeAccessPlan::Intersect(_)
@@ -140,11 +144,13 @@ pub(in crate::exec) fn edge_exec_access(plan: SimpleEdgeAccessLeaf<'_>) -> ExecE
             index,
             query_text,
             k,
+            fuzzy_distance,
         } => ExecEdgeAccessPlan::TextSearch {
             key: key.clone(),
             index: index.clone(),
             query_text: query_text.clone(),
             k: k.clone(),
+            fuzzy_distance,
         },
     }
 }

@@ -353,6 +353,7 @@ async fn public_shared_runtime_keeps_search_families_available() {
                 ir::NonEmptyString::new("needle").expect("text query is non-empty"),
             ),
             k: k(),
+            fuzzy_distance: 0,
         },
     ));
     let error = db
@@ -370,6 +371,7 @@ async fn public_shared_runtime_keeps_search_families_available() {
                 ir::NonEmptyString::new("needle").expect("text query is non-empty"),
             ),
             k: k(),
+            fuzzy_distance: 0,
         },
     ));
     let error = db

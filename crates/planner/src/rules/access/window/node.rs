@@ -63,11 +63,13 @@ impl shared::AccessWindowFamily for NodeWindowFamily {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => Some(shared::AccessSearchParts::Text {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance: *fuzzy_distance,
             }),
             _ => None,
         }
@@ -92,12 +94,14 @@ impl shared::AccessWindowFamily for NodeWindowFamily {
         index: ir::SearchIndexPlan,
         query_text: ir::TextQueryInputPlan,
         k: ir::SearchLimitPlan,
+        fuzzy_distance: u8,
     ) -> Self::Source {
         ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::TextSearch {
             key,
             index,
             query_text,
             k,
+            fuzzy_distance,
         })
     }
 }

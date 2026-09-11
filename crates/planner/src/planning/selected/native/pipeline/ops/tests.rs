@@ -291,6 +291,7 @@ fn traversal_scoped_text_search_preserves_input_and_resolves_the_index() {
         tenant_value: None,
         query_text: PropertyInput::from("needle"),
         k: StreamBound::Literal(10),
+        fuzzy_distance: 0,
     };
 
     let parsed = search::pipeline_op_from_ast(&ctx, &root).unwrap();
@@ -328,6 +329,7 @@ fn traversal_scoped_edge_text_search_uses_the_edge_plan_variant() {
         tenant_value: None,
         query_text: PropertyInput::from("needle"),
         k: StreamBound::Literal(3),
+        fuzzy_distance: 0,
     };
 
     let parsed = search::pipeline_op_from_ast(&ctx, &root).unwrap();

@@ -11,7 +11,7 @@ mod rows;
 mod search;
 mod secondary_set;
 
-pub(in crate::execution::interpreter) use search::SearchReadLimit;
+pub(in crate::execution::interpreter) use search::{SearchReadLimit, TextSearchAccess};
 
 #[cfg(any(test, feature = "production-coverage"))]
 #[cfg_attr(

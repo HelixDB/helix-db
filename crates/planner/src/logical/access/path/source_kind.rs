@@ -289,6 +289,7 @@ mod tests {
                     index: search_plan(),
                     query_text: ir::TextQueryInputPlan::new(PropertyInput::from("needle")).unwrap(),
                     k: ir::SearchLimitPlan::Literal(NonZeroUsize::new(1).unwrap()),
+                    fuzzy_distance: 0,
                 },
                 AccessSourceKind::Search,
             ),

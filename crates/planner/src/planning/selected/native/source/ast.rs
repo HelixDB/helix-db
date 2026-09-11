@@ -31,6 +31,7 @@ pub(in crate::planning::selected::native) enum NativeSourceAst<'a> {
         tenant_value: Option<&'a PropertyInput>,
         query_text: &'a PropertyInput,
         k: &'a StreamBound,
+        fuzzy_distance: u8,
     },
     /// Edge vector-search source.
     EdgeVectorSearch {
@@ -47,6 +48,7 @@ pub(in crate::planning::selected::native) enum NativeSourceAst<'a> {
         tenant_value: Option<&'a PropertyInput>,
         query_text: &'a PropertyInput,
         k: &'a StreamBound,
+        fuzzy_distance: u8,
     },
 }
 
@@ -92,12 +94,14 @@ impl<'a> NativeSourceAst<'a> {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             } => NativeSourceAstMatch::Source(Self::NodeTextSearch {
                 label,
                 property,
                 tenant_value: tenant_value.as_ref(),
                 query_text,
                 k,
+                fuzzy_distance: *fuzzy_distance,
             }),
             AstNode::VectorSearchEdges {
                 label,
@@ -118,12 +122,14 @@ impl<'a> NativeSourceAst<'a> {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             } => NativeSourceAstMatch::Source(Self::EdgeTextSearch {
                 label,
                 property,
                 tenant_value: tenant_value.as_ref(),
                 query_text,
                 k,
+                fuzzy_distance: *fuzzy_distance,
             }),
             _ => NativeSourceAstMatch::NotSource,
         }
