@@ -3934,3 +3934,82 @@ async fn a_fuzzy_query_reaches_across_every_split() {
         .await
         .expect("multi split fixture closes");
 }
+
+#[tokio::test]
+async fn a_typed_word_outweighs_a_guessed_word_of_the_same_frequency() {
+    const EACH: usize = 20;
+    let (db, Some(first_typed), _) =
+        open_current_v2_text_fixture("fts-fuzzy-typed-over-guessed", Some("alpha")).await
+    else {
+        panic!("the fixture inserts the first typed-word document")
+    };
+
+    let mut typed = vec![first_typed];
+    for _ in 1..EACH {
+        typed.push(insert_node(&db, "alpha").await);
+    }
+    let mut guessed = Vec::new();
+    for _ in 0..EACH {
+        guessed.push(insert_node(&db, "bravo").await);
+    }
+
+    // alpha is spelled right, bravx is one edit from bravo, and both indexed
+    // words sit in the same number of documents. The guessed word carries the
+    // distance boost, so a typed-word document has to come first.
+    let response = db
+        .query(fuzzy_node_text_ids_request("alpha bravx", 1))
+        .await
+        .expect("a mixed exact and fuzzy query runs");
+    let hits = query_node_ids(&response, "ids");
+
+    assert!(
+        hits.iter().any(|id| guessed.contains(id)),
+        "the guessed word has to be reachable for this to test anything: {hits:?}"
+    );
+    assert!(
+        typed.contains(&hits[0]),
+        "a guessed word outranked a correctly typed word of the same frequency: {hits:?}"
+    );
+
+    db.close().await.expect("the weighting fixture closes");
+}
+
+#[tokio::test]
+async fn a_common_neighbour_outranks_a_rare_one_on_the_production_path() {
+    const COMMON: usize = 20;
+    const RARE: usize = 2;
+    let (db, Some(first_common), _) =
+        open_current_v2_text_fixture("fts-fuzzy-common-over-rare", Some("helix helix")).await
+    else {
+        panic!("the fixture inserts the first common-word document")
+    };
+    let mut common = vec![first_common];
+    for _ in 1..COMMON {
+        common.push(insert_node(&db, "helix helix").await);
+    }
+    let mut rare = Vec::new();
+    for _ in 0..RARE {
+        rare.push(insert_node(&db, "heloz").await);
+    }
+
+    // helox is absent and one edit from both. heloz is ten times rarer, so BM25
+    // left to itself ranks it first. Blending puts both on the common word's
+    // statistics, and the common documents hold their word twice, so they come
+    // out ahead on term frequency rather than on an entity id tiebreak.
+    let response = db
+        .query(fuzzy_node_text_ids_request("helox", 1))
+        .await
+        .expect("a fuzzy search with two neighbours runs");
+    let hits = query_node_ids(&response, "ids");
+
+    assert!(
+        hits.iter().any(|id| rare.contains(id)),
+        "both neighbours have to be reachable for this to test anything: {hits:?}"
+    );
+    assert!(
+        common.contains(&hits[0]),
+        "a rare neighbour outranked the common one on the production path: {hits:?}"
+    );
+
+    db.close().await.expect("the neighbour fixture closes");
+}

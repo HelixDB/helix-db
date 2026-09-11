@@ -125,6 +125,10 @@ impl OpenedTextSplit {
         warm_searcher(&self.reader, self.fields, analyzer, query, fuzzy_distance).await
     }
 
+    pub(crate) const fn fields(&self) -> TextSchemaFields {
+        self.fields
+    }
+
     pub(crate) fn total_docs(&self) -> usize {
         self.reader.searcher().num_docs() as usize
     }

@@ -95,6 +95,11 @@ pub(crate) struct ValidatedActiveTextManifestRoot {
 }
 
 impl ValidatedActiveTextManifestRoot {
+    /// Returns the data scope the index lives in.
+    pub(crate) const fn scope(&self) -> DataScope {
+        self.scope
+    }
+
     /// Returns the stable logical index owner.
     pub(crate) const fn index_id(&self) -> IndexId {
         self.key.index_id

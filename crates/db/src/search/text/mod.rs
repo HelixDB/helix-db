@@ -24,7 +24,7 @@ use slatedb::object_store::{
 use tantivy::collector::{FilterCollector, TopDocs};
 use tantivy::directory::RamDirectory;
 use tantivy::merge_policy::NoMergePolicy;
-use tantivy::query::{BooleanQuery, BoostQuery, Occur, TermQuery};
+use tantivy::query::{Bm25StatisticsProvider, BooleanQuery, BoostQuery, Occur, TermQuery};
 use tantivy::schema::{IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions};
 use tantivy::tokenizer::{
     Language, LowerCaser, PreTokenizedString, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
@@ -395,12 +395,20 @@ fn bm25_idf(doc_freq: u64, doc_count: u64) -> f32 {
 /// When every neighbour is rare the reference is itself rare, the ratios sit
 /// near one, and nothing is damped. That is correct: there is no common word to
 /// prefer.
+///
+/// The statistics must be the provider the search is scored with, or the ratio
+/// cancels against numbers the query never uses. Production scores against
+/// corpus statistics, so a search resolved across splits passes those here.
 fn blended_boosts(
-    searcher: &tantivy::Searcher,
+    statistics: &dyn Bm25StatisticsProvider,
     field: tantivy::schema::Field,
     expanded: &BTreeMap<String, u8>,
 ) -> Result<BTreeMap<String, f32>, HelixDbError> {
-    let doc_count = searcher.num_docs();
+    let doc_count = statistics.total_num_docs().map_err(|err| {
+        HelixDbError::InvariantViolation(format!(
+            "text document count lookup failed during fuzzy expansion: {err}"
+        ))
+    })?;
     if doc_count == 0 {
         return Ok(expanded
             .iter()
@@ -410,14 +418,7 @@ fn blended_boosts(
 
     let mut frequencies: BTreeMap<&str, u64> = BTreeMap::new();
     for term in expanded.keys() {
-        let doc_freq = searcher
-            .doc_freq(&Term::from_field_text(field, term))
-            .map_err(|err| {
-                HelixDbError::InvariantViolation(format!(
-                    "text document frequency lookup failed during fuzzy expansion: {err}"
-                ))
-            })?;
-        frequencies.insert(term.as_str(), doc_freq);
+        frequencies.insert(term.as_str(), provider_doc_freq(statistics, field, term)?);
     }
 
     let reference_idf = bm25_idf(frequencies.values().copied().max().unwrap_or(0), doc_count);
@@ -434,6 +435,22 @@ fn blended_boosts(
             (term.clone(), fuzzy_boost(*edits) * blend)
         })
         .collect())
+}
+
+/// Document frequency of one term from whichever statistics the search is
+/// scored with, so absence and blending are judged on the numbers BM25 uses.
+fn provider_doc_freq(
+    statistics: &dyn Bm25StatisticsProvider,
+    field: tantivy::schema::Field,
+    term: &str,
+) -> Result<u64, HelixDbError> {
+    statistics
+        .doc_freq(&Term::from_field_text(field, term))
+        .map_err(|err| {
+            HelixDbError::InvariantViolation(format!(
+                "text document frequency lookup failed: {err}"
+            ))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -798,9 +815,10 @@ async fn search_manifest_with_state_source(
     struct SplitSearchState {
         split_ref: TextSplitRef,
         reader: Arc<SplitSearchReader>,
-        /// Resolved once while this split was warmed, because that is where the
-        /// dictionary walk had to happen anyway. The loop below can search a
-        /// split several times, and none of those rounds should walk it again.
+        /// Resolved when this split was warmed, and again across every split
+        /// once corpus statistics for what they reached are loaded. The loop
+        /// below can search a split several times, and none of those rounds
+        /// should walk it or resolve it again.
         fuzzy: Option<Arc<FuzzyClauses>>,
         total_docs: usize,
         candidate_limit: usize,
@@ -832,6 +850,52 @@ async fn search_manifest_with_state_source(
         .collect::<Vec<_>>()
         .await;
     let mut splits = opened.into_iter().collect::<Result<Vec<_>, _>>()?;
+
+    // Production scores against corpus statistics, and those only know the
+    // typed query terms, so every term a dictionary reached would score as if
+    // no document held it and outrank the words that were actually typed. Load
+    // the reached terms' corpus frequencies, then resolve once so every split
+    // scores the same term with the same boost against the same numbers. Boxed
+    // so an exact query's search future carries none of it.
+    if fuzzy_distance > 0
+        && let (Some(corpus), TextLiveStateSource::V2(root)) = (statistics, state_source)
+    {
+        Box::pin(async {
+            let mut merged = FuzzyExpansion::default();
+            for split in &splits {
+                if let Some(fuzzy) = &split.fuzzy {
+                    merged.merge(fuzzy.reached.clone());
+                }
+            }
+            merged.settle();
+            let unknown = merged
+                .absent_candidates(corpus)
+                .filter(|candidate| corpus.document_frequency(candidate.as_bytes()).is_none())
+                .map(|candidate| Bytes::copy_from_slice(candidate.as_bytes()))
+                .collect::<BTreeSet<_>>();
+            let reached = crate::index_lifecycle::text::statistics::load_term_frequencies(
+                reader,
+                root.scope(),
+                root.index_id(),
+                root.generation(),
+                root.partition(),
+                corpus.total_document_count(),
+                unknown,
+            )
+            .await?;
+            let extended = corpus.with_frequencies(reached);
+            let Some(field) = splits.first().map(|split| split.reader.fields().body) else {
+                return Ok(());
+            };
+            let resolved = Arc::new(resolve_across_splits(&merged, field, extended)?);
+            for split in &mut splits {
+                split.fuzzy = Some(Arc::clone(&resolved));
+            }
+            Ok::<_, HelixDbError>(())
+        })
+        .await?;
+    }
+
     let mut live_states = BTreeMap::new();
     let mut hits_by_entity = BTreeMap::new();
     loop {
@@ -872,7 +936,12 @@ async fn search_manifest_with_state_source(
         let searched = futures::stream::iter(selected)
             .map(|(index, split_reader, limit, fuzzy)| {
                 let query = query.to_owned();
-                let statistics = statistics.cloned();
+                // Clauses resolved across splits carry the corpus statistics
+                // they were resolved against, extended with the reached terms.
+                let statistics = fuzzy
+                    .as_deref()
+                    .and_then(|fuzzy| fuzzy.statistics.clone())
+                    .or_else(|| statistics.cloned());
                 let scope = scope.clone();
                 async move {
                     tokio::task::spawn_blocking(move || {
@@ -1012,6 +1081,13 @@ impl SplitSearchReader {
                 register_analyzers(index, analyzer);
                 warm_searcher(reader, *fields, analyzer, query, fuzzy_distance).await
             }
+        }
+    }
+
+    fn fields(&self) -> TextSchemaFields {
+        match self {
+            Self::Cached(split) => split.fields(),
+            Self::Direct { fields, .. } => *fields,
         }
     }
 
@@ -2113,19 +2189,89 @@ pub(crate) fn search_reader_candidates(
 /// it on its reference's statistics.
 ///
 /// Warmup has to know this set to make the right postings resident, and the
-/// clause builder has to know it to build the query. Deriving it twice meant an
-/// automaton walk per split on every refinement round, and worse, a standing
-/// requirement that two pieces of code keep agreeing. Anything warmup missed
-/// faulted later on a directory that only serves async reads.
+/// clause builder has to know it to build the query, so it is worked out once
+/// and handed down rather than derived twice. A search with corpus statistics
+/// then resolves every split's reach together, and carries the statistics it
+/// resolved against so the search scores with the same numbers.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FuzzyClauses {
     boosts: BTreeMap<String, f32>,
+    /// What this split's dictionary reached, kept so a search with corpus
+    /// statistics can resolve every split at once.
+    reached: FuzzyExpansion,
+    /// Corpus statistics extended with the reached terms. Present only once
+    /// the clauses have been resolved across splits.
+    statistics: Option<crate::index_lifecycle::text::statistics::TextBm25Statistics>,
 }
 
 impl FuzzyClauses {
     fn is_empty(&self) -> bool {
         self.boosts.is_empty()
     }
+}
+
+/// The analysed query terms, and for each one a split's dictionary lacks, the
+/// indexed words within reach with the edits that found each.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FuzzyExpansion {
+    terms: Vec<String>,
+    reached: BTreeMap<String, BTreeMap<String, u8>>,
+}
+
+impl FuzzyExpansion {
+    /// Fold in another split's reach for the same query.
+    fn merge(&mut self, other: Self) {
+        if self.terms.is_empty() {
+            self.terms = other.terms;
+        }
+        for (term, group) in other.reached {
+            let mine = self.reached.entry(term).or_default();
+            for (candidate, edits) in group {
+                mine.entry(candidate)
+                    .and_modify(|best| *best = (*best).min(edits))
+                    .or_insert(edits);
+            }
+        }
+    }
+
+    /// Reduce a union of splits to what one index holding the whole corpus
+    /// would have kept: only the closest tier any split reached, and at most
+    /// [`MAX_EXPANDED_TERMS`] of it, ties broken on the term the way a single
+    /// split breaks them.
+    fn settle(&mut self) {
+        for group in self.reached.values_mut() {
+            let Some(closest) = group.values().copied().min() else {
+                continue;
+            };
+            group.retain(|_, edits| *edits == closest);
+            while group.len() > MAX_EXPANDED_TERMS {
+                group.pop_last();
+            }
+        }
+    }
+
+    /// Every word reached for a query term the corpus does not have.
+    fn absent_candidates<'a>(
+        &'a self,
+        corpus: &'a crate::index_lifecycle::text::statistics::TextBm25Statistics,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.terms
+            .iter()
+            .filter(move |term| corpus.document_frequency(term.as_bytes()).unwrap_or(0) == 0)
+            .filter_map(move |term| self.reached.get(term))
+            .flat_map(|group| group.keys().map(String::as_str))
+    }
+}
+
+fn keep_strongest(boosts: &mut BTreeMap<String, f32>, term: String, boost: f32) {
+    boosts
+        .entry(term)
+        .and_modify(|best| {
+            if boost > *best {
+                *best = boost;
+            }
+        })
+        .or_insert(boost);
 }
 
 /// Work out what the query resolves to against one searcher's dictionary.
@@ -2144,6 +2290,10 @@ impl FuzzyClauses {
 /// Two query terms can also reach the same indexed term. Keep the stronger
 /// boost rather than adding the clause twice, which would count one document's
 /// match more than once.
+///
+/// The boosts here are against this split's own counts, which is what a search
+/// without corpus statistics scores with. A search with them re-resolves the
+/// reach across every split in [`resolve_across_splits`].
 fn resolve_fuzzy_clauses(
     searcher: &tantivy::Searcher,
     field: tantivy::schema::Field,
@@ -2151,31 +2301,55 @@ fn resolve_fuzzy_clauses(
     fuzzy_distance: u8,
 ) -> Result<FuzzyClauses, HelixDbError> {
     let mut boosts: BTreeMap<String, f32> = BTreeMap::new();
+    let mut reached = BTreeMap::new();
     for term in terms {
-        let doc_freq = searcher
-            .doc_freq(&Term::from_field_text(field, term))
-            .map_err(|err| {
-                HelixDbError::InvariantViolation(format!(
-                    "text document frequency lookup failed: {err}"
-                ))
-            })?;
-        if doc_freq > 0 {
-            boosts.insert(term.clone(), 1.0);
+        if provider_doc_freq(searcher, field, term)? > 0 {
+            keep_strongest(&mut boosts, term.clone(), 1.0);
             continue;
         }
         let group = expand_term(searcher, field, term, fuzzy_distance)?;
         for (candidate, boost) in blended_boosts(searcher, field, &group)? {
-            boosts
-                .entry(candidate)
-                .and_modify(|best| {
-                    if boost > *best {
-                        *best = boost;
-                    }
-                })
-                .or_insert(boost);
+            keep_strongest(&mut boosts, candidate, boost);
+        }
+        reached.insert(term.clone(), group);
+    }
+    Ok(FuzzyClauses {
+        boosts,
+        reached: FuzzyExpansion {
+            terms: terms.to_vec(),
+            reached,
+        },
+        statistics: None,
+    })
+}
+
+/// Resolve every split's reach at once against corpus statistics that know the
+/// reached terms. A term then scores the same wherever it lives, and a guessed
+/// word is weighed on how common it really is rather than on a count that was
+/// never loaded for it.
+fn resolve_across_splits(
+    expansion: &FuzzyExpansion,
+    field: tantivy::schema::Field,
+    corpus: crate::index_lifecycle::text::statistics::TextBm25Statistics,
+) -> Result<FuzzyClauses, HelixDbError> {
+    let mut boosts: BTreeMap<String, f32> = BTreeMap::new();
+    for term in &expansion.terms {
+        if provider_doc_freq(&corpus, field, term)? > 0 {
+            keep_strongest(&mut boosts, term.clone(), 1.0);
+            continue;
+        }
+        let Some(group) = expansion.reached.get(term) else {
+            continue;
+        };
+        for (candidate, boost) in blended_boosts(&corpus, field, group)? {
+            keep_strongest(&mut boosts, candidate, boost);
         }
     }
-    Ok(FuzzyClauses { boosts })
+    Ok(FuzzyClauses {
+        boosts,
+        reached: FuzzyExpansion::default(),
+        statistics: Some(corpus),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
