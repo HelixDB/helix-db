@@ -1762,7 +1762,23 @@ pub(crate) async fn warm_searcher(
     query: &str,
     fuzzy_distance: u8,
 ) -> Result<Option<FuzzyClauses>, HelixDbError> {
-    let mut warmup_info = query_warmup_info(fields, analyzer, query, fuzzy_distance);
+    // Branch before anything is awaited. The search pipeline heap allocates one
+    // warm future per split, and a future is as large as the most it ever holds
+    // across an await. So the fuzzy path sits behind a box, and the exact path
+    // below keeps nothing alive past its one await.
+    if fuzzy_distance > 0 {
+        return Box::pin(warm_fuzzy_searcher(
+            reader,
+            fields,
+            analyzer,
+            query,
+            fuzzy_distance,
+        ))
+        .await
+        .map(Some);
+    }
+
+    let mut warmup_info = query_warmup_info(fields, analyzer, query, 0);
     if warmup_info.terms_grouped_by_field.is_empty()
         && warmup_info.fast_fields.is_empty()
         && !warmup_info.field_norms
@@ -1775,19 +1791,31 @@ pub(crate) async fn warm_searcher(
     warmup_info.merge(collector_warmup_info());
     warmup_info.simplify();
     execute_warmup(reader, warmup_info).await?;
+    Ok(None)
+}
 
-    if fuzzy_distance == 0 {
-        return Ok(None);
-    }
+/// Warmup for a query with edit latitude, in two phases. The automaton walks
+/// the term dictionary, so the first phase makes that resident alongside what
+/// an exact query needs. Only then can it say which terms the query really
+/// reaches, and the second phase warms their postings rather than the whole
+/// inverted index for the field.
+async fn warm_fuzzy_searcher(
+    reader: &IndexReader,
+    fields: TextSchemaFields,
+    analyzer: TextAnalyzerKind,
+    query: &str,
+    fuzzy_distance: u8,
+) -> Result<FuzzyClauses, HelixDbError> {
+    let mut warmup_info = query_warmup_info(fields, analyzer, query, fuzzy_distance);
+    warmup_info.merge(collector_warmup_info());
+    warmup_info.simplify();
+    execute_warmup(reader, warmup_info).await?;
 
-    // The dictionary is resident now, so the automaton can say which terms this
-    // query really reaches. Their postings are what has to be warmed, rather
-    // than the whole inverted index for the field.
     let searcher = reader.searcher();
     let terms = analyze_query_terms(analyzer, query);
     let resolved = resolve_fuzzy_clauses(&searcher, fields.body, &terms, fuzzy_distance)?;
     if resolved.is_empty() {
-        return Ok(Some(resolved));
+        return Ok(resolved);
     }
 
     let mut postings = WarmupInfo::default();
@@ -1802,7 +1830,7 @@ pub(crate) async fn warm_searcher(
     postings.simplify();
     execute_warmup(reader, postings).await?;
 
-    Ok(Some(resolved))
+    Ok(resolved)
 }
 
 fn query_warmup_info(
