@@ -5,6 +5,7 @@ use crate::project::ProjectContext;
 use crate::utils::command_exists;
 use eyre::{eyre, Result};
 use helix_metrics::cli::{load_metrics_config, MetricsConfig, MetricsLevel};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -14,6 +15,10 @@ use std::time::{Duration, Instant};
 use tokio::process::Command as TokioCommand;
 
 pub const CONTAINER_PORT: u16 = 8080;
+const IDENTITY_LABEL: &str = "helixdb.identity";
+const CONTAINER_OWNER_FORMAT: &str =
+    r#"{{if .Config.Labels}}{{index .Config.Labels "helixdb.identity"}}{{end}}"#;
+const RESOURCE_OWNER_FORMAT: &str = r#"{{if .Labels}}{{index .Labels "helixdb.identity"}}{{end}}"#;
 /// How long to wait for a runtime daemon to become ready after we start it.
 /// Docker Desktop cold-boot can take 30–60s, so we allow generous headroom.
 const RUNTIME_START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -176,7 +181,52 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        format!("helix-{}-{}", self.project_name, instance_name)
+        let name = format!("{}-{}", self.project_name, instance_name);
+        let identity = self.instance_identity(instance_name);
+        let sanitized = sanitize_docker_name(&name);
+        let adopts = sanitized == name
+            && ends_with_hash_suffix(&sanitized)
+            && self.adopts_legacy_name(&format!("helix-{name}"), &identity);
+        compose_resource_name(&name, &identity, adopts)
+    }
+
+    fn instance_identity(&self, instance_name: &str) -> String {
+        format!(
+            "{}:{}/{}",
+            self.project_name.len(),
+            self.project_name,
+            instance_name
+        )
+    }
+
+    fn adopts_legacy_name(&self, legacy: &str, identity: &str) -> bool {
+        let minio = format!("{legacy}-minio");
+        let network = format!("{legacy}-net");
+        let volume = format!("{legacy}-minio-data");
+        let mut found = false;
+        for (kind, owner_format, resource) in [
+            ("container", CONTAINER_OWNER_FORMAT, legacy),
+            ("container", CONTAINER_OWNER_FORMAT, &minio),
+            ("network", RESOURCE_OWNER_FORMAT, &network),
+            ("volume", RESOURCE_OWNER_FORMAT, &volume),
+        ] {
+            let Some(owner) =
+                self.resource_label(&[kind, "inspect", "--format", owner_format, resource])
+            else {
+                continue;
+            };
+            if !owner.is_empty() && owner != identity {
+                return false;
+            }
+            found = true;
+        }
+        found
+    }
+
+    fn resource_label(&self, args: &[&str]) -> Option<String> {
+        let mut command = self.runtime_command();
+        command.args(args);
+        command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
     }
 
     pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
@@ -231,7 +281,15 @@ impl LocalRuntime {
         };
         env.extend(telemetry_env());
 
-        let args = helix_run_args(&name, &image, config.port, true, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            true,
+            network.as_deref(),
+            &env,
+            &self.instance_identity(instance_name),
+        );
         let output = self
             .runtime_command()
             .args(&args)
@@ -270,7 +328,15 @@ impl LocalRuntime {
             (None, Vec::new())
         };
         env.extend(telemetry_env());
-        let args = helix_run_args(&name, &image, config.port, false, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            false,
+            network.as_deref(),
+            &env,
+            &self.instance_identity(instance_name),
+        );
 
         let mut child = self
             .runtime_tokio_command()
@@ -452,11 +518,12 @@ impl LocalRuntime {
         let resources = self.disk_resources(instance_name);
         self.pull_image_ref(MINIO_IMAGE)?;
         self.pull_image_ref(MINIO_MC_IMAGE)?;
-        self.ensure_network(&resources.network)?;
-        self.ensure_volume(&resources.volume)?;
+        let identity = self.instance_identity(instance_name);
+        self.ensure_network(&resources.network, &identity)?;
+        self.ensure_volume(&resources.volume, &identity)?;
         let _ = self.remove_container(&resources.minio_container);
 
-        let args = minio_run_args(&resources);
+        let args = minio_run_args(&resources, &identity);
         let output = self
             .runtime_command()
             .args(&args)
@@ -475,14 +542,17 @@ impl LocalRuntime {
         Ok(resources)
     }
 
-    fn ensure_network(&self, network: &str) -> Result<()> {
+    fn ensure_network(&self, network: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["network", "inspect", network]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["network", "create", network])
+            .args(["network", "create", "--label"])
+            .arg(&label)
+            .arg(network)
             .output()
             .map_err(|e| eyre!("Failed to create network {network}: {e}"))?;
 
@@ -496,14 +566,17 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_volume(&self, volume: &str) -> Result<()> {
+    fn ensure_volume(&self, volume: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["volume", "inspect", volume]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["volume", "create", volume])
+            .args(["volume", "create", "--label"])
+            .arg(&label)
+            .arg(volume)
             .output()
             .map_err(|e| eyre!("Failed to create volume {volume}: {e}"))?;
 
@@ -1034,6 +1107,7 @@ fn helix_run_args(
     detached: bool,
     network: Option<&str>,
     env: &[ContainerEnv],
+    identity: &str,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string()];
     if detached {
@@ -1051,6 +1125,8 @@ fn helix_run_args(
         name.to_string(),
         "-p".to_string(),
         format!("{port}:{CONTAINER_PORT}"),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
     ]);
 
     if let Some(network) = network {
@@ -1064,7 +1140,7 @@ fn helix_run_args(
     args
 }
 
-fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
+fn minio_run_args(resources: &DiskRuntimeResources, identity: &str) -> Vec<String> {
     vec![
         "run".to_string(),
         "-d".to_string(),
@@ -1072,6 +1148,8 @@ fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
         "unless-stopped".to_string(),
         "--name".to_string(),
         resources.minio_container.clone(),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
         "--network".to_string(),
         resources.network.clone(),
         "-e".to_string(),
@@ -1222,9 +1300,119 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn sanitize_docker_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn compose_resource_name(name: &str, identity: &str, adopts_legacy: bool) -> String {
+    let sanitized = sanitize_docker_name(name);
+    if sanitized == name && (!ends_with_hash_suffix(&sanitized) || adopts_legacy) {
+        return format!("helix-{name}");
+    }
+    format!("helix-{sanitized}-{}", identity_suffix(identity))
+}
+
+const HASH_SUFFIX_LEN: usize = 32;
+
+fn ends_with_hash_suffix(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > HASH_SUFFIX_LEN + 1
+        && bytes[bytes.len() - HASH_SUFFIX_LEN - 1] == b'-'
+        && bytes[bytes.len() - HASH_SUFFIX_LEN..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn identity_suffix(identity: &str) -> String {
+    Sha256::digest(identity.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_for(project_name: &str) -> LocalRuntime {
+        LocalRuntime {
+            runtime: ContainerRuntime::Docker,
+            project_name: project_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn container_name_keeps_legacy_names_byte_identical() {
+        assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
+        assert_eq!(
+            compose_resource_name("demo-my-dev", "5:demo/my dev", false),
+            "helix-demo-my-dev"
+        );
+    }
+
+    #[test]
+    fn suffixed_names_carry_a_sha256_of_the_length_delimited_identity() {
+        assert_eq!(
+            runtime_for("My Project").container_name("dev"),
+            "helix-My-Project-dev-028ad0a3ea24fa42ed85d7f07ce24d71"
+        );
+        assert_eq!(
+            runtime_for("a b").container_name("dev"),
+            "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+        assert_eq!(
+            runtime_for("hélix (wörld)!").container_name("dev"),
+            "helix-h-lix--w-rld---dev-9d350e8e981617b49c69ea2afed0cfcb"
+        );
+    }
+
+    #[test]
+    fn hash_suffixed_legacy_names_are_displaced_only_when_not_adopted() {
+        let identity = "4:demo/dev-14527b3cbdf37376ceb9eda41d2afac4";
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, false),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4-9333c32b4742394d43c85929472329bf"
+        );
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, true),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+    }
+
+    #[test]
+    fn crafted_valid_names_do_not_collide_with_suffixed_names() {
+        let suffixed = compose_resource_name("a b-dev", "3:a b/dev", false);
+        let crafted = suffixed.strip_prefix("helix-a-b-").unwrap();
+        assert_ne!(
+            suffixed,
+            compose_resource_name(crafted, &format!("3:a-b/{crafted}"), false)
+        );
+    }
+
+    #[test]
+    fn container_name_stays_valid_when_every_character_is_rejected() {
+        assert!(runtime_for("!!!")
+            .container_name("dev")
+            .starts_with("helix-----dev-"));
+    }
+
+    #[test]
+    fn disk_resources_inherit_the_sanitized_base_name() {
+        let base = runtime_for("My Project").container_name("dev");
+        let resources = runtime_for("My Project").disk_resources("dev");
+        assert_eq!(resources.minio_container, format!("{base}-minio"));
+        assert_eq!(resources.network, format!("{base}-net"));
+        assert_eq!(resources.volume, format!("{base}-minio-data"));
+    }
 
     /// The launcher table and the advisory must never disagree about which
     /// runtime is in play. Before this was wired to `runtime_start_command`, a
@@ -1401,6 +1589,7 @@ mod tests {
             true,
             None,
             &[],
+            "4:demo/dev",
         );
 
         assert_eq!(
@@ -1414,6 +1603,8 @@ mod tests {
                 "helix-demo-dev",
                 "-p",
                 "9090:8080",
+                "--label",
+                "helixdb.identity=4:demo/dev",
                 "ghcr.io/helixdb/helixdb:v0.0.4",
             ]
             .into_iter()
@@ -1432,6 +1623,7 @@ mod tests {
             true,
             Some(&resources.network),
             &disk_env(&resources),
+            "4:demo/dev",
         );
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
@@ -1465,6 +1657,7 @@ mod tests {
             true,
             None,
             &env,
+            "4:demo/dev",
         );
 
         assert!(!args.contains(&"--network".to_string()));
@@ -1527,7 +1720,7 @@ mod tests {
     #[test]
     fn minio_args_include_persistent_volume() {
         let resources = disk_resources();
-        let args = minio_run_args(&resources);
+        let args = minio_run_args(&resources, "4:demo/dev");
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
         assert!(args.contains(&"MINIO_ROOT_USER=minioadmin".to_string()));

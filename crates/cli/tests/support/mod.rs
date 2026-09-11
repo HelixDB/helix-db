@@ -329,18 +329,69 @@ if "%1"=="logs" (
   echo fake logs
   exit /b 0
 )
+if "%1"=="container" (
+  if "%2"=="inspect" (
+    if defined HELIX_TEST_RUNTIME_CONTAINER_LABEL (
+      if "%HELIX_TEST_RUNTIME_CONTAINER_LABEL%"=="missing" (
+        echo No such object 1>&2
+        exit /b 1
+      )
+      if not "%HELIX_TEST_RUNTIME_CONTAINER_LABEL%"=="" if not "%HELIX_TEST_RUNTIME_CONTAINER_LABEL%"=="unlabeled" echo %HELIX_TEST_RUNTIME_CONTAINER_LABEL%
+      exit /b 0
+    )
+    if "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="missing" (
+      echo No such object 1>&2
+      exit /b 1
+    )
+    if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="" if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="unlabeled" echo %HELIX_TEST_RUNTIME_LABEL_PROBE%
+    exit /b 0
+  )
+  exit /b 0
+)
 if "%1"=="rm" (
   if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
   echo No such container 1>&2
   exit /b 1
 )
 if "%1"=="network" (
+  if "%2"=="inspect" if "%3"=="--format" (
+    if defined HELIX_TEST_RUNTIME_NETWORK_LABEL (
+      if "%HELIX_TEST_RUNTIME_NETWORK_LABEL%"=="missing" (
+        echo not found 1>&2
+        exit /b 1
+      )
+      if not "%HELIX_TEST_RUNTIME_NETWORK_LABEL%"=="" if not "%HELIX_TEST_RUNTIME_NETWORK_LABEL%"=="unlabeled" echo %HELIX_TEST_RUNTIME_NETWORK_LABEL%
+      exit /b 0
+    )
+    if "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="missing" (
+      echo not found 1>&2
+      exit /b 1
+    )
+    if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="" if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="unlabeled" echo %HELIX_TEST_RUNTIME_LABEL_PROBE%
+    exit /b 0
+  )
   if "%2"=="create" exit /b 0
   if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
   echo not found 1>&2
   exit /b 1
 )
 if "%1"=="volume" (
+  if "%2"=="inspect" if "%3"=="--format" (
+    if defined HELIX_TEST_RUNTIME_VOLUME_LABEL (
+      if "%HELIX_TEST_RUNTIME_VOLUME_LABEL%"=="missing" (
+        echo not found 1>&2
+        exit /b 1
+      )
+      if not "%HELIX_TEST_RUNTIME_VOLUME_LABEL%"=="" if not "%HELIX_TEST_RUNTIME_VOLUME_LABEL%"=="unlabeled" echo %HELIX_TEST_RUNTIME_VOLUME_LABEL%
+      exit /b 0
+    )
+    if "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="missing" (
+      echo not found 1>&2
+      exit /b 1
+    )
+    if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="" if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="unlabeled" echo %HELIX_TEST_RUNTIME_LABEL_PROBE%
+    exit /b 0
+  )
   if "%HELIX_TEST_RUNTIME_VOLUME_MODE%"=="existing" exit /b 0
   if "%HELIX_TEST_RUNTIME_VOLUME_MODE%"=="raced" (
     if "%2"=="create" (
@@ -394,12 +445,39 @@ case "$1" in
     exit 0
     ;;
   logs) echo "fake logs"; exit 0 ;;
+  container)
+    if [ "$2" = "inspect" ]; then
+      label="${HELIX_TEST_RUNTIME_CONTAINER_LABEL:-$HELIX_TEST_RUNTIME_LABEL_PROBE}"
+      if [ "$label" = "missing" ]; then
+        echo "No such object" >&2
+        exit 1
+      fi
+      case "$label" in
+        "" | unlabeled) ;;
+        *) printf '%s\n' "$label" ;;
+      esac
+      exit 0
+    fi
+    exit 0
+    ;;
   rm)
     if [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then exit 0; fi
     echo "No such container" >&2
     exit 1
     ;;
   network)
+    if [ "$2" = "inspect" ] && [ "$3" = "--format" ]; then
+      label="${HELIX_TEST_RUNTIME_NETWORK_LABEL:-$HELIX_TEST_RUNTIME_LABEL_PROBE}"
+      if [ "$label" = "missing" ]; then
+        echo "not found" >&2
+        exit 1
+      fi
+      case "$label" in
+        "" | unlabeled) ;;
+        *) printf '%s\n' "$label" ;;
+      esac
+      exit 0
+    fi
     if [ "$2" = "create" ] || [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then
       exit 0
     fi
@@ -407,6 +485,18 @@ case "$1" in
     exit 1
     ;;
   volume)
+    if [ "$2" = "inspect" ] && [ "$3" = "--format" ]; then
+      label="${HELIX_TEST_RUNTIME_VOLUME_LABEL:-$HELIX_TEST_RUNTIME_LABEL_PROBE}"
+      if [ "$label" = "missing" ]; then
+        echo "not found" >&2
+        exit 1
+      fi
+      case "$label" in
+        "" | unlabeled) ;;
+        *) printf '%s\n' "$label" ;;
+      esac
+      exit 0
+    fi
     case "${HELIX_TEST_RUNTIME_VOLUME_MODE:-fresh}" in
       existing)
         # inspect succeeds, so ensure_volume returns before ever creating

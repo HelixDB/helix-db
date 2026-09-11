@@ -1,6 +1,7 @@
 mod support;
 
 use assert_cmd::assert::Assert;
+use std::fs;
 use support::CliFixture;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -109,6 +110,299 @@ async fn disk_runtime_commands_cover_resource_reuse_status_cleanup_and_errors() 
     assert!(log.contains("minio/mc:latest"));
     assert!(log.contains("logs -f"));
     assert!(log.contains("network inspect"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hash_suffixed_legacy_resources_are_adopted_on_upgrade() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("upgrade-corner-project");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_VOLUME_MODE", "existing")
+        .args(["start", instance])
+        .assert()
+        .success();
+
+    let legacy = "helix-upgrade-corner-project-14527b3cbdf37376ceb9eda41d2afac4";
+    let log = fixture.runtime_log();
+    assert!(
+        log.contains(&format!("volume inspect {legacy}-minio-data")),
+        "expected the legacy volume to be adopted, got: {log}"
+    );
+    assert!(
+        !log.contains("volume create"),
+        "an adopted volume must be reopened, not recreated, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("--name {legacy} -p")),
+        "expected the legacy container name, got: {log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_hash_suffixed_names_get_their_own_digest() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("upgrade-corner-project");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_LABEL_PROBE", "missing")
+        .args(["start", instance])
+        .assert()
+        .success();
+
+    let suffixed =
+        "helix-upgrade-corner-project-14527b3cbdf37376ceb9eda41d2afac4-4d82fafccc46ce0a61a48599cc612258";
+    let log = fixture.runtime_log();
+    assert!(
+        log.contains(&format!(
+            "volume create --label helixdb.identity=22:upgrade-corner-project/14527b3cbdf37376ceb9eda41d2afac4 {suffixed}-minio-data"
+        )),
+        "expected a fresh labeled suffixed volume, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("--name {suffixed} -p")),
+        "expected a fresh suffixed container, got: {log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_labeled_resources_are_not_adopted_or_removed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let first = fixture.root().join("a b");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&first)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--no-skills"])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&first)
+        .args(["start", "dev"])
+        .assert()
+        .success();
+
+    let second = fixture.root().join("a-b-dev");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&second)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = second.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&second)
+        .env("HELIX_TEST_RUNTIME_LABEL_PROBE", "3:a b/dev")
+        .args(["start", instance])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&second)
+        .env("HELIX_TEST_RUNTIME_LABEL_PROBE", "3:a b/dev")
+        .args(["stop", instance])
+        .assert()
+        .success();
+
+    let legacy = "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let log = fixture.runtime_log().replace('\r', "");
+    assert!(
+        log.contains(&format!(
+            "--name {legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea -p"
+        )),
+        "the second identity must use its own suffixed name, got: {log}"
+    );
+    assert_eq!(
+        log.matches(&format!("--name {legacy} -p")).count(),
+        1,
+        "the legacy run line must belong to the first identity only, got: {log}"
+    );
+    assert_eq!(
+        log.matches(&format!("rm -f {legacy}\n")).count(),
+        1,
+        "the first identity's resources must not be removed again, got: {log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "rm -f {legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea\n"
+        )),
+        "stopping the second identity must only remove its own resources, got: {log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_ownership_is_not_adopted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("a-b-dev");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    let instance = "14527b3cbdf37376ceb9eda41d2afac4";
+    let config_path = project.join("helix.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("[local.dev]", &format!("[local.{instance}]")),
+    )
+    .unwrap();
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_CONTAINER_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_NETWORK_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_VOLUME_LABEL", "3:a b/dev")
+        .args(["start", instance])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&project)
+        .env("HELIX_TEST_RUNTIME_CONTAINER_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_NETWORK_LABEL", "unlabeled")
+        .env("HELIX_TEST_RUNTIME_VOLUME_LABEL", "3:a b/dev")
+        .args(["prune", instance, "--yes"])
+        .assert()
+        .success();
+
+    let legacy = "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4";
+    let suffixed = format!("{legacy}-13e3b00b2c8ffd87792b25c1d1cf2aea");
+    let log = fixture.runtime_log().replace('\r', "");
+    assert!(
+        log.contains(&format!("--name {suffixed} -p")),
+        "mixed ownership must use the suffixed name, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("--name {legacy} -p")),
+        "mixed ownership must not adopt the legacy container, got: {log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "volume create --label helixdb.identity=7:a-b-dev/{instance} {suffixed}-minio-data"
+        )),
+        "mixed ownership must create its own volume, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!(
+            "volume create --label helixdb.identity=7:a-b-dev/{instance} {legacy}-minio-data"
+        )),
+        "mixed ownership must not reuse the foreign volume, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("rm -f {suffixed}\n")),
+        "prune must remove the suffixed container, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("rm -f {legacy}\n")),
+        "prune must not remove the legacy container, got: {log}"
+    );
+    assert!(
+        log.contains(&format!("volume rm {suffixed}-minio-data")),
+        "prune must remove the suffixed volume, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("volume rm {legacy}-minio-data")),
+        "prune must not remove the foreign volume, got: {log}"
+    );
+    assert!(
+        !log.contains(&format!("network rm {legacy}-net\n")),
+        "prune must not remove the legacy network, got: {log}"
+    );
 }
 
 #[test]
