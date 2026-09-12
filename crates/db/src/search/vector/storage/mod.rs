@@ -7,6 +7,8 @@
 //! logical serialization to the canonical `encoding::v2` key types and therefore
 //! does not change persisted key bytes or row codecs.
 
+pub(super) mod transaction;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU64;
 use std::ops::Bound;
@@ -2546,7 +2548,7 @@ impl<'a, 'txn> VectorWriteRows<'a, 'txn> {
 }
 
 #[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector/storage.rs"]
+#[path = "../../../../tests/production_support/vector/storage.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]

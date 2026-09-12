@@ -8,6 +8,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use super::hnsw::{model, neighbor_set};
 use super::*;
 use crate::encoding::v2::values::indexes::vector::{
     ActiveScoreSemantic, CosineNormPolicyId, MetricKind, VectorCodecKind,

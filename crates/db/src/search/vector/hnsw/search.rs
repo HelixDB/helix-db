@@ -20,32 +20,32 @@ use slatedb::DbReadOps;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 
-use super::distance::{ActiveVectorSemantics, Distance};
 use super::index::VectorIndex;
-use super::item::Item;
 use super::model::Candidate;
 use super::policy::{
     AdaptiveBypassObservation, AdaptiveBypassPolicy, AdaptiveBypassState, Layer0Policy,
     SamplingDecision, SimHashContext, SimHashDecision,
 };
-use super::storage::{EntryCandidateLayerRow, VectorRows};
-use super::unaligned_vector::UnalignedVector;
-use super::{
+use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
+use crate::search::vector::item::Item;
+use crate::search::vector::storage::{EntryCandidateLayerRow, VectorRows};
+use crate::search::vector::unaligned_vector::UnalignedVector;
+use crate::search::vector::{
     decode_item_borrowed, CollisionThreshold, DistanceScore, FailureProbability, SearchParams,
     SearchResult, SearchStats, SimHash, UnitInterval, ValidatedMetricVector,
 };
-use super::{VectorDimension, VectorIndexState};
+use crate::search::vector::{VectorDimension, VectorIndexState};
 
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MIN_TARGETS: usize = 2;
 /// Maximum speculative layer-0 neighbor reads owned by one search session.
-pub(super) const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_QUERY: usize = 8;
+pub(in crate::search::vector) const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_QUERY: usize = 8;
 
 /// Selects the nearest uncached layer-0 rows within the remaining read budget.
 ///
 /// The deterministic distance/ID ordering keeps replay stable, while both
 /// current and prefetched caches prevent duplicate I/O in the same search.
-pub(super) fn select_layer0_neighbor_prefetch_targets(
+pub(in crate::search::vector) fn select_layer0_neighbor_prefetch_targets(
     newly_admitted_neighbors: &[(NodeId, f32)],
     neighbor_cache: &HashMap<NodeId, Vec<NodeId>>,
     prefetched_neighbor_cache: &HashMap<NodeId, Vec<NodeId>>,
@@ -86,7 +86,7 @@ pub(super) fn select_layer0_neighbor_prefetch_targets(
 /// Marks sampled nodes visited only when they are admitted for vector fetch.
 ///
 /// Deferred samples remain eligible for rediscovery on another graph path.
-pub(super) fn mark_sampled_neighbors_visited(
+pub(in crate::search::vector) fn mark_sampled_neighbors_visited(
     visited: &mut HashSet<NodeId>,
     sampled_neighbors: Vec<(NodeId, u32)>,
 ) -> Vec<(NodeId, u32)> {
@@ -101,7 +101,7 @@ pub(super) fn mark_sampled_neighbors_visited(
 /// The unused variant is valid only for `SimHashMode::Off` with exhaustive
 /// pre-filter sampling. Encoding that case separately prevents the hot path
 /// from constructing a projection that no policy decision can observe.
-pub(super) enum Layer0QuerySimHash {
+pub(in crate::search::vector) enum Layer0QuerySimHash {
     UnusedExhaustive,
     Computed(SimHash),
 }
@@ -118,7 +118,7 @@ impl Layer0QuerySimHash {
 
 impl<D: Distance> VectorIndex<D> {
     /// Reads one deployed layer-zero neighbor list through typed storage.
-    pub(super) async fn load_neighbors_layer0(
+    pub(in crate::search::vector) async fn load_neighbors_layer0(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         node_id: NodeId,
@@ -129,7 +129,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Reads one layer-zero list and reports its single logical row read.
-    pub(super) async fn load_neighbors_layer0_counted(
+    pub(in crate::search::vector) async fn load_neighbors_layer0_counted(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         node_id: NodeId,
@@ -142,7 +142,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Empty input performs no I/O. Missing physical rows become the deployed
     /// empty-neighbor state, and the returned count is the exact logical row
     /// budget consumed by the batch.
-    pub(super) async fn prefetch_layer0_neighbors_counted(
+    pub(in crate::search::vector) async fn prefetch_layer0_neighbors_counted(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         node_ids: &[NodeId],
@@ -166,7 +166,7 @@ impl<D: Distance> VectorIndex<D> {
     /// If the starting item is stale or missing, it returns the supplied entry
     /// unchanged so a lower layer can recover without introducing a write-side
     /// repair into read-only search.
-    pub(super) async fn search_layer_greedy(
+    pub(in crate::search::vector) async fn search_layer_greedy(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         query: &Item<'_, D>,
@@ -230,7 +230,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Search skips corrupt, mismatched, and payload-less candidate rows while
     /// preserving its read-only transaction boundary. Writable pruning remains
     /// owned by mutation repair.
-    pub(super) async fn find_live_entry_candidate_readonly(
+    pub(in crate::search::vector) async fn find_live_entry_candidate_readonly(
         &self,
         read: &(impl DbReadOps + Send + Sync),
     ) -> Result<Option<NodeId>, HelixDbError> {
@@ -264,7 +264,7 @@ impl<D: Distance> VectorIndex<D> {
     /// supplies the dimension validated from the same metadata snapshot so the
     /// traversal cannot reopen or disagree with that schema binding.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn search_layer0_with_simhash<
+    pub(in crate::search::vector) async fn search_layer0_with_simhash<
         const COLLECT_DIAGNOSTICS: bool,
         const STRICT_EXHAUSTIVE: bool,
     >(
@@ -279,7 +279,7 @@ impl<D: Distance> VectorIndex<D> {
         sampling_ratio: f32,
         adaptive_enabled: bool,
         adaptive_failure_prob: f32,
-    ) -> Result<(Vec<SearchResult>, super::SearchStats), HelixDbError> {
+    ) -> Result<(Vec<SearchResult>, crate::search::vector::SearchStats), HelixDbError> {
         debug_assert_eq!(
             STRICT_EXHAUSTIVE,
             matches!(query_simhash, Layer0QuerySimHash::UnusedExhaustive),
@@ -300,7 +300,8 @@ impl<D: Distance> VectorIndex<D> {
         let mut prefetched_neighbor_cache: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut remaining_neighbor_prefetch_budget = LAYER0_NEIGHBOR_PREFETCH_MAX_PER_QUERY;
         let mut vector_cache: HashMap<NodeId, bytes::Bytes> = HashMap::new();
-        let mut simhash_local_cache: HashMap<NodeId, Option<super::SimHash>> = HashMap::new();
+        let mut simhash_local_cache: HashMap<NodeId, Option<crate::search::vector::SimHash>> =
+            HashMap::new();
         let k = params.k();
         let ef = params.ef();
         let base_sampling_ratio = params.simhash_sampling_ratio_override.unwrap_or(
@@ -324,7 +325,8 @@ impl<D: Distance> VectorIndex<D> {
             params.simhash_mode,
             CollisionThreshold::try_new(
                 simhash_threshold,
-                NonZeroUsize::new(super::SIMHASH_BITS).expect("SimHash bit width is nonzero"),
+                NonZeroUsize::new(crate::search::vector::SIMHASH_BITS)
+                    .expect("SimHash bit width is nonzero"),
             )
             .map_err(|error| HelixDbError::InvalidVectorConfig(error.into()))?,
             base_sampling_ratio,
@@ -473,7 +475,7 @@ impl<D: Distance> VectorIndex<D> {
                 .saturating_add(_txn_multi_get_calls_simhash_key_derivation);
             let simhash_fetch_ns =
                 _simhash_fetch_ns_filter.saturating_add(_simhash_fetch_ns_key_derivation);
-            let stats = super::SearchStats {
+            let stats = crate::search::vector::SearchStats {
                 txn_get_total: _txn_get_total,
                 txn_get_neighbors: _txn_get_neighbors,
                 txn_get_simhash,
@@ -493,7 +495,7 @@ impl<D: Distance> VectorIndex<D> {
                 vector_fetch_ns: _vector_fetch_ns,
                 distance_compute_ns: _distance_compute_ns,
                 distance_computations: _distance_computations,
-                ..super::SearchStats::default()
+                ..crate::search::vector::SearchStats::default()
             };
             return Ok((Vec::new(), stats));
         };
@@ -1025,7 +1027,7 @@ impl<D: Distance> VectorIndex<D> {
         let simhash_fetch_ns =
             _simhash_fetch_ns_filter.saturating_add(_simhash_fetch_ns_key_derivation);
 
-        let stats = super::SearchStats {
+        let stats = crate::search::vector::SearchStats {
             expansion_steps: _expansion_steps,
             neighbors_examined: _neighbors_examined,
             simhash_filtered: _simhash_filtered,
@@ -1292,7 +1294,7 @@ impl<'a> SearchObserver<'a> {
 }
 
 #[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector/search.rs"]
+#[path = "../../../../tests/production_support/vector/search.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]

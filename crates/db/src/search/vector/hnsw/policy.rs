@@ -7,11 +7,11 @@
 
 use std::num::NonZeroUsize;
 
-use super::{
+use crate::encoding::v2::values::indexes::vector::ActiveMetricKind;
+use crate::search::vector::{
     CollisionThreshold, DistanceScore, FailureProbability, SearchBeamWidth, SimHashMode,
     UnitInterval,
 };
-use crate::encoding::v2::values::indexes::vector::ActiveMetricKind;
 
 /// Metric-qualified filtering behavior for one query.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -597,7 +597,7 @@ fn adaptive_threshold(
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/policy.rs"]
+#[path = "../../../../tests/production_support/vector/policy.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
@@ -631,7 +631,8 @@ mod tests {
     fn adaptive_bypass_policy(mode: SimHashMode) -> AdaptiveBypassPolicy {
         AdaptiveBypassPolicy::from_deployed(
             mode,
-            SearchBeamWidth::try_new(64, super::super::ResultCount::try_new(10).unwrap()).unwrap(),
+            SearchBeamWidth::try_new(64, crate::search::vector::ResultCount::try_new(10).unwrap())
+                .unwrap(),
             NonZeroUsize::new(24).unwrap(),
             NonZeroUsize::new(4).unwrap(),
             ratio(0.12),
@@ -845,7 +846,8 @@ mod tests {
         )
         .with_adaptive_bypass(AdaptiveBypassPolicy::from_deployed(
             SimHashMode::Adaptive,
-            SearchBeamWidth::try_new(64, super::super::ResultCount::try_new(10).unwrap()).unwrap(),
+            SearchBeamWidth::try_new(64, crate::search::vector::ResultCount::try_new(10).unwrap())
+                .unwrap(),
             NonZeroUsize::new(24).unwrap(),
             NonZeroUsize::MIN,
             ratio(0.12),

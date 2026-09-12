@@ -482,7 +482,7 @@ async fn run_row_contracts(db: &Db) {
             )),
             Arc::new(VectorMemoryPendingDirtyRows::default()),
         ),
-        Err(super::super::VectorGenerationValidationError::CacheIdentityMismatch)
+        Err(crate::search::vector::VectorGenerationValidationError::CacheIdentityMismatch)
     ));
     let simhash = index
         .simhash_cache(3)
@@ -671,7 +671,7 @@ async fn run_row_contracts(db: &Db) {
             88,
             &[1.0, 0.0, 0.0],
             0,
-            crate::search::vector::mutation::FreshVectorBuildProof::for_test(),
+            crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
         )
         .await
         .unwrap();
@@ -965,7 +965,7 @@ where
             5,
             &[0.1, 0.1, 0.8],
             1,
-            crate::search::vector::mutation::FreshVectorBuildProof::for_test(),
+            crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
         )
         .await
         .unwrap();

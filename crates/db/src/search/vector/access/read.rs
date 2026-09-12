@@ -10,12 +10,13 @@ use std::sync::Arc;
 
 use slatedb::DbReadOps;
 
-use super::memory_registry::{VectorCacheReadGuard, VectorCacheRegistry};
-use super::{
-    Distance, RestrictedVectorCandidates, SearchParams, SearchResult,
-    ValidatedVectorGenerationHandle, VectorIndex, VectorIndexMetadata,
-};
 use crate::error::HelixDbError;
+use crate::search::vector::cache::registry::{VectorCacheReadGuard, VectorCacheRegistry};
+use crate::search::vector::{
+    Distance, RestrictedVectorCandidates, SearchParams, SearchResult, SimHasherRegistry,
+    ValidatedVectorGenerationHandle, VectorGenerationValidationError, VectorIndex,
+    VectorIndexMetadata,
+};
 
 /// Storage visibility evidence available to a vector read factory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,9 +44,9 @@ impl<D: Distance> ValidatedVectorReadIndex<D> {
     pub(crate) fn managed(
         handle: &ValidatedVectorGenerationHandle,
         registry: &VectorCacheRegistry,
-        simhasher_registry: Arc<super::SimHasherRegistry>,
+        simhasher_registry: Arc<SimHasherRegistry>,
         visibility: VectorReadVisibility,
-    ) -> Result<Self, super::VectorGenerationValidationError> {
+    ) -> Result<Self, VectorGenerationValidationError> {
         handle.validate_distance::<D>()?;
         let mut index = VectorIndex::from_generation(handle)
             .with_simhasher_registry(simhasher_registry)
@@ -107,7 +108,7 @@ impl<D: Distance> ValidatedVectorReadIndex<D> {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/read_index.rs"]
+#[path = "../../../../tests/production_support/vector/read_index.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
@@ -141,7 +142,7 @@ mod tests {
     fn managed_factory_requires_exact_visibility_and_distance_identity() {
         let handle = handle();
         let registry = VectorCacheRegistry::default();
-        let simhasher_registry = Arc::new(super::super::SimHasherRegistry::default());
+        let simhasher_registry = Arc::new(SimHasherRegistry::default());
         let (entry, owns_hydration) = registry.entry_for(&handle);
         assert!(owns_hydration);
         assert!(entry.finish_hydration(Arc::new(VectorMemoryStore::new(
@@ -182,7 +183,7 @@ mod tests {
                 simhasher_registry,
                 VectorReadVisibility::Comparable(9),
             ),
-            Err(super::super::VectorGenerationValidationError::MetricMismatch)
+            Err(VectorGenerationValidationError::MetricMismatch)
         ));
     }
 }

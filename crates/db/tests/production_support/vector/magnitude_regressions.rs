@@ -9,10 +9,10 @@ use bytes::Bytes;
 use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbReadOps, IsolationLevel};
 
+use super::cache::store::VectorMemoryDirtyRows;
 use super::distance::{Cosine, Distance, Euclidean, Manhattan};
+use super::hnsw::mutation::VectorInsertContract;
 use super::magnitude_oracle;
-use super::memory_store::VectorMemoryDirtyRows;
-use super::mutation::VectorInsertContract;
 use super::storage::{
     LegacyVectorValidationMode, LegacyVectorValidationOutcome, VectorRowKeyspace, VectorRows,
 };

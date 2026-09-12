@@ -180,7 +180,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
         }
         self.inner.put_bytes(key.clone(), value.clone())?;
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_put(key.len(), value.len());
+        crate::search::vector::record_benchmark_put(key.len(), value.len());
         self.recorder
             .writes
             .lock()
@@ -202,7 +202,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
         let key = Bytes::copy_from_slice(key.as_ref());
         self.inner.delete(key.clone())?;
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_delete(key.len());
+        crate::search::vector::record_benchmark_delete(key.len());
         self.recorder
             .writes
             .lock()
@@ -344,7 +344,7 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
             return Err(Self::injected_read_error());
         }
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_point_get();
+        crate::search::vector::record_benchmark_point_get();
         self.inner.get_with_options(key, options).await
     }
 
@@ -358,7 +358,7 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
             return Err(Self::injected_read_error());
         }
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_point_get();
+        crate::search::vector::record_benchmark_point_get();
         self.inner.get_key_value_with_options(key, options).await
     }
 
@@ -375,7 +375,7 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
             return Err(Self::injected_read_error());
         }
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_multi_get(keys.len());
+        crate::search::vector::record_benchmark_multi_get(keys.len());
         self.inner.multi_get_with_options(keys, options).await
     }
 
@@ -392,7 +392,7 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
             return Err(Self::injected_read_error());
         }
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_scan();
+        crate::search::vector::record_benchmark_scan();
         self.inner.scan_with_options(range, options).await
     }
 
@@ -411,7 +411,7 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
             return Err(Self::injected_read_error());
         }
         #[cfg(feature = "production-coverage")]
-        super::record_benchmark_scan();
+        crate::search::vector::record_benchmark_scan();
         self.inner
             .scan_prefix_with_options(prefix, subrange, options)
             .await
@@ -596,7 +596,7 @@ pub(crate) enum VectorWriteMeasurementError {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/write_transaction.rs"]
+#[path = "../../../../tests/production_support/vector/write_transaction.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]

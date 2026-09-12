@@ -75,7 +75,7 @@ impl<'db> ExecutionContext<'db> {
 /// letting an unauthenticated caller force a full frontier expansion over
 /// the entire index with a single large `k`. Mirrors the value the
 /// restricted vector-search path already enforces unconditionally via
-/// `MAX_RESTRICTED_RESULT_COUNT` in `crate::search::vector::restricted`.
+/// `MAX_RESTRICTED_RESULT_COUNT` in `crate::search::vector::hnsw::restricted`.
 const DEFAULT_MAX_SEARCH_RESULT_COUNT: usize = 800;
 
 pub(in crate::execution::interpreter::access) fn limited_search_k(
