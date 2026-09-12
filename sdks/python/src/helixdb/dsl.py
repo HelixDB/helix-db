@@ -211,7 +211,12 @@ class DateTime:
 
     @classmethod
     def parse_rfc3339(cls, value: str) -> "DateTime":
-        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        if re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})",
+            value,
+        ) is None:
+            raise TypeError(f"invalid RFC3339 datetime: {value}")
+        text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
         try:
             return cls.from_datetime(datetime.fromisoformat(text))
         except ValueError as exc:
