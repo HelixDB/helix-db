@@ -10,6 +10,9 @@ use super::canonical_number::{self, CanonicalNumber};
 use super::property_value::PropertyValue;
 use crate::encoding::error::EncodingError;
 
+mod prepare;
+pub(crate) use prepare::{prepare_equality_value, PreparedEqualityValue};
+
 pub(crate) const EQUALITY_DIGEST_LEN: usize = core::mem::size_of::<u64>();
 pub(crate) const MAX_EQUALITY_CANONICAL_LEN: usize = 1024 * 1024 - 64;
 
@@ -81,8 +84,8 @@ impl CanonicalEqualityValue {
 
 /// Closed maintenance/lookup projection for every property-value variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EqualityValueProjection {
-    Indexed(CanonicalEqualityValue),
+pub(crate) enum EqualityValueProjection<T = CanonicalEqualityValue> {
+    Indexed(T),
     AuthoritativeNull,
     NonReflexive,
     Unsupported(&'static str),
@@ -90,92 +93,26 @@ pub(crate) enum EqualityValueProjection {
 }
 
 pub(crate) fn project_equality_value(value: &PropertyValue) -> EqualityValueProjection {
-    let mut canonical = Vec::new();
-    let projection = match value {
-        PropertyValue::Null => return EqualityValueProjection::AuthoritativeNull,
-        PropertyValue::Bool(value) => {
-            canonical.put_u8(BOOL_TAG);
-            canonical.put_u8(u8::from(*value));
-            Some(())
-        }
-        PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_) => {
-            let Some(number) = canonical_number::from_property(value) else {
-                return EqualityValueProjection::NonReflexive;
-            };
-            canonical.put_u8(NUMBER_TAG);
-            put_number(&mut canonical, number);
-            Some(())
-        }
-        PropertyValue::DateTime(value) => {
-            canonical.put_u8(DATETIME_TAG);
-            canonical.put_i64(*value);
-            Some(())
-        }
-        PropertyValue::String(value) => {
-            canonical.put_u8(STRING_TAG);
-            put_length_delimited(&mut canonical, value.as_bytes())
-        }
-        PropertyValue::Bytes(value) => {
-            canonical.put_u8(BYTES_TAG);
-            put_length_delimited(&mut canonical, value)
-        }
-        PropertyValue::I64Array(values) => {
-            canonical.put_u8(I64_ARRAY_TAG);
-            put_count(&mut canonical, values.len()).map(|()| {
-                values.iter().for_each(|value| canonical.put_i64(*value));
-            })
-        }
-        PropertyValue::F64Array(values) => {
-            canonical.put_u8(F64_ARRAY_TAG);
-            let Some(()) = put_count(&mut canonical, values.len()) else {
-                return oversized_projection(values.len());
-            };
-            for value in values {
-                let Some(value) = CanonicalNumber::from_f64(*value) else {
-                    return EqualityValueProjection::NonReflexive;
-                };
-                put_number(&mut canonical, value);
-            }
-            Some(())
-        }
-        PropertyValue::F32Array(values) => {
-            canonical.put_u8(F32_ARRAY_TAG);
-            let Some(()) = put_count(&mut canonical, values.len()) else {
-                return oversized_projection(values.len());
-            };
-            for value in values {
-                let Some(value) = CanonicalNumber::from_f32(*value) else {
-                    return EqualityValueProjection::NonReflexive;
-                };
-                put_number(&mut canonical, value);
-            }
-            Some(())
-        }
-        PropertyValue::StringArray(values) => {
-            canonical.put_u8(STRING_ARRAY_TAG);
-            let Some(()) = put_count(&mut canonical, values.len()) else {
-                return oversized_projection(values.len());
-            };
-            for value in values {
-                if put_length_delimited(&mut canonical, value.as_bytes()).is_none() {
-                    return oversized_projection(value.len());
-                }
-            }
-            Some(())
-        }
-        PropertyValue::Array(_) => return EqualityValueProjection::Unsupported("Array"),
-        PropertyValue::Object(_) => return EqualityValueProjection::Unsupported("Object"),
-    };
-    if projection.is_none() || canonical.len() > MAX_EQUALITY_CANONICAL_LEN {
-        return oversized_projection(canonical.len());
-    }
-    EqualityValueProjection::Indexed(CanonicalEqualityValue::new(canonical))
+    prepare_equality_value(value).map_indexed(PreparedEqualityValue::encode)
 }
 
-fn oversized_projection(encoded_len: usize) -> EqualityValueProjection {
-    EqualityValueProjection::Oversized {
-        encoded_len,
-        maximum: MAX_EQUALITY_CANONICAL_LEN,
+impl<T> EqualityValueProjection<T> {
+    /// Transform only the validated indexed payload, retaining the exact semantic
+    /// classification for null, NaN, unsupported and oversized values.
+    pub(crate) fn map_indexed<U>(self, map: impl FnOnce(T) -> U) -> EqualityValueProjection<U> {
+        match self {
+            Self::Indexed(value) => EqualityValueProjection::Indexed(map(value)),
+            Self::AuthoritativeNull => EqualityValueProjection::AuthoritativeNull,
+            Self::NonReflexive => EqualityValueProjection::NonReflexive,
+            Self::Unsupported(kind) => EqualityValueProjection::Unsupported(kind),
+            Self::Oversized {
+                encoded_len,
+                maximum,
+            } => EqualityValueProjection::Oversized {
+                encoded_len,
+                maximum,
+            },
+        }
     }
 }
 

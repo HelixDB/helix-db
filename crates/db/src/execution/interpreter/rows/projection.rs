@@ -9,7 +9,7 @@ pub(super) struct Projection<'a> {
     pub items: &'a r::ProjectionProgram,
     pub distinct: bool,
     pub ordering: &'a [r::Ordering],
-    pub predicate: Option<&'a r::Expression>,
+    pub predicate: Option<&'a r::SelectionProgram>,
     pub skip: Option<&'a r::Expression>,
     pub limit: Option<&'a r::Expression>,
 }
@@ -220,21 +220,10 @@ impl ExecutionContext<'_> {
         }
         let mut projected = projected.finish();
         if let Some(predicate) = predicate {
-            let mut filtered = RowBuffer::new(self.row_budget())?;
-            for batch in projected.chunks(limits.batch_rows) {
-                let graph = self.expression_graph_batch(batch, [predicate]).await?;
-                for row in batch {
-                    if self
-                        .evaluate(row, parameters, &graph, limits)
-                        .eval(predicate)?
-                        .truth()?
-                        == Some(true)
-                    {
-                        push_row(&mut filtered, row.clone(), limits)?;
-                    }
-                }
-            }
-            projected = filtered.finish();
+            projected = self
+                .row_budget()
+                .admitted_future(self.filter_relation(projected, predicate, parameters, limits))?
+                .await?;
         }
         if distinct {
             projected.sort_by(|a, b| {

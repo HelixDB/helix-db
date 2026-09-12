@@ -93,6 +93,44 @@ pub(in crate::execution::interpreter) fn required_for(
     }
 }
 
+/// A row pipeline may suspend several MATCH operators while borrowing one read
+/// view. Flush their selected physical families before opening any continuation.
+/// No mutation is allowed inside such a pipeline.
+pub(in crate::execution::interpreter) fn required_for_pattern(
+    plan: &helix_planner::relational::MatchPlan,
+) -> RequiredMutationVisibility {
+    use helix_planner::relational::MatchStep;
+    plan.steps
+        .iter()
+        .fold(RequiredMutationVisibility::NONE, |mut required, step| {
+            match step {
+                MatchStep::Scan(slot) | MatchStep::HashJoin { slot, .. } => {
+                    let source = plan
+                        .sources
+                        .iter()
+                        .find(|source| source.slot == *slot)
+                        .expect("planned scan has a source");
+                    for step in source.access.steps() {
+                        required.0 |= required_for(&step.op).0;
+                    }
+                }
+                MatchStep::IndexLookup(lookup) => {
+                    required.0 |= RequiredMutationVisibility::SECONDARY;
+                    let source = plan
+                        .sources
+                        .iter()
+                        .find(|source| source.slot == lookup.slot)
+                        .expect("planned lookup has a fallback source");
+                    for step in source.access.steps() {
+                        required.0 |= required_for(&step.op).0;
+                    }
+                }
+                MatchStep::Expand { .. } => required.0 |= RequiredMutationVisibility::TOPOLOGY,
+            }
+            required
+        })
+}
+
 fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibility {
     match plan {
         exec::ExecAccessPlan::Limited(plan) => required_for_access(plan.source()),

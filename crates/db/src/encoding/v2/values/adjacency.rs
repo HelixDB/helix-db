@@ -5,6 +5,9 @@ use super::codec::{take_slice, take_u32_le, take_u8, ENCODING_TYPE_LEN, U32_LEN}
 use super::indexes::BitmapMembershipDelta;
 use crate::encoding::{error::EncodingError, NodeId};
 
+mod prepared;
+pub(crate) use prepared::prepare_edges;
+
 const BITMAP_LEN_PREFIX_LEN: usize = U32_LEN;
 const ADJACENCY_MEMBERSHIP_DELTA_MAGIC: &[u8; 8] = b"HLXADJ2\0";
 const ADJACENCY_RESET_OUT_LEN: usize = core::mem::size_of::<u8>();

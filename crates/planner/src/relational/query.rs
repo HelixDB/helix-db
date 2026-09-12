@@ -57,6 +57,14 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// A node-only pattern that can resume one correlated binding at a time.
+    /// Repeated occurrences retain all their constraints and named paths.
+    pub fn single_node(&self) -> Option<Slot> {
+        let slot = self.nodes.first()?.slot;
+        (self.relationships.is_empty() && self.nodes.iter().all(|node| node.slot == slot))
+            .then_some(slot)
+    }
+
     pub fn slots(&self) -> BTreeSet<Slot> {
         self.nodes
             .iter()
@@ -100,9 +108,9 @@ pub enum Operator {
     Match {
         pattern: Pattern,
         optional: bool,
-        predicate: Option<Expression>,
+        predicate: Option<super::SelectionProgram>,
     },
-    Filter(Expression),
+    Filter(super::SelectionProgram),
     Unwind {
         expression: Expression,
         slot: Slot,
@@ -111,7 +119,7 @@ pub enum Operator {
         items: super::ProjectionProgram,
         distinct: bool,
         ordering: Vec<Ordering>,
-        predicate: Option<Expression>,
+        predicate: Option<super::SelectionProgram>,
         skip: Option<Expression>,
         limit: Option<Expression>,
     },
@@ -133,10 +141,11 @@ impl Operator {
             } => pattern
                 .expressions()
                 .into_iter()
-                .chain(predicate.iter())
+                .chain(predicate.iter().map(|predicate| predicate.expression()))
                 .collect(),
             Self::Create(pattern) => pattern.expressions(),
-            Self::Filter(expression) | Self::Unwind { expression, .. } => vec![expression],
+            Self::Filter(predicate) => vec![predicate.expression()],
+            Self::Unwind { expression, .. } => vec![expression],
             Self::Project {
                 items,
                 ordering,
@@ -148,7 +157,7 @@ impl Operator {
                 .iter()
                 .map(|i| &i.expression)
                 .chain(ordering.iter().map(|o| &o.expression))
-                .chain(predicate.iter())
+                .chain(predicate.iter().map(|predicate| predicate.expression()))
                 .chain(skip.iter())
                 .chain(limit.iter())
                 .collect(),
@@ -380,14 +389,14 @@ impl Query {
                         predicate: Some(e), ..
                     } = operator
                     {
-                        check(e, &scope)?;
+                        e.validate_input(&scope)?;
                     }
                     defined = scope;
                     if matches!(operator, Operator::Create(_)) {
                         effect = Effect::Write;
                     }
                 }
-                Operator::Filter(e) => check(e, &defined)?,
+                Operator::Filter(e) => e.validate_input(&defined)?,
                 Operator::Unwind { expression, slot } => {
                     check(expression, &defined)?;
                     defined.insert(*slot);
@@ -407,7 +416,7 @@ impl Query {
                         check(&order.expression, &order_scope)?;
                     }
                     if let Some(e) = predicate {
-                        check(e, &order_scope)?;
+                        e.validate_input(&order_scope)?;
                     }
                     for e in skip.iter().chain(limit.iter()) {
                         check(e, &BTreeSet::new())?;

@@ -246,7 +246,7 @@ async fn reverse_range_skips_unneeded_blobs_but_propagates_attempted_decode_erro
                 None,
                 iteration,
                 None,
-                &members,
+                &members.iter().collect::<Vec<_>>(),
                 &RangeScanCounters::default()
             )
             .await
@@ -396,7 +396,7 @@ async fn reverse_range_cancels_inside_rejected_membership_and_tie_verification()
                 None,
                 Reverse,
                 Some(10),
-                &members,
+                &members.iter().collect::<Vec<_>>(),
                 &CancelAfter(AtomicUsize::new(checkpoints))
             )
             .await,

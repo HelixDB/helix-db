@@ -749,22 +749,28 @@ async fn equality_join_is_bounded_and_preserves_multiplicity_and_numeric_semanti
         .iter()
         .any(|step| matches!(step, helix_planner::relational::MatchStep::HashJoin { .. })));
     assert_eq!(plan.matches()[&0].cartesian_products, 0);
-    // 160,000 Cartesian candidates exceed this budget. The admitted build side,
-    // batched keys and 400 matching rows fit without truncating either input.
-    let result = cypher::execute(
-        &db,
-        cypher::Request::new(query),
-        db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-        db::query_service::QueryMode::Execute,
-        db::execution_control::ExecutionControl::default(),
-        cypher::Limits {
-            memory_bytes: 2 * 1024 * 1024,
-            ..cypher::Limits::default()
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(result.rows, vec![vec![json!(400)]]);
+    // 160,000 Cartesian candidates exceed either budget. Account for whole
+    // sparse property-map nodes: the default hydration batch needs 3 MiB,
+    // while smaller batches retain the original 2 MiB execution contract.
+    // Neither configuration may truncate the build side or matching rows.
+    for (memory_bytes, batch_rows) in [(2 * 1024 * 1024, 64), (3 * 1024 * 1024, 512)] {
+        let result = cypher::execute(
+            &db,
+            cypher::Request::new(query),
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::query_service::QueryMode::Execute,
+            db::execution_control::ExecutionControl::default(),
+            cypher::Limits {
+                memory_bytes,
+                batch_rows,
+                ..cypher::Limits::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rows, vec![vec![json!(400)]]);
+        assert!(result.resources.peak_memory_bytes <= memory_bytes);
+    }
     run(
         &db,
         "CREATE (:Left {key:1.0}),(:Left),(:Right),(:Right {key:1.0})",

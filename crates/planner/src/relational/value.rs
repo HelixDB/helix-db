@@ -94,11 +94,12 @@ mod float_bits {
 impl Value {
     /// Validate externally constructed nested literals before recursive use.
     pub fn validate_shape(&self) -> Result<()> {
-        let mut pending = vec![(self, 0_usize)];
-        let mut count = 0_usize;
-        while let Some((value, depth)) = pending.pop() {
-            count += 1;
-            if depth >= super::MAX_EXPRESSION_DEPTH || count > 200_000 {
+        // The depth check bounds recursion before descending. Walking borrowed
+        // children avoids a heap allocation for every scalar grouping key and
+        // an unadmitted frontier proportional to a wide list or map.
+        fn visit(value: &Value, depth: usize, count: &mut usize) -> Result<()> {
+            *count += 1;
+            if depth >= super::MAX_EXPRESSION_DEPTH || *count > 200_000 {
                 return Err(QueryError::compile(
                     "ResourceLimit",
                     "ValueDepth",
@@ -106,18 +107,22 @@ impl Value {
                 ));
             }
             match value {
-                Self::List(values) => pending.extend(values.iter().map(|v| (v, depth + 1))),
-                Self::Map(values) => pending.extend(values.values().map(|v| (v, depth + 1))),
-                Self::Null
-                | Self::Boolean(_)
-                | Self::Integer(_)
-                | Self::Float(_)
-                | Self::String(_)
-                | Self::Entity(_)
-                | Self::Path(_) => {}
+                Value::List(values) => values
+                    .iter()
+                    .try_for_each(|value| visit(value, depth + 1, count)),
+                Value::Map(values) => values
+                    .values()
+                    .try_for_each(|value| visit(value, depth + 1, count)),
+                Value::Null
+                | Value::Boolean(_)
+                | Value::Integer(_)
+                | Value::Float(_)
+                | Value::String(_)
+                | Value::Entity(_)
+                | Value::Path(_) => Ok(()),
             }
         }
-        Ok(())
+        visit(self, 0, &mut 0)
     }
     pub fn truth(&self) -> Result<Option<bool>> {
         match self {
@@ -141,12 +146,14 @@ impl Value {
                     .saturating_mul(size_of::<Self>()),
                 |bytes, value| bytes.saturating_add(value.allocated_bytes()),
             ),
-            Self::Map(xs) => xs.iter().fold(0_usize, |bytes, (k, v)| {
-                bytes
-                    .saturating_add(k.capacity())
-                    .saturating_add(v.allocated_bytes())
-                    .saturating_add(64)
-            }),
+            Self::Map(xs) => xs.iter().fold(
+                super::allocation::btree_bytes::<String, Self>(xs.len()),
+                |bytes, (key, value)| {
+                    bytes
+                        .saturating_add(key.capacity())
+                        .saturating_add(value.allocated_bytes().saturating_sub(size_of::<Self>()))
+                },
+            ),
             Self::Path(p) => p
                 .nodes
                 .capacity()

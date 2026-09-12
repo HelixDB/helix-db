@@ -63,14 +63,17 @@ impl ExecutionContext<'_> {
             let batch = batch?;
             self.check_execution_deadline()?;
             let graph = self
-                .expression_graph_batch(
-                    &batch,
-                    keys.iter().copied().chain(
-                        specifications
-                            .iter()
-                            .filter_map(|(_, argument, _)| *argument),
+                .row_budget()
+                .admitted_future(
+                    self.expression_graph_batch(
+                        &batch,
+                        keys.iter().copied().chain(
+                            specifications
+                                .iter()
+                                .filter_map(|(_, argument, _)| *argument),
+                        ),
                     ),
-                )
+                )?
                 .await?;
             for row in batch.iter() {
                 let evaluation = self.evaluate(row, parameters, &graph, limits);
@@ -152,7 +155,10 @@ impl ExecutionContext<'_> {
         } in groups
         {
             let graph = self
-                .expression_graph_batch(std::slice::from_ref(&base), keys.iter().copied())
+                .row_budget()
+                .admitted_future(
+                    self.expression_graph_batch(std::slice::from_ref(&base), keys.iter().copied()),
+                )?
                 .await?;
             let evaluation = self.evaluate(&base, parameters, &graph, limits);
             let mut results = accumulators.into_iter();

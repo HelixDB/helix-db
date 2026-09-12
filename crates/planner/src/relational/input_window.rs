@@ -24,11 +24,15 @@ impl InputWindow {
                 pattern,
                 predicate: None,
                 ..
-            } if pattern.nodes.len() == 1
-                && pattern.nodes[0].properties.is_empty()
-                && pattern.relationships.is_empty()
-                && pattern.paths.is_empty() =>
+            } if pattern.nodes.iter().all(|node| node.properties.is_empty())
+                && pattern
+                    .relationships
+                    .iter()
+                    .all(|edge| edge.properties.is_empty()) =>
             {
+                // Fixed graph matching, including labels, directions, paths
+                // and relationship uniqueness, has no scalar expression error
+                // to hide. Constraints with expressions retain the drain proof.
                 Termination::BeforeInput
             }
             Operator::Match { .. }

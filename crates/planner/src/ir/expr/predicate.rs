@@ -8,10 +8,27 @@ use super::super::contracts::AtLeast;
 use super::error::ExprPlanError;
 use super::validation::validate_predicate;
 
+/// Resolved native predicate, constructed only after native name validation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedPredicate(super::native::Expression);
+impl ResolvedPredicate {
+    pub fn expression(&self) -> &super::native::Expression {
+        &self.0
+    }
+}
+impl crate::relational::ExpressionInput for ResolvedPredicate {
+    fn validate(&self) -> crate::relational::Result<()> {
+        Ok(())
+    }
+    fn references(&self) -> std::collections::BTreeSet<crate::relational::Slot> {
+        self.0.slots()
+    }
+}
+
 /// Runtime predicate with validated parameter and property names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PredicatePlan {
-    resolved: std::sync::Arc<super::native::Expression>,
+    program: crate::relational::SelectionProgram<ResolvedPredicate>,
     predicate: std::sync::Arc<Predicate>,
 }
 
@@ -20,7 +37,10 @@ impl PredicatePlan {
     pub fn new(predicate: Predicate) -> Result<Self, ExprPlanError> {
         validate_predicate(&predicate)?;
         Ok(Self {
-            resolved: std::sync::Arc::new(super::native::predicate(&predicate)),
+            program: crate::relational::SelectionProgram::new(ResolvedPredicate(
+                super::native::predicate(&predicate),
+            ))
+            .expect("native predicate was validated"),
             predicate: std::sync::Arc::new(predicate),
         })
     }
@@ -50,7 +70,10 @@ impl PredicatePlan {
                 .collect(),
         );
         Self {
-            resolved: std::sync::Arc::new(super::native::predicate(&predicate)),
+            program: crate::relational::SelectionProgram::new(ResolvedPredicate(
+                super::native::predicate(&predicate),
+            ))
+            .expect("native predicate was validated"),
             predicate: std::sync::Arc::new(predicate),
         }
     }
@@ -69,9 +92,14 @@ impl PredicatePlan {
         &self.predicate
     }
 
+    /// Common selection contract; the native adapter retains two-valued semantics.
+    pub fn program(&self) -> &crate::relational::SelectionProgram<ResolvedPredicate> {
+        &self.program
+    }
+
     /// Borrow the shared scalar representation with native predicate semantics.
     pub fn resolved(&self) -> &super::native::Expression {
-        &self.resolved
+        self.program.expression().expression()
     }
 }
 

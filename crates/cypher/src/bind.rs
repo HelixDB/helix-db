@@ -50,7 +50,11 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                 let pattern = binder.pattern(patterns, *optional, false)?;
                 let predicate = predicate
                     .as_ref()
-                    .map(|e| binder.predicate(e, &binder.scope))
+                    .map(|e| {
+                        binder
+                            .predicate(e, &binder.scope)
+                            .and_then(r::SelectionProgram::new)
+                    })
                     .transpose()?;
                 operators.push(r::Operator::Match {
                     pattern,
@@ -263,7 +267,11 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                 let limit = limit.as_ref().map(|e| binder.bound(e)).transpose()?;
                 let predicate = predicate
                     .as_ref()
-                    .map(|e| binder.predicate(e, &order_scope))
+                    .map(|e| {
+                        binder
+                            .predicate(e, &order_scope)
+                            .and_then(r::SelectionProgram::new)
+                    })
                     .transpose()?;
                 operators.push(r::Operator::Project {
                     items: r::ProjectionProgram::new(projections)?,

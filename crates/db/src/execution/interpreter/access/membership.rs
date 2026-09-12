@@ -5,6 +5,7 @@ use helix_planner::{catalog, exec, ir};
 use super::super::{ElementRef, ExecutionContext, ExecutionRow};
 use crate::encoding::v2::values::property::{equality_index_value, property_value::PropertyValue};
 use crate::error::Result;
+use crate::query_resources::bitmap;
 
 #[derive(Debug, PartialEq)]
 enum RuntimeEqualityDomain {
@@ -18,7 +19,7 @@ impl<'db> ExecutionContext<'db> {
         kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
         plan: &ir::RuntimeEqualitySet,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         match self.runtime_equality_domain(plan)? {
             RuntimeEqualityDomain::Indexed(values) => {
                 self.lookup_managed_equality_union(kind, key, &values).await
@@ -35,15 +36,15 @@ impl<'db> ExecutionContext<'db> {
                     ),
                 };
                 let ids = self.scan_element_ids(keyspace, None).await?;
-                let mut matches = roaring::RoaringTreemap::new();
+                let mut matches = bitmap::Builder::new(self.row_memory.as_ref())?;
                 for id in ids {
                     self.check_execution_deadline()?;
                     let row = ExecutionRow::current(element(id));
                     if self.scoped_membership_matches(&row, key, &values).await? {
-                        matches.insert(id);
+                        matches.insert(id)?;
                     }
                 }
-                Ok(matches)
+                Ok(matches.finish())
             }
         }
     }
@@ -64,20 +65,22 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyKey,
         values: &PropertyValue,
     ) -> Result<bool> {
-        let properties = self.row_properties(row).await?;
-        if properties
-            .iter()
-            .find(|property| property.name == "$label")
-            .and_then(|property| property.value.as_str())
-            != Some(key.label.as_ref())
-        {
-            return Ok(false);
-        }
-        let value = properties
-            .iter()
-            .find(|property| property.name == key.property.as_ref())
-            .map_or(&PropertyValue::Null, |property| &property.value);
-        Ok(super::super::stream::property_value_is_in(value, values))
+        self.row_properties_match(row, &["$label", key.property.as_ref()], |properties| {
+            if properties
+                .iter()
+                .find(|property| property.name == "$label")
+                .and_then(|property| property.value.as_str())
+                != Some(key.label.as_ref())
+            {
+                return false;
+            }
+            let value = properties
+                .iter()
+                .find(|property| property.name == key.property.as_ref())
+                .map_or(&PropertyValue::Null, |property| &property.value);
+            super::super::stream::property_value_is_in(value, values)
+        })
+        .await
     }
 }
 
@@ -134,7 +137,7 @@ fn bounded_index_members(
     values
         .into_iter()
         .try_fold(Vec::with_capacity(max_values.get()), |mut unique, value| {
-            match equality_index_value::project_equality_value(&value) {
+            match equality_index_value::prepare_equality_value(&value) {
                 equality_index_value::EqualityValueProjection::Indexed(_) => {}
                 equality_index_value::EqualityValueProjection::NonReflexive => {
                     return Some(unique);

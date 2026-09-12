@@ -8,4 +8,4 @@ mod validation;
 
 pub use self::error::{ExprPlanError, NameField, PredicateSetOp};
 pub use self::plan::ExprPlan;
-pub use self::predicate::PredicatePlan;
+pub use self::predicate::{PredicatePlan, ResolvedPredicate};

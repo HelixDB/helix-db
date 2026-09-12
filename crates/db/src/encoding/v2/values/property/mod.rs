@@ -4,6 +4,7 @@
 
 pub(crate) mod canonical_number;
 pub(crate) mod equality_index_value;
+pub(crate) mod prepared;
 pub mod property;
 pub(crate) mod property_value;
 pub(crate) mod range_index_value;

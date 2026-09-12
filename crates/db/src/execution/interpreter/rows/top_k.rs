@@ -64,7 +64,10 @@ impl ExecutionContext<'_> {
             let graph = self
                 .expression_graph_batch(
                     &projected,
-                    ordering.iter().map(|o| &o.expression).chain(predicate),
+                    ordering
+                        .iter()
+                        .map(|o| &o.expression)
+                        .chain(predicate.map(r::SelectionProgram::expression)),
                 )
                 .await?;
             for mut row in projected {

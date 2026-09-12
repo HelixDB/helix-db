@@ -827,6 +827,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(7),
+        None,
     )
     .await
     .unwrap());
@@ -845,6 +846,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(7),
+        None,
     )
     .await
     .unwrap());
@@ -863,6 +865,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(7),
+        None,
     )
     .await
     .unwrap());
@@ -872,6 +875,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(8),
+        None,
     )
     .await
     .unwrap());

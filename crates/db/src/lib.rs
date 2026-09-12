@@ -5,6 +5,9 @@
 #[cfg(test)]
 extern crate self as db;
 
+#[cfg(test)]
+mod allocation_testing;
+
 pub mod config;
 pub mod cypher;
 pub mod encoding;
@@ -22,6 +25,7 @@ mod merge_operator;
 #[cfg(feature = "migration-parity")]
 pub mod migration_parity;
 pub mod migrations;
+mod query_resources;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
@@ -843,6 +847,12 @@ impl PreparedPlannerContext {
 
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
+    }
+
+    /// Transfer the request's original parameters together with its catalog
+    /// proof. Serial planning and execution need no duplicate binding tables.
+    pub(crate) fn into_execution_inputs(self) -> (ParamBindings, CatalogRefreshProof) {
+        (self.context.params, self.proof)
     }
 }
 

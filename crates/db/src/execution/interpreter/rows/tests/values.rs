@@ -205,7 +205,9 @@ async fn graph_demand_admission_precedes_storage_reads_and_deduplicates_referenc
     let db = crate::execution::interpreter::test_support::open_db("graph-demand-admission").await;
     let mut context = ExecutionContext::new(&db, helix_planner::context::ParamBindings::default());
     context.enable_request_read_view().await.unwrap();
-    context.row_memory = Some(memory::Budget::new(1024));
+    // One sparse tree node is larger than the old per-entry estimate. This
+    // admits one distinct reference but still rejects 100 before any I/O.
+    context.row_memory = Some(memory::Budget::new(4096));
     let demand = BTreeMap::from([(r::Slot(0), r::PropertyDemand::All)]);
     let rows = vec![vec![r::Value::List(
         (0..100)
@@ -238,12 +240,27 @@ async fn graph_demand_admission_precedes_storage_reads_and_deduplicates_referenc
         .entities
         .is_empty());
     assert_eq!(context.row_budget().reads().multi_get_keys, 1);
+    assert_eq!(context.row_budget().available(), 4096);
     context.close_request_read_view().unwrap();
     db.close().await.unwrap();
 }
 
 #[test]
 fn stored_value_conversion_preserves_widths_and_rejects_unstorable_composites() {
+    for length in [1, 7, 8, 9, 4095, 4096, 4097] {
+        let input = (0..length)
+            .map(|i| r::Value::Boolean(i % 3 == 0))
+            .collect::<Vec<_>>();
+        let bound = input.capacity() * size_of::<r::Value>();
+        let P::Array(values) = graph::to_property(r::Value::List(input)).unwrap() else {
+            panic!("boolean array storage form")
+        };
+        assert!(values.capacity() * size_of::<P>() <= bound);
+        assert!(values
+            .iter()
+            .enumerate()
+            .all(|(i, value)| *value == P::Bool(i % 3 == 0)));
+    }
     for (stored, expected) in [
         (P::Null, r::Value::Null),
         (P::F32(1.5), r::Value::Float(1.5)),
@@ -275,7 +292,12 @@ fn stored_value_conversion_preserves_widths_and_rejects_unstorable_composites() 
             r::Value::List(vec![r::Value::String("x".into())]),
         ),
     ] {
-        assert_eq!(graph::from_property(stored).unwrap(), expected);
+        assert_eq!(
+            property_conversion::Conversion::new(stored)
+                .finish()
+                .unwrap(),
+            expected
+        );
     }
     for value in [
         r::Value::Null,
@@ -296,7 +318,9 @@ fn stored_value_conversion_preserves_widths_and_rejects_unstorable_composites() 
         ]),
     ] {
         assert_eq!(
-            graph::from_property(graph::to_property(value.clone()).unwrap()).unwrap(),
+            property_conversion::Conversion::new(graph::to_property(value.clone()).unwrap())
+                .finish()
+                .unwrap(),
             value
         );
     }

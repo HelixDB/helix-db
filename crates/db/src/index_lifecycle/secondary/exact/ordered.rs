@@ -39,7 +39,7 @@ struct RangeScan<'a, R> {
     direction: StorageRangeIndexDirection,
     lane: SecondaryEntryLane,
     query: Option<&'a SecondaryRangeQuery>,
-    membership: &'a [roaring::RoaringTreemap],
+    membership: &'a [&'a roaring::RoaringTreemap],
     progress: &'a dyn ExactRangeScanProgress,
 }
 
@@ -176,7 +176,7 @@ pub(crate) async fn scan_active_range_generation_ordered(
     query: Option<&SecondaryRangeQuery>,
     iteration: RangeScanIteration,
     limit: Option<usize>,
-    membership: &[roaring::RoaringTreemap],
+    membership: &[&roaring::RoaringTreemap],
     progress: &dyn ExactRangeScanProgress,
 ) -> Result<Vec<u64>> {
     progress.checkpoint()?;
@@ -207,7 +207,7 @@ pub(crate) async fn scan_active_range_generation_ordered(
         }
         None => (Bound::Unbounded, Bound::Unbounded),
     };
-    if limit == Some(0) || membership.iter().any(roaring::RoaringTreemap::is_empty) {
+    if limit == Some(0) || membership.iter().any(|bitmap| bitmap.is_empty()) {
         return Ok(Vec::new());
     }
     let scan = RangeScan {

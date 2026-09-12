@@ -43,37 +43,47 @@ pub struct MatchPlan {
 pub struct RowPlan {
     pipeline: RowPipeline,
     matches: BTreeMap<usize, MatchPlan>,
+    #[serde(skip)]
+    consumers: BTreeMap<usize, BatchConsumer>,
     pub metrics: exec::PlannerMetrics,
 }
 
 impl RowPlan {
+    /// Construct a diagnostic reference execution from the validated logical
+    /// query. Every node source scans all nodes; graph steps follow binding order
+    /// without index probes or hash joins, and row operators materialize. This
+    /// does no optimizer exploration and preserves expression/effect boundaries.
+    /// Estimates are unit placeholders, not production cost diagnostics.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// let query = r::Query::new(Vec::new(), Vec::new(), Vec::new()).unwrap();
+    /// let reference = r::RowPlan::reference(query).unwrap();
+    /// assert_eq!(reference.pipeline().execution(), r::RowExecution::Materialized);
+    /// assert_eq!(reference.metrics.memo_groups, 0);
+    /// ```
+    pub fn reference(query: Query) -> Result<Self> {
+        let matches = super::reference::matches(&query)?;
+        Ok(Self {
+            pipeline: RowPipeline::new(std::sync::Arc::new(query), RowExecution::Materialized),
+            matches,
+            consumers: BTreeMap::new(),
+            metrics: exec::PlannerMetrics::default(),
+        })
+    }
+
     /// Select a validated execution strategy without changing graph access,
     /// expression semantics, schemas, or effect boundaries. This also permits
     /// independent batch-versus-materialized execution checks.
     pub fn with_execution(mut self, execution: RowExecution) -> Self {
         self.pipeline = RowPipeline::new(std::sync::Arc::new(self.query().clone()), execution);
+        self.consumers = super::consumers::prepare(&self.pipeline, &self.matches);
         self
     }
     /// Validated adjacent consumer. Node cursor availability also depends on the
     /// selected native access primitive; unsupported primitives keep their executor.
     pub fn batch_consumer(&self, source: usize) -> Option<BatchConsumer> {
-        let consumer = self.pipeline.batch_consumer(source)?;
-        if let Some(plan) = self.matches.get(&source) {
-            let Some(MatchStep::Scan(start)) = plan.steps.first() else {
-                return None;
-            };
-            if !plan.steps[1..]
-                .iter()
-                .all(|step| matches!(step, MatchStep::Expand { .. }))
-                || !plan
-                    .sources
-                    .iter()
-                    .any(|source| source.slot == *start && source.access.steps().len() == 1)
-            {
-                return None;
-            }
-        }
-        Some(consumer)
+        self.consumers.get(&source).copied()
     }
     /// Safe upstream demand for a window over a total, row-preserving projection.
     /// No filter, aggregation, ordering, distinct, or write boundary is crossed.
@@ -136,8 +146,10 @@ pub fn plan(query: Query, ctx: &context::PlannerContext) -> Result<RowPlan> {
             | Operator::Delete { .. } => {}
         }
     }
+    let consumers = super::consumers::prepare(&pipeline, &matches);
     Ok(RowPlan {
         pipeline,
+        consumers,
         matches,
         metrics,
     })
@@ -189,7 +201,7 @@ fn plan_accesses(
             }];
             if let Some(label) = label {
                 let mut equalities = node.properties.clone();
-                if let Some(predicate) = predicate
+                if let Some(predicate) = predicate.as_deref()
                     && index_predicate_is_total(predicate, pattern)
                 {
                     collect_equalities(predicate, node.slot, &mut equalities);
@@ -357,23 +369,51 @@ fn plan_accesses(
             relationships,
             query.contracts()[operator_index].input().slots(),
         )?;
-        // A single equality can probe an incoming scalar without moving a
-        // potentially failing expression across another pattern or predicate.
-        // Wider conjunctions retain scans until their error ordering is proven.
+        // Probe extraction may eliminate candidates before final validation.
+        // Only total constraints can cross that boundary: missing parameters,
+        // arithmetic, functions and dynamic property access retain their order.
         let incoming = query.contracts()[operator_index].input().slots();
-        if pattern.nodes.len() == 1 && pattern.relationships.is_empty() {
-            let node = &pattern.nodes[0];
-            let mut equalities = Vec::new();
-            if predicate.is_none() && node.properties.len() == 1 {
-                equalities.clone_from(&node.properties);
-            } else if node.properties.is_empty()
-                && let Some(expression @ Expression::Binary(Binary::Equal, _, _)) = predicate
-            {
-                collect_equalities(expression, node.slot, &mut equalities);
+        let constraints_total = pattern
+            .nodes
+            .iter()
+            .flat_map(|node| &node.properties)
+            .chain(pattern.relationships.iter().flat_map(|rel| &rel.properties))
+            .all(|(_, expression)| match expression {
+                Expression::Literal(_) => true,
+                Expression::Slot(slot) => incoming.contains(slot),
+                _ => false,
+            });
+        let mut predicate_total = predicate
+            .as_deref()
+            .is_none_or(|expression| index_predicate_is_total(expression, pattern));
+        if let Some(predicate) = predicate {
+            predicate.visit(&mut |expression| {
+                if matches!(expression, Expression::Parameter(_)) {
+                    predicate_total = false;
+                }
+            });
+        }
+        let mut lookups = Vec::new();
+        if constraints_total && predicate_total {
+            // Group repeated bindings once; do not rescan the whole pattern
+            // for every node in a wide disconnected conjunction.
+            let mut lookup_nodes = BTreeMap::<_, Vec<_>>::new();
+            for node in &pattern.nodes {
+                if !incoming.contains(&node.slot) {
+                    lookup_nodes.entry(node.slot).or_default().push(node);
+                }
             }
-            if !incoming.contains(&node.slot)
-                && let Some(label) = &node.label
-            {
+            for (slot, nodes) in lookup_nodes {
+                let Some(label) = nodes.iter().find_map(|node| node.label.as_ref()) else {
+                    continue;
+                };
+                let mut equalities = nodes
+                    .iter()
+                    .flat_map(|node| node.properties.iter().cloned())
+                    .collect();
+                if let Some(predicate) = predicate {
+                    collect_equalities(predicate, slot, &mut equalities);
+                }
                 for (property, expression) in equalities {
                     let Expression::Slot(probe) = expression else {
                         continue;
@@ -392,24 +432,25 @@ fn plan_accesses(
                         .storage
                         .equality_index_rows(config.stats.node_eq_cardinality.get(&key).copied())
                         .as_rows();
-                    order = order.with_lookups(vec![PatternLookup {
-                        slot: node.slot,
+                    lookups.push(PatternLookup {
+                        slot,
                         probe,
                         index: index.clone(),
                         key,
                         estimated_rows,
-                    }])?;
+                    });
                     break;
                 }
             }
         }
+        order = order.with_lookups(lookups)?;
         // Equality is the complete predicate here: pushing a key evaluation
         // through an earlier short-circuiting expression could expose an error.
         if pattern.relationships.is_empty()
             && pattern.paths.is_empty()
             && pattern.nodes.len() == 2
-            && pattern.nodes.iter().all(|n| n.properties.is_empty())
-            && let Some(Expression::Binary(Binary::Equal, left, right)) = predicate
+            && constraints_total
+            && let Some(Expression::Binary(Binary::Equal, left, right)) = predicate.as_deref()
             && let (Expression::Property(left, left_key), Expression::Property(right, right_key)) =
                 (left.as_ref(), right.as_ref())
             && let (Expression::Slot(left), Expression::Slot(right)) =
@@ -558,7 +599,7 @@ fn index_predicate_is_total(expression: &Expression, pattern: &Pattern) -> bool 
         }
         Expression::Binary(Binary::Equal, left, right) => {
             [left, right].iter().all(|operand| match operand.as_ref() {
-                Expression::Literal(_) | Expression::Parameter(_) => true,
+                Expression::Literal(_) | Expression::Parameter(_) | Expression::Slot(_) => true,
                 Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
                     if pattern.nodes.iter().any(|node| node.slot == *slot)),
                 _ => false,

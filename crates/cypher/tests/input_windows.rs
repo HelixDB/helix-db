@@ -72,8 +72,8 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
         "CREATE (:N) WITH 1 AS x RETURN x LIMIT 1",
         "MATCH (n {key:1}) WITH n RETURN n LIMIT 1",
         "MATCH (n) WHERE n.key=1 WITH n RETURN n LIMIT 1",
-        "MATCH (n)-[:R]->() WITH n RETURN n LIMIT 1",
-        "MATCH (n),(m) WITH n RETURN n LIMIT 1",
+        "MATCH (n)-[:R {key:1/0}]->() WITH n RETURN n LIMIT 1",
+        "MATCH (n)-[:R]->() WHERE n.key=1 WITH n RETURN n LIMIT 1",
         "MATCH (n) WITH n RETURN 1+1 LIMIT 1",
         "RETURN 1 LIMIT 1",
         "UNWIND [1] AS x WITH x RETURN x",
@@ -85,6 +85,24 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
         }
     }
     for (text, stage, termination, demand) in [
+        (
+            "MATCH (n)-[:R]->() WITH n RETURN n LIMIT 1",
+            2,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "MATCH (n),(m) WITH n RETURN n LIMIT 1",
+            2,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "OPTIONAL MATCH p=(n)-[:R]-() WITH p SKIP 2 RETURN p LIMIT 1",
+            2,
+            r::Termination::BeforeInput,
+            3,
+        ),
         (
             "MATCH (n) WITH n RETURN n LIMIT 1",
             2,

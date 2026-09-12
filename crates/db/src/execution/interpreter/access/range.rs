@@ -19,7 +19,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<usize>,
     ) -> Result<usize> {
         self.range_index_count_with_membership(
@@ -36,7 +36,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<usize>,
     ) -> Result<usize> {
         self.range_index_count_with_membership(
@@ -54,7 +54,7 @@ impl<'db> ExecutionContext<'db> {
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<usize>,
     ) -> Result<usize> {
         let direction = storage_range_direction(key.direction);
@@ -124,7 +124,7 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
         iteration: ir::RangeScanIteration,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<properties::PositiveUsize>,
     ) -> Result<Vec<u64>> {
         self.check_execution_deadline()?;
@@ -230,7 +230,7 @@ async fn scan_managed_range_in_view(
     query: Option<&crate::index_lifecycle::secondary::SecondaryRangeQuery>,
     requested_direction: StorageRangeIndexDirection,
     iteration: ir::RangeScanIteration,
-    membership: &[roaring::RoaringTreemap],
+    membership: &[&roaring::RoaringTreemap],
     limit: Option<usize>,
 ) -> Result<Vec<u64>> {
     let active =
@@ -291,7 +291,7 @@ async fn count_range_with_membership_in_view(
     query: &OwnedRangeQuery,
     requested_direction: StorageRangeIndexDirection,
     limit: Option<usize>,
-    membership: &[roaring::RoaringTreemap],
+    membership: &[&roaring::RoaringTreemap],
 ) -> Result<usize> {
     let managed_query = match query {
         OwnedRangeQuery::All => None,

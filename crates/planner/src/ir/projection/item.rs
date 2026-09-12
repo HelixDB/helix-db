@@ -27,7 +27,7 @@ impl ResolvedProjection {
         &self.0
     }
 }
-impl r::ProjectionInput for ResolvedProjection {
+impl r::ExpressionInput for ResolvedProjection {
     fn validate(&self) -> r::Result<()> {
         // Private construction follows NonEmptyString / ExprPlan validation.
         Ok(())

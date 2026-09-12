@@ -20,15 +20,36 @@ impl<'db> ExecutionContext<'db> {
         row: &ExecutionRow,
         plan: &ir::PredicatePlan,
     ) -> Result<bool> {
+        self.eval_resolved_predicate(row, plan.resolved()).await
+    }
+
+    async fn eval_resolved_predicate(
+        &self,
+        row: &ExecutionRow,
+        expression: &native::Expression,
+    ) -> Result<bool> {
         let mut resolver = RowValueResolver::new(self);
         let DbPropertyValue::Bool(value) =
-            Box::pin(self.eval_resolved(row, plan.resolved(), &mut resolver)).await?
+            Box::pin(self.eval_resolved(row, expression, &mut resolver)).await?
         else {
             return Err(HelixDbError::InvariantViolation(
                 "native predicate resolved to a non-boolean".into(),
             ));
         };
         Ok(value)
+    }
+
+    pub(in crate::execution::interpreter) async fn select_native_rows(
+        &self,
+        rows: Vec<ExecutionRow>,
+        predicate: &ir::PredicatePlan,
+    ) -> Result<Vec<ExecutionRow>> {
+        let mut evaluator = NativeSelection {
+            context: self,
+            output: Vec::new(),
+        };
+        Box::pin(predicate.program().select(rows, &mut evaluator)).await?;
+        Ok(evaluator.output)
     }
 
     pub(in crate::execution::interpreter::stream) async fn eval_resolved(
@@ -244,5 +265,33 @@ impl<'db> ExecutionContext<'db> {
                 unreachable!("native adapter only constructs supported expression contracts")
             }
         }
+    }
+}
+
+struct NativeSelection<'a, 'db> {
+    context: &'a ExecutionContext<'db>,
+    output: Vec<ExecutionRow>,
+}
+impl helix_planner::relational::SelectionEvaluator<ir::ResolvedPredicate>
+    for NativeSelection<'_, '_>
+{
+    type Row = ExecutionRow;
+    type Error = HelixDbError;
+    async fn evaluate(
+        &mut self,
+        row: &ExecutionRow,
+        expression: &ir::ResolvedPredicate,
+    ) -> Result<helix_planner::relational::Selection> {
+        self.context.check_execution_deadline()?;
+        let value = Box::pin(
+            self.context
+                .eval_resolved_predicate(row, expression.expression()),
+        )
+        .await?;
+        Ok(Some(value).into())
+    }
+    fn retain(&mut self, row: ExecutionRow) -> Result<()> {
+        self.output.push(row);
+        Ok(())
     }
 }

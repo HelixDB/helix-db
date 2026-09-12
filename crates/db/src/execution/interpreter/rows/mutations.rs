@@ -2,9 +2,41 @@
 use super::memory::Rows;
 use super::{graph, ExecutionContext, Limits, Result};
 use helix_planner::relational::{self as r, GraphValues};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 impl ExecutionContext<'_> {
+    /// Property expressions share one remaining budget. Keep both the evaluated
+    /// map and its storage conversion admitted until the write consumes them.
+    fn create_properties(
+        &self,
+        fields: &[(String, r::Expression)],
+        mut evaluation: r::Evaluation<'_>,
+    ) -> Result<(
+        Vec<crate::encoding::v2::values::property::Property>,
+        super::memory::Reservation,
+    )> {
+        // Cover sparse B-tree nodes, key copies and the destination property
+        // vector before allocating any entries. Values are admitted below.
+        let mut bytes = fields.iter().fold(0_usize, |bytes, (key, _)| {
+            bytes
+                .saturating_add(1024)
+                .saturating_add(key.len().saturating_mul(2))
+        });
+        let mut memory = self.row_budget().reserve(bytes)?;
+        let mut properties = BTreeMap::new();
+        for (key, expression) in fields {
+            self.check_execution_deadline()?;
+            // Typed list conversion may retain source and destination buffers
+            // together. Admission for both precedes their construction.
+            evaluation.max_value_bytes = self.row_budget().available() / 2;
+            let value = evaluation.eval(expression)?;
+            bytes = bytes.saturating_add(value.allocated_bytes().saturating_mul(2));
+            memory.resize(bytes)?;
+            properties.insert(key.clone(), value);
+        }
+        Ok((graph::properties(properties)?, memory))
+    }
+
     pub(super) async fn create_rows(
         &mut self,
         mut rows: Rows,
@@ -12,6 +44,17 @@ impl ExecutionContext<'_> {
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<Rows> {
+        // Every surviving input row receives these paths. Reserve their exact
+        // vector capacities before staging writes or allocating any path IDs.
+        let path_bytes = pattern.paths.iter().fold(0_usize, |bytes, path| {
+            bytes.saturating_add(
+                path.nodes
+                    .len()
+                    .saturating_add(path.relationships.len())
+                    .saturating_mul(size_of::<u64>()),
+            )
+        });
+        rows.admit_payload(path_bytes.saturating_mul(rows.len()))?;
         for row in &mut rows {
             for node in &pattern.nodes {
                 if row[node.slot.0 as usize] != r::Value::Null {
@@ -22,19 +65,11 @@ impl ExecutionContext<'_> {
                 };
                 self.check_execution_deadline()?;
                 let graph = self.graph_batch(std::slice::from_ref(row)).await?;
-                let properties = node
-                    .properties
-                    .iter()
-                    .map(|(k, e)| {
-                        Ok((
-                            k.clone(),
-                            self.evaluate(row, parameters, &graph, limits).eval(e)?,
-                        ))
-                    })
-                    .collect::<r::Result<BTreeMap<_, _>>>()?;
-                let id = self
-                    .row_create_node(label, graph::properties(properties)?)
-                    .await?;
+                let (properties, _properties_memory) = self.create_properties(
+                    &node.properties,
+                    self.evaluate(row, parameters, &graph, limits),
+                )?;
+                let id = self.row_create_node(label, properties).await?;
                 row[node.slot.0 as usize] = r::Value::Entity(r::Entity::Node(id));
             }
             for relationship in &pattern.relationships {
@@ -60,16 +95,10 @@ impl ExecutionContext<'_> {
                     std::mem::swap(&mut from, &mut to);
                 }
                 let graph = self.graph_batch(std::slice::from_ref(row)).await?;
-                let properties = relationship
-                    .properties
-                    .iter()
-                    .map(|(k, e)| {
-                        Ok((
-                            k.clone(),
-                            self.evaluate(row, parameters, &graph, limits).eval(e)?,
-                        ))
-                    })
-                    .collect::<r::Result<BTreeMap<_, _>>>()?;
+                let (properties, _properties_memory) = self.create_properties(
+                    &relationship.properties,
+                    self.evaluate(row, parameters, &graph, limits),
+                )?;
                 let label = relationship.types.first().ok_or_else(|| {
                     r::QueryError::runtime(
                         "SyntaxError",
@@ -77,17 +106,14 @@ impl ExecutionContext<'_> {
                         "new relationships require one type",
                     )
                 })?;
-                let id = self
-                    .row_create_edge(from, to, label, graph::properties(properties)?)
-                    .await?;
+                let id = self.row_create_edge(from, to, label, properties).await?;
                 row[relationship.slot.0 as usize] = r::Value::Entity(r::Entity::Relationship(id));
             }
             for path in &pattern.paths {
-                let nodes = path
-                    .nodes
-                    .iter()
-                    .map(|s| match row[s.0 as usize] {
-                        r::Value::Entity(r::Entity::Node(id)) => Ok(id),
+                let mut nodes = Vec::with_capacity(path.nodes.len());
+                for s in &path.nodes {
+                    nodes.push(match row[s.0 as usize] {
+                        r::Value::Entity(r::Entity::Node(id)) => id,
                         r::Value::Null
                         | r::Value::Boolean(_)
                         | r::Value::Integer(_)
@@ -96,18 +122,20 @@ impl ExecutionContext<'_> {
                         | r::Value::List(_)
                         | r::Value::Map(_)
                         | r::Value::Entity(_)
-                        | r::Value::Path(_) => Err(r::QueryError::runtime(
-                            "TypeError",
-                            "ExpectedNode",
-                            "path must contain nodes",
-                        )),
-                    })
-                    .collect::<r::Result<_>>()?;
-                let relationships = path
-                    .relationships
-                    .iter()
-                    .map(|s| match row[s.0 as usize] {
-                        r::Value::Entity(r::Entity::Relationship(id)) => Ok(id),
+                        | r::Value::Path(_) => {
+                            return Err(r::QueryError::runtime(
+                                "TypeError",
+                                "ExpectedNode",
+                                "path must contain nodes",
+                            )
+                            .into())
+                        }
+                    });
+                }
+                let mut relationships = Vec::with_capacity(path.relationships.len());
+                for s in &path.relationships {
+                    relationships.push(match row[s.0 as usize] {
+                        r::Value::Entity(r::Entity::Relationship(id)) => id,
                         r::Value::Null
                         | r::Value::Boolean(_)
                         | r::Value::Integer(_)
@@ -116,13 +144,16 @@ impl ExecutionContext<'_> {
                         | r::Value::List(_)
                         | r::Value::Map(_)
                         | r::Value::Entity(_)
-                        | r::Value::Path(_) => Err(r::QueryError::runtime(
-                            "TypeError",
-                            "ExpectedRelationship",
-                            "path must contain relationships",
-                        )),
-                    })
-                    .collect::<r::Result<_>>()?;
+                        | r::Value::Path(_) => {
+                            return Err(r::QueryError::runtime(
+                                "TypeError",
+                                "ExpectedRelationship",
+                                "path must contain relationships",
+                            )
+                            .into())
+                        }
+                    });
+                }
                 row[path.slot.0 as usize] = r::Value::Path(r::Path::new(nodes, relationships)?);
             }
         }
@@ -199,6 +230,18 @@ impl ExecutionContext<'_> {
                         .into())
                     }
                 };
+                // Expression evaluation checks construction against available
+                // memory; retain that ownership across the asynchronous edits
+                // and allow simultaneous typed-list conversion buffers.
+                let _changes_memory = self.row_budget().reserve(changes.iter().fold(
+                    0_usize,
+                    |bytes, (key, value)| {
+                        bytes
+                            .saturating_add(1024)
+                            .saturating_add(key.len().saturating_mul(2))
+                            .saturating_add(value.allocated_bytes().saturating_mul(2))
+                    },
+                ))?;
                 if replace {
                     for key in graph.properties(entity)?.keys() {
                         if !changes.contains_key(key) {
@@ -227,7 +270,7 @@ impl ExecutionContext<'_> {
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<Rows> {
-        let mut entities = BTreeSet::new();
+        let mut entities = super::super::mutation::DeletionTargets::new(self.row_budget())?;
         for batch in rows.chunks(limits.batch_rows) {
             let graph = self.graph_batch(batch).await?;
             // The type is immutable. Retain it for references that survive an
@@ -239,7 +282,23 @@ impl ExecutionContext<'_> {
                     continue;
                 };
                 if !self.row_relationship_types.contains_key(id) {
-                    let memory = self.row_budget().reserve(label.len().saturating_add(128))?;
+                    // Entries are never removed individually. Their guards
+                    // own successive node-growth deltas until the request ends.
+                    let count = self.row_relationship_types.len();
+                    let previous = if count == 0 {
+                        0
+                    } else {
+                        r::allocation::btree_bytes::<u64, (String, super::memory::Reservation)>(
+                            count,
+                        )
+                    };
+                    let next = r::allocation::btree_bytes::<
+                        u64,
+                        (String, super::memory::Reservation),
+                    >(count.saturating_add(1));
+                    let memory = self
+                        .row_budget()
+                        .reserve(label.len().saturating_add(next.saturating_sub(previous)))?;
                     self.row_relationship_types
                         .insert(*id, (label.clone(), memory));
                 }
@@ -252,16 +311,15 @@ impl ExecutionContext<'_> {
                     {
                         r::Value::Null => {}
                         r::Value::Entity(entity) => {
-                            entities.insert(entity);
+                            entities.insert(entity)?;
                         }
                         r::Value::Path(path) => {
-                            entities.extend(path.nodes().iter().copied().map(r::Entity::Node));
-                            entities.extend(
-                                path.relationships()
-                                    .iter()
-                                    .copied()
-                                    .map(r::Entity::Relationship),
-                            );
+                            for id in path.nodes() {
+                                entities.insert(r::Entity::Node(*id))?;
+                            }
+                            for id in path.relationships() {
+                                entities.insert(r::Entity::Relationship(*id))?;
+                            }
                         }
                         r::Value::Boolean(_)
                         | r::Value::Integer(_)
@@ -282,5 +340,71 @@ impl ExecutionContext<'_> {
         }
         self.row_delete_entities(entities, detach).await?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn property_maps_share_admission_and_keep_conversion_ownership() {
+        let db =
+            crate::execution::interpreter::test_support::open_db("property-map-admission").await;
+        let mut ctx = ExecutionContext::new(&db, helix_planner::context::ParamBindings::default());
+        ctx.row_memory = Some(super::super::memory::Budget::new(32 * 1024));
+        let graph = super::super::GraphBatch::default();
+        let params = BTreeMap::from([(
+            "payload".to_owned(),
+            r::Value::String("x".repeat(12 * 1024)),
+        )]);
+        let fields = vec![("a".to_owned(), r::Expression::Parameter("payload".into()))];
+        let (properties, memory) = ctx
+            .create_properties(
+                &fields,
+                ctx.evaluate(&[], &params, &graph, Limits::default()),
+            )
+            .unwrap();
+        assert_eq!(properties.len(), 1);
+        assert!(ctx.row_budget().available() < 8 * 1024);
+        drop(properties);
+        // The guard follows the conversion through the asynchronous write.
+        assert!(ctx.row_budget().available() < 8 * 1024);
+        drop(memory);
+        assert_eq!(ctx.row_budget().available(), 32 * 1024);
+        let mut fields = fields;
+        fields.push(("b".into(), r::Expression::Parameter("payload".into())));
+        assert!(
+            matches!(ctx.create_properties(&fields, ctx.evaluate(&[], &params, &graph, Limits::default())), Err(crate::cypher::Error::Query(error)) if error.detail == "MemoryLimit")
+        );
+        assert_eq!(ctx.row_budget().available(), 32 * 1024);
+        for (key, value, detail) in [
+            ("$label", r::Value::Null, "ReservedPropertyName"),
+            ("", r::Value::Integer(1), "EmptyPropertyName"),
+            (
+                "mixed",
+                r::Value::List(vec![r::Value::Integer(1), r::Value::Boolean(true)]),
+                "InvalidPropertyType",
+            ),
+        ] {
+            let fields = vec![(key.into(), r::Expression::Literal(value))];
+            assert!(
+                matches!(ctx.create_properties(&fields, ctx.evaluate(&[], &params, &graph, Limits::default())), Err(crate::cypher::Error::Query(error)) if error.detail == detail)
+            );
+            assert_eq!(ctx.row_budget().available(), 32 * 1024);
+        }
+        ctx.fail_deadline_after(0);
+        assert!(matches!(
+            ctx.create_properties(
+                &fields,
+                ctx.evaluate(&[], &params, &graph, Limits::default())
+            ),
+            Err(crate::cypher::Error::Storage(
+                crate::HelixDbError::QueryDeadlineExceeded
+            ))
+        ));
+        assert_eq!(ctx.row_budget().available(), 32 * 1024);
+        drop(ctx);
+        db.close().await.unwrap();
     }
 }

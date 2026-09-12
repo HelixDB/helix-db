@@ -15,8 +15,6 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::ops::Bound;
-#[cfg(any(test, feature = "production-coverage"))]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -89,10 +87,9 @@ pub(crate) use exact::run_production_contracts as run_exact_production_contracts
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) use exact::scan_active_range_generation_with_membership;
 pub(crate) use exact::{
-    count_active_range_generation_with_membership,
-    lookup_active_equality_literal_batch_with_compatibility,
-    lookup_active_equality_point_literal_with_compatibility, record_equality_graph_read,
-    scan_active_range_generation_ordered, ExactRangeScanProgress,
+    count_active_range_generation_with_membership, lookup_active_equality_batch_admitted,
+    lookup_active_equality_generations_admitted, lookup_active_equality_point_admitted,
+    record_equality_graph_read, scan_active_range_generation_ordered, ExactRangeScanProgress,
 };
 #[cfg(test)]
 pub(crate) use exact::{
@@ -100,48 +97,20 @@ pub(crate) use exact::{
 };
 
 #[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_POINT_READS: AtomicU64 = AtomicU64::new(0);
+mod metrics;
 #[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_MULTI_GETS: AtomicU64 = AtomicU64::new(0);
+pub(crate) use metrics::{
+    equality_read_metrics, reset_equality_read_metrics, EqualityReadObserver,
+    SecondaryEqualityReadMetrics,
+};
 #[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_SCANS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_GRAPH_READS: AtomicU64 = AtomicU64::new(0);
-
-/// Exact storage operations issued by managed equality serving while the
-/// production-coverage benchmark is measuring it.
-#[cfg(any(test, feature = "production-coverage"))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SecondaryEqualityReadMetrics {
-    pub(crate) point_reads: u64,
-    pub(crate) multi_get_calls: u64,
-    pub(crate) scans: u64,
-    pub(crate) graph_reads: u64,
-}
-
-#[cfg(any(test, feature = "production-coverage"))]
-pub(crate) fn reset_equality_read_metrics() {
-    BENCHMARK_POINT_READS.store(0, AtomicOrdering::Relaxed);
-    BENCHMARK_MULTI_GETS.store(0, AtomicOrdering::Relaxed);
-    BENCHMARK_SCANS.store(0, AtomicOrdering::Relaxed);
-    BENCHMARK_GRAPH_READS.store(0, AtomicOrdering::Relaxed);
-}
-
-#[cfg(any(test, feature = "production-coverage"))]
-pub(crate) fn equality_read_metrics() -> SecondaryEqualityReadMetrics {
-    SecondaryEqualityReadMetrics {
-        point_reads: BENCHMARK_POINT_READS.load(AtomicOrdering::Relaxed),
-        multi_get_calls: BENCHMARK_MULTI_GETS.load(AtomicOrdering::Relaxed),
-        scans: BENCHMARK_SCANS.load(AtomicOrdering::Relaxed),
-        graph_reads: BENCHMARK_GRAPH_READS.load(AtomicOrdering::Relaxed),
-    }
-}
+use metrics::{record, ReadKind};
 
 /// Records one logical point read issued by the complete equality-serving path.
 #[inline]
 pub(crate) fn record_equality_point_read() {
     #[cfg(any(test, feature = "production-coverage"))]
-    BENCHMARK_POINT_READS.fetch_add(1, AtomicOrdering::Relaxed);
+    record(ReadKind::Point);
 }
 
 /// Family driver sharing the lifecycle scope gate.
@@ -2863,241 +2832,60 @@ pub(crate) async fn lookup_active_equality_generation(
     handle: &ActiveIndexHandle,
     value: &PropertyValue,
 ) -> Result<roaring::RoaringTreemap> {
-    lookup_active_equality_generation_with_compatibility(
+    exact::lookup_active_equality_generation_admitted(
         reader,
         handle,
         value,
         ReaderStorageCompatibility::Current,
+        None,
     )
     .await
+    .map(crate::query_resources::bitmap::Bitmap::into_unbudgeted)
 }
 
-async fn lookup_active_equality_generation_with_compatibility(
-    reader: &(impl DbReadOps + Sync),
-    handle: &ActiveIndexHandle,
-    value: &PropertyValue,
-    compatibility: ReaderStorageCompatibility,
-) -> Result<roaring::RoaringTreemap> {
-    let Some(definition) = handle.secondary_definition() else {
-        return Err(corruption(
-            "secondary equality serving received a non-secondary Active handle",
-        ));
-    };
-    if !matches!(
-        definition,
-        ValidatedSecondaryIndexDefinition::NodeEquality { .. }
-            | ValidatedSecondaryIndexDefinition::EdgeEquality { .. }
-    ) {
-        return Err(corruption(
-            "secondary equality serving received a range definition",
-        ));
-    }
-
-    let canonical = match project_equality_value(value) {
-        EqualityValueProjection::Indexed(value) => CanonicalSecondaryValue::equality(value),
-        EqualityValueProjection::AuthoritativeNull => {
-            return scan_authoritative_null_equality(reader, handle, definition).await;
-        }
-        EqualityValueProjection::NonReflexive => return Ok(roaring::RoaringTreemap::new()),
-        EqualityValueProjection::Unsupported(value_type) => {
-            return Err(SecondaryIndexValueError::UnsupportedEqualityValue { value_type }.into());
-        }
-        EqualityValueProjection::Oversized {
-            encoded_len,
-            maximum,
-        } => {
-            return Err(SecondaryIndexValueError::EncodedKeyTooLarge {
-                encoded_len,
-                maximum,
-            }
-            .into());
-        }
-    };
-    let lane = definition_lane(definition);
-    if lane.is_unique() {
-        let key = secondary_entry_key(
-            handle.scope(),
-            handle.index_id(),
-            handle.generation(),
-            definition,
-            canonical,
-            IndexEntityId::initial(),
-        )?;
-        record_equality_point_read();
-        let Some(bytes) = reader.get(key).await? else {
-            return Ok(roaring::RoaringTreemap::new());
-        };
-        let owner =
-            decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &bytes)?;
-        #[cfg(any(test, feature = "production-coverage"))]
-        BENCHMARK_GRAPH_READS.fetch_add(1, AtomicOrdering::Relaxed);
-        if !authoritative_equality_matches(reader, handle.scope(), definition, owner, value).await?
-        {
-            return Err(corruption(
-                "unique secondary equality owner differs from authoritative graph state",
-            ));
-        }
-        return Ok(roaring::RoaringTreemap::from_iter([owner.get()]));
-    }
-
-    lookup_active_equality_point_literal_with_compatibility(reader, handle, value, compatibility)
-        .await
-}
-
-/// Reads and unions equality values from one exact Active generation.
-///
-/// Non-unique indexed values use one `multi_get` over their V4 bitmap rows.
-/// Unique, null, non-reflexive, and error projections retain the authoritative
-/// single-value path so their verification contracts remain unchanged.
-pub(crate) async fn lookup_active_equality_generations_with_compatibility(
-    reader: &(impl DbReadOps + Sync),
-    handle: &ActiveIndexHandle,
-    values: &[PropertyValue],
-    compatibility: ReaderStorageCompatibility,
-) -> Result<roaring::RoaringTreemap> {
-    if values.is_empty() {
-        return Ok(roaring::RoaringTreemap::new());
-    }
-    let Some(definition) = handle.secondary_definition() else {
-        return Err(corruption(
-            "secondary equality batch serving received a non-secondary Active handle",
-        ));
-    };
-    if !definition_uses_equality_bitmap(definition) {
-        let mut owners = roaring::RoaringTreemap::new();
-        for value in values {
-            owners |= lookup_active_equality_generation_with_compatibility(
-                reader,
-                handle,
-                value,
-                compatibility,
-            )
-            .await?;
-        }
-        return Ok(owners);
-    }
-    if compatibility == ReaderStorageCompatibility::LegacyEqualityUnion {
-        let mut owners = roaring::RoaringTreemap::new();
-        for value in values {
-            owners |= lookup_active_equality_generation_with_compatibility(
-                reader,
-                handle,
-                value,
-                compatibility,
-            )
-            .await?;
-        }
-        return Ok(owners);
-    }
-
-    let mut canonical = Vec::with_capacity(values.len());
-    for value in values {
-        let EqualityValueProjection::Indexed(value) = project_equality_value(value) else {
-            let mut owners = roaring::RoaringTreemap::new();
-            for value in values {
-                owners |= lookup_active_equality_generation_with_compatibility(
-                    reader,
-                    handle,
-                    value,
-                    compatibility,
-                )
-                .await?;
-            }
-            return Ok(owners);
-        };
-        canonical.push(CanonicalSecondaryValue::equality(value));
-    }
-    let mut keys = canonical
-        .into_iter()
-        .map(|value| {
-            secondary_entry_key(
-                handle.scope(),
-                handle.index_id(),
-                handle.generation(),
-                definition,
-                value,
-                IndexEntityId::initial(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    keys.sort_unstable();
-    keys.dedup();
-    keys.iter().for_each(|_| record_equality_point_read());
-    if keys.len() == 1 {
-        return reader
-            .get(
-                keys.pop()
-                    .expect("one-key equality batch remains non-empty"),
-            )
-            .await?
-            .map(|bytes| {
-                SecondaryEqualityBitmapValue::decode(&bytes)
-                    .map(SecondaryEqualityBitmapValue::into_ids)
-                    .map_err(HelixDbError::from)
-            })
-            .transpose()
-            .map(Option::unwrap_or_default);
-    }
-    #[cfg(any(test, feature = "production-coverage"))]
-    BENCHMARK_MULTI_GETS.fetch_add(1, AtomicOrdering::Relaxed);
-    let mut owners = roaring::RoaringTreemap::new();
-    for bytes in reader.multi_get(&keys).await?.into_iter().flatten() {
-        owners |= SecondaryEqualityBitmapValue::decode(&bytes)?.into_ids();
-    }
-    Ok(owners)
-}
-
-async fn scan_authoritative_null_equality(
-    reader: &(impl DbReadOps + Sync),
-    handle: &ActiveIndexHandle,
-    definition: &ValidatedSecondaryIndexDefinition,
-) -> Result<roaring::RoaringTreemap> {
-    #[cfg(any(test, feature = "production-coverage"))]
-    BENCHMARK_SCANS.fetch_add(1, AtomicOrdering::Relaxed);
-    let prefix = source_prefix(handle.scope(), definition.element_kind());
-    let mut rows = reader.scan_prefix(&prefix, ..).await?;
-    let mut owners = roaring::RoaringTreemap::new();
-    while let Some(row) = rows.next().await? {
-        #[cfg(any(test, feature = "production-coverage"))]
-        BENCHMARK_GRAPH_READS.fetch_add(1, AtomicOrdering::Relaxed);
-        let Some(entity_id) = source_entity(handle.scope(), definition.element_kind(), &row.key)?
-        else {
-            continue;
-        };
-        let properties = decode_properties(&row.value)?;
-        if properties_match_definition(definition, &properties)
-            && properties
-                .iter()
-                .find(|property| property.name == definition.property().as_str())
-                .is_none_or(|property| matches!(property.value, PropertyValue::Null))
-        {
-            owners.insert(entity_id.get());
-        }
-    }
-    Ok(owners)
-}
-
+/// Verify one unique hit against its authoritative graph row in the same view.
+/// Raw property bytes remain admitted while the shared owned decoder runs.
 async fn authoritative_equality_matches(
     reader: &(impl DbReadOps + Sync),
     scope: DataScope,
     definition: &ValidatedSecondaryIndexDefinition,
     entity_id: IndexEntityId,
     query: &PropertyValue,
+    budget: Option<&crate::query_resources::Budget>,
 ) -> Result<bool> {
     let entity = IndexEntity {
         kind: definition.element_kind(),
         id: entity_id,
     };
-    let Some(properties) = read_authoritative_properties(reader, scope, entity).await? else {
+    let _key_memory = budget
+        .map(|budget| {
+            budget.reserve(
+                scope
+                    .encoded_len()
+                    .saturating_add(size_of::<u8>() + size_of::<u64>()),
+            )
+        })
+        .transpose()?;
+    let key = authoritative_property_key(scope, entity);
+    if let Some(budget) = budget {
+        budget.record_reads(crate::query_resources::StorageReadUsage {
+            point_gets: 1,
+            ..Default::default()
+        });
+    }
+    let Some(bytes) = reader.get(key).await? else {
         return Ok(false);
     };
-    if !properties_match_definition(definition, &properties) {
-        return Ok(false);
-    }
-    Ok(properties
-        .iter()
-        .find(|property| property.name == definition.property().as_str())
-        .is_some_and(|property| property.value.eq_value(query)))
+    // Match the common hydration decoder bound plus its retained raw bytes.
+    let _properties_memory = budget
+        .map(|budget| budget.reserve(bytes.len().saturating_mul(33)))
+        .transpose()?;
+    let properties = decode_properties(&bytes)?;
+    Ok(properties_match_definition(definition, &properties)
+        && properties
+            .iter()
+            .find(|property| property.name == definition.property().as_str())
+            .is_some_and(|property| property.value.eq_value(query)))
 }
 
 fn properties_match_definition(
@@ -3393,6 +3181,21 @@ fn secondary_entry_key(
     value: CanonicalSecondaryValue,
     entity_id: IndexEntityId,
 ) -> Result<Bytes> {
+    Ok(
+        prepare_secondary_entry_key(scope, index_id, generation, definition, value, entity_id)?
+            .to_bytes(),
+    )
+}
+
+/// Construct a validated typed key before allocating its serialized frame.
+fn prepare_secondary_entry_key(
+    scope: DataScope,
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    definition: &ValidatedSecondaryIndexDefinition,
+    value: CanonicalSecondaryValue,
+    entity_id: IndexEntityId,
+) -> Result<IndexKey> {
     if definition_uses_equality_bitmap(definition) {
         let CanonicalSecondaryValue::Equality(value) = value else {
             return Err(corruption(
@@ -3405,10 +3208,10 @@ fn secondary_entry_key(
             definition.element_kind(),
             value,
         )?;
-        return Ok(scoped_index_key(
+        return Ok(IndexKey::Data {
             scope,
-            ScopedKey::SecondaryEqualityBitmap(key),
-        ));
+            kind: ScopedKey::SecondaryEqualityBitmap(key),
+        });
     }
     let lane = definition_lane(definition);
     let key = SecondaryEntryKey::try_new(
@@ -3418,7 +3221,10 @@ fn secondary_entry_key(
         value,
         (!lane.is_unique()).then_some(entity_id),
     )?;
-    Ok(scoped_index_key(scope, ScopedKey::SecondaryEntry(key)))
+    Ok(IndexKey::Data {
+        scope,
+        kind: ScopedKey::SecondaryEntry(key),
+    })
 }
 
 #[cfg(test)]
@@ -3723,7 +3529,7 @@ mod tests {
             .expect("secondary read fixture projects an Active handle")
     }
 
-    async fn active_vector_read_handle(db: &Db) -> ActiveIndexHandle {
+    pub(super) async fn active_vector_read_handle(db: &Db) -> ActiveIndexHandle {
         let definition = ValidatedDynamicIndexDefinition::try_from(
             VectorIndexDefinition::new_node(
                 "User",
@@ -4252,7 +4058,7 @@ mod tests {
                     &handle,
                     None,
                     None,
-                    &[membership.clone(), second_filter.clone()],
+                    &[&membership, &second_filter],
                 )
                 .await
                 .expect("exact range applies membership in encoded order"),
@@ -4270,7 +4076,7 @@ mod tests {
                     &handle,
                     None,
                     None,
-                    &[membership.clone(), second_filter.clone()],
+                    &[&membership, &second_filter],
                 )
                 .await
                 .expect("exact range count applies membership in encoded order"),
@@ -5660,77 +5466,83 @@ mod tests {
 
     #[tokio::test]
     async fn shared_edge_equality_builds_one_bitmap_and_serves_one_point_read() {
-        let db = test_db("secondary-shared-edge-bitmap-read").await;
-        let scope = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
-            0xFD00_0000_0000_0000_0000_0000_0000_0007,
-        ));
-        let definition = validated(
-            SecondaryIndexDefinition::edge_equality("FOLLOWS", "kind")
-                .expect("edge equality definition validates"),
-        );
-        for edge_id in 0..8 {
-            put_source(
-                &db,
-                scope,
-                IndexElementKind::Edge,
-                edge_id,
-                &[
-                    Property::string("$label", "FOLLOWS"),
-                    Property::string("kind", "shared"),
-                ],
-            )
-            .await;
-        }
-        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 7).await;
-        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
-        let mut claim_sequence = 1;
-        assert_eq!(
-            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
-            CommittedOperationStep::Completed
-        );
-        let rows = generation_rows(
-            &db,
-            scope,
-            RecordKind::SecondaryEqualityBitmap,
-            index_id,
-            generation,
-        )
-        .await;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            SecondaryEqualityBitmapValue::decode(&rows[0].1)
-                .expect("edge equality bitmap decodes")
-                .ids()
-                .iter()
-                .collect::<Vec<_>>(),
-            (0..8).collect::<Vec<_>>()
-        );
-        let active = read_index(&db, scope, &definition).await;
-        let handle = ActiveIndexHandle::try_from_record(scope, &active)
-            .expect("active edge equality handle projects");
-        reset_equality_read_metrics();
-        assert_eq!(
-            lookup_active_equality_generation(
-                &db,
-                &handle,
-                &PropertyValue::String("shared".to_string()),
-            )
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let db = test_db("secondary-shared-edge-bitmap-read").await;
+                let scope =
+                    DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(
+                        0xFD00_0000_0000_0000_0000_0000_0000_0007,
+                    ));
+                let definition = validated(
+                    SecondaryIndexDefinition::edge_equality("FOLLOWS", "kind")
+                        .expect("edge equality definition validates"),
+                );
+                for edge_id in 0..8 {
+                    put_source(
+                        &db,
+                        scope,
+                        IndexElementKind::Edge,
+                        edge_id,
+                        &[
+                            Property::string("$label", "FOLLOWS"),
+                            Property::string("kind", "shared"),
+                        ],
+                    )
+                    .await;
+                }
+                let (operation_id, index_id, generation) =
+                    create_build(&db, scope, &definition, 7).await;
+                let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+                let mut claim_sequence = 1;
+                assert_eq!(
+                    drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                    CommittedOperationStep::Completed
+                );
+                let rows = generation_rows(
+                    &db,
+                    scope,
+                    RecordKind::SecondaryEqualityBitmap,
+                    index_id,
+                    generation,
+                )
+                .await;
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    SecondaryEqualityBitmapValue::decode(&rows[0].1)
+                        .expect("edge equality bitmap decodes")
+                        .ids()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    (0..8).collect::<Vec<_>>()
+                );
+                let active = read_index(&db, scope, &definition).await;
+                let handle = ActiveIndexHandle::try_from_record(scope, &active)
+                    .expect("active edge equality handle projects");
+                reset_equality_read_metrics();
+                assert_eq!(
+                    lookup_active_equality_generation(
+                        &db,
+                        &handle,
+                        &PropertyValue::String("shared".to_string()),
+                    )
+                    .await
+                    .expect("edge equality bitmap lookup succeeds")
+                    .iter()
+                    .collect::<Vec<_>>(),
+                    (0..8).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    equality_read_metrics(),
+                    SecondaryEqualityReadMetrics {
+                        point_reads: 1,
+                        multi_get_calls: 0,
+                        scans: 0,
+                        graph_reads: 0,
+                    }
+                );
+                db.close().await.expect("edge bitmap database closes");
+            })
             .await
-            .expect("edge equality bitmap lookup succeeds")
-            .iter()
-            .collect::<Vec<_>>(),
-            (0..8).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            equality_read_metrics(),
-            SecondaryEqualityReadMetrics {
-                point_reads: 1,
-                multi_get_calls: 0,
-                scans: 0,
-                graph_reads: 0,
-            }
-        );
-        db.close().await.expect("edge bitmap database closes");
     }
 
     #[tokio::test]

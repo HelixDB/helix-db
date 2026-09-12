@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   canonicalizeJson,
+  Client,
   g,
   parseJson,
   parseJsonStructural,
@@ -16,8 +17,11 @@ import {
   structuralJsonEqual,
 } from "../../src/index.js";
 import { goGeneratedRoot, resultsRoot, rustGeneratedRoot, typescriptGeneratedRoot, workspaceRoot } from "./paths.js";
+import { cypherFixturePath, readCypherCases, verifyCypherResults } from "./cypher-results.js";
+import { writeCypherCase } from "./cypher-client.js";
 
 const EXPECTED_RUNTIME = 233;
+const cypherCases = await readCypherCases();
 const TRANSACTION_CONFLICT_ATTEMPTS = 8;
 
 type Instance = {
@@ -74,9 +78,88 @@ try {
     workspaceRoot,
     900_000,
   );
-  console.log(`server disk runtime parity passed for ${EXPECTED_RUNTIME} fixtures with restart coverage`);
+  await runCypherHttpSuite(temp);
+  console.log(
+    `server disk runtime parity passed for ${EXPECTED_RUNTIME} DSL and ${cypherCases.length} Cypher fixtures with restart coverage`,
+  );
 } finally {
   await rm(temp, { recursive: true, force: true });
+}
+
+/** Every SDK makes real HTTP calls on both sides of a local disk server restart. */
+async function runCypherHttpSuite(temp: string): Promise<void> {
+  run(
+    "cargo",
+    [
+      "build",
+      "--locked",
+      "--manifest-path",
+      join(workspaceRoot, "sdks/rust/Cargo.toml"),
+      "--features",
+      "embedded",
+      "--example",
+      "generate_parity_fixtures",
+    ],
+    workspaceRoot,
+    900_000,
+  );
+  const goBinary = join(temp, "cypher-go-parity");
+  run("go", ["build", "-o", goBinary, "./cmd/generate-parity-fixtures"], join(workspaceRoot, "sdks/go"), 900_000);
+  const instance = instances[0]!;
+  for (const sdk of ["rust", "typescript", "go", "python", "python-async"] as const) {
+    const root = join(temp, "cypher-http", sdk);
+    const data = join(root, "data");
+    await mkdir(join(root, "cypher"), { recursive: true });
+    await mkdir(data, { recursive: true });
+    let server = startServer(instance, data);
+    try {
+      await waitReady(instance, server);
+      for (const phase of ["before", "after"] as const) {
+        if (phase === "after") {
+          await stopServer(server.child);
+          server = startServer(instance, data);
+          await waitReady(instance, server);
+        }
+        const url = `http://127.0.0.1:${instance.port}`;
+        const env = {
+          ...process.env,
+          HELIX_CYPHER_PARITY_URL: url,
+          HELIX_CYPHER_PARITY_RESULTS: root,
+          HELIX_CYPHER_PARITY_PHASE: phase,
+          HELIX_CYPHER_PARITY_FIXTURES: cypherFixturePath,
+          HELIX_PYTHON_PARITY_MODE: sdk === "python-async" ? "async" : "sync",
+        };
+        if (sdk === "typescript") {
+          const client = new Client(url);
+          try {
+            let after = false;
+            for (const fixture of cypherCases) {
+              after ||= fixture.afterDiskReopen;
+              if (after === (phase === "after")) await writeCypherCase(client, fixture, join(root, "cypher"));
+            }
+          } finally {
+            await client.close();
+          }
+        } else if (sdk === "rust") {
+          run(
+            join(process.env.CARGO_TARGET_DIR ?? join(workspaceRoot, "target"), "debug/examples/generate_parity_fixtures"),
+            [],
+            workspaceRoot,
+            120_000,
+            env,
+          );
+        } else if (sdk === "go") {
+          run(goBinary, [], workspaceRoot, 120_000, env);
+        } else {
+          run(pythonCommand(), [join(workspaceRoot, "sdks/python/scripts/run_cypher_http.py")], workspaceRoot, 120_000, env);
+        }
+      }
+      await verifyCypherResults(join(root, "cypher"), cypherCases);
+      console.log(`${sdk} Cypher HTTP runtime and disk restart passed (${cypherCases.length} cases)`);
+    } finally {
+      await stopServer(server.child);
+    }
+  }
 }
 
 async function runInstance(instance: Instance, dataRoot: string) {
@@ -94,7 +177,9 @@ async function runInstance(instance: Instance, dataRoot: string) {
     console.log(`running ${files.length} ${instance.label} fixture(s) against disk server on port ${instance.port}`);
     for (const file of files) {
       const json = await readFile(join(instance.generatedRoot, "runtime", file), "utf8");
-      const response = await executeQuery(instance, json);
+      const response = await executeQuery(instance, json).catch((error: unknown) => {
+        throw new Error(`${instance.label} HTTP fixture ${file} failed\n${server.output()}`, { cause: error });
+      });
       await awaitIndexOperations(instance, response);
       const output = stringifyJson(normalizeOperationIds(response));
       await writeFile(join(instance.results, file), output);
@@ -294,8 +379,8 @@ async function jsonFiles(root: string, dir = ""): Promise<string[]> {
   return files.flat().sort((a, b) => a.localeCompare(b));
 }
 
-function run(command: string, args: string[], cwd: string, timeout: number) {
-  const result = spawnSync(command, args, { cwd, encoding: "utf8", timeout, maxBuffer: 1024 * 1024 * 20 });
+function run(command: string, args: string[], cwd: string, timeout: number, env: NodeJS.ProcessEnv = process.env) {
+  const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout, maxBuffer: 1024 * 1024 * 20 });
   if (result.error === undefined && result.status === 0) return;
   throw new Error(
     [

@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "scalar-values",
+      "query": "RETURN $big AS big,$values AS values,$opaque AS opaque,$nan AS nan",
+      "parameters": {
+        "big": {
+          "$type": "integer",
+          "value": "9223372036854775807"
+        },
+        "values": [
+          true,
+          null,
+          "café 🪄",
+          {
+            "minimum": {
+              "$type": "integer",
+              "value": "-9223372036854775808"
+            }
+          }
+        ],
+        "opaque": {
+          "$type": "map",
+          "value": {
+            "$type": "integer",
+            "value": "ordinary map"
+          }
+        },
+        "nan": {
+          "$type": "float",
+          "value": "NaN"
+        }
+      },
+      "expected": {
+        "columns": ["big", "values", "opaque", "nan"],
+        "rows": [
+          [
+            {
+              "$type": "integer",
+              "value": "9223372036854775807"
+            },
+            [
+              true,
+              null,
+              "café 🪄",
+              {
+                "minimum": {
+                  "$type": "integer",
+                  "value": "-9223372036854775808"
+                }
+              }
+            ],
+            {
+              "$type": "map",
+              "value": {
+                "$type": "integer",
+                "value": "ordinary map"
+              }
+            },
+            {
+              "$type": "float",
+              "value": "NaN"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "create",
+      "query": "CREATE (a:CypherParity {key:'a',count:$big}),(b:CypherParity {key:'b'}),(a)-[r:CYPHER_PARITY {tag:'edge'}]->(b) RETURN labels(a) AS labels,type(r) AS type,a.count AS count,properties(b) AS properties",
+      "parameters": {
+        "big": {
+          "$type": "integer",
+          "value": "9223372036854775807"
+        }
+      },
+      "expected": {
+        "columns": ["labels", "type", "count", "properties"],
+        "rows": [
+          [
+            ["CypherParity"],
+            "CYPHER_PARITY",
+            {
+              "$type": "integer",
+              "value": "9223372036854775807"
+            },
+            {
+              "key": "b"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "graph-values",
+      "query": "MATCH p=(a:CypherParity {key:'a'})-[r:CYPHER_PARITY]->(b:CypherParity {key:'b'}) RETURN a AS node,r AS relationship,p AS path",
+      "normalize_graph_ids": true,
+      "expected": {
+        "columns": ["node", "relationship", "path"],
+        "rows": [
+          [
+            {
+              "$type": "node",
+              "id": "node:a",
+              "labels": ["CypherParity"],
+              "properties": {
+                "key": "a",
+                "count": {
+                  "$type": "integer",
+                  "value": "9223372036854775807"
+                }
+              }
+            },
+            {
+              "$type": "relationship",
+              "id": "relationship:edge",
+              "start": "node:a",
+              "end": "node:b",
+              "type": "CYPHER_PARITY",
+              "properties": {
+                "tag": "edge"
+              }
+            },
+            {
+              "$type": "path",
+              "nodes": [
+                {
+                  "$type": "node",
+                  "id": "node:a",
+                  "labels": ["CypherParity"],
+                  "properties": {
+                    "key": "a",
+                    "count": {
+                      "$type": "integer",
+                      "value": "9223372036854775807"
+                    }
+                  }
+                },
+                {
+                  "$type": "node",
+                  "id": "node:b",
+                  "labels": ["CypherParity"],
+                  "properties": {
+                    "key": "b"
+                  }
+                }
+              ],
+              "relationships": [
+                {
+                  "$type": "relationship",
+                  "id": "relationship:edge",
+                  "start": "node:a",
+                  "end": "node:b",
+                  "type": "CYPHER_PARITY",
+                  "properties": {
+                    "tag": "edge"
+                  }
+                }
+              ]
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "delete-rollback",
+      "query": "MATCH (a:CypherParity {key:'a'}) SET a.rollback=true DELETE a",
+      "expected_error_detail": "DeleteConnectedNode",
+      "expected_error_category": "ConstraintVerificationFailed",
+      "expected_error_phase": "runtime"
+    },
+    {
+      "name": "rollback-observation",
+      "query": "MATCH (a:CypherParity {key:'a'}) RETURN a.rollback AS rollback,a.count AS count",
+      "expected": {
+        "columns": ["rollback", "count"],
+        "rows": [
+          [
+            null,
+            {
+              "$type": "integer",
+              "value": "9223372036854775807"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "update",
+      "query": "MATCH (a:CypherParity {key:'a'}) SET a.count=$minimum,a += {extra:'changed',remove:null} REMOVE a.rollback RETURN properties(a) AS properties",
+      "parameters": {
+        "minimum": {
+          "$type": "integer",
+          "value": "-9223372036854775808"
+        }
+      },
+      "expected": {
+        "columns": ["properties"],
+        "rows": [
+          [
+            {
+              "key": "a",
+              "count": {
+                "$type": "integer",
+                "value": "-9223372036854775808"
+              },
+              "extra": "changed"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "persistent-read",
+      "query": "MATCH (a:CypherParity)-[r:CYPHER_PARITY]->(b:CypherParity) RETURN a.key AS source,b.key AS target,a.count AS count,type(r) AS type",
+      "after_disk_reopen": true,
+      "expected": {
+        "columns": ["source", "target", "count", "type"],
+        "rows": [
+          [
+            "a",
+            "b",
+            {
+              "$type": "integer",
+              "value": "-9223372036854775808"
+            },
+            "CYPHER_PARITY"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "match-after-distinct",
+      "query": "UNWIND ['a','a','b','missing',null] AS key WITH DISTINCT key OPTIONAL MATCH p=(a:CypherParity {key:key})-[:CYPHER_PARITY]->(b) RETURN key AS key,b.key AS target,length(p) AS length ORDER BY key LIMIT 10",
+      "expected": {
+        "columns": ["key", "target", "length"],
+        "rows": [
+          ["a", "b", 1],
+          ["b", null, null],
+          ["missing", null, null],
+          [null, null, null]
+        ]
+      }
+    },
+    {
+      "name": "detach-delete",
+      "query": "MATCH (n:CypherParity) DETACH DELETE n RETURN count(*) AS deleted",
+      "expected": {
+        "columns": ["deleted"],
+        "rows": [[2]]
+      }
+    },
+    {
+      "name": "deleted-observation",
+      "query": "MATCH (n:CypherParity) RETURN count(*) AS remaining",
+      "expected": {
+        "columns": ["remaining"],
+        "rows": [[0]]
+      }
+    }
+  ]
+}

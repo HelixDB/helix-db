@@ -1,5 +1,7 @@
 //! Stored values for lifecycle-managed equality indexes.
 
+mod admission;
+
 use std::io::Cursor;
 
 use bytes::{BufMut, Bytes};
@@ -27,6 +29,15 @@ pub(crate) struct BitmapMembershipDelta {
 }
 
 impl BitmapMembershipDelta {
+    pub(crate) fn prepare_if_delta(
+        bytes: &[u8],
+    ) -> Result<Option<PreparedBitmap<'_>>, EncodingError> {
+        bytes
+            .starts_with(BITMAP_MEMBERSHIP_DELTA_MAGIC)
+            .then(|| SecondaryEqualityBitmapValue::prepare(bytes))
+            .transpose()
+    }
+
     pub(crate) fn from_additions(additions: RoaringTreemap) -> Self {
         Self {
             additions,
@@ -160,6 +171,14 @@ fn take_delta_bitmap(
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SecondaryEqualityBitmapValue(RoaringTreemap);
 
+/// Structurally bounded encoded bitmap. Construction does not allocate decoded
+/// containers. A query can reserve `allocation_bound` before consuming this
+/// value through the ordinary validating decoder.
+pub(crate) struct PreparedBitmap<'a> {
+    bytes: &'a [u8],
+    allocation_bound: usize,
+}
+
 impl SecondaryEqualityBitmapValue {
     pub(crate) fn new(ids: RoaringTreemap) -> Self {
         Self(ids)
@@ -174,23 +193,15 @@ impl SecondaryEqualityBitmapValue {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, EncodingError> {
-        if let Some(delta) = BitmapMembershipDelta::decode_if_delta(bytes)? {
-            return Ok(Self(delta.additions));
-        }
-        let mut cursor = Cursor::new(bytes);
-        let ids = RoaringTreemap::deserialize_from(&mut cursor).map_err(|error| {
-            EncodingError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("failed to decode secondary equality bitmap: {error}"),
-            ))
-        })?;
-        if cursor.position() != bytes.len() as u64 {
-            return Err(EncodingError::Custom(format!(
-                "secondary equality bitmap has {} trailing bytes",
-                bytes.len() as u64 - cursor.position()
-            )));
-        }
-        Ok(Self(ids))
+        Self::prepare(bytes)?.decode()
+    }
+
+    pub(crate) fn prepare(bytes: &[u8]) -> Result<PreparedBitmap<'_>, EncodingError> {
+        let allocation_bound = admission::allocation_bound(bytes)?;
+        Ok(PreparedBitmap {
+            bytes,
+            allocation_bound,
+        })
     }
 
     pub(crate) fn ids(&self) -> &RoaringTreemap {
@@ -199,6 +210,46 @@ impl SecondaryEqualityBitmapValue {
 
     pub(crate) fn into_ids(self) -> RoaringTreemap {
         self.0
+    }
+}
+
+impl<'a> PreparedBitmap<'a> {
+    /// Portable-only preflight, retaining the decoder's historical suffix
+    /// leniency. Adjacency fields cannot contain membership-delta wrappers.
+    pub(crate) fn portable(bytes: &'a [u8]) -> Result<Self, EncodingError> {
+        let (overhead, consumed) = admission::portable_prefix(bytes)?;
+        Ok(Self {
+            bytes: &bytes[..consumed],
+            allocation_bound: size_of::<RoaringTreemap>()
+                .saturating_add(overhead)
+                .saturating_add(consumed.saturating_mul(2)),
+        })
+    }
+
+    pub(crate) fn allocation_bound(&self) -> usize {
+        self.allocation_bound
+    }
+
+    pub(crate) fn decode(self) -> Result<SecondaryEqualityBitmapValue, EncodingError> {
+        let ids = if let Some(delta) = BitmapMembershipDelta::decode_if_delta(self.bytes)? {
+            delta.additions
+        } else {
+            let mut cursor = Cursor::new(self.bytes);
+            let ids = RoaringTreemap::deserialize_from(&mut cursor).map_err(|error| {
+                EncodingError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("failed to decode secondary equality bitmap: {error}"),
+                ))
+            })?;
+            // Structural preflight has already consumed exactly this payload.
+            assert_eq!(cursor.position(), self.bytes.len() as u64);
+            ids
+        };
+        let allocated = retained_allocation_estimate(&ids);
+        assert!(allocated <= self.allocation_bound(),
+            "bitmap decoder footprint {allocated} exceeded its preflight allocation bound {} for {} encoded bytes",
+            self.allocation_bound(), self.bytes.len());
+        Ok(SecondaryEqualityBitmapValue(ids))
     }
 }
 
@@ -380,6 +431,15 @@ mod tests {
 pub(crate) struct SecondaryEqualityValue(RoaringTreemap);
 
 impl SecondaryEqualityValue {
+    /// Preserve the built-in codec's deployed portable-prefix leniency while
+    /// retaining strict framing for membership deltas.
+    pub(crate) fn prepare(bytes: &[u8]) -> Result<PreparedBitmap<'_>, EncodingError> {
+        if bytes.starts_with(BITMAP_MEMBERSHIP_DELTA_MAGIC) {
+            return SecondaryEqualityBitmapValue::prepare(bytes);
+        }
+        PreparedBitmap::portable(bytes)
+    }
+
     /// Encodes identifiers with the exact current portable Roaring format.
     pub(crate) fn encode_ids(ids: &RoaringTreemap) -> Bytes {
         let mut bytes = Vec::new();
@@ -437,4 +497,31 @@ mod deployed_row_tests {
         assert_eq!(decoded.into_ids(), ids);
         assert!(SecondaryEqualityValue::decode(b"not a bitmap").is_err());
     }
+}
+
+/// Estimated retained allocation of a compressed ID bitmap. Roaring exposes
+/// array capacity but not spare run/container-vector capacity. Fresh decoded
+/// query bitmaps retain their structural preflight bound instead of shrinking
+/// their reservation to this estimate.
+pub(crate) fn retained_allocation_estimate(bitmap: &roaring::RoaringTreemap) -> usize {
+    bitmap.bitmaps().fold(
+        size_of::<roaring::RoaringTreemap>(),
+        |bytes, (_, bitmap)| {
+            let statistics = bitmap.statistics();
+            // roaring 0.11.3 reports BitmapStore::capacity() (bits) in
+            // n_bytes_bitset_containers. A portable bitset owns 65,536 bits,
+            // so derive its byte footprint from the container count instead.
+            let payload = statistics
+                .n_bytes_array_containers
+                .saturating_add(
+                    u64::from(statistics.n_bitset_containers)
+                        .saturating_mul(65536 / u64::from(u8::BITS)),
+                )
+                .saturating_add(statistics.n_bytes_run_containers);
+            bytes
+                .saturating_add(usize::try_from(payload).unwrap_or(usize::MAX))
+                .saturating_add((statistics.n_containers as usize).saturating_mul(256))
+                .saturating_add(512)
+        },
+    )
 }

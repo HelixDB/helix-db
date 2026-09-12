@@ -1,14 +1,22 @@
 //! Common relational operators inside the existing request-owned interpreter.
 mod aggregation;
+mod bound_match;
+mod correlated;
+mod correlated_batch;
+mod cross_product;
 mod expansion;
+mod expansion_stack;
 mod graph;
+mod hash_probe;
 mod joins;
 mod lookup;
+mod lookup_cursor;
 mod matches;
 pub(in crate::execution::interpreter) mod memory;
 mod mutations;
 mod projection;
 mod projection_chain;
+mod property_conversion;
 mod scan;
 mod streaming;
 mod top_k;
@@ -41,7 +49,11 @@ impl Interpreter<'_> {
                 self.ctx.enable_request_write_scope().await?;
             }
         }
-        let result = Box::pin(self.ctx.row_program(plan, parameters, limits)).await;
+        let budget = self.ctx.row_budget().clone();
+        let result = match budget.admitted_future(self.ctx.row_program(plan, parameters, limits)) {
+            Ok(execution) => execution.await,
+            Err(error) => Err(error.into()),
+        };
         match result {
             Err(error) => {
                 self.ctx.abort_request_write_scope();
@@ -63,7 +75,7 @@ impl Interpreter<'_> {
 }
 
 impl ExecutionContext<'_> {
-    fn row_budget(&self) -> &memory::Budget {
+    pub(in crate::execution::interpreter) fn row_budget(&self) -> &memory::Budget {
         self.row_memory
             .as_ref()
             .expect("row memory is initialized at the request boundary")
@@ -74,6 +86,7 @@ impl ExecutionContext<'_> {
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<Response> {
+        let budget = self.row_budget().clone();
         let width = plan.query().bindings().len();
         if width
             .saturating_mul(size_of::<r::Value>())
@@ -85,7 +98,12 @@ impl ExecutionContext<'_> {
                 "row schema exceeds the query memory budget",
             ));
         }
-        let mut rows = Rows::new(vec![vec![r::Value::Null; width]], self.row_budget())?;
+        let mut input = RowBuffer::new(self.row_budget())?;
+        input.push_with(
+            size_of::<r::Row>().saturating_add(width.saturating_mul(size_of::<r::Value>())),
+            || vec![r::Value::Null; width],
+        )?;
+        let mut rows = input.finish();
         let mut preprojected = None;
         for (index, operator) in plan.query().operators().iter().enumerate() {
             self.check_execution_deadline()?;
@@ -101,70 +119,110 @@ impl ExecutionContext<'_> {
                 .map(|window| window.demand(|expression| evaluation.eval(expression)))
                 .transpose()?
                 .unwrap_or(usize::MAX);
+            if let Some(consumer) = plan.batch_consumer(index) {
+                let end = match consumer {
+                    r::BatchConsumer::Pipeline { end } => end,
+                    r::BatchConsumer::Aggregate
+                    | r::BatchConsumer::TopK
+                    | r::BatchConsumer::Project { .. } => index + 1,
+                };
+                for (_, pattern) in plan.matches().range(index..end) {
+                    budget
+                        .admitted_future(self.flush_required_mutations(
+                            super::mutation::visibility::required_for_pattern(pattern),
+                        ))?
+                        .await?;
+                }
+            }
             rows = match operator {
                 r::Operator::Match {
                     pattern,
                     optional,
                     predicate,
                 } => {
+                    if index > 0
+                        && let Some(consumer) = plan.batch_consumer(index)
+                    {
+                        let match_plan = plan.matches().get(&index).expect("validated match plan");
+                        let batches = bound_match::BoundMatch::new(
+                            matches::Match {
+                                pattern,
+                                optional: *optional,
+                                predicate: predicate.as_deref(),
+                                demand,
+                            },
+                            match_plan,
+                        )
+                        .batches(rows, self, parameters, limits);
+                        let batches = budget.admitted_stream(batches)?;
+                        let (result, consumed) = budget
+                            .admitted_future(self.consume_batches(
+                                batches, plan, index, consumer, parameters, limits,
+                            ))?
+                            .await?;
+                        rows = result;
+                        preprojected = Some(consumed);
+                        continue;
+                    }
                     if let Some(consumer) = plan.batch_consumer(index)
                         && let Some(match_plan) = plan.matches().get(&index)
                         && let Some(r::MatchStep::Scan(start)) = match_plan.steps.first()
-                        && match_plan.steps[1..]
-                            .iter()
-                            .all(|step| matches!(step, r::MatchStep::Expand { .. }))
                         && let Some(source) = match_plan
                             .sources
                             .iter()
                             .find(|source| source.slot == *start)
                         && let [step] = source.access.steps()
-                        && let Some(cursor) = self.node_cursor(&step.op).await?
+                        && let Some(cursor) =
+                            budget.admitted_future(self.node_cursor(&step.op))?.await?
                     {
                         // Only the initial independent MATCH is admitted. The
                         // consumer finishes before any subsequent mutation runs.
                         drop(rows);
-                        let producer_limits = Limits {
-                            batch_rows: limits.batch_rows.min(demand.max(1)),
-                            ..limits
-                        };
                         let batches = self.graph_match_batches(
                             cursor,
                             width,
                             matches::Match {
                                 pattern,
                                 optional: *optional,
-                                predicate: predicate.as_ref(),
-                                demand: usize::MAX,
+                                predicate: predicate.as_deref(),
+                                demand,
                             },
                             match_plan,
                             parameters,
-                            producer_limits,
+                            limits,
                         );
-                        let (result, consumed) =
-                            Box::pin(self.consume_batches(
+                        // Pin the producer once before moving it through consumer
+                        // dispatch; suspended consumers retain only its small owner.
+                        let batches = self.row_budget().admitted_stream(batches)?;
+                        let (result, consumed) = self
+                            .row_budget()
+                            .admitted_future(self.consume_batches(
                                 batches, plan, index, consumer, parameters, limits,
-                            ))
+                            ))?
                             .await?;
                         rows = result;
                         preprojected = Some(consumed);
                         continue;
                     }
-                    self.match_rows(
-                        rows,
-                        matches::Match {
-                            pattern,
-                            optional: *optional,
-                            predicate: predicate.as_ref(),
-                            demand,
-                        },
-                        plan.matches().get(&index).expect("validated match plan"),
-                        parameters,
-                        limits,
-                    )
-                    .await?
+                    budget
+                        .admitted_future(self.match_rows(
+                            rows,
+                            matches::Match {
+                                pattern,
+                                optional: *optional,
+                                predicate: predicate.as_deref(),
+                                demand,
+                            },
+                            plan.matches().get(&index).expect("validated match plan"),
+                            parameters,
+                            limits,
+                        ))?
+                        .await?
                 }
                 r::Operator::Filter(predicate) => {
-                    Box::pin(self.filter_relation(rows, predicate, parameters, limits)).await?
+                    self.row_budget()
+                        .admitted_future(self.filter_relation(rows, predicate, parameters, limits))?
+                        .await?
                 }
                 r::Operator::Unwind { expression, slot } => {
                     if let Some(consumer) = plan.batch_consumer(index) {
@@ -179,10 +237,14 @@ impl ExecutionContext<'_> {
                             parameters,
                             producer_limits,
                         );
-                        let (result, consumed) =
-                            Box::pin(self.consume_batches(
+                        // Pin the producer once before moving it through consumer
+                        // dispatch; suspended consumers retain only its small owner.
+                        let batches = self.row_budget().admitted_stream(batches)?;
+                        let (result, consumed) = self
+                            .row_budget()
+                            .admitted_future(self.consume_batches(
                                 batches, plan, index, consumer, parameters, limits,
-                            ))
+                            ))?
                             .await?;
                         rows = result;
                         preprojected = Some(consumed);
@@ -190,7 +252,9 @@ impl ExecutionContext<'_> {
                     }
                     let mut out = RowBuffer::new(self.row_budget())?;
                     'unwind: for batch in rows.chunks(limits.batch_rows) {
-                        let graph = self.expression_graph_batch(batch, [expression]).await?;
+                        let graph = budget
+                            .admitted_future(self.expression_graph_batch(batch, [expression]))?
+                            .await?;
                         for row in batch {
                             let values = self
                                 .evaluate(row, parameters, &graph, limits)
@@ -232,30 +296,38 @@ impl ExecutionContext<'_> {
                     } else {
                         items
                     };
-                    self.project_rows(
-                        rows,
-                        width,
-                        projection::Projection {
-                            items,
-                            distinct: *distinct,
-                            ordering,
-                            predicate: predicate.as_ref(),
-                            skip: skip.as_ref(),
-                            limit: limit.as_ref(),
-                        },
-                        parameters,
-                        limits,
-                    )
-                    .await?
+                    budget
+                        .admitted_future(self.project_rows(
+                            rows,
+                            width,
+                            projection::Projection {
+                                items,
+                                distinct: *distinct,
+                                ordering,
+                                predicate: predicate.as_ref(),
+                                skip: skip.as_ref(),
+                                limit: limit.as_ref(),
+                            },
+                            parameters,
+                            limits,
+                        ))?
+                        .await?
                 }
                 r::Operator::Create(pattern) => {
-                    self.create_rows(rows, pattern, parameters, limits).await?
+                    budget
+                        .admitted_future(self.create_rows(rows, pattern, parameters, limits))?
+                        .await?
                 }
                 r::Operator::Update(updates) => {
-                    self.update_rows(rows, updates, parameters, limits).await?
+                    budget
+                        .admitted_future(self.update_rows(rows, updates, parameters, limits))?
+                        .await?
                 }
                 r::Operator::Delete { entities, detach } => {
-                    self.delete_rows(rows, entities, *detach, parameters, limits)
+                    budget
+                        .admitted_future(
+                            self.delete_rows(rows, entities, *detach, parameters, limits),
+                        )?
                         .await?
                 }
             };
@@ -289,7 +361,9 @@ impl ExecutionContext<'_> {
                     .iter()
                     .map(|(_, slot)| (*slot, r::PropertyDemand::All))
                     .collect();
-                let graph = self.graph_batch_required(batch, &demand).await?;
+                let graph = budget
+                    .admitted_future(self.graph_batch_required(batch, &demand))?
+                    .await?;
                 for row in batch {
                     let admitted_bytes = plan.query().returns().iter().try_fold(
                         size_of::<Vec<serde_json::Value>>(),
@@ -444,10 +518,10 @@ impl RowBuffer {
         Ok(())
     }
     /// Copy a row while replacing one binding, without cloning the old value
-    /// that is being overwritten. Used by both streamed and materialized UNWIND.
+    /// that is being overwritten. Shared by UNWIND, scans, and joins.
     fn push_replacing(&mut self, input: &r::Row, slot: r::Slot, value: r::Value) -> Result<()> {
         let slot = slot.0 as usize;
-        assert!(slot < input.len(), "validated UNWIND destination");
+        assert!(slot < input.len(), "validated row destination");
         let bytes =
             input
                 .iter()

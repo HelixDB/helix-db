@@ -282,10 +282,18 @@ fn escaped_parameter_names_share_identifier_escaping_and_source_validation() {
 }
 
 #[test]
-fn mixed_batch_spans_stop_at_blocking_effect_and_correlation_boundaries() {
+fn mixed_batch_spans_stop_at_blocking_and_effect_boundaries() {
     for (text, end) in [
         ("UNWIND [1] AS x UNWIND [x] AS y RETURN count(*)", Some(2)),
         ("UNWIND [1] AS x WITH x UNWIND [x] AS y RETURN y", Some(3)),
+        (
+            "UNWIND [1] AS x OPTIONAL MATCH (n:N {key:x}) RETURN count(*)",
+            Some(2),
+        ),
+        (
+            "MATCH (n:N) OPTIONAL MATCH (n) UNWIND [n] AS y RETURN count(*)",
+            Some(3),
+        ),
         (
             "UNWIND [1] AS x WITH DISTINCT x UNWIND [x] AS y RETURN y",
             None,
@@ -300,7 +308,7 @@ fn mixed_batch_spans_stop_at_blocking_effect_and_correlation_boundaries() {
         ),
         (
             "MATCH (n:N) OPTIONAL MATCH (n)-[:R]->(m:N) UNWIND [m] AS y RETURN y",
-            None,
+            Some(3),
         ),
     ] {
         let query = helix_cypher::compile(text).unwrap();
@@ -313,5 +321,26 @@ fn mixed_batch_spans_stop_at_blocking_effect_and_correlation_boundaries() {
         let round_trip: r::RowPipeline =
             serde_json::from_str(&serde_json::to_string(&pipeline).unwrap()).unwrap();
         assert_eq!(round_trip.batch_consumer(0), pipeline.batch_consumer(0));
+    }
+}
+
+#[test]
+fn correlated_graph_batches_require_a_supported_physical_schedule() {
+    for (text, batched) in [
+        ("UNWIND [1] AS x MATCH (a:N),(b:N) RETURN count(*)", true),
+        (
+            "MATCH (a:N) OPTIONAL MATCH (a)-[:R]->(b),(c:N) RETURN count(*)",
+            true,
+        ),
+        (
+            "MATCH (a:N) OPTIONAL MATCH (a)-[:R]->(b) RETURN count(*)",
+            true,
+        ),
+        ("UNWIND [1] AS x MATCH (n:N) RETURN n", true),
+        ("MATCH (a:N) MATCH (a),(a) RETURN count(*)", true),
+    ] {
+        let query = helix_cypher::compile(text).unwrap();
+        let plan = r::plan(query, &helix_planner::context::PlannerContext::default()).unwrap();
+        assert_eq!(plan.batch_consumer(0).is_some(), batched, "{text}");
     }
 }

@@ -23,14 +23,9 @@ impl<'db> ExecutionContext<'db> {
         predicate: &ir::PredicatePlan,
     ) -> Result<ExecutionValue> {
         let rows = self.stream_rows(input, "filter")?;
-        let mut filtered = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            if self.eval_predicate_plan(&row, predicate).await? {
-                filtered.push(row);
-            }
-        }
-        Ok(ExecutionValue::Stream(filtered))
+        self.select_native_rows(rows, predicate)
+            .await
+            .map(ExecutionValue::Stream)
     }
 
     pub(super) fn stream_rows(

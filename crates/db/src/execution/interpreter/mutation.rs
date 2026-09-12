@@ -15,6 +15,7 @@ pub(super) mod visibility;
 use super::*;
 
 pub(super) use index_context::MutationIndexContext;
+pub(super) use rows::DeletionTargets;
 
 #[cfg(test)]
 mod tests;

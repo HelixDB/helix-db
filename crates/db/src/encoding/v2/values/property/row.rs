@@ -25,7 +25,9 @@ pub(crate) fn sortable_i64_index_string(value: i64) -> String {
     format!("{:020}", (value as u64) ^ SIGNED_I64_SORT_MASK)
 }
 
-pub(super) const PROPERTY_ALIGNMENT: usize = core::mem::align_of::<rkyv::Archived<Vec<Property>>>();
+// Align the elements as well as the vector root. Numeric property payloads can
+// require stricter alignment than the archived vector's relative pointer.
+pub(super) const PROPERTY_ALIGNMENT: usize = core::mem::align_of::<rkyv::Archived<Property>>();
 #[inline]
 fn align_for_rkyv(data: &[u8]) -> AlignedVec<PROPERTY_ALIGNMENT> {
     if data.is_empty() {

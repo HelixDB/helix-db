@@ -8,6 +8,39 @@ use crate::{
 use helix_planner::{ir, relational as r};
 use std::collections::BTreeSet;
 
+/// Deduplicated mutation targets and their construction reservation move
+/// together into the write barrier. No insertion can bypass admission.
+pub(in crate::execution::interpreter) struct DeletionTargets {
+    entities: BTreeSet<r::Entity>,
+    memory: crate::query_resources::Reservation,
+}
+
+impl DeletionTargets {
+    pub(in crate::execution::interpreter) fn new(
+        budget: &crate::query_resources::Budget,
+    ) -> cypher::Result<Self> {
+        Ok(Self {
+            entities: BTreeSet::new(),
+            memory: budget.reserve(0)?,
+        })
+    }
+
+    pub(in crate::execution::interpreter) fn insert(
+        &mut self,
+        entity: r::Entity,
+    ) -> cypher::Result<()> {
+        if !self.entities.contains(&entity) {
+            // A sparse B-tree node holds eleven 16-byte entities, twelve child
+            // pointers and bookkeeping. This bound per unique entry also covers
+            // transient node splits; duplicates consume no additional budget.
+            self.memory
+                .resize(self.entities.len().saturating_add(1).saturating_mul(512))?;
+            self.entities.insert(entity);
+        }
+        Ok(())
+    }
+}
+
 impl ExecutionContext<'_> {
     pub(in crate::execution::interpreter) async fn row_create_node(
         &mut self,
@@ -138,20 +171,29 @@ impl ExecutionContext<'_> {
     /// A failed check drops the statement's transaction, including prior clauses.
     pub(in crate::execution::interpreter) async fn row_delete_entities(
         &mut self,
-        entities: BTreeSet<r::Entity>,
+        targets: DeletionTargets,
         detach: bool,
     ) -> cypher::Result<()> {
+        let DeletionTargets {
+            entities,
+            memory: _targets_memory,
+        } = targets;
         let mut scope = self.take_or_begin_write_scope().await?;
         // Prior CREATE clauses may still own coalesced pair/adjacency changes.
         // Deletion observations must include them, just like native deletion.
         scope.index_context.flush_topology(&scope.txn).await?;
-        let edges = entities
+        let edge_count = entities
             .iter()
-            .filter_map(|e| match e {
-                r::Entity::Relationship(id) => Some(*id),
-                r::Entity::Node(_) => None,
-            })
-            .collect::<Vec<_>>();
+            .filter(|e| matches!(e, r::Entity::Relationship(_)))
+            .count();
+        let _edges_memory = self
+            .row_budget()
+            .reserve(edge_count.saturating_mul(size_of::<u64>()))?;
+        let mut edges = Vec::with_capacity(edge_count);
+        edges.extend(entities.iter().filter_map(|e| match e {
+            r::Entity::Relationship(id) => Some(*id),
+            r::Entity::Node(_) => None,
+        }));
         let mut observed = self
             .observe_edge_deletions(&scope.txn, edges.iter().copied(), &scope.index_context)
             .await?;
@@ -184,5 +226,46 @@ impl ExecutionContext<'_> {
         }
         self.finish_write_scope(scope).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn deletion_targets_admit_unique_entries_and_release_on_failure_or_drop() {
+        let budget = crate::query_resources::Budget::new(512 * 2000);
+        let mut targets = DeletionTargets::new(&budget).unwrap();
+        let mut expected = BTreeSet::new();
+        for i in 0..2000 {
+            let id = (i * 997) % 2000;
+            let entity = if i % 2 == 0 {
+                r::Entity::Node(id)
+            } else {
+                r::Entity::Relationship(id)
+            };
+            targets.insert(entity).unwrap();
+            expected.insert(entity);
+        }
+        assert_eq!(targets.entities, expected);
+        assert_eq!(budget.available(), 0);
+        for entity in expected {
+            targets.insert(entity).unwrap();
+        }
+        for entity in [r::Entity::Node(u64::MAX), r::Entity::Relationship(u64::MAX)] {
+            assert!(
+                matches!(targets.insert(entity), Err(cypher::Error::Query(error)) if error.detail == "MemoryLimit")
+            );
+            assert!(!targets.entities.contains(&entity));
+            assert_eq!(targets.entities.len(), 2000);
+        }
+        drop(targets);
+        assert_eq!(budget.available(), 512 * 2000);
+        let budget = crate::query_resources::Budget::new(511);
+        let mut targets = DeletionTargets::new(&budget).unwrap();
+        assert!(targets.insert(r::Entity::Node(1)).is_err());
+        assert!(targets.entities.is_empty());
+        assert_eq!(budget.available(), 511);
     }
 }

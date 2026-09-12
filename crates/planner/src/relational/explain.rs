@@ -94,7 +94,7 @@ impl RowPlan {
                     {
                         blocking.push(BlockingWork::HashBuild);
                     }
-                    if consumer.is_some() {
+                    if consumer.is_some() || batched {
                         notices.push(PlanNotice::CursorDependentBatching { operator: position });
                     } else {
                         blocking.push(BlockingWork::MaterializedRelation);

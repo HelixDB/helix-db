@@ -1,10 +1,13 @@
-//! Isolated production contract for process-global secondary-equality I/O metrics.
+//! Production contracts for scoped secondary-equality I/O measurements.
 
 /// Proves bounded sequential and concurrent V4 writes produce identical
 /// bitmaps and that every configured equality lookup is one point read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn secondary_equality_v4_bitmap_shape_and_read_io_are_exact() {
-    use db::production_coverage::{SecondaryEqualityHotPathFixture, SecondaryEqualityInsertMode};
+    use db::production_coverage::{
+        SecondaryEqualityHotPathFixture, SecondaryEqualityInsertMode, SecondaryEqualityReadMode,
+    };
+    use std::num::NonZeroUsize;
 
     let sequential = SecondaryEqualityHotPathFixture::open_correctness(
         "secondary-equality-v4-correctness-sequential",
@@ -75,6 +78,35 @@ async fn secondary_equality_v4_bitmap_shape_and_read_io_are_exact() {
             .map(|(key, _)| key)
             .collect::<Vec<_>>()
     );
+
+    let sequential_read = sequential
+        .read_operations(
+            SecondaryEqualityReadMode::Sequential,
+            NonZeroUsize::new(3).unwrap(),
+        )
+        .await
+        .expect("sequential measurement succeeds");
+    assert_eq!(sequential_read.point_reads, 3);
+    // Each measurement starts worker tasks. Overlap two independent observers
+    // so a shared process counter or missing worker propagation fails exactly.
+    let (first, second) = tokio::join!(
+        sequential.read_operations(
+            SecondaryEqualityReadMode::Concurrent,
+            NonZeroUsize::new(13).unwrap(),
+        ),
+        concurrent.read_operations(
+            SecondaryEqualityReadMode::Concurrent,
+            NonZeroUsize::new(17).unwrap(),
+        ),
+    );
+    for (sample, expected) in [(first.unwrap(), 13), (second.unwrap(), 17)] {
+        assert_eq!(sample.point_reads, expected);
+        assert_eq!(sample.result_count, 100);
+        assert_eq!(
+            (sample.multi_get_calls, sample.scans, sample.graph_reads),
+            (0, 0, 0)
+        );
+    }
 
     sequential
         .close()

@@ -44,7 +44,9 @@ pub enum BatchConsumer {
     },
     /// Nonblocking projections, filters and UNWIND stages, ending at an
     /// inclusive operator index. The terminal projection may also be a direct
-    /// aggregation or bounded top-k. Mutations and correlated matches are barriers.
+    /// aggregation or bounded top-k. Correlated graph stages require a separate
+    /// cursor proof for the selected schedule in `RowPlan::batch_consumer`.
+    /// Mutations remain barriers.
     Pipeline {
         end: usize,
     },
@@ -122,7 +124,7 @@ impl RowPipeline {
         let mut suffix: Option<(usize, BatchConsumer)> = None;
         for (index, operator) in query.operators().iter().enumerate().rev() {
             let source = matches!(operator, Operator::Unwind { .. })
-                || matches!(operator, Operator::Match { pattern, .. } if index == 0 && !pattern.nodes.is_empty());
+                || matches!(operator, Operator::Match { pattern, .. } if !pattern.nodes.is_empty());
             if source && let Some((end, consumer)) = suffix {
                 let consumer = if end > index + 1 {
                     BatchConsumer::Pipeline { end }
@@ -144,6 +146,7 @@ impl RowPipeline {
                 }
                 (_, Some(consumer)) => Some((index, consumer)),
                 (Operator::Unwind { .. } | Operator::Filter(_), None) => suffix,
+                (Operator::Match { .. }, None) => suffix,
                 _ => None,
             };
         }

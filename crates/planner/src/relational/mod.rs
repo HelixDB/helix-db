@@ -4,6 +4,8 @@
 //! the trust boundary: physical planning and execution only accept a validated
 //! query. Storage values and frontend syntax do not belong in this module.
 
+pub mod allocation;
+
 mod explain;
 pub use explain::*;
 mod graph_order;
@@ -18,9 +20,11 @@ mod expression;
 mod graph_values;
 mod input_window;
 pub use input_window::InputWindow;
+mod consumers;
 mod pipeline;
 mod planning;
 mod projection;
+mod reference;
 pub use pipeline::*;
 pub use projection::*;
 mod query;
@@ -101,3 +105,8 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 /// Maximum nesting accepted before recursive compilation or evaluation. This
 /// bound is exercised on Rust's default test-thread stack as well as workers.
 pub const MAX_EXPRESSION_DEPTH: usize = 48;
+
+mod program;
+pub use program::*;
+mod selection;
+pub use selection::*;

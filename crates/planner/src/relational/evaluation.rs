@@ -196,14 +196,15 @@ impl Evaluation<'_> {
             }
             E::List(xs) => Value::List(self.arguments(xs)?),
             E::Map(xs) => {
+                let mut bytes = size_of::<Value>()
+                    .saturating_add(super::allocation::btree_bytes::<String, Value>(xs.len()));
+                self.remaining(bytes)?;
                 let mut values = BTreeMap::new();
-                let mut bytes = size_of::<Value>();
                 for (key, expression) in xs {
                     let value = self.remaining(bytes)?.eval(expression)?;
                     bytes = bytes
                         .saturating_add(key.capacity())
-                        .saturating_add(value.allocated_bytes())
-                        .saturating_add(64);
+                        .saturating_add(value.allocated_bytes().saturating_sub(size_of::<Value>()));
                     self.remaining(bytes)?;
                     values.insert(key.clone(), value);
                 }
@@ -292,13 +293,16 @@ impl Evaluation<'_> {
     /// owned representation. Shared by properties() and graph-to-map updates.
     pub fn properties(&self, entity: Entity) -> Result<BTreeMap<String, Value>> {
         let properties = self.graph.properties(entity)?;
-        let mut bytes = size_of::<Value>();
+        let mut bytes = size_of::<Value>()
+            .saturating_add(super::allocation::btree_bytes::<String, Value>(
+                properties.len(),
+            ));
+        self.remaining(bytes)?;
         for (key, value) in properties {
             let value = value.as_ref().map_err(Clone::clone)?;
             bytes = bytes
                 .saturating_add(key.len())
-                .saturating_add(value.allocated_bytes())
-                .saturating_add(64);
+                .saturating_add(value.allocated_bytes().saturating_sub(size_of::<Value>()));
             self.remaining(bytes)?;
         }
         properties

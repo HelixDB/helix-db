@@ -351,6 +351,54 @@ async fn high_fan_out_keeps_compact_ids_and_bounded_endpoint_batches() {
             .unwrap_err();
         assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
     }
+    for (query, count, maximum_keys) in [
+        (
+            "MATCH (h:Hub)-[:R]->(n:Leaf) RETURN 1 AS found LIMIT 0",
+            0,
+            0,
+        ),
+        (
+            "MATCH (h:Hub)-[:R]->(n:Leaf) RETURN 1 AS found LIMIT 1",
+            1,
+            16,
+        ),
+        (
+            "MATCH (n:Leaf)<-[:R]-(h:Hub) RETURN 1 AS found LIMIT 1",
+            1,
+            16,
+        ),
+        (
+            "MATCH p=(h:Hub)-[:R]-(n:Leaf) RETURN 1 AS found LIMIT 1",
+            1,
+            16,
+        ),
+        (
+            "MATCH (h:Hub)-[:R]->(n:Leaf) WITH n AS leaf SKIP 17 RETURN 1 AS found LIMIT 2",
+            2,
+            152,
+        ),
+        ("MATCH (h:Hub),(n:Absent) RETURN 1 AS found LIMIT 1", 0, 16),
+        (
+            "OPTIONAL MATCH (h:Hub),(n:Absent) RETURN 1 AS found LIMIT 1",
+            1,
+            16,
+        ),
+    ] {
+        let result = db.cypher(crate::cypher::Request::new(query)).await.unwrap();
+        assert_eq!(result.rows, vec![vec![json!(1)]; count], "{query}");
+        assert!(
+            result.resources.reads.multi_get_keys <= maximum_keys,
+            "{query}: {:?}",
+            result.resources.reads
+        );
+    }
+    let error = db
+        .cypher(crate::cypher::Request::new(
+            "MATCH (h:Hub)-[:R]->(n:Leaf) RETURN 1/(n.key-1) LIMIT 1",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Query(error) if error.detail == "DivisionByZero"));
     db.close().await.unwrap();
 }
 
@@ -558,7 +606,9 @@ async fn explicit_filter_contracts_and_empty_or_limited_matches_preserve_rows() 
                     expression: r::Expression::Literal(r::Value::List(values)),
                     slot: r::Slot(0),
                 },
-                r::Operator::Filter(r::Expression::Slot(r::Slot(0))),
+                r::Operator::Filter(
+                    r::SelectionProgram::new(r::Expression::Slot(r::Slot(0))).unwrap(),
+                ),
             ],
             vec![("value".into(), r::Slot(0))],
         )

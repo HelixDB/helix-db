@@ -143,7 +143,9 @@ async fn standalone_common_filters_stream_and_reject_non_boolean_values() {
         let mut operators = query.operators().to_vec();
         operators.insert(
             1,
-            r::Operator::Filter(r::Expression::Literal(predicate.clone())),
+            r::Operator::Filter(
+                r::SelectionProgram::new(r::Expression::Literal(predicate.clone())).unwrap(),
+            ),
         );
         let query = r::Query::new(
             query.bindings().to_vec(),

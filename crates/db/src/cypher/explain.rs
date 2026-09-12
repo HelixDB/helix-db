@@ -169,10 +169,18 @@ mod tests {
             .await
             .unwrap();
         let report = serde_json::to_value(&joined).unwrap();
+        assert_eq!(report["operators"][0]["blocking"], json!(["hash_build"]));
+        assert!(report["operators"][0]["batch_consumer"].is_object());
+        let materialized = joined
+            .plan()
+            .clone()
+            .with_execution(r::RowExecution::Materialized);
+        let reference_report = serde_json::to_value(materialized.explain()).unwrap();
         assert_eq!(
-            report["operators"][0]["blocking"],
+            reference_report["operators"][0]["blocking"],
             json!(["hash_build", "materialized_relation"])
         );
+        assert!(reference_report["operators"][0]["batch_consumer"].is_null());
         let product = db
             .explain_cypher(Request::new(
                 "MATCH (a:N),(b:N) RETURN DISTINCT a,b ORDER BY a",

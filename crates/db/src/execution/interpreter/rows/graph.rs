@@ -113,6 +113,48 @@ impl ExecutionContext<'_> {
             .collect()
     }
 
+    /// Resolve candidate relationship types within the local expansion batch.
+    /// The caller admits the bounded ID/key/result vectors. Raw values carry
+    /// their own guards; decoding workspace is reserved before allocation.
+    pub(super) async fn relationship_types_batch(
+        &self,
+        ids: &[u64],
+        types: &[String],
+    ) -> Result<Vec<bool>> {
+        if types.is_empty() {
+            return Ok(vec![true; ids.len()]);
+        }
+        let keys = ids
+            .iter()
+            .map(|id| {
+                self.storage_key(keys::DataKeyKind::EdgePropertyById(
+                    keys::EdgePropertyByIdKey::new(*id),
+                ))
+            })
+            .collect::<Vec<_>>();
+        self.multi_get_raw(&keys)
+            .await?
+            .into_iter()
+            .map(|bytes| {
+                let Some(bytes) = bytes else {
+                    return Ok(false);
+                };
+                let properties = crate::query_resources::properties::Decoded::new(
+                    &bytes,
+                    property::prepared::Selection::Names(&["$label"]),
+                    Some(self.row_budget()),
+                )?;
+                Ok(properties.iter().any(|property| {
+                    property.name == "$label"
+                        && property
+                            .value
+                            .as_str()
+                            .is_some_and(|label| types.iter().any(|wanted| wanted == label))
+                }))
+            })
+            .collect()
+    }
+
     pub(super) async fn graph_batch_required(
         &self,
         rows: &[r::Row],
@@ -128,28 +170,77 @@ impl ExecutionContext<'_> {
                 collect_entities(&row[slot.0 as usize], &mut found, &mut found_memory)?;
                 for entity in found {
                     let previous = entities.get(&entity);
-                    let added_keys = match properties {
-                        r::PropertyDemand::All => 0,
-                        r::PropertyDemand::Keys(keys) => keys
-                            .iter()
-                            .filter(|key| previous.is_none_or(|existing| !existing.contains(key)))
-                            .fold(0_usize, |bytes, key| {
-                                bytes.saturating_add(key.len()).saturating_add(128)
-                            }),
+                    let (old_keys, new_keys, name_bytes) = match (previous, properties) {
+                        (Some(r::PropertyDemand::All), _) | (_, r::PropertyDemand::All) => {
+                            (0, 0, 0)
+                        }
+                        (previous, r::PropertyDemand::Keys(keys)) => {
+                            let old = match previous {
+                                Some(r::PropertyDemand::Keys(keys)) => keys.len(),
+                                Some(r::PropertyDemand::All) => {
+                                    unreachable!("handled all-properties demand")
+                                }
+                                None => 0,
+                            };
+                            let (added, bytes) = keys
+                                .iter()
+                                .filter(|key| {
+                                    previous.is_none_or(|existing| !existing.contains(key))
+                                })
+                                .fold((0_usize, 0_usize), |(count, bytes), key| {
+                                    (count.saturating_add(1), bytes.saturating_add(key.len()))
+                                });
+                            (old, old.saturating_add(added), bytes)
+                        }
+                    };
+                    let old_tree = if old_keys == 0 {
+                        0
+                    } else {
+                        r::allocation::btree_bytes::<String, ()>(old_keys)
+                    };
+                    let new_tree = if new_keys == 0 {
+                        0
+                    } else {
+                        r::allocation::btree_bytes::<String, ()>(new_keys)
                     };
                     entity_bytes = entity_bytes
-                        .saturating_add(added_keys)
-                        .saturating_add(if previous.is_none() { 128 } else { 0 });
-                    entity_memory.resize(entity_bytes)?;
+                        .saturating_add(name_bytes)
+                        .saturating_add(new_tree.saturating_sub(old_tree));
+                    entity_memory.resize(
+                        entity_bytes.saturating_add(r::allocation::btree_bytes::<
+                            r::Entity,
+                            r::PropertyDemand,
+                        >(
+                            entities
+                                .len()
+                                .saturating_add(usize::from(previous.is_none())),
+                        )),
+                    )?;
                     entities.entry(entity).or_default().merge(properties);
                 }
             }
         }
+        if entities.is_empty() {
+            return Ok(GraphBatch::default());
+        }
+        let edge_count = entities
+            .keys()
+            .filter(|entity| matches!(entity, r::Entity::Relationship(_)))
+            .count();
         // Key vectors, endpoint IDs and endpoint maps live alongside the demand
         // map. Admit their bounded per-entity storage before allocating them.
-        let _lookup_memory = self
-            .row_budget()
-            .reserve(entities.len().saturating_mul(256))?;
+        let _lookup_memory =
+            self.row_budget()
+                .reserve(
+                    entities
+                        .len()
+                        .saturating_mul(256)
+                        .saturating_add(if edge_count == 0 {
+                            0
+                        } else {
+                            r::allocation::btree_bytes::<u64, Option<(u64, u64)>>(edge_count)
+                        }),
+                )?;
         let keys = entities
             .keys()
             .map(|entity| {
@@ -179,8 +270,15 @@ impl ExecutionContext<'_> {
             .zip(self.edge_endpoints_batch(&edge_ids).await?)
             .collect::<BTreeMap<_, _>>();
         let mut graph = GraphBatch::default();
-        let mut graph_memory = self.row_budget().reserve(0)?;
-        let mut graph_bytes = 0_usize;
+        // These maps only receive entries during hydration. Reserve their
+        // maximum node storage before the first insertion, including sparse roots.
+        let mut graph_bytes = r::allocation::btree_bytes::<r::Entity, EntityData>(entities.len())
+            .saturating_add(if edge_count == 0 {
+                0
+            } else {
+                r::allocation::btree_bytes::<u64, String>(edge_count)
+            });
+        let mut graph_memory = self.row_budget().reserve(graph_bytes)?;
         for ((entity, demand), bytes) in entities.into_iter().zip(values) {
             let Some(bytes) = bytes else {
                 let r::Entity::Relationship(id) = entity else {
@@ -189,68 +287,99 @@ impl ExecutionContext<'_> {
                 let Some((label, _)) = self.row_relationship_types.get(&id) else {
                     continue;
                 };
-                graph_bytes = graph_bytes.saturating_add(label.len()).saturating_add(128);
+                graph_bytes = graph_bytes.saturating_add(label.len());
                 graph_memory.resize(graph_bytes)?;
                 graph.deleted_relationship_types.insert(id, label.clone());
                 continue;
             };
-            // Charge a conservative decode workspace before turning compact
-            // values into owned strings, maps and per-element enum values.
-            let _decode_memory = self.row_budget().reserve(bytes.len().saturating_mul(32))?;
-            let properties =
-                property::decode_properties(&bytes).map_err(crate::HelixDbError::from)?;
-            let mut label = None;
-            let mut values = BTreeMap::new();
-            for property in properties {
-                if property.name == "$label" {
-                    label = property
-                        .value
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
-                    continue;
-                }
-                if property.name.starts_with('$')
-                    || property.value == P::Null
-                    || !demand.contains(&property.name)
-                {
-                    continue;
-                }
-                let value = match from_property(property.value) {
-                    Ok(value) => Ok(value),
-                    Err(Error::Query(error)) if error.category == "UnsupportedFeature" => {
-                        Err(error)
-                    }
-                    Err(error) => return Err(error),
-                };
-                // Unsupported stored values remain dormant until accessed. A
-                // CASE branch or short-circuit boolean must not fail on a value
-                // that its expression never evaluates.
-                values.insert(property.name, value);
-            }
-            let kind = match entity {
-                r::Entity::Node(_) => EntityKind::Node { label },
-                r::Entity::Relationship(id) => {
-                    let Some(endpoints) = endpoints[&id] else {
+            let selection = match &demand {
+                r::PropertyDemand::All => property::prepared::Selection::All,
+                r::PropertyDemand::Keys(names) => property::prepared::Selection::Keys {
+                    names,
+                    required: "$label",
+                },
+            };
+            let properties = crate::query_resources::properties::Decoded::new(
+                &bytes,
+                selection,
+                Some(self.row_budget()),
+            )?;
+            properties.with_owned(|properties| -> Result<()> {
+                let mut label = None;
+                let mut values = BTreeMap::new();
+                let mut property_memory = self.row_budget().reserve(0)?;
+                let mut payload_bytes = 0_usize;
+                for property in properties {
+                    if property.name == "$label" {
+                        let P::String(value) = property.value else {
+                            label = None;
+                            continue;
+                        };
+                        if value.is_empty() {
+                            label = None;
+                            continue;
+                        }
+                        payload_bytes = payload_bytes.saturating_add(value.capacity());
+                        property_memory.resize(payload_bytes.saturating_add(
+                            if values.is_empty() {
+                                0
+                            } else {
+                                r::allocation::btree_bytes::<String, r::Result<r::Value>>(
+                                    values.len(),
+                                )
+                            },
+                        ))?;
+                        label = Some(value);
                         continue;
-                    };
-                    let label = label.ok_or_else(|| {
-                        r::QueryError::runtime(
-                            "UnsupportedFeature",
-                            "UntypedStoredRelationship",
-                            "stored relationship has no type",
-                        )
-                    })?;
-                    EntityKind::Relationship { label, endpoints }
+                    }
+                    if property.name.starts_with('$')
+                        || property.value == P::Null
+                        || !demand.contains(&property.name)
+                    {
+                        continue;
+                    }
+                    let conversion = super::property_conversion::Conversion::new(property.value);
+                    payload_bytes = payload_bytes
+                        .saturating_add(property.name.capacity())
+                        .saturating_add(conversion.owned_bytes());
+                    property_memory.resize(payload_bytes.saturating_add(
+                        r::allocation::btree_bytes::<String, r::Result<r::Value>>(
+                            values.len().saturating_add(1),
+                        ),
+                    ))?;
+                    // The dormant error is admitted like a value. No CASE branch
+                    // or short-circuit expression observes it until access.
+                    values.insert(property.name, conversion.finish());
                 }
-            };
-            let data = EntityData {
-                kind,
-                properties: values,
-            };
-            graph_bytes = graph_bytes.saturating_add(data.allocated_bytes());
-            graph_memory.resize(graph_bytes)?;
-            graph.entities.insert(entity, data);
+                let kind = match entity {
+                    r::Entity::Node(_) => EntityKind::Node { label },
+                    r::Entity::Relationship(id) => {
+                        let Some(endpoints) = endpoints[&id] else {
+                            return Ok(());
+                        };
+                        let label = label.ok_or_else(|| {
+                            r::QueryError::runtime(
+                                "UnsupportedFeature",
+                                "UntypedStoredRelationship",
+                                "stored relationship has no type",
+                            )
+                        })?;
+                        EntityKind::Relationship { label, endpoints }
+                    }
+                };
+                let data = EntityData {
+                    kind,
+                    properties: values,
+                };
+                let retained = data
+                    .allocated_bytes()
+                    .saturating_sub(size_of::<EntityData>());
+                property_memory.resize(retained)?;
+                graph_bytes = graph_bytes.saturating_add(retained);
+                graph_memory.absorb(property_memory);
+                graph.entities.insert(entity, data);
+                Ok(())
+            })?;
         }
         graph._memory = Some(graph_memory);
         Ok(graph)
@@ -265,7 +394,9 @@ fn collect_entities(
     match value {
         r::Value::Entity(entity) => {
             if !out.contains(entity) {
-                memory.resize(out.len().saturating_add(1).saturating_mul(128))?;
+                memory.resize(r::allocation::btree_bytes::<r::Entity, ()>(
+                    out.len().saturating_add(1),
+                ))?;
                 out.insert(*entity);
             }
         }
@@ -437,39 +568,10 @@ impl GraphBatch {
     }
 }
 
-pub(super) fn from_property(value: P) -> Result<r::Value> {
-    Ok(match value {
-        P::Null => r::Value::Null,
-        P::Bool(b) => r::Value::Boolean(b),
-        P::I64(i) => r::Value::Integer(i),
-        P::F64(f) | P::F32(f) => r::Value::Float(f),
-        P::String(s) => r::Value::String(s),
-        P::Array(xs) => r::Value::List(xs.into_iter().map(from_property).collect::<Result<_>>()?),
-        P::Object(xs) => r::Value::Map(
-            xs.into_iter()
-                .map(|(k, v)| Ok((k, from_property(v)?)))
-                .collect::<Result<_>>()?,
-        ),
-        P::I64Array(xs) => r::Value::List(xs.into_iter().map(r::Value::Integer).collect()),
-        P::F64Array(xs) => r::Value::List(xs.into_iter().map(r::Value::Float).collect()),
-        P::F32Array(xs) => r::Value::List(
-            xs.into_iter()
-                .map(|f| r::Value::Float(f64::from(f)))
-                .collect(),
-        ),
-        P::StringArray(xs) => r::Value::List(xs.into_iter().map(r::Value::String).collect()),
-        P::DateTime(_) | P::Bytes(_) => {
-            return Err(r::QueryError::runtime(
-                "UnsupportedFeature",
-                "StoredValueType",
-                "temporal and binary stored values are outside the MVP profile",
-            )
-            .into())
-        }
-    })
-}
-
 pub(super) fn to_property(value: r::Value) -> Result<P> {
+    const {
+        assert!(size_of::<P>() <= size_of::<r::Value>());
+    }
     Ok(match value {
         r::Value::Null => P::Null,
         r::Value::Boolean(b) => P::Bool(b),
@@ -531,7 +633,17 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
                         .collect(),
                 ),
                 Some(r::Value::Boolean(_)) => {
-                    P::Array(xs.into_iter().map(to_property).collect::<Result<_>>()?)
+                    // Exact capacity makes simultaneous source/destination
+                    // admission independent of fallible-collect growth or
+                    // compiler-specific in-place collection optimizations.
+                    let mut values = Vec::with_capacity(xs.len());
+                    for value in xs {
+                        let r::Value::Boolean(value) = value else {
+                            unreachable!("validated homogeneous list");
+                        };
+                        values.push(P::Bool(value));
+                    }
+                    P::Array(values)
                 }
                 Some(
                     r::Value::Null
@@ -583,20 +695,28 @@ impl EntityData {
             EntityKind::Relationship { label, .. } => label.capacity(),
         };
         self.properties.iter().fold(
-            label.saturating_add(size_of::<Self>()).saturating_add(64),
+            label.saturating_add(size_of::<Self>()).saturating_add(
+                // Property maps are built fresh with inserts only; an empty one
+                // has never allocated a root.
+                if self.properties.is_empty() {
+                    0
+                } else {
+                    r::allocation::btree_bytes::<String, r::Result<r::Value>>(self.properties.len())
+                },
+            ),
             |bytes, (key, value)| {
                 bytes
                     .saturating_add(key.capacity())
                     .saturating_add(match value {
-                        Ok(value) => value.allocated_bytes(),
+                        Ok(value) => value
+                            .allocated_bytes()
+                            .saturating_sub(size_of::<r::Value>()),
                         Err(error) => error
                             .category
                             .capacity()
                             .saturating_add(error.detail.capacity())
-                            .saturating_add(error.message.capacity())
-                            .saturating_add(size_of::<r::QueryError>()),
+                            .saturating_add(error.message.capacity()),
                     })
-                    .saturating_add(64)
             },
         )
     }

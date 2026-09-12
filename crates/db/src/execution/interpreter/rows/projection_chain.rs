@@ -1,7 +1,13 @@
 //! Nonblocking row stages with an explicit expansion stack. Every projection
 //! owns global window counters; mutations run only after the consumer finishes.
 use super::{
-    memory::Rows, projection::Projection, push_row, row_bytes, streaming::UnwindCursor,
+    bound_match::{BoundCursor, BoundMatch},
+    correlated::{MatchCursor, NodeMatch},
+    matches,
+    memory::Rows,
+    projection::Projection,
+    push_row,
+    streaming::UnwindCursor,
     ConsumedProjection, ExecutionContext, GraphBatch, Limits, Result, RowBuffer,
 };
 use futures::StreamExt;
@@ -11,19 +17,27 @@ use std::{collections::BTreeMap, ops};
 enum Stage<'a> {
     Project {
         items: &'a r::ProjectionProgram,
-        predicate: Option<&'a r::Expression>,
+        predicate: Option<&'a r::SelectionProgram>,
         skip: usize,
         remaining: usize,
     },
-    Filter(&'a r::Expression),
+    Filter(&'a r::SelectionProgram),
+    Match(NodeMatch<'a>),
+    BoundMatch(BoundMatch<'a>),
     Unwind {
         expression: &'a r::Expression,
         slot: r::Slot,
     },
 }
-struct Expansion {
+struct Expansion<'a> {
     stage: usize,
-    cursor: UnwindCursor,
+    cursor: PipelineCursor<'a>,
+}
+
+enum PipelineCursor<'a> {
+    Unwind(UnwindCursor),
+    Match(MatchCursor),
+    BoundMatch(BoundCursor<'a>),
 }
 
 impl ExecutionContext<'_> {
@@ -43,15 +57,17 @@ impl ExecutionContext<'_> {
     {
         let end = match consumer {
             r::BatchConsumer::Pipeline { end } => {
-                return Box::pin(self.projection_chain(
-                    batches,
-                    plan.query(),
-                    source + 1..=end,
-                    plan.input_window(source),
-                    parameters,
-                    limits,
-                ))
-                .await;
+                return self
+                    .row_budget()
+                    .admitted_future(self.projection_chain(
+                        batches,
+                        plan,
+                        source + 1..=end,
+                        plan.input_window(source),
+                        parameters,
+                        limits,
+                    ))?
+                    .await;
             }
             r::BatchConsumer::Aggregate
             | r::BatchConsumer::TopK
@@ -79,25 +95,31 @@ impl ExecutionContext<'_> {
         let width = plan.query().bindings().len();
         match consumer {
             r::BatchConsumer::Aggregate => Ok((
-                Box::pin(self.aggregate_batches(batches, width, items, parameters, limits))
+                self.row_budget()
+                    .admitted_future(
+                        self.aggregate_batches(batches, width, items, parameters, limits),
+                    )?
                     .await?
                     .finish(),
                 ConsumedProjection::Aggregate(end),
             )),
             r::BatchConsumer::Project { termination } => Ok((
-                Box::pin(self.project_batches(
-                    batches,
-                    width,
-                    projection,
-                    parameters,
-                    limits,
-                    termination,
-                ))
-                .await?,
+                self.row_budget()
+                    .admitted_future(self.project_batches(
+                        batches,
+                        width,
+                        projection,
+                        parameters,
+                        limits,
+                        termination,
+                    ))?
+                    .await?,
                 ConsumedProjection::Complete(end),
             )),
             r::BatchConsumer::TopK => Ok((
-                Box::pin(self.top_k_batches(batches, projection, parameters, limits)).await?,
+                self.row_budget()
+                    .admitted_future(self.top_k_batches(batches, projection, parameters, limits))?
+                    .await?,
                 ConsumedProjection::Complete(end),
             )),
             r::BatchConsumer::Pipeline { .. } => unreachable!("pipeline was handled above"),
@@ -107,24 +129,28 @@ impl ExecutionContext<'_> {
     pub(super) async fn filter_relation(
         &self,
         rows: Rows,
-        predicate: &r::Expression,
+        predicate: &r::SelectionProgram,
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<Rows> {
         let mut output = RowBuffer::new(self.row_budget())?;
-        for batch in rows.chunks(limits.batch_rows) {
+        let mut rows = rows.into_iter();
+        while !rows.as_slice().is_empty() {
             self.check_execution_deadline()?;
-            let graph = self.expression_graph_batch(batch, [predicate]).await?;
-            for row in batch {
-                if self
-                    .evaluate(row, parameters, &graph, limits)
-                    .eval(predicate)?
-                    .truth()?
-                    == Some(true)
-                {
-                    output.push_with(row_bytes(row), || row.clone())?;
-                }
-            }
+            let count = rows.as_slice().len().min(limits.batch_rows);
+            let graph = self
+                .expression_graph_batch(&rows.as_slice()[..count], [predicate.expression()])
+                .await?;
+            let mut evaluator = RowSelection {
+                context: self,
+                graph: &graph,
+                parameters,
+                limits,
+                output: &mut output,
+            };
+            self.row_budget()
+                .admitted_future(predicate.select(rows.by_ref().take(count), &mut evaluator))?
+                .await?;
         }
         Ok(output.finish())
     }
@@ -132,7 +158,7 @@ impl ExecutionContext<'_> {
     pub(super) async fn projection_chain<'a, S>(
         &'a self,
         batches: S,
-        query: &'a r::Query,
+        plan: &'a r::RowPlan,
         operators: ops::RangeInclusive<usize>,
         window: Option<&'a r::InputWindow>,
         parameters: &'a BTreeMap<String, r::Value>,
@@ -141,6 +167,7 @@ impl ExecutionContext<'_> {
     where
         S: futures::Stream<Item = Result<Rows>> + Send + 'a,
     {
+        let query = plan.query();
         let width = query.bindings().len();
         let end = *operators.end();
         let r::Operator::Project {
@@ -167,19 +194,18 @@ impl ExecutionContext<'_> {
         });
         let expansions = operators
             .iter()
-            .filter(|op| matches!(op, r::Operator::Unwind { .. }))
+            .filter(|op| matches!(op, r::Operator::Unwind { .. } | r::Operator::Match { .. }))
             .count();
         let memory = self.row_budget().reserve(
             size_of::<Vec<Stage<'_>>>()
                 .saturating_add(operators.len().saturating_mul(size_of::<Stage<'_>>()))
-                .saturating_add(size_of::<Vec<Expansion>>())
-                .saturating_add(expansions.saturating_mul(size_of::<Expansion>()))
-                .saturating_add(size_of::<S>()),
+                .saturating_add(size_of::<Vec<Expansion<'_>>>())
+                .saturating_add(expansions.saturating_mul(size_of::<Expansion<'_>>())),
         )?;
         let empty = GraphBatch::default();
         let evaluation = self.evaluate(&[], parameters, &empty, limits);
         let mut stages = Vec::with_capacity(operators.len());
-        for operator in operators {
+        for (offset, operator) in operators.iter().enumerate() {
             stages.push(match operator {
                 r::Operator::Project {
                     items,
@@ -214,113 +240,174 @@ impl ExecutionContext<'_> {
                     expression,
                     slot: *slot,
                 },
-                r::Operator::Match { .. }
-                | r::Operator::Create(_)
-                | r::Operator::Update(_)
-                | r::Operator::Delete { .. } => {
+                r::Operator::Match {
+                    pattern,
+                    optional,
+                    predicate,
+                } => {
+                    let operation = matches::Match {
+                        pattern,
+                        optional: *optional,
+                        predicate: predicate.as_deref(),
+                        demand: usize::MAX,
+                    };
+                    let physical = &plan.matches()[&(start + offset)];
+                    if matches!(physical.steps.as_slice(), [r::MatchStep::IndexLookup(_)]) {
+                        Stage::Match(NodeMatch::new(operation, physical))
+                    } else {
+                        Stage::BoundMatch(BoundMatch::new(operation, physical))
+                    }
+                }
+                r::Operator::Create(_) | r::Operator::Update(_) | r::Operator::Delete { .. } => {
                     unreachable!("validated nonblocking pipeline stage")
                 }
             });
         }
-        let stack = Vec::<Expansion>::with_capacity(expansions);
+        let stack = Vec::<Expansion<'_>>::with_capacity(expansions);
         // Expand using continuations, not one recursively polled stream per
-        // clause. A source batch and each suspended UNWIND own admitted input.
-        let batches = Box::pin(futures::stream::try_unfold(
-            (Box::pin(batches), stages, stack, memory, false),
-            move |(mut batches, mut stages, mut stack, memory, mut input_started)| async move {
-                'input: loop {
-                    self.check_execution_deadline()?;
-                    let (mut rows, first) = if let Some(expansion) = stack.last_mut() {
-                        let Stage::Unwind { expression, slot } = &stages[expansion.stage] else {
-                            unreachable!("expansion resumes an UNWIND stage");
-                        };
-                        let Some(rows) = Box::pin(
-                            expansion
-                                .cursor
-                                .next_batch(self, expression, *slot, parameters, limits),
-                        )
-                        .await?
-                        else {
-                            stack.pop();
-                            continue;
-                        };
-                        (rows, expansion.stage + 1)
-                    } else {
-                        // Drain downstream continuations before stopping the
-                        // upstream source; a limited row may still expand.
-                        if stop.is_some_and(|(stage, termination)| {
-                            matches!(stages[stage], Stage::Project { remaining: 0, .. })
-                                && termination.may_stop(input_started)
-                        }) {
-                            return Ok(None);
-                        }
-                        let Some(batch) = batches.next().await else {
-                            return Ok(None);
-                        };
-                        input_started = true;
-                        (batch?, 0)
-                    };
-                    for (position, stage) in stages.iter_mut().enumerate().skip(first) {
+        // clause. A source batch and each suspended expansion own admitted input.
+        let batches = self
+            .row_budget()
+            .admitted_stream(futures::stream::try_unfold(
+                (
+                    self.row_budget().admitted_stream(batches)?,
+                    stages,
+                    stack,
+                    memory,
+                    false,
+                ),
+                move |(mut batches, mut stages, mut stack, memory, mut input_started)| async move {
+                    'input: loop {
                         self.check_execution_deadline()?;
-                        rows = match stage {
-                            Stage::Project {
-                                items,
-                                predicate,
-                                skip,
-                                remaining,
-                            } => {
-                                let projected = Box::pin(self.project_rows(
-                                    rows,
-                                    width,
-                                    Projection {
-                                        items,
-                                        distinct: false,
-                                        ordering: &[],
-                                        predicate: *predicate,
-                                        skip: None,
-                                        limit: None,
-                                    },
-                                    parameters,
-                                    limits,
-                                ))
-                                .await?;
-                                let mut output = RowBuffer::new(self.row_budget())?;
-                                for row in projected {
-                                    if *skip > 0 {
-                                        *skip -= 1;
-                                    } else if *remaining > 0 {
-                                        push_row(&mut output, row, limits)?;
-                                        *remaining -= 1;
-                                    }
+                        let (mut rows, first) = if let Some(expansion) = stack.last_mut() {
+                            let next = match (&mut stages[expansion.stage], &mut expansion.cursor) {
+                                (
+                                    Stage::Unwind { expression, slot },
+                                    PipelineCursor::Unwind(cursor),
+                                ) => {
+                                    self.row_budget()
+                                        .admitted_future(cursor.next_batch(
+                                            self, expression, *slot, parameters, limits,
+                                        ))?
+                                        .await?
                                 }
-                                output.finish()
+                                (Stage::Match(stage), PipelineCursor::Match(cursor)) => {
+                                    self.row_budget()
+                                        .admitted_future(
+                                            stage.next_batch(cursor, self, parameters, limits),
+                                        )?
+                                        .await?
+                                }
+                                (Stage::BoundMatch(stage), PipelineCursor::BoundMatch(cursor)) => {
+                                    self.row_budget()
+                                        .admitted_future(
+                                            stage.next_batch(cursor, self, parameters, limits),
+                                        )?
+                                        .await?
+                                }
+                                _ => unreachable!("continuation matches its stage"),
+                            };
+                            let Some(rows) = next else {
+                                stack.pop();
+                                continue;
+                            };
+                            (rows, expansion.stage + 1)
+                        } else {
+                            // Drain downstream continuations before stopping the
+                            // upstream source; a limited row may still expand.
+                            if stop.is_some_and(|(stage, termination)| {
+                                matches!(stages[stage], Stage::Project { remaining: 0, .. })
+                                    && termination.may_stop(input_started)
+                            }) {
+                                return Ok(None);
                             }
-                            Stage::Filter(predicate) => {
-                                Box::pin(self.filter_relation(rows, predicate, parameters, limits))
-                                    .await?
-                            }
-                            Stage::Unwind { .. } => {
-                                assert!(
-                                    stack.len() < stack.capacity(),
-                                    "one continuation per UNWIND stage"
-                                );
-                                stack.push(Expansion {
-                                    stage: position,
-                                    cursor: UnwindCursor::new(rows),
-                                });
-                                continue 'input;
-                            }
+                            let Some(batch) = batches.next().await else {
+                                return Ok(None);
+                            };
+                            input_started = true;
+                            (batch?, 0)
                         };
+                        for (position, stage) in stages.iter_mut().enumerate().skip(first) {
+                            self.check_execution_deadline()?;
+                            rows = match stage {
+                                Stage::Project {
+                                    items,
+                                    predicate,
+                                    skip,
+                                    remaining,
+                                } => {
+                                    let projected = self
+                                        .row_budget()
+                                        .admitted_future(self.project_rows(
+                                            rows,
+                                            width,
+                                            Projection {
+                                                items,
+                                                distinct: false,
+                                                ordering: &[],
+                                                predicate: *predicate,
+                                                skip: None,
+                                                limit: None,
+                                            },
+                                            parameters,
+                                            limits,
+                                        ))?
+                                        .await?;
+                                    let mut output = RowBuffer::new(self.row_budget())?;
+                                    for row in projected {
+                                        if *skip > 0 {
+                                            *skip -= 1;
+                                        } else if *remaining > 0 {
+                                            push_row(&mut output, row, limits)?;
+                                            *remaining -= 1;
+                                        }
+                                    }
+                                    output.finish()
+                                }
+                                Stage::Filter(predicate) => {
+                                    self.row_budget()
+                                        .admitted_future(
+                                            self.filter_relation(
+                                                rows, predicate, parameters, limits,
+                                            ),
+                                        )?
+                                        .await?
+                                }
+                                Stage::Unwind { .. } | Stage::Match(_) | Stage::BoundMatch(_) => {
+                                    assert!(
+                                        stack.len() < stack.capacity(),
+                                        "one continuation per expansion stage"
+                                    );
+                                    stack.push(Expansion {
+                                        stage: position,
+                                        cursor: match stage {
+                                            Stage::Unwind { .. } => {
+                                                PipelineCursor::Unwind(UnwindCursor::new(rows))
+                                            }
+                                            Stage::Match(_) => PipelineCursor::Match(
+                                                MatchCursor::new(rows, self.row_budget())?,
+                                            ),
+                                            Stage::BoundMatch(_) => PipelineCursor::BoundMatch(
+                                                BoundCursor::new(rows, self.row_budget())?,
+                                            ),
+                                            Stage::Project { .. } | Stage::Filter(_) => {
+                                                unreachable!("expanding stage")
+                                            }
+                                        },
+                                    });
+                                    continue 'input;
+                                }
+                            };
+                        }
+                        if !rows.is_empty() {
+                            return Ok(Some((
+                                rows,
+                                (batches, stages, stack, memory, input_started),
+                            )));
+                        }
                     }
-                    if !rows.is_empty() {
-                        return Ok(Some((
-                            rows,
-                            (batches, stages, stack, memory, input_started),
-                        )));
-                    }
-                }
-            },
-        ));
+                },
+            ))?;
         if projected_terminal {
             let mut batches = batches;
             let mut output = RowBuffer::new(self.row_budget())?;
@@ -341,7 +428,10 @@ impl ExecutionContext<'_> {
         };
         if aggregate {
             Ok((
-                Box::pin(self.aggregate_batches(batches, width, items, parameters, limits))
+                self.row_budget()
+                    .admitted_future(
+                        self.aggregate_batches(batches, width, items, parameters, limits),
+                    )?
                     .await?
                     .finish(),
                 ConsumedProjection::Aggregate(end),
@@ -352,9 +442,35 @@ impl ExecutionContext<'_> {
                 "validated terminal consumer is aggregation, projection, or top-k"
             );
             Ok((
-                Box::pin(self.top_k_batches(batches, projection, parameters, limits)).await?,
+                self.row_budget()
+                    .admitted_future(self.top_k_batches(batches, projection, parameters, limits))?
+                    .await?,
                 ConsumedProjection::Complete(end),
             ))
         }
+    }
+}
+
+struct RowSelection<'a, 'db> {
+    context: &'a ExecutionContext<'db>,
+    graph: &'a GraphBatch,
+    parameters: &'a BTreeMap<String, r::Value>,
+    limits: Limits,
+    output: &'a mut RowBuffer,
+}
+impl r::SelectionEvaluator<r::Expression> for RowSelection<'_, '_> {
+    type Row = r::Row;
+    type Error = crate::cypher::Error;
+    async fn evaluate(&mut self, row: &r::Row, expression: &r::Expression) -> Result<r::Selection> {
+        self.context.check_execution_deadline()?;
+        Ok(self
+            .context
+            .evaluate(row, self.parameters, self.graph, self.limits)
+            .eval(expression)?
+            .truth()?
+            .into())
+    }
+    fn retain(&mut self, row: r::Row) -> Result<()> {
+        push_row(self.output, row, self.limits)
     }
 }

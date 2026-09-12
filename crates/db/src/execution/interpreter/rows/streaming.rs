@@ -98,10 +98,11 @@ impl ExecutionContext<'_> {
         limits: Limits,
     ) -> impl futures::Stream<Item = Result<memory::Rows>> + 'a {
         futures::stream::try_unfold(UnwindCursor::new(rows), move |mut cursor| async move {
-            Ok(cursor
-                .next_batch(self, expression, slot, parameters, limits)
-                .await?
-                .map(|batch| (batch, cursor)))
+            let batch = self
+                .row_budget()
+                .admitted_future(cursor.next_batch(self, expression, slot, parameters, limits))?
+                .await?;
+            Ok(batch.map(|batch| (batch, cursor)))
         })
     }
 }

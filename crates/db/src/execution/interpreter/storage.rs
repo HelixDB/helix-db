@@ -39,11 +39,7 @@ impl<'db> ExecutionContext<'db> {
         let _request_memory = self
             .row_memory
             .as_ref()
-            .map(|budget| {
-                budget
-                    .reserve(key.len().saturating_add(size_of::<Bytes>()))
-                    .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)
-            })
+            .map(|budget| budget.reserve(key.len().saturating_add(size_of::<Bytes>())))
             .transpose()?;
         if let Some(budget) = &self.row_memory {
             budget.record_reads(crate::cypher::StorageReadUsage {
@@ -88,11 +84,7 @@ impl<'db> ExecutionContext<'db> {
         let _request_memory = self
             .row_memory
             .as_ref()
-            .map(|budget| {
-                budget
-                    .reserve(keys.len().saturating_mul(2 * size_of::<Option<Bytes>>()))
-                    .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)
-            })
+            .map(|budget| budget.reserve(keys.len().saturating_mul(2 * size_of::<Option<Bytes>>())))
             .transpose()?;
         if let Some(budget) = &self.row_memory {
             budget.record_reads(crate::cypher::StorageReadUsage {
@@ -301,9 +293,7 @@ fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Re
     let Some(budget) = budget else {
         return Ok(bytes);
     };
-    budget
-        .retain_read(bytes)
-        .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)
+    budget.retain_read(bytes)
 }
 
 fn writer_from_storage(db: &HelixDB) -> std::result::Result<&HelixWriter, crate::HelixDbMode> {

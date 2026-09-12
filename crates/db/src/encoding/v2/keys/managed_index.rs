@@ -46,6 +46,74 @@ pub(crate) enum ManagedIndexKey {
     Data { scope: DataScope, kind: ScopedKey },
 }
 
+/// Validated V3 value prefix, borrowed until its allocation has been admitted.
+pub(crate) struct PreparedEqualityPrefix<'a> {
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    lane: SecondaryEntryLane,
+    value: &'a CanonicalEqualityValue,
+    encoded_len: usize,
+}
+
+impl PreparedEqualityPrefix<'_> {
+    pub(crate) const fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+
+    pub(crate) fn to_bytes(&self) -> Bytes {
+        let mut bytes = Vec::with_capacity(self.encoded_len());
+        bytes.put_u8(ScopedKey::key_prefix());
+        bytes.put_u8(RecordKind::SecondaryEntry.as_u8());
+        bytes.put_u64(self.index_id.get());
+        bytes.put_u64(self.generation.get());
+        bytes.put_u8(self.lane.as_u8());
+        bytes.put_slice(self.value.digest());
+        bytes.put_u32(
+            u32::try_from(self.value.canonical().len()).expect("prepared canonical length"),
+        );
+        bytes.put_slice(self.value.canonical());
+        assert_eq!(bytes.len(), self.encoded_len);
+        Bytes::from(bytes)
+    }
+
+    /// Verify an entry against this exact canonical prefix without cloning its
+    /// canonical payload. A valid entry has precisely one trailing owner ID.
+    pub(crate) fn parse_owner(
+        &self,
+        scope: DataScope,
+        physical: &[u8],
+    ) -> Result<IndexEntityId, EncodingError> {
+        let Some(logical) = scope.strip_key(physical) else {
+            return Err(EncodingError::InvalidKey(
+                "physical key does not match index data scope".into(),
+            ));
+        };
+        let mut decoder = KeyDecoder::new(logical);
+        if decoder.take_u8()? != ScopedKey::key_prefix()
+            || decoder.take_u8()? != RecordKind::SecondaryEntry.as_u8()
+            || decoder.take_u64()? != self.index_id.get()
+            || decoder.take_u64()? != self.generation.get()
+            || decoder.take_u8()? != self.lane.as_u8()
+            || decoder.take_bytes(EQUALITY_DIGEST_LEN)? != self.value.digest()
+        {
+            return Err(EncodingError::InvalidKey(
+                "entry differs from its prepared equality prefix".into(),
+            ));
+        }
+        let length = decoder.take_u32()? as usize;
+        if length != self.value.canonical().len()
+            || decoder.take_bytes(length)? != self.value.canonical()
+        {
+            return Err(EncodingError::InvalidKey(
+                "entry differs from its prepared canonical equality value".into(),
+            ));
+        }
+        let owner = IndexEntityId::new(decoder.take_u64()?);
+        decoder.finish()?;
+        Ok(owner)
+    }
+}
+
 impl ManagedIndexKey {
     pub(crate) fn data_prefix(scope: DataScope, logical_prefix: Bytes) -> Bytes {
         match scope {
@@ -100,17 +168,16 @@ impl ManagedIndexKey {
         }
     }
 
+    /// Exact physical length, available before allocating serialized key bytes.
+    pub(crate) fn encoded_len(&self) -> usize {
+        match self {
+            Self::Global { kind } => kind.encoded_len(),
+            Self::Data { scope, kind } => scope.encoded_len() + kind.encoded_len(),
+        }
+    }
+
     pub(crate) fn to_bytes(&self) -> Bytes {
-        let mut bytes = match self {
-            Self::Global { kind } => Vec::with_capacity(kind.encoded_len()),
-            Self::Data { scope, kind } => {
-                let envelope_len = match scope {
-                    DataScope::LegacyUnscoped => 0,
-                    DataScope::Tenant(_) => TENANT_ENVELOPE_LEN,
-                };
-                Vec::with_capacity(envelope_len + kind.encoded_len())
-            }
-        };
+        let mut bytes = Vec::with_capacity(self.encoded_len());
         match self {
             Self::Global { kind } => kind.encode_into(&mut bytes),
             Self::Data { scope, kind } => {
@@ -257,7 +324,7 @@ impl ScopedKey {
         generation: IndexGenerationId,
         lane: SecondaryEntryLane,
         value: &CanonicalEqualityValue,
-    ) -> Result<Bytes, EncodingError> {
+    ) -> Result<PreparedEqualityPrefix<'_>, EncodingError> {
         if !lane.is_equality() || lane.is_unique() {
             return Err(EncodingError::InvalidKey(
                 "V3 equality value prefix requires a non-unique equality lane".to_string(),
@@ -276,16 +343,13 @@ impl ScopedKey {
                 "V3 equality value prefix exceeds the complete 1 MiB key limit".to_string(),
             ));
         }
-        let mut bytes =
-            Self::generation_prefix(RecordKind::SecondaryEntry, index_id, generation).to_vec();
-        bytes.put_u8(lane.as_u8());
-        bytes.put_slice(value.digest());
-        bytes.put_u32(
-            u32::try_from(value.canonical().len())
-                .expect("canonical equality values are bounded below u32"),
-        );
-        bytes.put_slice(value.canonical());
-        Ok(Bytes::from(bytes))
+        Ok(PreparedEqualityPrefix {
+            index_id,
+            generation,
+            lane,
+            value,
+            encoded_len,
+        })
     }
 
     /// Returns the exact V4 bitmap-generation prefix for one element kind.
@@ -906,6 +970,73 @@ mod wire_fixtures {
                 }),
             ),
         ]
+    }
+
+    #[test]
+    fn prepared_equality_prefixes_match_frozen_keys_without_scratch_allocations() {
+        let CanonicalSecondaryValue::Equality(value) =
+            CanonicalSecondaryValue::equality_string("shared")
+        else {
+            panic!("equality fixture");
+        };
+        for (lane, expected) in [
+            (SecondaryEntryLane::NodeEquality, "06050000000000000001000000000000000201e9cf50951f33fb140000000b0400000006736861726564"),
+            (SecondaryEntryLane::EdgeEquality, "06050000000000000001000000000000000205e9cf50951f33fb140000000b0400000006736861726564"),
+        ] {
+            let (prepared, allocations) = crate::allocation_testing::observe(|| {
+                ScopedKey::secondary_equality_entry_value_prefix(index_id(), generation(), lane, &value).unwrap()
+            });
+            assert_eq!(allocations.allocations, 0);
+            let (bytes, allocations) = crate::allocation_testing::observe(|| prepared.to_bytes());
+            assert_eq!(hex(&bytes), expected);
+            assert_eq!(allocations.allocations, 1);
+            assert_eq!(allocations.bytes, prepared.encoded_len());
+            assert_eq!(bytes.len(), prepared.encoded_len());
+            let tenant = TenantId::from_ulid_str("00000000000000000000000001").unwrap();
+            for scope in [DataScope::LegacyUnscoped, DataScope::Tenant(tenant)] {
+                let owner = IndexEntityId::new(u64::MAX);
+                let key = ManagedIndexKey::Data {
+                    scope,
+                    kind: ScopedKey::SecondaryEntry(SecondaryEntryKey::try_new(
+                        index_id(), generation(), lane, CanonicalSecondaryValue::Equality(value.clone()), Some(owner)
+                    ).unwrap()),
+                }.to_bytes();
+                let (actual, allocations) = crate::allocation_testing::observe(|| prepared.parse_owner(scope, &key).unwrap());
+                assert_eq!(actual, owner);
+                assert_eq!(allocations.allocations, 0);
+                for length in 0..key.len() {
+                    const PREFIX_OFFSET: usize = 0;
+                    assert!(prepared.parse_owner(scope, &key[PREFIX_OFFSET..PREFIX_OFFSET + length]).is_err());
+                }
+                for offset in 0..key.len() - U64_LEN {
+                    let mut corrupt = key.to_vec();
+                    corrupt[offset] ^= 1;
+                    assert!(prepared.parse_owner(scope, &corrupt).is_err());
+                }
+                let mut extra = key.to_vec();
+                extra.push(0);
+                assert!(prepared.parse_owner(scope, &extra).is_err());
+            }
+        }
+        for lane in [
+            SecondaryEntryLane::NodeUniqueEquality,
+            SecondaryEntryLane::NodeRangeAscending,
+        ] {
+            assert!(ScopedKey::secondary_equality_entry_value_prefix(
+                index_id(),
+                generation(),
+                lane,
+                &value
+            )
+            .is_err());
+        }
+        let tenant = TenantId::from_ulid_str("00000000000000000000000001").unwrap();
+        for scope in [DataScope::LegacyUnscoped, DataScope::Tenant(tenant)] {
+            for (_, kind) in scoped_fixtures() {
+                let key = ManagedIndexKey::Data { scope, kind };
+                assert_eq!(key.encoded_len(), key.to_bytes().len());
+            }
+        }
     }
 
     #[test]

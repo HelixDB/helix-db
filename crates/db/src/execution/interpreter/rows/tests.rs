@@ -1,12 +1,19 @@
 use super::*;
 use helix_planner::context;
 
+mod bound_match;
+mod correlated;
+mod correlated_sources;
 mod cursors;
+mod hash_join;
 mod mixed_pipeline;
 mod mutations;
 mod pipeline;
 mod projection_chain;
 mod projection_windows;
+mod property_admission;
+mod reference;
+mod selection;
 mod unwind;
 mod values;
 
@@ -93,3 +100,8 @@ async fn every_cancellation_checkpoint_before_commit_rolls_back_a_small_write() 
         "all pre-commit checkpoints must have been exercised"
     );
 }
+
+mod node_existence;
+
+mod lookup_frames;
+mod match_producers;

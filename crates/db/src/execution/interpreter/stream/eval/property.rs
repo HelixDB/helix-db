@@ -123,6 +123,39 @@ impl<'db> ExecutionContext<'db> {
     }
 
     async fn load_property_blob(&self, element: &ElementRef) -> Result<CachedPropertyBlob> {
+        let Some(value) = self.property_bytes(element).await? else {
+            return Ok(CachedPropertyBlob::Missing);
+        };
+        #[cfg(test)]
+        self.record_property_decode();
+        Ok(CachedPropertyBlob::Decoded(decode_properties(&value)?))
+    }
+
+    /// Inspect a fixed native field set without letting decoded ownership escape
+    /// its admission guard. Missing rows retain the native empty-property contract.
+    pub(in crate::execution::interpreter) async fn row_properties_match(
+        &self,
+        row: &ExecutionRow,
+        names: &[&str],
+        predicate: impl FnOnce(&[Property]) -> bool,
+    ) -> Result<bool> {
+        let Some(element) = row.current.as_ref() else {
+            return Ok(predicate(&[]));
+        };
+        let Some(value) = self.property_bytes(element).await? else {
+            return Ok(predicate(&[]));
+        };
+        #[cfg(test)]
+        self.record_property_decode();
+        let properties = crate::query_resources::properties::Decoded::new(
+            &value,
+            crate::encoding::v2::values::property::prepared::Selection::Names(names),
+            self.row_memory.as_ref(),
+        )?;
+        Ok(predicate(&properties))
+    }
+
+    async fn property_bytes(&self, element: &ElementRef) -> Result<Option<bytes::Bytes>> {
         let kind = match element {
             ElementRef::Node(id) => {
                 keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id))
@@ -138,12 +171,7 @@ impl<'db> ExecutionContext<'db> {
         .to_bytes();
         #[cfg(test)]
         self.record_property_get();
-        let Some(value) = self.get_raw(&key).await? else {
-            return Ok(CachedPropertyBlob::Missing);
-        };
-        #[cfg(test)]
-        self.record_property_decode();
-        Ok(CachedPropertyBlob::Decoded(decode_properties(&value)?))
+        self.get_raw(&key).await
     }
 }
 

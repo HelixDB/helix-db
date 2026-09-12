@@ -368,7 +368,15 @@ impl PropertyDemand {
         match (&mut *self, other) {
             (Self::All, _) => {}
             (_, Self::All) => *self = Self::All,
-            (Self::Keys(keys), Self::Keys(other)) => keys.extend(other.iter().cloned()),
+            (Self::Keys(keys), Self::Keys(other)) => {
+                // Do not allocate temporary strings for already requested keys.
+                for key in other {
+                    if keys.contains(key) {
+                        continue;
+                    }
+                    keys.insert(key.clone());
+                }
+            }
         }
     }
     pub fn contains(&self, key: &str) -> bool {

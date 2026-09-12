@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod explain;
+mod parameters;
 pub use explain::{explain, Explanation};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,16 +78,7 @@ pub struct ResourceUsage {
     pub reads: StorageReadUsage,
 }
 
-/// Logical storage calls made through the request interpreter. Object-store
-/// reads are a separate metric: caches and transactions can satisfy these calls.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct StorageReadUsage {
-    pub point_gets: usize,
-    pub multi_get_batches: usize,
-    pub multi_get_keys: usize,
-    pub scans: usize,
-    pub scan_rows: usize,
-}
+pub use crate::query_resources::StorageReadUsage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -101,14 +93,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<HelixDbError> for Error {
     fn from(error: HelixDbError) -> Self {
-        let HelixDbError::QueryMemoryLimitExceeded = error else {
+        let (detail, message) = if matches!(error, HelixDbError::QueryMemoryLimitExceeded) {
+            ("MemoryLimit", "query live buffers exceed the memory budget")
+        } else if matches!(
+            error,
+            HelixDbError::Encoding(crate::encoding::error::EncodingError::PropertyNestingLimit)
+        ) {
+            (
+                "StoredValueNestingLimit",
+                "stored property archive exceeds the decoder nesting limit",
+            )
+        } else {
             return Self::Storage(error);
         };
-        Self::Query(r::QueryError::runtime(
-            "ResourceLimit",
-            "MemoryLimit",
-            "query live buffers exceed the memory budget",
-        ))
+        Self::Query(r::QueryError::runtime("ResourceLimit", detail, message))
     }
 }
 
@@ -140,7 +138,7 @@ pub async fn execute(
         query,
         params,
         values,
-        parameter_bytes,
+        parameter_memory,
     } = prepare_request(request, limits)?;
     if query.effect() == r::Effect::Write
         && (db.is_reader_mode() || mode == crate::query_service::QueryMode::Warm)
@@ -153,17 +151,14 @@ pub async fn execute(
         .into());
     }
     let prepared = control
-        .run(db.planner_context_scoped_prepared(params.clone(), scope))
+        .run(db.planner_context_scoped_prepared(params, scope))
         .await?;
     control.check()?;
     let plan = r::plan(query, prepared.context())?;
     control.check()?;
-    crate::execution::interpreter::Interpreter::new_scoped_controlled_prepared(
-        db,
-        params,
-        scope,
-        control,
-        prepared.into_catalog_proof(),
+    let (params, proof) = prepared.into_execution_inputs();
+    let mut response = crate::execution::interpreter::Interpreter::new_scoped_controlled_prepared(
+        db, params, scope, control, proof,
     )
     .execute_rows(
         &plan,
@@ -171,18 +166,24 @@ pub async fn execute(
         Limits {
             memory_bytes: limits
                 .memory_bytes
-                .saturating_sub(parameter_bytes.saturating_mul(3)),
+                .saturating_sub(parameter_memory.retained()),
             ..limits
         },
     )
-    .await
+    .await?;
+    response.resources.peak_memory_bytes = parameter_memory.construction().max(
+        parameter_memory
+            .retained()
+            .saturating_add(response.resources.peak_memory_bytes),
+    );
+    Ok(response)
 }
 
 struct PreparedRequest {
     query: r::Query,
     params: context::ParamBindings,
     values: BTreeMap<String, r::Value>,
-    parameter_bytes: usize,
+    parameter_memory: parameters::Footprint,
 }
 
 // Shared validation keeps planning-only requests on the execution parameter and
@@ -211,70 +212,17 @@ fn prepare_request(request: Request, limits: Limits) -> Result<PreparedRequest> 
             .into());
         }
     }
-    let mut params = context::ParamBindings::default();
-    let mut values = BTreeMap::new();
-    let mut parameter_bytes = 0_usize;
-    for (name, value) in request.parameters {
-        parameter_bytes = parameter_bytes
-            .saturating_add(validate_parameter(&value)?)
-            .saturating_add(name.capacity());
-        if parameter_bytes.saturating_mul(3) > limits.memory_bytes {
-            return Err(r::QueryError::runtime(
-                "ResourceLimit",
-                "MemoryLimit",
-                "parameter representations exceed the query memory budget",
-            )
-            .into());
-        }
-        let key = ir::NonEmptyString::new(name.clone()).ok_or_else(|| {
-            r::QueryError::compile(
-                "SyntaxError",
-                "InvalidParameter",
-                "parameter name cannot be empty",
-            )
-        })?;
-        params
-            .values
-            .insert(key.clone(), helix_ast::value::PropertyValue::from(&value));
-        values.insert(name, parameter_value(&value));
-        params.query_values.insert(key, value);
-    }
+    let parameters::Prepared {
+        bindings: params,
+        values,
+        footprint: parameter_memory,
+    } = parameters::prepare(request.parameters, limits.memory_bytes)?;
     Ok(PreparedRequest {
         query,
         params,
         values,
-        parameter_bytes,
+        parameter_memory,
     })
-}
-
-fn validate_parameter(value: &helix_ast::query::QueryValue) -> r::Result<usize> {
-    use helix_ast::query::QueryValue as Q;
-    let mut pending = vec![(value, 0_usize)];
-    let mut count = 0_usize;
-    let mut bytes = 0_usize;
-    while let Some((value, depth)) = pending.pop() {
-        count += 1;
-        if depth >= r::MAX_EXPRESSION_DEPTH || count > 200_000 {
-            return Err(r::QueryError::compile(
-                "ResourceLimit",
-                "ValueDepth",
-                "parameter exceeds structural limits",
-            ));
-        }
-        bytes = bytes.saturating_add(size_of::<Q>());
-        match value {
-            Q::String(value) => bytes = bytes.saturating_add(value.capacity()),
-            Q::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
-            Q::Object(values) => {
-                for (key, value) in values {
-                    bytes = bytes.saturating_add(key.capacity()).saturating_add(64);
-                    pending.push((value, depth + 1));
-                }
-            }
-            Q::Null | Q::Bool(_) | Q::I64(_) | Q::F64(_) | Q::F32(_) => {}
-        }
-    }
-    Ok(bytes)
 }
 
 fn parameter_value(value: &helix_ast::query::QueryValue) -> r::Value {
@@ -346,3 +294,7 @@ fn decode_parameter(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cypher/tests/parameters.rs"]
+mod parameter_tests;

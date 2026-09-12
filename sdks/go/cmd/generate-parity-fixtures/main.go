@@ -14,6 +14,7 @@ import (
 	"time"
 
 	helix "github.com/helixdb/helix-db/sdks/go"
+	"github.com/helixdb/helix-db/sdks/go/internal/paritycypher"
 )
 
 type fixture struct {
@@ -33,6 +34,9 @@ func main() {
 }
 
 func run() error {
+	if url := os.Getenv("HELIX_CYPHER_PARITY_URL"); url != "" {
+		return paritycypher.RunHTTP(url, os.Getenv("HELIX_CYPHER_PARITY_RESULTS"), os.Getenv("HELIX_CYPHER_PARITY_PHASE"))
+	}
 	out := "../tests/parity/generated/go"
 	if len(os.Args) > 1 {
 		out = os.Args[1]
@@ -213,7 +217,10 @@ func executeEmbeddedFixtures(fixtures []fixture, results string) error {
 			return fmt.Errorf("%s returned the wrong post-DROP error: %w", search.name, err)
 		}
 	}
-	return nil
+	if err := client.Close(); err != nil {
+		return err
+	}
+	return paritycypher.RunEmbedded(source, cache, results)
 }
 
 func requiredFixture(fixtures []fixture, name string) (fixture, error) {

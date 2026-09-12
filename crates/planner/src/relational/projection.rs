@@ -2,29 +2,13 @@
 //! the program owns column order, unique destinations, and input dependencies.
 //! All expressions observe the incoming row, including when a destination
 //! shadows an input slot. A failed expression produces no partially updated row.
-use super::{Expression, QueryError, Result, Slot};
+use super::{Expression, ExpressionInput, QueryError, Result, Slot};
 use std::{collections::BTreeSet, future::Future};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Projection<E = Expression> {
     pub slot: Slot,
     pub expression: E,
-}
-
-/// Resolved expression dependency boundary. Implementations validate their
-/// own operation domain before recursive dependency traversal.
-pub trait ProjectionInput {
-    fn validate(&self) -> Result<()>;
-    fn references(&self) -> BTreeSet<Slot>;
-}
-
-impl ProjectionInput for Expression {
-    fn validate(&self) -> Result<()> {
-        self.validate_shape()
-    }
-    fn references(&self) -> BTreeSet<Slot> {
-        self.slots()
-    }
 }
 
 /// A relative row program. Construction and deserialization reject duplicate
@@ -48,7 +32,7 @@ pub struct ProjectionProgram<E = Expression> {
     outputs: BTreeSet<Slot>,
 }
 
-impl<E: ProjectionInput> ProjectionProgram<E> {
+impl<E: ExpressionInput> ProjectionProgram<E> {
     pub fn new(items: Vec<Projection<E>>) -> Result<Self> {
         let mut outputs = BTreeSet::new();
         let mut references = BTreeSet::new();
@@ -141,7 +125,7 @@ impl<E: serde::Serialize> serde::Serialize for ProjectionProgram<E> {
         self.items.serialize(serializer)
     }
 }
-impl<'de, E: serde::Deserialize<'de> + ProjectionInput> serde::Deserialize<'de>
+impl<'de, E: serde::Deserialize<'de> + ExpressionInput> serde::Deserialize<'de>
     for ProjectionProgram<E>
 {
     fn deserialize<D: serde::Deserializer<'de>>(
