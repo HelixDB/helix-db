@@ -55,6 +55,30 @@ impl TextBm25Statistics {
     }
 }
 
+impl TextBm25Statistics {
+    /// Corpus document frequency of one term, if it was loaded.
+    pub(crate) fn document_frequency(&self, term: &[u8]) -> Option<u64> {
+        self.document_frequencies.get(term).copied()
+    }
+
+    pub(crate) const fn total_document_count(&self) -> u64 {
+        self.total_document_count
+    }
+
+    /// These statistics with more terms' frequencies added. A term that was
+    /// already loaded keeps the frequency it was loaded with.
+    pub(crate) fn with_frequencies(&self, more: BTreeMap<Bytes, u64>) -> Self {
+        let mut extended = self.clone();
+        for (term, frequency) in more {
+            extended
+                .document_frequencies
+                .entry(term)
+                .or_insert(frequency);
+        }
+        extended
+    }
+}
+
 impl tantivy::query::Bm25StatisticsProvider for TextBm25Statistics {
     fn total_num_tokens(&self, _field: tantivy::schema::Field) -> tantivy::Result<u64> {
         Ok(self.total_token_count)
@@ -119,6 +143,42 @@ pub(crate) async fn load_query_statistics(
         total_token_count: corpus.total_token_count,
         document_frequencies,
     }))
+}
+
+/// Corpus document frequencies for terms a fuzzy expansion reached but the
+/// query never named.
+///
+/// Same keys, ownership checks and bounds as the query terms get in
+/// [`load_query_statistics`], so a reached term is scored on exactly the
+/// statistics it would have had if someone had typed it.
+pub(crate) async fn load_term_frequencies(
+    reader: &(impl DbReadOps + Send + Sync),
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    partition: &work::TextPartition,
+    document_count: u64,
+    terms: impl IntoIterator<Item = Bytes>,
+) -> Result<BTreeMap<Bytes, u64>> {
+    let mut frequencies = BTreeMap::new();
+    for term in terms {
+        let key = term_key(scope, index_id, generation, partition, &term);
+        let frequency = match reader.get(key).await? {
+            Some(value) => {
+                let statistics = decode_term(&value)?;
+                validate_term_owner(&statistics, index_id, generation, partition, &term)?;
+                if statistics.document_frequency > document_count {
+                    return Err(corruption(
+                        "text term document frequency exceeds corpus document count",
+                    ));
+                }
+                statistics.document_frequency
+            }
+            None => 0,
+        };
+        frequencies.insert(term, frequency);
+    }
+    Ok(frequencies)
 }
 
 /// Canonical contribution produced by one validated source document.

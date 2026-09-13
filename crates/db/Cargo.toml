@@ -33,6 +33,10 @@ thiserror = "2"
 # Object storage
 object_store = { version = "0.12", features = ["aws"] }
 tantivy = { version = "0.26", features = ["quickwit"] }
+# Both already come in through tantivy; pinned here so the fuzzy term
+# expansion can drive the same automaton the term dictionary expects.
+levenshtein_automata = "0.2.1"
+tantivy-fst = "0.5.0"
 sha2 = "0.11"
 stable_deref_trait = "1"
 tempfile = "3"

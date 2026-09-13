@@ -113,6 +113,7 @@ fn direct_label_helpers_cover_index_and_search_families() {
             index: search_index("user_bio"),
             query_text: text_query(),
             k: literal_limit(3),
+            fuzzy_distance: 0,
         },
     ] {
         assert_eq!(plan.direct_label(), Some(&user));
@@ -146,6 +147,7 @@ fn direct_label_helpers_cover_index_and_search_families() {
             index: search_index("likes_comment"),
             query_text: text_query(),
             k: literal_limit(3),
+            fuzzy_distance: 0,
         },
     ] {
         assert_eq!(plan.direct_label(), Some(&likes));
@@ -217,6 +219,7 @@ fn hard_cardinality_bounds_cover_point_unique_search_and_sets() {
         ))
         .unwrap(),
         k: literal_limit(5),
+        fuzzy_distance: 0,
     });
     let union = edge_source(ir::EdgeAccessPlan::Union(ir::AtLeast::<_, 2>::from_pair(
         point.clone(),
