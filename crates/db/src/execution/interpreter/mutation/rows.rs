@@ -3,7 +3,7 @@ use super::{super::ExecutionContext, contracts::EdgeMutationTarget};
 use crate::{
     cypher,
     encoding::v2::values::property::{property_value::PropertyValue, Property},
-    index_lifecycle::graph_mutation::CanonicalPropertyRow,
+    index_lifecycle::graph_mutation::{self, CanonicalPropertyRow},
 };
 use helix_planner::{ir, relational as r};
 use std::collections::BTreeSet;
@@ -42,11 +42,96 @@ impl DeletionTargets {
 }
 
 impl ExecutionContext<'_> {
+    /// An evaluated map observes, rewrites and stages its target exactly once.
+    /// The map contract preserves labels, so topology routes remain valid.
+    pub(in crate::execution::interpreter) async fn row_edit_map(
+        &mut self,
+        entity: r::Entity,
+        edit: graph_mutation::map::Edit,
+    ) -> cypher::Result<()> {
+        let mut scope = self.take_or_begin_write_scope().await?;
+        let (entity, before) = match entity {
+            r::Entity::Node(id) => (
+                graph_mutation::GraphEntity::node(id),
+                self.observe_node_rows(&scope.txn, [id])
+                    .await?
+                    .observed(id)
+                    .ok_or_else(|| {
+                        crate::HelixDbError::InvariantViolation(
+                            "Active text graph source disagrees with its supplied before state"
+                                .to_string(),
+                        )
+                    })?,
+            ),
+            r::Entity::Relationship(id) => (
+                graph_mutation::GraphEntity::edge(id),
+                self.observe_edge_rows(&scope.txn, [id])
+                    .await?
+                    .observed(id)
+                    .require_properties(id)?,
+            ),
+        };
+        match edit.apply(self.tenant_scope, entity, before, self.row_memory.as_ref())? {
+            graph_mutation::PropertyEditOutcome::Unchanged(_) => {}
+            graph_mutation::PropertyEditOutcome::Changed(transition) => {
+                let encoded = transition
+                    .after()
+                    .expect("a map replacement has an after row")
+                    .write_payload();
+                scope
+                    .index_context
+                    .maintain_graph_indexes(
+                        &scope.txn,
+                        transition,
+                        self.db
+                            .config()
+                            .db()
+                            .search_index_backfill()
+                            .active_text_mutation(),
+                        self.row_memory.as_ref(),
+                    )
+                    .await?;
+                scope.index_context.property_writes.stage(
+                    &scope.txn,
+                    self.tenant_scope,
+                    entity,
+                    Some(encoded),
+                    self.row_memory.as_ref(),
+                )?;
+            }
+        }
+        self.finish_write_scope(scope).await?;
+        Ok(())
+    }
+
     pub(in crate::execution::interpreter) async fn row_create_node(
         &mut self,
         label: &str,
         mut properties: Vec<Property>,
     ) -> cypher::Result<u64> {
+        // The caller owns the input vector. If push reallocates it, admit the
+        // new capacity alongside that input, plus both metadata strings, before
+        // either allocation. Canonical row retention takes over before return.
+        let growth = if properties.len() == properties.capacity() {
+            properties
+                .capacity()
+                .saturating_mul(2)
+                .max(4)
+                .saturating_mul(size_of::<Property>())
+        } else {
+            0
+        };
+        let _metadata_memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(
+                    growth
+                        .saturating_add("$label".len())
+                        .saturating_add(label.len()),
+                )
+            })
+            .transpose()?;
         let id = self.writer()?.node_ids().allocate().await?;
         properties.push(Property::string("$label", label));
         let mut scope = self.take_or_begin_write_scope().await?;
@@ -63,13 +148,37 @@ impl ExecutionContext<'_> {
         label: &str,
         mut properties: Vec<Property>,
     ) -> cypher::Result<u64> {
-        let label = ir::NonEmptyString::new(label.to_owned()).ok_or_else(|| {
-            r::QueryError::runtime(
+        if label.is_empty() {
+            return Err(r::QueryError::runtime(
                 "SyntaxError",
                 "NoRelationshipType",
                 "a relationship requires a nonempty type",
             )
-        })?;
+            .into());
+        }
+        let growth = if properties.len() == properties.capacity() {
+            properties
+                .capacity()
+                .saturating_mul(2)
+                .max(4)
+                .saturating_mul(size_of::<Property>())
+        } else {
+            0
+        };
+        // The validated type and the stored label each own a string.
+        let _metadata_memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(
+                    growth
+                        .saturating_add("$label".len())
+                        .saturating_add(label.len().saturating_mul(2)),
+                )
+            })
+            .transpose()?;
+        let label = ir::NonEmptyString::new(label.to_owned())
+            .expect("relationship type is checked before admission");
         let id = self.writer()?.edge_ids().allocate().await?;
         properties.push(Property::string("$label", label.as_ref()));
         let mut scope = self.take_or_begin_write_scope().await?;

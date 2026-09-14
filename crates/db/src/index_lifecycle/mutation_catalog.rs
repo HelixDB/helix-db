@@ -17,6 +17,9 @@ use crate::encoding::v2::keys::{RecordKind, ScopedKey};
 use crate::encoding::v2::values::decode_index_record;
 use crate::error::{HelixDbError, Result};
 
+#[cfg(test)]
+mod routes_tests;
+
 use super::{
     secondary, text, vector, ActiveIndexHandle, IndexRecordV2, IndexStateV2,
     ValidatedDynamicIndexDefinition,
@@ -130,7 +133,7 @@ struct MutationLabelRoutes {
 /// Borrowed target selection for one authoritative graph transition.
 ///
 /// The common create/delete/single-property cases borrow one catalog slice and
-/// allocate nothing. `Owned` is reserved for future multi-property edits.
+/// allocate nothing. Multi-property unions retain their construction admission.
 pub(crate) enum RoutedMutationTargets<'a> {
     /// No configured target can observe this transition.
     None,
@@ -140,6 +143,11 @@ pub(crate) enum RoutedMutationTargets<'a> {
     Two(&'a [MutationRouteTarget], &'a [MutationRouteTarget]),
     /// A deduplicated union for a multi-property replacement.
     Owned(Vec<MutationRouteTarget>),
+    /// A union whose reservation follows the retained vector capacity.
+    Admitted {
+        targets: Vec<MutationRouteTarget>,
+        _memory: crate::query_resources::Reservation,
+    },
 }
 
 impl RoutedMutationTargets<'_> {
@@ -149,7 +157,7 @@ impl RoutedMutationTargets<'_> {
             Self::None => (&[][..], &[][..]),
             Self::One(targets) => (*targets, &[][..]),
             Self::Two(first, second) => (*first, *second),
-            Self::Owned(targets) => (targets.as_slice(), &[][..]),
+            Self::Owned(targets) | Self::Admitted { targets, .. } => (targets.as_slice(), &[][..]),
         };
         first.iter().chain(second).copied()
     }
@@ -178,15 +186,25 @@ impl MutationRouteCatalog {
         }
     }
 
-    /// Selects exact family target ordinals for one graph-row transition.
+    #[cfg(test)]
     pub(crate) fn targets_for(
         &self,
         transition: &super::graph_mutation::GraphMutationTransition,
     ) -> RoutedMutationTargets<'_> {
-        use super::graph_mutation::GraphMutationTransition;
+        self.targets_for_with_budget(transition, None)
+            .expect("native routes have no admission limit")
+    }
 
+    /// Selects exact targets, admitting a union before allocating. Changes to
+    /// unindexed fields do not force a copy of the one remaining borrowed route.
+    pub(crate) fn targets_for_with_budget(
+        &self,
+        transition: &super::graph_mutation::GraphMutationTransition,
+        budget: Option<&crate::query_resources::Budget>,
+    ) -> Result<RoutedMutationTargets<'_>> {
+        use super::graph_mutation::GraphMutationTransition;
         let element_kind = transition.entity().index_entity().kind;
-        match transition {
+        Ok(match transition {
             GraphMutationTransition::Create { after, .. } => {
                 self.targets_for_label(element_kind, graph_label(after.properties()))
             }
@@ -211,31 +229,46 @@ impl MutationRouteCatalog {
             }
             GraphMutationTransition::Replace { after, changed, .. } => {
                 let Some(label) = graph_label(after.properties()) else {
-                    return RoutedMutationTargets::None;
+                    return Ok(RoutedMutationTargets::None);
                 };
-                let mut changed = changed.iter();
-                let Some(first) = changed.next() else {
-                    unreachable!("replacement transitions have non-empty changed properties")
+                let mut routes = changed
+                    .iter()
+                    .filter_map(|property| self.property_targets(element_kind, label, property));
+                let Some(first) = routes.next() else {
+                    return Ok(RoutedMutationTargets::None);
                 };
-                let first = self.property_targets(element_kind, label, first);
-                let Some(second_property) = changed.next() else {
-                    return first.map_or(RoutedMutationTargets::None, RoutedMutationTargets::One);
+                let Some(second) = routes.next() else {
+                    return Ok(RoutedMutationTargets::One(first));
                 };
-                let mut targets = first.map_or_else(Vec::new, ToOwned::to_owned);
-                for property in std::iter::once(second_property).chain(changed) {
-                    if let Some(more) = self.property_targets(element_kind, label, property) {
-                        targets.extend_from_slice(more);
-                    }
-                }
+                let capacity = routes
+                    .clone()
+                    .fold(first.len().saturating_add(second.len()), |count, route| {
+                        count.saturating_add(route.len())
+                    });
+                let memory = budget
+                    .map(|budget| {
+                        budget.reserve(capacity.saturating_mul(size_of::<MutationRouteTarget>()))
+                    })
+                    .transpose()?;
+                let mut targets = Vec::with_capacity(capacity);
+                targets.extend(
+                    std::iter::once(first)
+                        .chain(std::iter::once(second))
+                        .chain(routes)
+                        .flatten()
+                        .copied(),
+                );
                 targets.sort_unstable();
                 targets.dedup();
-                if targets.is_empty() {
-                    RoutedMutationTargets::None
-                } else {
-                    RoutedMutationTargets::Owned(targets)
+                match memory {
+                    Some(memory) => RoutedMutationTargets::Admitted {
+                        targets,
+                        _memory: memory,
+                    },
+                    None => RoutedMutationTargets::Owned(targets),
                 }
             }
-        }
+        })
     }
 
     /// Selects label-scoped targets for a coalesced original/final row pair.

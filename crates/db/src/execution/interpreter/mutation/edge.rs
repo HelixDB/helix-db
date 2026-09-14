@@ -24,6 +24,21 @@ pub(super) struct ObservedEdgeRow {
     properties: Option<CanonicalPropertyRow>,
 }
 
+impl ObservedEdgeRow {
+    pub(super) fn require_properties(self, edge_id: u64) -> Result<CanonicalPropertyRow> {
+        let Some(_) = self.endpoints else {
+            return Err(HelixDbError::Query(format!(
+                "edge {edge_id} does not exist"
+            )));
+        };
+        self.properties.ok_or_else(|| {
+            HelixDbError::InvariantViolation(
+                "Active text graph source disagrees with its supplied before state".to_string(),
+            )
+        })
+    }
+}
+
 /// Sorted, deduplicated edge observations with an ordered property overlay.
 pub(super) struct ObservedEdgeRows {
     rows: BTreeMap<u64, ObservedEdgeRow>,
@@ -182,6 +197,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(
@@ -225,16 +241,7 @@ impl<'db> ExecutionContext<'db> {
         observed: ObservedEdgeRow,
         index_context: &mut MutationIndexContext,
     ) -> Result<CanonicalPropertyRow> {
-        let Some(_) = observed.endpoints else {
-            return Err(HelixDbError::Query(format!(
-                "edge {edge_id} does not exist"
-            )));
-        };
-        let Some(before) = observed.properties else {
-            return Err(HelixDbError::InvariantViolation(
-                "Active text graph source disagrees with its supplied before state".to_string(),
-            ));
-        };
+        let before = observed.require_properties(edge_id)?;
         let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::edge(edge_id),
@@ -265,6 +272,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(
@@ -339,6 +347,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(
@@ -383,6 +392,13 @@ impl<'db> ExecutionContext<'db> {
             keys.len(),
             self.row_memory.as_ref(),
         )?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            })
+        });
         let values = txn.multi_get(keys).await?;
         let mut values = request.attach(values)?;
         let mut rows = BTreeMap::new();
@@ -553,17 +569,19 @@ impl<'db> ExecutionContext<'db> {
             .before()
             .expect("a delete transition has a before row")
             .properties();
-        let label = label_of(properties).map(str::to_string);
-        if let Some(label) = label.as_deref() {
-            index_context
-                .topology_mutations()
-                .remove_global_edge_label(self.tenant_scope, label, edge_id)?;
-            if !observed.label_remains {
+        label_of(properties)
+            .map(|label| -> Result<()> {
                 index_context
                     .topology_mutations()
-                    .remove_edge_label_neighbors(self.tenant_scope, from, to, label)?;
-            }
-        }
+                    .remove_global_edge_label(self.tenant_scope, label, edge_id)?;
+                if !observed.label_remains {
+                    index_context
+                        .topology_mutations()
+                        .remove_edge_label_neighbors(self.tenant_scope, from, to, label)?;
+                }
+                Ok(())
+            })
+            .transpose()?;
         index_context.topology_mutations().remove_edge_pair(
             self.tenant_scope,
             from,
@@ -594,6 +612,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(

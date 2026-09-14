@@ -2,6 +2,80 @@ use super::*;
 use crate::{allocation_testing, HelixDbError};
 
 #[test]
+fn property_builder_admits_capacity_and_payload_before_clone_and_transfers_ownership() {
+    let budget = Budget::new(16 * 1024);
+    let mut builder = Builder::new(2, Some(&budget)).unwrap();
+    let input = property::Property::bytes("clone", vec![7; 4096]);
+    let before = budget.available();
+    let (result, allocations) = allocation_testing::observe(|| builder.push_cloned(&input));
+    result.unwrap();
+    assert_eq!(before - budget.available(), allocations.bytes);
+    let mut spare = String::with_capacity(1024);
+    spare.push('x');
+    let owned = property::Property::string("owned", spare);
+    let pointer = owned.value.as_str().unwrap().as_ptr();
+    let before = budget.available();
+    let (result, allocations) = allocation_testing::observe(|| builder.push_owned(owned));
+    result.unwrap();
+    assert_eq!(allocations.allocations, 0);
+    assert!(before - budget.available() >= 1024);
+    let before = budget.available();
+    let decoded = builder.finish();
+    assert!(decoded.budget().is_some());
+    assert_eq!(decoded[0], input);
+    assert_eq!(decoded[1].value.as_str().unwrap().as_ptr(), pointer);
+    assert_eq!(budget.available(), before);
+    drop(decoded);
+    assert_eq!(budget.available(), 16 * 1024);
+    let mut native = Builder::new(2, None).unwrap();
+    native.push_cloned(&input).unwrap();
+    native.push_owned(input.clone()).unwrap();
+    let native = native.finish();
+    assert!(native.budget().is_none());
+    assert_eq!(&*native, &[input.clone(), input]);
+}
+
+#[test]
+fn property_builder_failure_does_not_allocate_or_exceed_prepared_capacity() {
+    let budget = Budget::new(size_of::<property::Property>());
+    let input = property::Property::bytes("value", vec![7; 8192]);
+    let mut builder = Builder::new(1, Some(&budget)).unwrap();
+    let (result, allocations) = allocation_testing::observe(|| builder.push_cloned(&input));
+    assert!(matches!(
+        result,
+        Err(HelixDbError::QueryMemoryLimitExceeded)
+    ));
+    assert_eq!(allocations.allocations, 0);
+    let (result, allocations) = allocation_testing::observe(|| builder.push_owned(input));
+    assert!(matches!(
+        result,
+        Err(HelixDbError::QueryMemoryLimitExceeded)
+    ));
+    assert_eq!(allocations.allocations, 0);
+    assert!(builder.finish().is_empty());
+    assert_eq!(budget.available(), size_of::<property::Property>());
+    let (result, allocations) =
+        allocation_testing::observe(|| Builder::new(usize::MAX, Some(&budget)));
+    assert!(matches!(
+        result,
+        Err(HelixDbError::QueryMemoryLimitExceeded)
+    ));
+    assert_eq!(allocations.allocations, 0);
+    for cloned in [false, true] {
+        let mut builder = Builder::new(0, None).unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let input = property::Property::i64("value", 1);
+            if cloned {
+                builder.push_cloned(&input)
+            } else {
+                builder.push_owned(input)
+            }
+        }))
+        .is_err());
+    }
+}
+
+#[test]
 fn shared_decoded_rows_charge_the_arc_and_release_only_after_the_last_owner() {
     let input = vec![property::Property::string("value", "x".repeat(4096))];
     let encoded = property::encode_properties(&input);

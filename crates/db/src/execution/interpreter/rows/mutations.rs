@@ -1,7 +1,7 @@
 //! Clause barriers materialize input before staging any graph changes.
 use super::memory::Rows;
 use super::{graph, ExecutionContext, Limits, Result};
-use helix_planner::relational::{self as r, GraphValues};
+use helix_planner::relational as r;
 use std::collections::BTreeMap;
 
 impl ExecutionContext<'_> {
@@ -242,20 +242,48 @@ impl ExecutionContext<'_> {
                             .saturating_add(value.allocated_bytes().saturating_mul(2))
                     },
                 ))?;
-                if replace {
-                    for key in graph.properties(entity)?.keys() {
-                        if !changes.contains_key(key) {
-                            self.row_edit_property(entity, key, None).await?;
-                        }
+                if matches!(
+                    update,
+                    r::PropertyMutation::Set { .. } | r::PropertyMutation::Remove { .. }
+                ) {
+                    for (key, value) in changes {
+                        let value = if value == r::Value::Null {
+                            None
+                        } else {
+                            Some(graph::to_property(value)?)
+                        };
+                        self.row_edit_property(entity, &key, value).await?;
                     }
-                }
-                for (key, value) in changes {
-                    let value = if value == r::Value::Null {
-                        None
+                } else {
+                    if changes.is_empty() && !replace {
+                        continue;
+                    }
+                    use crate::index_lifecycle::graph_mutation::map;
+                    let mut edit = map::Edit::new(if replace {
+                        map::Mode::ReplaceUserProperties
                     } else {
-                        Some(graph::to_property(value)?)
-                    };
-                    self.row_edit_property(entity, &key, value).await?;
+                        map::Mode::Extend
+                    });
+                    for (key, value) in changes {
+                        let value = if value == r::Value::Null {
+                            None
+                        } else {
+                            Some(graph::to_property(value)?)
+                        };
+                        // Validate after this value's conversion, before the next
+                        // item, preserving the frontend's observable error order.
+                        edit.insert(key, value).map_err(|error| {
+                            r::QueryError::runtime(
+                                "UnsupportedFeature",
+                                match error {
+                                    map::NameError::Empty => "EmptyPropertyName",
+                                    map::NameError::Reserved => "ReservedPropertyName",
+                                },
+                                error.to_string(),
+                            )
+                        })?;
+                    }
+                    self.row_edit_map(entity, edit).await?;
                 }
             }
         }

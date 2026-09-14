@@ -5,6 +5,8 @@ mod read;
 mod write;
 pub(crate) use read::{Read, ReadRequest};
 pub(crate) use write::Encoded;
+mod builder;
+pub(crate) use builder::Builder;
 
 #[cfg(test)]
 mod tests;
@@ -14,6 +16,11 @@ pub(crate) struct Decoded {
     _memory: Option<Reservation>,
 }
 impl Decoded {
+    /// Encoding inherits the decoded owner's budget; callers cannot substitute
+    /// a different request or turn admission off when transferring a row.
+    pub(crate) fn budget(&self) -> Option<&Budget> {
+        self._memory.as_ref().map(|memory| &memory.budget)
+    }
     /// Retain an already-owned write input. Its producer admits construction;
     /// this guard takes over before the producer releases its reservation.
     pub(crate) fn owned(properties: Vec<property::Property>, budget: &Budget) -> Result<Self> {

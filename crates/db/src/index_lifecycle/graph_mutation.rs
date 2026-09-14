@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::query_resources::{self, properties};
 
 use super::{IndexElementKind, IndexEntityId};
+pub(crate) mod map;
 
 #[cfg(test)]
 mod write_tests;
@@ -108,15 +109,16 @@ impl CanonicalPropertyRow {
         let Some(budget) = budget else {
             return Ok(Self::new(properties));
         };
-        Self::from_decoded(properties::Decoded::owned(properties, budget)?, budget)
+        Self::from_decoded(properties::Decoded::owned(properties, budget)?)
     }
 
-    fn from_decoded(
-        properties: properties::Decoded,
-        budget: &query_resources::Budget,
-    ) -> Result<Self> {
-        let encoded =
-            properties::Encoded::new(&property::write::Prepared::new(&properties)?, budget)?;
+    fn from_decoded(properties: properties::Decoded) -> Result<Self> {
+        let encoded = match properties.budget() {
+            Some(budget) => {
+                properties::Encoded::new(&property::write::Prepared::new(&properties)?, budget)?
+            }
+            None => properties::Encoded::native(property::encode_properties(&properties)),
+        };
         Ok(Self {
             properties: properties.share()?,
             encoded,
@@ -162,46 +164,93 @@ impl CanonicalPropertyRow {
     }
 }
 
-/// The property name changed by a single-property replacement.
-/// Clones share both the name and its admission across index consumers.
+/// Sorted, nonempty property names shared by every index consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChangedProperties(Arc<ChangedName>);
-struct ChangedName {
-    name: Box<str>,
+pub(crate) struct ChangedProperties(Arc<ChangedNames>);
+struct ChangedNames {
+    first: Box<str>,
+    rest: Vec<Box<str>>,
     _memory: Option<query_resources::Reservation>,
 }
-impl std::fmt::Debug for ChangedName {
+impl std::fmt::Debug for ChangedNames {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.name.fmt(f)
+        f.debug_list()
+            .entries(std::iter::once(&self.first).chain(&self.rest))
+            .finish()
     }
 }
-impl PartialEq for ChangedName {
+impl PartialEq for ChangedNames {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
+        self.first == other.first && self.rest == other.rest
     }
 }
-impl Eq for ChangedName {}
+impl Eq for ChangedNames {}
 impl ChangedProperties {
     fn admitted(name: &str, budget: Option<&query_resources::Budget>) -> Result<Self> {
+        Self::from_names(std::iter::once(name), budget)
+            .map(|names| names.expect("one name produces a nonempty change set"))
+    }
+
+    /// The cloned iterator must inspect the same immutable names on each pass.
+    /// Empty changes are represented by None, so a replacement cannot have an
+    /// empty routing set. Sorting/deduplication needs no temporary allocation.
+    fn from_names<'a>(
+        mut names: impl Iterator<Item = &'a str> + Clone,
+        budget: Option<&query_resources::Budget>,
+    ) -> Result<Option<Self>> {
+        let (count, bytes) = names
+            .clone()
+            .fold((0_usize, 0_usize), |(count, bytes), name| {
+                (count.saturating_add(1), bytes.saturating_add(name.len()))
+            });
+        if count == 0 {
+            return Ok(None);
+        }
+        let capacity = if count == 1 { 0 } else { count };
         let memory = budget
             .map(|budget| {
                 budget.reserve(
-                    name.len()
-                        .saturating_add(size_of::<ChangedName>() + 2 * size_of::<usize>()),
+                    bytes
+                        .saturating_add(capacity.saturating_mul(size_of::<Box<str>>()))
+                        .saturating_add(size_of::<ChangedNames>() + 2 * size_of::<usize>()),
                 )
             })
             .transpose()?;
-        Ok(Self(Arc::new(ChangedName {
-            name: name.into(),
+        let (first, rest) = if count == 1 {
+            (
+                names.next().expect("counted one immutable name").into(),
+                Vec::new(),
+            )
+        } else {
+            let mut owned = Vec::with_capacity(count);
+            owned.extend(names.map(Box::<str>::from));
+            assert_eq!(
+                owned.len(),
+                count,
+                "immutable change names cannot change between passes"
+            );
+            owned.sort_unstable();
+            owned.dedup();
+            let first = owned.remove(0);
+            (first, owned)
+        };
+        Ok(Some(Self(Arc::new(ChangedNames {
+            first,
+            rest,
             _memory: memory,
-        })))
+        }))))
     }
 
     pub(crate) fn contains(&self, name: &str) -> bool {
-        self.0.name.as_ref() == name
+        self.0.first.as_ref() == name
+            || self
+                .0
+                .rest
+                .binary_search_by(|candidate| candidate.as_ref().cmp(name))
+                .is_ok()
     }
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.0.name.as_ref())
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &str> + Clone {
+        std::iter::once(self.0.first.as_ref()).chain(self.0.rest.iter().map(Box::as_ref))
     }
 }
 
@@ -356,16 +405,13 @@ impl GraphMutationTransition {
             }
         };
         let after = match budget {
-            Some(budget) => CanonicalPropertyRow::from_decoded(
-                properties::Decoded::rewritten(
-                    before.properties(),
-                    insert,
-                    extra_payload,
-                    budget,
-                    apply,
-                )?,
+            Some(budget) => CanonicalPropertyRow::from_decoded(properties::Decoded::rewritten(
+                before.properties(),
+                insert,
+                extra_payload,
                 budget,
-            )?,
+                apply,
+            )?)?,
             None => {
                 let mut properties = before.properties().to_vec();
                 apply(&mut properties);

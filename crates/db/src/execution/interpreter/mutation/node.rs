@@ -86,6 +86,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(
@@ -167,7 +168,7 @@ impl<'db> ExecutionContext<'db> {
             .after()
             .expect("a replacement transition has an after row")
             .properties();
-        let old_label = label_of(old_properties).map(str::to_string);
+        let old_label = label_of(old_properties);
         if transition
             .changed()
             .expect("a replacement transition has changed properties")
@@ -178,14 +179,16 @@ impl<'db> ExecutionContext<'db> {
                     "validated node label lost its string value".to_string(),
                 ));
             };
-            if old_label.as_deref() != Some(new_label) {
-                if let Some(old_label) = old_label.as_deref() {
-                    index_context.topology_mutations().remove_node_label(
-                        self.tenant_scope,
-                        old_label,
-                        node_id,
-                    )?;
-                }
+            if old_label != Some(new_label) {
+                old_label
+                    .map(|old_label| {
+                        index_context.topology_mutations().remove_node_label(
+                            self.tenant_scope,
+                            old_label,
+                            node_id,
+                        )
+                    })
+                    .transpose()?;
                 index_context.topology_mutations().add_node_label(
                     self.tenant_scope,
                     new_label,
@@ -210,6 +213,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(
@@ -297,6 +301,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(
@@ -341,6 +346,13 @@ impl<'db> ExecutionContext<'db> {
             keys.len(),
             self.row_memory.as_ref(),
         )?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            })
+        });
         let values = txn.multi_get(keys).await?;
         let mut decoded = requested
             .ids
@@ -446,6 +458,7 @@ impl<'db> ExecutionContext<'db> {
                     .db()
                     .search_index_backfill()
                     .active_text_mutation(),
+                self.row_memory.as_ref(),
             )
             .await?;
         index_context.property_writes.stage(

@@ -4,6 +4,7 @@
 //! behavior family so mutation coverage can grow without one broad test body.
 
 mod graph_lifecycle;
+mod maps;
 mod owned_writes;
 mod snapshots;
 mod support;

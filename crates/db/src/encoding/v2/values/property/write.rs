@@ -10,6 +10,11 @@ use std::mem::MaybeUninit;
 // Native callers without query admission retain their existing codec behavior.
 pub(crate) const MAX_WRITE_DEPTH: usize = 48;
 
+/// Validate an incoming value before recursive representation comparisons.
+pub(crate) fn validate_value(input: &PropertyValue) -> Result<(), EncodingError> {
+    value(input, 0).map(|_| ())
+}
+
 /// A borrowed, depth-validated row with immutable allocation bounds.
 pub(crate) struct Prepared<'a> {
     properties: &'a [Property],

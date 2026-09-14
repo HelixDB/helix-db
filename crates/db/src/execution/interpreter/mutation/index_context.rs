@@ -129,8 +129,9 @@ impl MutationIndexContext {
         transaction: &slatedb::DbTransaction,
         graph: crate::index_lifecycle::graph_mutation::GraphMutationTransition,
         text_limits: crate::config::ActiveTextMutationLimits,
+        budget: Option<&crate::query_resources::Budget>,
     ) -> Result<(), crate::HelixDbError> {
-        let routes = self.routes.targets_for(&graph);
+        let routes = self.routes.targets_for_with_budget(&graph, budget)?;
         self.secondary_runtime
             .collect(graph.scope(), &self.secondary, &routes, &graph)?;
         crate::index_lifecycle::vector::maintain_routed_entity_with_runtime(
