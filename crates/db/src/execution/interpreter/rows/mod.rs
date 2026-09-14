@@ -17,6 +17,7 @@ mod mutations;
 mod projection;
 mod projection_chain;
 mod property_conversion;
+mod requirements;
 mod scan;
 mod streaming;
 mod top_k;

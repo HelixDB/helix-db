@@ -64,7 +64,12 @@ impl ExecutionContext<'_> {
                     continue;
                 };
                 self.check_execution_deadline()?;
-                let graph = self.graph_batch(std::slice::from_ref(row)).await?;
+                let graph = self
+                    .expression_graph_batch(
+                        std::slice::from_ref(row),
+                        node.properties.iter().map(|(_, value)| value),
+                    )
+                    .await?;
                 let (properties, _properties_memory) = self.create_properties(
                     &node.properties,
                     self.evaluate(row, parameters, &graph, limits),
@@ -94,7 +99,12 @@ impl ExecutionContext<'_> {
                 if relationship.direction == r::Direction::Incoming {
                     std::mem::swap(&mut from, &mut to);
                 }
-                let graph = self.graph_batch(std::slice::from_ref(row)).await?;
+                let graph = self
+                    .expression_graph_batch(
+                        std::slice::from_ref(row),
+                        relationship.properties.iter().map(|(_, value)| value),
+                    )
+                    .await?;
                 let (properties, _properties_memory) = self.create_properties(
                     &relationship.properties,
                     self.evaluate(row, parameters, &graph, limits),
@@ -170,7 +180,15 @@ impl ExecutionContext<'_> {
         for row in &rows {
             for update in updates {
                 self.check_execution_deadline()?;
-                let graph = self.graph_batch(std::slice::from_ref(row)).await?;
+                let expression = match update {
+                    r::PropertyMutation::Set { value, .. } => Some(value),
+                    r::PropertyMutation::Replace { properties, .. }
+                    | r::PropertyMutation::Extend { properties, .. } => Some(properties),
+                    r::PropertyMutation::Remove { .. } => None,
+                };
+                let graph = self
+                    .expression_graph_batch(std::slice::from_ref(row), expression)
+                    .await?;
                 let evaluation = self.evaluate(row, parameters, &graph, limits);
                 let (target, changes, replace) = match update {
                     r::PropertyMutation::Set { entity, key, value } => (
@@ -189,7 +207,22 @@ impl ExecutionContext<'_> {
                         let value = evaluation.eval(properties)?;
                         let map = match value {
                             r::Value::Map(map) => map,
-                            r::Value::Entity(entity) => evaluation.properties(entity)?,
+                            r::Value::Entity(entity) => {
+                                // A bare entity slot needs no properties during
+                                // scalar evaluation. Hydrate only the selected
+                                // map source, without evaluating the expression again.
+                                let _source_memory = self
+                                    .row_budget()
+                                    .reserve(size_of::<r::Row>() + size_of::<r::Value>())?;
+                                let source = [vec![r::Value::Entity(entity)]];
+                                let mut demand =
+                                    super::requirements::Requirements::new(self.row_budget())?;
+                                demand.insert(r::Slot(0), r::PropertyRequirement::All)?;
+                                let source_graph =
+                                    self.graph_batch_required(&source, demand.values()).await?;
+                                self.evaluate(row, parameters, &source_graph, limits)
+                                    .properties(entity)?
+                            }
                             r::Value::Null => BTreeMap::new(),
                             r::Value::Boolean(_)
                             | r::Value::Integer(_)
@@ -212,6 +245,9 @@ impl ExecutionContext<'_> {
                         )
                     }
                 };
+                // The evaluated change map owns its values. Release expression
+                // hydration before taking canonical mutation snapshots.
+                drop(graph);
                 let entity = match target {
                     r::Value::Null => continue,
                     r::Value::Entity(entity) => entity,

@@ -65,12 +65,13 @@ fn missing(entity: r::Entity) -> r::QueryError {
 
 impl ExecutionContext<'_> {
     pub(super) async fn graph_batch(&self, rows: &[r::Row]) -> Result<GraphBatch> {
-        let demand = rows
-            .first()
-            .into_iter()
-            .flat_map(|row| (0..row.len()).map(|i| (r::Slot(i as u32), r::PropertyDemand::All)))
-            .collect();
-        self.graph_batch_required(rows, &demand).await
+        self.check_execution_deadline()?;
+        let mut demand = super::requirements::Requirements::new(self.row_budget())?;
+        for slot in rows.first().into_iter().flat_map(|row| 0..row.len()) {
+            self.check_execution_deadline()?;
+            demand.insert(r::Slot(slot as u32), r::PropertyRequirement::All)?;
+        }
+        self.graph_batch_required(rows, demand.values()).await
     }
 
     pub(super) async fn expression_graph_batch<'a>(
@@ -78,11 +79,16 @@ impl ExecutionContext<'_> {
         rows: &[r::Row],
         expressions: impl IntoIterator<Item = &'a r::Expression>,
     ) -> Result<GraphBatch> {
-        let mut demand = BTreeMap::new();
+        self.check_execution_deadline()?;
+        let mut demand = super::requirements::Requirements::new(self.row_budget())?;
         for expression in expressions {
-            expression.graph_requirements(&mut demand);
+            self.check_execution_deadline()?;
+            expression.try_graph_requirements(|slot, requirement| {
+                self.check_execution_deadline()?;
+                demand.insert(slot, requirement)
+            })?;
         }
-        self.graph_batch_required(rows, &demand).await
+        self.graph_batch_required(rows, demand.values()).await
     }
 
     pub(super) async fn edge_endpoints_batch(

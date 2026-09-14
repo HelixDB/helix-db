@@ -118,35 +118,67 @@ impl Expression {
     /// Slots requiring graph hydration. Identity, paths, and ordinary scalar
     /// operations need no property reads; dynamic property access is conservative.
     pub fn graph_requirements(&self, out: &mut std::collections::BTreeMap<Slot, PropertyDemand>) {
-        self.visit(&mut |expression| {
-            let (slots, demand) = match expression {
-                Self::Property(value, key) => (
-                    value.slots(),
-                    PropertyDemand::Keys(BTreeSet::from([key.clone()])),
-                ),
-                Self::HasLabel(slot, _) => (
-                    BTreeSet::from([*slot]),
-                    PropertyDemand::Keys(BTreeSet::new()),
-                ),
+        self.try_graph_requirements(|slot, requirement| {
+            let demand = out.entry(slot).or_default();
+            match (demand, requirement) {
+                (PropertyDemand::All, _) => {}
+                (demand, PropertyRequirement::All) => *demand = PropertyDemand::All,
+                (PropertyDemand::Keys(keys), PropertyRequirement::Key(key)) => {
+                    if !keys.contains(key) {
+                        keys.insert(key.to_owned());
+                    }
+                }
+                (PropertyDemand::Keys(_), PropertyRequirement::Metadata) => {}
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("owned requirement collection is infallible");
+    }
+
+    /// Visit borrowed graph demands without allocating transient slot sets or
+    /// copying property names. A slot/key may occur more than once; the consumer
+    /// owns deduplication and can reject growth before allocating its state.
+    /// The first consumer error stops traversal immediately. Callers must use
+    /// validated expressions, as with the other recursive expression visitors.
+    ///
+    /// ```
+    /// use helix_planner::relational::{Expression, PropertyRequirement, Slot};
+    /// let expression = Expression::Property(Box::new(Expression::Slot(Slot(2))), "name".into());
+    /// let mut visited = Vec::new();
+    /// expression.try_graph_requirements(|slot, demand| {
+    ///     visited.push((slot, demand));
+    ///     Ok::<_, ()>(())
+    /// }).unwrap();
+    /// assert_eq!(visited, [(Slot(2), PropertyRequirement::Key("name"))]);
+    /// ```
+    pub fn try_graph_requirements<'a, E>(
+        &'a self,
+        mut visit: impl FnMut(Slot, PropertyRequirement<'a>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.try_visit(&mut |expression| {
+            let mut slots = |value: &'a Self, demand| {
+                value.try_visit(&mut |candidate| match candidate {
+                    Self::Slot(slot) | Self::HasLabel(slot, _) => visit(*slot, demand),
+                    _ => Ok(()),
+                })
+            };
+            match expression {
+                Self::Property(value, key) => slots(value, PropertyRequirement::Key(key)),
+                Self::HasLabel(..) => slots(expression, PropertyRequirement::Metadata),
                 Self::Index(value, index)
                     if !matches!(index.as_ref(), Self::Literal(Value::Integer(_))) =>
                 {
-                    (value.slots(), PropertyDemand::All)
+                    slots(value, PropertyRequirement::All)
                 }
-                Self::Function(Function::Labels | Function::Type, args) => (
-                    args.iter().flat_map(Self::slots).collect(),
-                    PropertyDemand::Keys(BTreeSet::new()),
-                ),
-                Self::Function(Function::Properties | Function::Keys, args) => (
-                    args.iter().flat_map(Self::slots).collect(),
-                    PropertyDemand::All,
-                ),
-                _ => return,
-            };
-            for slot in slots {
-                out.entry(slot).or_default().merge(&demand);
+                Self::Function(Function::Labels | Function::Type, args) => args
+                    .iter()
+                    .try_for_each(|arg| slots(arg, PropertyRequirement::Metadata)),
+                Self::Function(Function::Properties | Function::Keys, args) => args
+                    .iter()
+                    .try_for_each(|arg| slots(arg, PropertyRequirement::All)),
+                _ => Ok(()),
             }
-        });
+        })
     }
 
     /// Check shape before recursive visitors or evaluation cross the plan boundary.
@@ -228,38 +260,59 @@ impl Expression {
 
 impl<L, U, B, F> ScalarExpression<L, U, B, F> {
     pub fn visit(&self, f: &mut impl FnMut(&Self)) {
-        f(self);
+        self.try_visit(&mut |expression| {
+            f(expression);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("infallible expression visitor");
+    }
+
+    /// Traverse in preorder, stopping at the first visitor error. This visitor
+    /// borrows each expression and allocates no traversal stack on the heap.
+    /// The caller must validate structural depth before recursive traversal.
+    pub fn try_visit<'a, E>(
+        &'a self,
+        f: &mut impl FnMut(&'a Self) -> Result<(), E>,
+    ) -> Result<(), E> {
+        f(self)?;
         match self {
-            Self::Property(x, _) | Self::Unary(_, x) => x.visit(f),
+            Self::Property(x, _) | Self::Unary(_, x) => x.try_visit(f)?,
             Self::Index(a, b) | Self::Binary(_, a, b) => {
-                a.visit(f);
-                b.visit(f);
+                a.try_visit(f)?;
+                b.try_visit(f)?;
             }
             Self::Slice { value, start, end } => {
-                value.visit(f);
+                value.try_visit(f)?;
                 for x in start.iter().chain(end.iter()) {
-                    x.visit(f);
+                    x.try_visit(f)?;
                 }
             }
-            Self::Function(_, xs) | Self::List(xs) => xs.iter().for_each(|x| x.visit(f)),
+            Self::Function(_, xs) | Self::List(xs) => {
+                for x in xs {
+                    x.try_visit(f)?;
+                }
+            }
             Self::Aggregate { argument, .. } => {
-                if let Some(x) = argument {
-                    x.visit(f);
+                argument.iter().try_for_each(|x| x.try_visit(f))?;
+            }
+            Self::Map(xs) => {
+                for (_, x) in xs {
+                    x.try_visit(f)?;
                 }
             }
-            Self::Map(xs) => xs.iter().for_each(|(_, x)| x.visit(f)),
             Self::Case {
                 branches,
                 otherwise,
             } => {
                 for (a, b) in branches {
-                    a.visit(f);
-                    b.visit(f);
+                    a.try_visit(f)?;
+                    b.try_visit(f)?;
                 }
-                otherwise.visit(f);
+                otherwise.try_visit(f)?;
             }
             Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(_, _) => {}
         }
+        Ok(())
     }
 
     pub fn slots(&self) -> BTreeSet<Slot> {
@@ -347,6 +400,15 @@ impl<L: Clone, U: Copy, B: Copy, F: Clone> ScalarExpression<L, U, B, F> {
             },
         })
     }
+}
+
+/// One borrowed hydration requirement. Metadata includes existence and label/type;
+/// All includes metadata and every user property. Consumers may merge duplicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyRequirement<'a> {
+    Metadata,
+    Key(&'a str),
+    All,
 }
 
 /// Property demand permits late hydration without conflating a missing key
