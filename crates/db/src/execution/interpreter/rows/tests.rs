@@ -1,6 +1,7 @@
 use super::*;
 use helix_planner::context;
 
+mod aggregation_admission;
 mod bound_match;
 mod computed_depth;
 mod correlated;

@@ -96,11 +96,19 @@ impl Accumulator {
         if value == Value::Null {
             return Ok(());
         }
-        if let Deduplication::Distinct { seen, .. } = &self.deduplication
-            && seen.contains(&GroupingKey::new(value.clone())?)
-        {
-            return Ok(());
-        }
+        let value = match &self.deduplication {
+            Deduplication::Distinct { seen, .. } => {
+                // The input is already owned and admitted by its producer.
+                // Probe with that owner; only retained unique state may copy
+                // the payload, after the admission check below.
+                let key = GroupingKey::new(value)?;
+                if seen.contains(&key) {
+                    return Ok(());
+                }
+                key.into_value()
+            }
+            Deduplication::All => value,
+        };
         let retains = matches!(
             self.state,
             State::Collect { .. } | State::Minimum(_) | State::Maximum(_)

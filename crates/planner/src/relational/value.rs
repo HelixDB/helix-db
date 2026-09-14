@@ -330,6 +330,12 @@ impl GroupingKey {
     pub fn value(&self) -> &Value {
         &self.0
     }
+
+    /// Recover an owned input after lookup without copying its payload. Row keys
+    /// retain their internal tuple wrapper; this does not relax value limits.
+    pub(super) fn into_value(self) -> Value {
+        self.0
+    }
 }
 impl PartialEq for GroupingKey {
     fn eq(&self, other: &Self) -> bool {
