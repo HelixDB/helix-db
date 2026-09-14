@@ -335,45 +335,56 @@ impl ExecutionContext<'_> {
             rows.refresh()?;
             check_memory(&rows, limits)?;
         }
+        // The materialized input fixes the result capacity. Admit it once,
+        // together with user-controlled column names, before either allocation.
+        let output_count = if plan.query().returns().is_empty() {
+            0
+        } else {
+            rows.len()
+        };
+        let mut output_bytes = plan
+            .query()
+            .returns()
+            .iter()
+            .fold(size_of::<Vec<String>>(), |bytes, (name, _)| {
+                bytes
+                    .saturating_add(size_of::<String>())
+                    .saturating_add(name.len())
+            })
+            .saturating_add(size_of::<Vec<Vec<serde_json::Value>>>())
+            .saturating_add(output_count.saturating_mul(size_of::<Vec<serde_json::Value>>()));
+        let mut output_memory = self.row_budget().reserve(output_bytes)?;
         let columns: Vec<String> = plan
             .query()
             .returns()
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
-        let mut output = Vec::new();
+        let mut output = Vec::with_capacity(output_count);
         let mut wire_size = WireSize {
             bytes: b"{\"columns\":,\"rows\":[]}".len(),
         };
         serde_json::to_writer(&mut wire_size, &columns)?;
-        let mut output_bytes = columns
-            .iter()
-            .fold(size_of::<Vec<String>>(), |bytes, name| {
-                bytes
-                    .saturating_add(size_of::<String>())
-                    .saturating_add(name.capacity())
-            });
-        let mut output_memory = self.row_budget().reserve(output_bytes)?;
-        if !plan.query().returns().is_empty() {
+        if !plan.query().returns().is_empty() && !rows.is_empty() {
+            let mut demand = requirements::Requirements::new(self.row_budget())?;
+            for (_, slot) in plan.query().returns() {
+                self.check_execution_deadline()?;
+                demand.insert(*slot, r::PropertyRequirement::All)?;
+            }
             for batch in rows.chunks(limits.batch_rows) {
-                let demand = plan
-                    .query()
-                    .returns()
-                    .iter()
-                    .map(|(_, slot)| (*slot, r::PropertyDemand::All))
-                    .collect();
                 let graph = budget
-                    .admitted_future(self.graph_batch_required(batch, &demand))?
+                    .admitted_future(self.graph_batch_required(batch, demand.values()))?
                     .await?;
                 for row in batch {
-                    let admitted_bytes = plan.query().returns().iter().try_fold(
-                        size_of::<Vec<serde_json::Value>>(),
-                        |bytes, (_, slot)| {
-                            Ok::<_, Error>(
-                                bytes.saturating_add(graph.wire_memory(&row[slot.0 as usize])?),
-                            )
-                        },
-                    )?;
+                    let admitted_bytes =
+                        plan.query()
+                            .returns()
+                            .iter()
+                            .try_fold(0_usize, |bytes, (_, slot)| {
+                                Ok::<_, Error>(
+                                    bytes.saturating_add(graph.wire_memory(&row[slot.0 as usize])?),
+                                )
+                            })?;
                     output_memory.resize(output_bytes.saturating_add(admitted_bytes))?;
                     let values = plan
                         .query()
@@ -381,11 +392,9 @@ impl ExecutionContext<'_> {
                         .iter()
                         .map(|(_, slot)| graph.wire(&row[slot.0 as usize]))
                         .collect::<Result<Vec<_>>>()?;
-                    let row_bytes = values
-                        .iter()
-                        .fold(size_of::<Vec<serde_json::Value>>(), |bytes, value| {
-                            bytes.saturating_add(json_bytes(value))
-                        });
+                    let row_bytes = values.iter().fold(0_usize, |bytes, value| {
+                        bytes.saturating_add(json_bytes(value))
+                    });
                     assert!(
                         row_bytes <= admitted_bytes,
                         "wire admission must cover the owned response"
@@ -403,6 +412,10 @@ impl ExecutionContext<'_> {
                             "query result exceeds the response byte budget",
                         ));
                     }
+                    assert!(
+                        output.len() < output_count,
+                        "result capacity is fixed by input"
+                    );
                     output.push(values);
                 }
             }
