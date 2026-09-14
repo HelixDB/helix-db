@@ -172,8 +172,7 @@ impl<'db> ExecutionContext<'db> {
             label.as_ref(),
             edge.edge_id,
         )?;
-        let key = transition.graph_key();
-        let encoded = property_row.encoded().clone();
+        let encoded = property_row.write_payload();
         index_context
             .maintain_graph_indexes(
                 txn,
@@ -185,7 +184,13 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put_bytes(key, encoded)?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge.edge_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
+        )?;
         Ok(())
     }
 
@@ -230,12 +235,13 @@ impl<'db> ExecutionContext<'db> {
                 "Active text graph source disagrees with its supplied before state".to_string(),
             ));
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::edge(edge_id),
             before,
             PropertyEdit::set(property),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -245,8 +251,7 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
@@ -262,11 +267,12 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put_bytes(
-            self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(edge_id),
-            )),
-            encoded,
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(final_row)
     }
@@ -303,12 +309,13 @@ impl<'db> ExecutionContext<'db> {
         let Some(before) = observed.properties else {
             return Ok(None);
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::edge(edge_id),
             before,
             PropertyEdit::remove(name.as_ref()),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -318,8 +325,7 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
@@ -335,11 +341,12 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put_bytes(
-            self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(edge_id),
-            )),
-            encoded,
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(Some(final_row))
     }
@@ -532,9 +539,6 @@ impl<'db> ExecutionContext<'db> {
         let Some((from, to)) = observed.row.endpoints else {
             return Ok(());
         };
-        let property_key = self.storage_key(keys::DataKeyKind::EdgePropertyById(
-            keys::EdgePropertyByIdKey::new(edge_id),
-        ));
         let Some(properties) = observed.row.properties else {
             return Err(HelixDbError::InvariantViolation(
                 "Active text graph source disagrees with its supplied before state".to_string(),
@@ -592,7 +596,13 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.delete(property_key)?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge_id),
+            None,
+            self.row_memory.as_ref(),
+        )?;
         Ok(())
     }
 

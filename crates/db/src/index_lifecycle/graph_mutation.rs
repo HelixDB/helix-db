@@ -17,6 +17,9 @@ use crate::query_resources::{self, properties};
 
 use super::{IndexElementKind, IndexEntityId};
 
+#[cfg(test)]
+mod write_tests;
+
 /// Graph identity whose element kind is encoded by its enum variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum GraphEntity {
@@ -70,13 +73,21 @@ impl GraphEntity {
         }
         .to_bytes()
     }
+
+    pub(crate) fn property_key_len(self, scope: DataScope) -> usize {
+        DataKey::Data {
+            scope,
+            kind: self.property_key_kind(),
+        }
+        .encoded_len()
+    }
 }
 
 /// One decoded property row paired with its canonical encoding.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalPropertyRow {
     properties: Arc<properties::Decoded>,
-    encoded: Bytes,
+    encoded: properties::Encoded,
 }
 
 impl CanonicalPropertyRow {
@@ -85,8 +96,36 @@ impl CanonicalPropertyRow {
         let encoded = property::encode_properties(&properties);
         Self {
             properties: Arc::new(properties::Decoded::native(properties)),
-            encoded,
+            encoded: properties::Encoded::native(encoded),
         }
+    }
+
+    /// Retains owned inputs and admits scratch/output before canonical encoding.
+    pub(crate) fn new_with_budget(
+        properties: Vec<Property>,
+        budget: Option<&query_resources::Budget>,
+    ) -> Result<Self> {
+        let Some(budget) = budget else {
+            return Ok(Self::new(properties));
+        };
+        Self::from_decoded(properties::Decoded::owned(properties, budget)?, budget)
+    }
+
+    fn from_decoded(
+        properties: properties::Decoded,
+        budget: &query_resources::Budget,
+    ) -> Result<Self> {
+        let encoded =
+            properties::Encoded::new(&property::write::Prepared::new(&properties)?, budget)?;
+        Ok(Self {
+            properties: properties.share()?,
+            encoded,
+        })
+    }
+
+    /// Shares write bytes and their separate transaction-lifetime reservation.
+    pub(crate) fn write_payload(&self) -> properties::Encoded {
+        self.encoded.clone()
     }
 
     /// Admit the entire transaction-visible snapshot, retaining original bytes
@@ -103,7 +142,7 @@ impl CanonicalPropertyRow {
         let (encoded, properties) = read.decode()?;
         Ok(Self {
             properties,
-            encoded,
+            encoded: properties::Encoded::native(encoded),
         })
     }
 
@@ -114,39 +153,55 @@ impl CanonicalPropertyRow {
 
     /// Borrows the exact canonical bytes for storage and validation.
     pub(crate) const fn encoded(&self) -> &Bytes {
-        &self.encoded
+        &self.encoded.bytes
     }
 
     /// Returns the encoded row length without rebuilding it.
     pub(crate) fn encoded_len(&self) -> usize {
-        self.encoded.len()
+        self.encoded.bytes.len()
     }
 }
 
-/// Non-empty property names changed by one replacement.
+/// The property name changed by a single-property replacement.
+/// Clones share both the name and its admission across index consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChangedProperties {
-    first: Box<str>,
-    rest: Box<[Box<str>]>,
+pub(crate) struct ChangedProperties(Arc<ChangedName>);
+struct ChangedName {
+    name: Box<str>,
+    _memory: Option<query_resources::Reservation>,
 }
-
+impl std::fmt::Debug for ChangedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(f)
+    }
+}
+impl PartialEq for ChangedName {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl Eq for ChangedName {}
 impl ChangedProperties {
-    /// Creates the single-property replacement used by executable mutations.
-    pub(crate) fn one(name: impl Into<Box<str>>) -> Self {
-        Self {
-            first: name.into(),
-            rest: Box::new([]),
-        }
+    fn admitted(name: &str, budget: Option<&query_resources::Budget>) -> Result<Self> {
+        let memory = budget
+            .map(|budget| {
+                budget.reserve(
+                    name.len()
+                        .saturating_add(size_of::<ChangedName>() + 2 * size_of::<usize>()),
+                )
+            })
+            .transpose()?;
+        Ok(Self(Arc::new(ChangedName {
+            name: name.into(),
+            _memory: memory,
+        })))
     }
 
-    /// Returns whether the replacement changed `name`.
     pub(crate) fn contains(&self, name: &str) -> bool {
-        self.first.as_ref() == name || self.rest.iter().any(|changed| changed.as_ref() == name)
+        self.0.name.as_ref() == name
     }
-
-    /// Iterates every changed property name.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.first.as_ref()).chain(self.rest.iter().map(Box::as_ref))
+        std::iter::once(self.0.name.as_ref())
     }
 }
 
@@ -238,12 +293,39 @@ impl GraphMutationTransition {
     }
 
     /// Applies one edit and returns a replacement only when bytes must change.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn edit(
         scope: DataScope,
         entity: GraphEntity,
         before: CanonicalPropertyRow,
         edit: PropertyEdit,
     ) -> PropertyEditOutcome {
+        Self::edit_with_budget(scope, entity, before, edit, None)
+            .expect("unbudgeted native property editing is infallible")
+    }
+
+    pub(crate) fn edit_with_budget(
+        scope: DataScope,
+        entity: GraphEntity,
+        before: CanonicalPropertyRow,
+        edit: PropertyEdit,
+        budget: Option<&query_resources::Budget>,
+    ) -> Result<PropertyEditOutcome> {
+        // Validate before recursive bitwise equality, cloning or encoding.
+        let extra_payload = match budget {
+            Some(_) => {
+                property::write::Prepared::new(before.properties())?;
+                match &edit {
+                    PropertyEdit::Set(property) => {
+                        property::write::Prepared::new(std::slice::from_ref(property))?
+                            .retained_bytes(1)
+                            .saturating_sub(size_of::<Property>())
+                    }
+                    PropertyEdit::Remove(_) => 0,
+                }
+            }
+            None => 0,
+        };
         let name = edit.name();
         let position = before
             .properties()
@@ -253,17 +335,17 @@ impl GraphMutationTransition {
             (PropertyEdit::Set(property), Some(position))
                 if before.properties()[position].same_v1_representation(property) =>
             {
-                return PropertyEditOutcome::Unchanged(before);
+                return Ok(PropertyEditOutcome::Unchanged(before));
             }
             (PropertyEdit::Remove(_), None) => {
-                return PropertyEditOutcome::Unchanged(before);
+                return Ok(PropertyEditOutcome::Unchanged(before));
             }
             (PropertyEdit::Set(_), _) | (PropertyEdit::Remove(_), Some(_)) => {}
         }
 
-        let changed = ChangedProperties::one(name);
-        let mut properties = before.properties().to_vec();
-        match (edit, position) {
+        let changed = ChangedProperties::admitted(name, budget)?;
+        let insert = position.is_none();
+        let apply = |properties: &mut Vec<Property>| match (edit, position) {
             (PropertyEdit::Set(property), Some(position)) => properties[position] = property,
             (PropertyEdit::Set(property), None) => properties.push(property),
             (PropertyEdit::Remove(_), Some(position)) => {
@@ -272,14 +354,31 @@ impl GraphMutationTransition {
             (PropertyEdit::Remove(_), None) => {
                 unreachable!("an absent remove returns before constructing a transition")
             }
-        }
-        PropertyEditOutcome::Changed(Self::Replace {
+        };
+        let after = match budget {
+            Some(budget) => CanonicalPropertyRow::from_decoded(
+                properties::Decoded::rewritten(
+                    before.properties(),
+                    insert,
+                    extra_payload,
+                    budget,
+                    apply,
+                )?,
+                budget,
+            )?,
+            None => {
+                let mut properties = before.properties().to_vec();
+                apply(&mut properties);
+                CanonicalPropertyRow::new(properties)
+            }
+        };
+        Ok(PropertyEditOutcome::Changed(Self::Replace {
             scope,
             entity,
             before,
-            after: CanonicalPropertyRow::new(properties),
+            after,
             changed,
-        })
+        }))
     }
 
     /// Creates one typed row deletion.
@@ -338,6 +437,7 @@ impl GraphMutationTransition {
     }
 
     /// Returns the canonical scoped graph-row key.
+    #[cfg(test)]
     pub(crate) fn graph_key(&self) -> Bytes {
         self.entity().property_key(self.scope())
     }

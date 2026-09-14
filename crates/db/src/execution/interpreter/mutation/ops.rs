@@ -151,7 +151,10 @@ impl<'db> ExecutionContext<'db> {
             source_rows_and_properties.push((
                 row,
                 from,
-                crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new(properties),
+                crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new_with_budget(
+                    properties,
+                    self.row_memory.as_ref(),
+                )?,
             ));
         }
         let ids = self

@@ -62,7 +62,7 @@ impl<'db> ExecutionContext<'db> {
         let transition = GraphMutationTransition::create(
             self.tenant_scope,
             GraphEntity::node(node_id),
-            CanonicalPropertyRow::new(properties),
+            CanonicalPropertyRow::new_with_budget(properties, self.row_memory.as_ref())?,
         );
         let properties = transition
             .after()
@@ -76,8 +76,7 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a create transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         index_context
             .maintain_graph_indexes(
                 txn,
@@ -89,10 +88,13 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-            node_id,
-        )));
-        txn.put_bytes(key, encoded)?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
+        )?;
         Ok(())
     }
 
@@ -144,12 +146,13 @@ impl<'db> ExecutionContext<'db> {
                 "Active text graph source disagrees with its supplied before state".to_string(),
             ));
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::node(node_id),
             before,
             PropertyEdit::set(property),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -193,8 +196,7 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
@@ -210,11 +212,12 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put_bytes(
-            self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                node_id,
-            ))),
-            encoded,
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(final_row)
     }
@@ -264,12 +267,13 @@ impl<'db> ExecutionContext<'db> {
         let Some(before) = observed else {
             return Ok(None);
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::node(node_id),
             before,
             PropertyEdit::remove(name.as_ref()),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -279,8 +283,7 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
@@ -296,11 +299,12 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put_bytes(
-            self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                node_id,
-            ))),
-            encoded,
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(Some(final_row))
     }
@@ -444,7 +448,13 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.delete(&key)?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            None,
+            self.row_memory.as_ref(),
+        )?;
         txn.delete(
             self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
                 node_id,

@@ -2,7 +2,9 @@
 use super::{Budget, Reservation, Result};
 use crate::encoding::v2::values::property::{self, prepared};
 mod read;
+mod write;
 pub(crate) use read::{Read, ReadRequest};
+pub(crate) use write::Encoded;
 
 #[cfg(test)]
 mod tests;
@@ -12,8 +14,44 @@ pub(crate) struct Decoded {
     _memory: Option<Reservation>,
 }
 impl Decoded {
-    /// Native writes already own their input. This preserves their unbudgeted
-    /// behavior until the mutation construction boundary admits those inputs.
+    /// Retain an already-owned write input. Its producer admits construction;
+    /// this guard takes over before the producer releases its reservation.
+    pub(crate) fn owned(properties: Vec<property::Property>, budget: &Budget) -> Result<Self> {
+        let prepared = property::write::Prepared::new(&properties)?;
+        let memory = budget.reserve(prepared.retained_bytes(properties.capacity()))?;
+        Ok(Self {
+            properties,
+            _memory: Some(memory),
+        })
+    }
+
+    /// Admit a complete clone and optional insertion before allocating it.
+    /// The callback only replaces/removes entries or fills the admitted spare
+    /// slot. Incoming property payloads remain charged by their producer.
+    pub(crate) fn rewritten(
+        properties: &[property::Property],
+        insert: bool,
+        extra_payload: usize,
+        budget: &Budget,
+        edit: impl FnOnce(&mut Vec<property::Property>),
+    ) -> Result<Self> {
+        let prepared = property::write::Prepared::new(properties)?;
+        let memory = budget.reserve(
+            prepared
+                .clone_bytes()
+                .saturating_add(usize::from(insert) * size_of::<property::Property>())
+                .saturating_add(extra_payload),
+        )?;
+        let mut output = Vec::with_capacity(properties.len() + usize::from(insert));
+        output.extend_from_slice(properties);
+        edit(&mut output);
+        Ok(Self {
+            properties: output,
+            _memory: Some(memory),
+        })
+    }
+    /// Native callers without query admission retain their existing owned-input
+    /// behavior. Admitted writes use `owned` or `rewritten` instead.
     pub(crate) fn native(properties: Vec<property::Property>) -> Self {
         Self {
             properties,

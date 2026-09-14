@@ -80,7 +80,7 @@ impl ExecutionContext<'_> {
             &scope.txn,
             EdgeMutationTarget::new(id, from, to),
             &label,
-            &CanonicalPropertyRow::new(properties),
+            &CanonicalPropertyRow::new_with_budget(properties, self.row_memory.as_ref())?,
             &mut scope.index_context,
         )
         .await?;

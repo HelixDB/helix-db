@@ -13,6 +13,7 @@ use crate::search::vector;
 /// Index state that is valid for exactly one graph mutation transaction.
 #[derive(Debug)]
 pub(crate) struct MutationIndexContext {
+    pub(super) property_writes: super::property_writes::Pending,
     _scope_permit: Option<crate::index_lifecycle::IndexScopeMutationPermit>,
     active: crate::index_lifecycle::mutation_catalog::ActiveMutationCatalog,
     secondary: crate::index_lifecycle::secondary::SecondaryMutationSet,
@@ -29,6 +30,7 @@ pub(crate) struct MutationIndexContext {
 
 /// Commit-owned index state after every transaction-local runtime is sealed.
 pub(crate) struct PreparedMutationIndexContext {
+    _property_writes: super::property_writes::Pending,
     _scope_permit: Option<crate::index_lifecycle::IndexScopeMutationPermit>,
     active_generations: Vec<crate::index_lifecycle::ActiveIndexHandle>,
     _secondary: crate::index_lifecycle::secondary::SecondaryMutationSet,
@@ -48,6 +50,7 @@ impl MutationIndexContext {
     ) -> Self {
         let (active, secondary, vector, text, routes) = loaded.into_components();
         Self {
+            property_writes: super::property_writes::Pending::default(),
             _scope_permit: Some(scope_permit),
             active,
             secondary,
@@ -73,6 +76,7 @@ impl MutationIndexContext {
         simhasher_registry: Arc<vector::SimHasherRegistry>,
     ) -> Self {
         Self {
+            property_writes: super::property_writes::Pending::default(),
             _scope_permit: None,
             active: crate::index_lifecycle::mutation_catalog::ActiveMutationCatalog::default(),
             secondary: crate::index_lifecycle::secondary::SecondaryMutationSet::empty(),
@@ -283,6 +287,7 @@ impl MutationIndexContext {
     /// Consumes the sealed runtime and transfers all state to the commit boundary.
     pub(crate) fn into_prepared(self) -> Result<PreparedMutationIndexContext, crate::HelixDbError> {
         let Self {
+            property_writes,
             _scope_permit,
             active,
             secondary,
@@ -301,6 +306,7 @@ impl MutationIndexContext {
         active_text_runtime.consume_prepared()?;
         secondary_runtime.consume_prepared()?;
         Ok(PreparedMutationIndexContext {
+            _property_writes: property_writes,
             _scope_permit,
             active_generations: active.into_generations(),
             _secondary: secondary,
