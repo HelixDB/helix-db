@@ -67,6 +67,27 @@ impl HelixQueryService {
         crate::cypher::execute_json(&self.db, request, scope, mode, control, limits).await
     }
 
+    /// Execute an already compiled Cypher request after transport routing checks.
+    /// Catalog acquisition, planning, parameters and transactions use this attempt.
+    pub async fn execute_compiled_cypher_json_scoped_controlled(
+        &self,
+        request: crate::cypher::CompiledRequest,
+        mode: QueryMode,
+        scope: DataScope,
+        control: ExecutionControl,
+        limits: crate::cypher::Limits,
+    ) -> crate::cypher::Result<crate::cypher::EncodedResponse> {
+        crate::cypher::execute_with::<crate::cypher::output::Json>(
+            &self.db,
+            crate::cypher::Input::Compiled(request),
+            scope,
+            mode,
+            control,
+            limits,
+        )
+        .await
+    }
+
     /// Create a query service.
     pub fn new(db: Arc<HelixDB>) -> Self {
         Self {

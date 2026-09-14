@@ -70,18 +70,18 @@ impl HelixDbServer for GrpcService {
         }
         let query: db::cypher::Request = serde_json::from_slice(&request.body)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let request_type = query.request_type().map_err(|e| cypher_status(e.into()))?;
+        let query = query.compile().map_err(|e| cypher_status(e.into()))?;
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
             request.await_durable,
-            request_type,
+            query.request_type(),
             self.state.db_mode(),
         )?;
         let response = self
             .state
             .query_service()
-            .execute_cypher_json_scoped_controlled(
+            .execute_compiled_cypher_json_scoped_controlled(
                 query,
                 query_mode(request.warm_only),
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,

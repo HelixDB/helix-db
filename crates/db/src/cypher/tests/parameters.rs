@@ -32,7 +32,7 @@ async fn planner_to_execution_transfers_both_parameter_encodings_without_allocat
         params,
         values,
         ..
-    } = prepare_request(request, Limits::default()).unwrap();
+    } = prepare_request(Input::Source(request), Limits::default()).unwrap();
     let key = ir::NonEmptyString::new("payload").unwrap();
     let helix_ast::value::PropertyValue::String(native) = &params.values[&key] else {
         panic!("native string")

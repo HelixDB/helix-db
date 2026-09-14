@@ -8,7 +8,10 @@ use helix_planner::{context, ir, relational as r};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod compiled;
 mod explain;
+pub use compiled::CompiledRequest;
+pub(crate) use compiled::Input;
 pub(crate) mod output;
 mod parameters;
 pub use explain::{explain, Explanation};
@@ -36,6 +39,7 @@ impl Request {
 
 impl Request {
     /// Resolve statement effects before applying transport routing options.
+    /// Use [`Self::compile`] when execution follows routing, to retain this work.
     pub fn request_type(&self) -> r::Result<helix_ast::query::QueryRequestType> {
         Ok(match helix_cypher::compile(&self.query)?.effect() {
             r::Effect::Read => helix_ast::query::QueryRequestType::Read,
@@ -162,7 +166,7 @@ pub async fn execute(
     control: ExecutionControl,
     limits: Limits,
 ) -> Result<Response> {
-    execute_with::<output::Typed>(db, request, scope, mode, control, limits).await
+    execute_with::<output::Typed>(db, Input::Source(request), scope, mode, control, limits).await
 }
 
 /// Execute and prepare a bounded JSON body before the write transaction commits.
@@ -176,12 +180,12 @@ pub async fn execute_json(
     control: ExecutionControl,
     limits: Limits,
 ) -> Result<EncodedResponse> {
-    execute_with::<output::Json>(db, request, scope, mode, control, limits).await
+    execute_with::<output::Json>(db, Input::Source(request), scope, mode, control, limits).await
 }
 
-async fn execute_with<O: output::Format>(
+pub(crate) async fn execute_with<O: output::Format>(
     db: &HelixDB,
-    request: Request,
+    request: Input,
     scope: DataScope,
     mode: crate::query_service::QueryMode,
     control: ExecutionControl,
@@ -243,7 +247,7 @@ struct PreparedRequest {
 
 // Shared validation keeps planning-only requests on the execution parameter and
 // structural-limit contract without opening an execution transaction.
-fn prepare_request(request: Request, limits: Limits) -> Result<PreparedRequest> {
+fn prepare_request(request: Input, limits: Limits) -> Result<PreparedRequest> {
     if limits.batch_rows == 0
         || limits.memory_bytes == 0
         || limits.result_bytes == 0
@@ -256,9 +260,12 @@ fn prepare_request(request: Request, limits: Limits) -> Result<PreparedRequest> 
         )
         .into());
     }
-    let query = helix_cypher::compile(&request.query)?;
+    let CompiledRequest { query, parameters } = match request {
+        Input::Source(request) => request.compile()?,
+        Input::Compiled(request) => request,
+    };
     for name in query.parameters() {
-        if !request.parameters.contains_key(&name) {
+        if !parameters.contains_key(&name) {
             return Err(r::QueryError::compile(
                 "ParameterMissing",
                 "MissingParameter",
@@ -271,7 +278,7 @@ fn prepare_request(request: Request, limits: Limits) -> Result<PreparedRequest> 
         bindings: params,
         values,
         footprint: parameter_memory,
-    } = parameters::prepare(request.parameters, limits.memory_bytes)?;
+    } = parameters::prepare(parameters, limits.memory_bytes)?;
     Ok(PreparedRequest {
         query,
         params,

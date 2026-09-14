@@ -44,7 +44,7 @@ pub async fn explain(
     limits: Limits,
 ) -> Result<Explanation> {
     control.check()?;
-    let request = prepare_request(request, limits)?;
+    let request = prepare_request(Input::Source(request), limits)?;
     let prepared = control
         .run(db.planner_context_scoped_prepared(request.params, scope))
         .await?;

@@ -184,16 +184,16 @@ async fn execute_cypher(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let request_type = match request.request_type() {
-        Ok(kind) => kind,
+    let request = match request.compile() {
+        Ok(request) => request,
         Err(error) => return cypher_error_response(error.into()),
     };
-    if let Err(error) = options.validate_for_request_type(request_type, state.db_mode()) {
+    if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
         return error.into_response();
     }
     let result = state
         .query_service()
-        .execute_cypher_json_scoped_controlled(
+        .execute_compiled_cypher_json_scoped_controlled(
             request,
             options.query_mode(),
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,

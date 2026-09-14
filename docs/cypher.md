@@ -72,6 +72,13 @@ before a modifying statement commits, so an encoding resource failure rolls back
 the statement. `EncodedResponse::body()` borrows the JSON, `into_bytes()` transfers
 it to shared transport ownership, and `into_vec()` moves its allocation to an
 embedded caller. None of these methods serializes the result again.
+Transport adapters that check read/write policy before execution can consume
+`Request::compile()` once, inspect `CompiledRequest::request_type()`, and pass the
+owned result to `HelixQueryService::execute_compiled_cypher_json_scoped_controlled`.
+HTTP and gRPC use this path. Compilation retains no database or catalog snapshot;
+execution still acquires the current scoped catalog, validates parameters, and
+applies the attempt's limits and cancellation control.
+
 The additive gRPC `ExecuteCypher(QueryJsonRequest)` method accepts the same JSON
 body and existing request options, returning a `QueryJsonResponse`.
 

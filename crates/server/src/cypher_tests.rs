@@ -148,3 +148,81 @@ async fn cypher_explain_has_a_separate_read_only_http_contract() {
     drop(router);
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn cypher_routing_checks_effects_before_parameter_validation() {
+    let source = db::HelixDbSource::InMemory {
+        database: "cypher-routing-precedence".into(),
+    };
+    let config = source
+        .embedded_default_config()
+        .with_query_telemetry(db::config::QueryTelemetry::Disabled);
+    let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
+    let state = state::ServerState::new(Arc::clone(&db), None);
+    let router = http::router(state.clone());
+    let grpc = grpc::GrpcService::new(state);
+    for (text, warm, durable, detail) in [
+        ("CREATE (:N {key:$missing})", true, false, None),
+        ("RETURN $missing", false, true, None),
+        ("RETURN $missing", true, false, Some("MissingParameter")),
+        ("RETURN missing", false, true, Some("UndefinedVariable")),
+    ] {
+        let body = json!({"query":text}).to_string();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v2/cypher")
+                    .header("x-helix-warm", warm.to_string())
+                    .header("x-helix-await-durable", durable.to_string())
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let error = grpc
+            .execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
+                body: body.into_bytes().into(),
+                warm_only: warm,
+                await_durable: durable,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        match detail {
+            Some(detail) => {
+                assert_eq!(value["details"]["detail"], detail);
+                assert_eq!(value["details"]["phase"], "compile");
+                let error: helix_planner::relational::QueryError =
+                    serde_json::from_slice(error.details()).unwrap();
+                assert_eq!(error.detail, detail);
+                assert_eq!(error.phase, helix_planner::relational::ErrorPhase::Compile);
+            }
+            None => {
+                assert_eq!(value["error"], "invalid_request_option");
+                assert_eq!(
+                    error
+                        .metadata()
+                        .get(grpc::HELIX_ERROR_CODE_METADATA)
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    "invalid_request_option"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        db.cypher(db::cypher::Request::new("MATCH (n:N) RETURN count(*)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(0)]]
+    );
+    drop(router);
+    drop(grpc);
+    db.close().await.unwrap();
+}
