@@ -746,7 +746,10 @@ class StreamBound:
 
     @classmethod
     def literal(cls, value: int) -> "StreamBound":
-        return cls("Literal", _int_to_json(value))
+        safe = _int_to_json(value)
+        if safe < 0:
+            raise ValueError("Stream bound literal must be non-negative")
+        return cls("Literal", safe)
 
     @classmethod
     def expr(cls, expr: "Expr | ParamRef") -> "StreamBound":

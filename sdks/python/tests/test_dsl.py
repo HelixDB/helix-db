@@ -28,6 +28,7 @@ from helixdb import (
     RepeatConfig,
     ShortestPathDirection,
     SourcePredicate,
+    StreamBound,
     VectorDistanceMetric,
     WhenThen,
     WriteBatch,
@@ -699,6 +700,12 @@ class DslAstTests(unittest.TestCase):
             read_batch().to_query_json(bytes_params, {"payload": b"abc"})
         with self.assertRaises(TypeError):
             read_batch().var_as("bad", g().add_n("User", {"name": "Alice"}))
+
+    def test_stream_bound_literal(self) -> None:
+        bound = StreamBound.literal(10)
+        self.assertEqual(bound.to_json(), {"literal": 10})
+        with self.assertRaises(ValueError):
+            StreamBound.literal(-1)
 
 
 if __name__ == "__main__":
