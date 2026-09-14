@@ -55,6 +55,18 @@ impl HelixQueryService {
         crate::cypher::execute(&self.db, request, scope, mode, control, limits).await
     }
 
+    /// Prepare Cypher JSON under the same request authority, before committing writes.
+    pub async fn execute_cypher_json_scoped_controlled(
+        &self,
+        request: crate::cypher::Request,
+        mode: QueryMode,
+        scope: DataScope,
+        control: ExecutionControl,
+        limits: crate::cypher::Limits,
+    ) -> crate::cypher::Result<crate::cypher::EncodedResponse> {
+        crate::cypher::execute_json(&self.db, request, scope, mode, control, limits).await
+    }
+
     /// Create a query service.
     pub fn new(db: Arc<HelixDB>) -> Self {
         Self {

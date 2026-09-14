@@ -216,7 +216,7 @@ impl HelixDB {
             }
         })?;
         let inner = Arc::clone(&self.inner);
-        let response = runtime::run(async move { inner.cypher(request).await })
+        let response = runtime::run(async move { inner.cypher_json(request).await })
             .await?
             .map_err(|e| match e {
                 db::cypher::Error::Storage(e) => HelixError::from(e),
@@ -229,10 +229,7 @@ impl HelixDB {
                     msg: e.to_string(),
                 },
             })?;
-        serde_json::to_vec(&response).map_err(|e| HelixError::Internal {
-            error: "response_serialization_error".into(),
-            msg: e.to_string(),
-        })
+        Ok(response.into_vec())
     }
 
     /// Execute one ordinary read request and construct a reusable native graph.

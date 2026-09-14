@@ -66,6 +66,12 @@ build prerequisites. Use SDK and server builds from this checkout for Cypher.
 The database crate also exposes `database.cypher(db::cypher::Request::new(query)).await`.
 The lower-level `db::cypher::execute` accepts explicit scope, execution control,
 query mode, and resource limits. These use the caller's existing database handle.
+For a prepared JSON body, use `database.cypher_json(request).await` or
+`db::cypher::execute_json` with explicit scope and limits. JSON preparation runs
+before a modifying statement commits, so an encoding resource failure rolls back
+the statement. `EncodedResponse::body()` borrows the JSON, `into_bytes()` transfers
+it to shared transport ownership, and `into_vec()` moves its allocation to an
+embedded caller. None of these methods serializes the result again.
 The additive gRPC `ExecuteCypher(QueryJsonRequest)` method accepts the same JSON
 body and existing request options, returning a `QueryJsonResponse`.
 
@@ -175,5 +181,12 @@ Successful result JSON contains only `columns` and `rows`. Embedded response
 objects expose local diagnostics separately. Resource-limit failures return an
 error instead of truncating a successful result. The advanced embedded API can
 set query memory, result-size, batch-size, and collection-item limits. The memory
-budget is an admission estimate, not a process RSS ceiling. Disk spilling is
-not implemented.
+budget is an admission estimate, not a process RSS ceiling. HTTP, gRPC and
+embedded SDK bindings prepare their JSON within that budget before commit,
+including the overlap between typed values and the encoded buffer. Shared body
+clones and slices retain the body's admission until their final owner is dropped.
+An embedded caller taking a Vec assumes its memory ownership and accounting.
+Transport framing, TLS queues, shared storage caches and caller allocations are
+outside this engine estimate. Disk spilling is not implemented.
+Frontend/planner allocations and some native storage working buffers still need
+memory accounting; the current budget covers the integrated execution buffers.

@@ -193,7 +193,7 @@ async fn execute_cypher(
     }
     let result = state
         .query_service()
-        .execute_cypher_scoped_controlled(
+        .execute_cypher_json_scoped_controlled(
             request,
             options.query_mode(),
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
@@ -210,7 +210,12 @@ async fn execute_cypher(
             {
                 return service_error_response(error.into());
             }
-            json_response(StatusCode::OK, &response)
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                response.into_bytes(),
+            )
+                .into_response()
         }
         Err(error) => cypher_error_response(error),
     }

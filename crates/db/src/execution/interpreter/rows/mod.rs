@@ -23,7 +23,7 @@ mod streaming;
 mod top_k;
 
 use super::{ExecutionContext, ExecutionValue, Interpreter};
-use crate::cypher::{Error, Limits, Response, Result};
+use crate::cypher::{output, Error, Limits, Response, Result};
 use graph::GraphBatch;
 use helix_planner::relational as r;
 use memory::Rows;
@@ -35,12 +35,23 @@ enum ConsumedProjection {
 }
 
 impl Interpreter<'_> {
+    #[cfg(test)]
     pub(crate) async fn execute_rows(
-        mut self,
+        self,
         plan: &r::RowPlan,
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<Response> {
+        self.execute_rows_with::<output::Typed>(plan, parameters, limits)
+            .await
+    }
+
+    pub(crate) async fn execute_rows_with<O: output::Format>(
+        mut self,
+        plan: &r::RowPlan,
+        parameters: &BTreeMap<String, r::Value>,
+        limits: Limits,
+    ) -> Result<O::Value> {
         self.ctx.check_execution_deadline()?;
         self.ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
         match plan.query().effect() {
@@ -55,6 +66,11 @@ impl Interpreter<'_> {
             Ok(execution) => execution.await,
             Err(error) => Err(error.into()),
         };
+        let result = result.and_then(|response| {
+            response.prepare::<O>(&budget, || {
+                self.ctx.check_execution_deadline().map_err(Into::into)
+            })
+        });
         match result {
             Err(error) => {
                 self.ctx.abort_request_write_scope();
@@ -69,7 +85,13 @@ impl Interpreter<'_> {
                     r::Effect::Read => self.ctx.validate_request_read_view()?,
                     r::Effect::Write => self.ctx.commit_request_write_scope().await?,
                 }
-                Ok(response)
+                Ok(O::finish(
+                    response,
+                    crate::cypher::ResourceUsage {
+                        peak_memory_bytes: budget.peak(),
+                        reads: budget.reads(),
+                    },
+                ))
             }
         }
     }
@@ -86,7 +108,7 @@ impl ExecutionContext<'_> {
         plan: &r::RowPlan,
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
-    ) -> Result<Response> {
+    ) -> Result<output::AdmittedResponse> {
         let budget = self.row_budget().clone();
         let width = plan.query().bindings().len();
         if width
@@ -426,15 +448,21 @@ impl ExecutionContext<'_> {
                 "query result exceeds the response byte budget",
             ));
         }
-        Ok(Response {
-            columns,
-            rows: output,
-            diagnostics: plan.metrics.clone(),
-            resources: crate::cypher::ResourceUsage {
-                peak_memory_bytes: self.row_budget().peak(),
-                reads: self.row_budget().reads(),
+        // Input rows are no longer needed while preparing the final encoding.
+        drop(rows);
+        Ok(output::AdmittedResponse::new(
+            Response {
+                columns,
+                rows: output,
+                diagnostics: plan.metrics.clone(),
+                resources: crate::cypher::ResourceUsage {
+                    peak_memory_bytes: self.row_budget().peak(),
+                    reads: self.row_budget().reads(),
+                },
             },
-        })
+            output_memory,
+            wire_size.bytes,
+        ))
     }
 }
 

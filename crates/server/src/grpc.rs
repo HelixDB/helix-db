@@ -81,7 +81,7 @@ impl HelixDbServer for GrpcService {
         let response = self
             .state
             .query_service()
-            .execute_cypher_scoped_controlled(
+            .execute_cypher_json_scoped_controlled(
                 query,
                 query_mode(request.warm_only),
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
@@ -99,9 +99,7 @@ impl HelixDbServer for GrpcService {
                 .map_err(|e| status_from_service_error(e.into()))?;
         }
         Ok(Response::new(QueryJsonResponse {
-            body: serde_json::to_vec(&response)
-                .map_err(|e| Status::internal(e.to_string()))?
-                .into(),
+            body: response.into_bytes(),
         }))
     }
 
