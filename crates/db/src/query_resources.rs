@@ -149,6 +149,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn splitting_ownership_never_readmits_or_changes_the_live_total() {
+        let budget = Budget::new(100);
+        let mut parent = budget.reserve(100).unwrap();
+        let (child, allocated) = crate::allocation_testing::observe(|| parent.split(40));
+        assert_eq!(allocated.allocations, 0);
+        assert_eq!((parent.bytes, child.bytes, budget.available()), (60, 40, 0));
+        let empty = parent.split(0);
+        assert_eq!(empty.bytes, 0);
+        drop(empty);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parent.split(61))).is_err()
+        );
+        assert_eq!((parent.bytes, budget.available()), (60, 0));
+        parent.absorb(child);
+        assert_eq!((parent.bytes, budget.available()), (100, 0));
+        drop(parent);
+        assert_eq!(budget.available(), 100);
+        let budget = Budget::new(usize::MAX);
+        let mut parent = budget.reserve(usize::MAX).unwrap();
+        let child = parent.split(usize::MAX);
+        drop(parent);
+        assert_eq!(budget.available(), 0);
+        drop(child);
+        assert_eq!(budget.available(), usize::MAX);
+    }
+
+    #[test]
     fn reservation_transfer_preserves_exact_admission_without_allocating() {
         let budget = Budget::new(100);
         let mut output = budget.reserve(60).unwrap();
@@ -335,6 +362,20 @@ pub(crate) struct Reservation {
     bytes: usize,
 }
 impl Reservation {
+    /// Split already-admitted ownership within the same query. The live total
+    /// stays unchanged; callers keep the original guard for allocations that
+    /// have not moved. Splitting past the proven bound is an invariant failure.
+    pub(crate) fn split(&mut self, bytes: usize) -> Self {
+        self.bytes = self
+            .bytes
+            .checked_sub(bytes)
+            .expect("split exceeds admitted ownership");
+        Self {
+            budget: self.budget.clone(),
+            bytes,
+        }
+    }
+
     /// Transfer an already-admitted owner in the same query without briefly
     /// charging both reservations for the same output. Callers release surplus
     /// construction allowance before transferring the retained allocation.

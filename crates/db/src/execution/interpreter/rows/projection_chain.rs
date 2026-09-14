@@ -96,9 +96,13 @@ impl ExecutionContext<'_> {
         match consumer {
             r::BatchConsumer::Aggregate => Ok((
                 self.row_budget()
-                    .admitted_future(
-                        self.aggregate_batches(batches, width, items, parameters, limits),
-                    )?
+                    .admitted_future(self.aggregate_batches(
+                        batches.map(|batch| batch.map(super::memory::Batch::from)),
+                        width,
+                        projection,
+                        parameters,
+                        limits,
+                    ))?
                     .await?
                     .finish(),
                 ConsumedProjection::Aggregate(end),
@@ -435,9 +439,13 @@ impl ExecutionContext<'_> {
         if aggregate {
             Ok((
                 self.row_budget()
-                    .admitted_future(
-                        self.aggregate_batches(batches, width, items, parameters, limits),
-                    )?
+                    .admitted_future(self.aggregate_batches(
+                        batches.map(|batch| batch.map(super::memory::Batch::from)),
+                        width,
+                        projection,
+                        parameters,
+                        limits,
+                    ))?
                     .await?
                     .finish(),
                 ConsumedProjection::Aggregate(end),

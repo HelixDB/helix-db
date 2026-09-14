@@ -83,10 +83,41 @@ impl Accumulator {
             .saturating_add(values)
             .saturating_add(match &self.deduplication {
                 Deduplication::All => 0,
-                Deduplication::Distinct { bytes, .. } => *bytes,
+                Deduplication::Distinct { seen, bytes } => {
+                    bytes.saturating_add(super::allocation::hash_table_retained_bytes::<
+                        GroupingKey,
+                        (),
+                    >(seen.len()))
+                }
             })
     }
     pub fn push(&mut self, value: Value, max_items: usize, max_bytes: usize) -> Result<()> {
+        self.push_with_admission(value, max_items, max_bytes, |_| Ok(()))
+    }
+
+    /// Admit the next state's conservative ownership bound before allocating or
+    /// mutating it. Null and duplicate inputs need no callback. A validation or
+    /// admission error leaves this accumulator unchanged; the input is consumed.
+    /// The producer separately owns admission for the input value.
+    ///
+    /// ```
+    /// use helix_planner::relational::{Accumulator, Aggregate, QueryError, Value};
+    /// let mut count = Accumulator::new(Aggregate::Count, false);
+    /// let mut admitted = 0;
+    /// count.push_with_admission::<QueryError>(Value::Integer(1), 10, 1024, |bytes| {
+    ///     admitted = bytes;
+    ///     Ok(())
+    /// }).unwrap();
+    /// assert!(admitted >= count.allocated_bytes());
+    /// assert_eq!(count.finish().unwrap(), Value::Integer(1));
+    /// ```
+    pub fn push_with_admission<E: From<QueryError>>(
+        &mut self,
+        value: Value,
+        max_items: usize,
+        max_bytes: usize,
+        admit: impl FnOnce(usize) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
         // Collect adds one logical level. Reject before updating either state
         // or deduplication, so finish cannot produce an excessively deep value.
         value.validate_runtime_shape(
@@ -113,31 +144,51 @@ impl Accumulator {
             self.state,
             State::Collect { .. } | State::Minimum(_) | State::Maximum(_)
         );
-        let distinct = matches!(self.deduplication, Deduplication::Distinct { .. });
+
         let collection_growth = match &self.state {
             State::Collect { values, .. } if values.len() == values.capacity() => {
                 values.capacity().max(4).saturating_mul(size_of::<Value>())
             }
             _ => 0,
         };
+        let distinct_growth = match &self.deduplication {
+            Deduplication::All => 0,
+            Deduplication::Distinct { seen, .. } => {
+                let next = super::allocation::hash_table_retained_bytes::<GroupingKey, ()>(
+                    seen.len().saturating_add(1),
+                );
+                // During rehashing the old table remains live; the existing
+                // state already owns its bound, and admission adds the new one.
+                let table = if seen.len() == seen.capacity() {
+                    next
+                } else {
+                    next.saturating_sub(super::allocation::hash_table_retained_bytes::<
+                        GroupingKey,
+                        (),
+                    >(seen.len()))
+                };
+                value.allocated_bytes().saturating_add(table)
+            }
+        };
         let additional = value
             .allocated_bytes()
-            .saturating_add(128)
-            .saturating_mul(usize::from(retains) + usize::from(distinct))
-            .saturating_add(collection_growth);
+            .saturating_mul(usize::from(retains))
+            .saturating_add(collection_growth)
+            .saturating_add(distinct_growth);
         if self.allocated_bytes().saturating_add(additional) > max_bytes {
             return Err(QueryError::runtime(
                 "ResourceLimit",
                 "MemoryLimit",
                 "aggregation state exceeds the memory budget",
-            ));
+            )
+            .into());
         }
         // Compute fallible numeric transitions before mutating either the
         // accumulator or its distinct-key set. A rejected input leaves it usable.
         let numeric = match &self.state {
             State::Sum(sum) | State::Average { sum, .. } => {
                 if !matches!(value, Value::Integer(_) | Value::Float(_)) {
-                    return Err(evaluation::type_error("numeric aggregate requires numbers"));
+                    return Err(evaluation::type_error("numeric aggregate requires numbers").into());
                 }
                 Some(evaluation::binary(Binary::Add, sum.clone(), value.clone())?)
             }
@@ -154,20 +205,29 @@ impl Accumulator {
                 "ResourceLimit",
                 "CollectionLimit",
                 "collect exceeds the collection budget",
-            ));
+            )
+            .into());
         }
+        if matches!(&self.deduplication, Deduplication::Distinct { seen, .. } if seen.len() >= max_items)
+        {
+            return Err(QueryError::runtime(
+                "ResourceLimit",
+                "CollectionLimit",
+                "distinct aggregation exceeds the collection budget",
+            )
+            .into());
+        }
+        admit(self.allocated_bytes().saturating_add(additional))?;
         if let Deduplication::Distinct { seen, bytes } = &mut self.deduplication {
-            if seen.len() >= max_items {
-                return Err(QueryError::runtime(
+            seen.try_reserve(1).map_err(|_| {
+                QueryError::runtime(
                     "ResourceLimit",
-                    "CollectionLimit",
-                    "distinct aggregation exceeds the collection budget",
-                ));
-            }
-            *bytes = bytes
-                .saturating_add(value.allocated_bytes())
-                .saturating_add(128);
+                    "MemoryLimit",
+                    "distinct aggregation allocation failed",
+                )
+            })?;
             seen.insert(GroupingKey::new(value.clone())?);
+            *bytes = bytes.saturating_add(value.allocated_bytes());
         }
         match &mut self.state {
             State::Count(count) => *count = next_count.expect("count transition was checked"),

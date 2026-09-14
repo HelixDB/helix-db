@@ -559,6 +559,16 @@ impl RowBuffer {
         self.bytes = bytes;
         Ok(())
     }
+    /// Move a row whose payload and final row slot already have an ownership
+    /// reservation. Vector growth is still admitted by the common insertion
+    /// path; moved values are never briefly charged by both owners.
+    fn push_admitted(&mut self, row: r::Row, mut memory: memory::Reservation) -> Result<()> {
+        let bytes = row_bytes(&row);
+        memory.shrink_to(bytes);
+        self.rows.reservation.absorb(memory);
+        self.push_with(bytes, || row)
+    }
+
     /// Install simultaneous projection values after admitting both vector slot
     /// allocations. Only incoming values needed by later ordering/predicates
     /// are copied; overwritten and out-of-scope payloads remain in the source.

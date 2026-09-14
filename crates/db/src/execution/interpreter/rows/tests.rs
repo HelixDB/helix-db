@@ -8,6 +8,8 @@ mod correlated;
 mod correlated_sources;
 mod cursors;
 mod deletion_hydration;
+mod direct_aggregation_ownership;
+mod direct_aggregation_transfer;
 mod encoding;
 mod hash_join;
 mod mixed_pipeline;

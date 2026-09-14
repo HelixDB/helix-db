@@ -24,6 +24,40 @@ pub(super) enum ProjectionInputs {
     },
 }
 impl ProjectionInputs {
+    /// Add grouping dependencies to an admitted incoming-value mask. Allocate
+    /// only when an expression actually references an input binding.
+    pub(super) fn include_references<'e>(
+        &mut self,
+        ctx: &ExecutionContext<'_>,
+        width: usize,
+        expressions: impl Iterator<Item = &'e r::Expression>,
+    ) -> Result<()> {
+        for expression in expressions {
+            ctx.check_execution_deadline()?;
+            expression.try_visit(&mut |expression| {
+                let (r::Expression::Slot(slot) | r::Expression::HasLabel(slot, _)) = expression
+                else {
+                    return Ok::<_, super::Error>(());
+                };
+                if matches!(self, Self::Discard) {
+                    let memory = ctx
+                        .row_budget()
+                        .reserve(width.saturating_mul(size_of::<bool>()))?;
+                    *self = Self::Keep {
+                        slots: vec![false; width],
+                        _memory: memory,
+                    };
+                }
+                let Self::Keep { slots, .. } = self else {
+                    unreachable!("referenced input has an admitted mask");
+                };
+                slots[slot.0 as usize] = true;
+                Ok(())
+            })?;
+        }
+        ctx.check_execution_deadline()?;
+        Ok(())
+    }
     pub(super) fn keeps(&self, slot: usize) -> bool {
         match self {
             Self::Discard => false,
@@ -241,7 +275,6 @@ impl ExecutionContext<'_> {
                 .await;
         }
 
-        let inputs = projection.input_slots(self, width)?;
         let mut projected = RowBuffer::new(self.row_budget())?;
         if aggregated
             && items.iter().all(|item| {
@@ -250,10 +283,11 @@ impl ExecutionContext<'_> {
             })
         {
             projected = self
-                .aggregate_rows(&rows, width, items, parameters, limits)
+                .aggregate_rows(&rows, width, projection, parameters, limits)
                 .await?;
             drop(rows);
         } else if aggregated {
+            let inputs = projection.input_slots(self, width)?;
             let key_count = items
                 .iter()
                 .filter(|item| !item.expression.has_aggregate())
@@ -321,6 +355,7 @@ impl ExecutionContext<'_> {
                 projected.push_projection(base, items, values, &inputs, self.row_budget())?;
             }
         } else {
+            let inputs = projection.input_slots(self, width)?;
             for batch in rows.chunks(limits.batch_rows) {
                 let graph = self
                     .expression_graph_batch(batch, items.iter().map(|i| &i.expression))
