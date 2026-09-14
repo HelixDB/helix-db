@@ -5,7 +5,7 @@ use crate::{
     output, MetricsAction,
 };
 use color_eyre::owo_colors::OwoColorize;
-use eyre::Result;
+use eyre::{eyre, Result};
 use regex::Regex;
 
 pub async fn run(action: MetricsAction) -> Result<()> {
@@ -20,7 +20,7 @@ pub async fn run(action: MetricsAction) -> Result<()> {
 async fn enable_full_metrics() -> Result<()> {
     output::info("Enabling metrics collection");
 
-    let email = ask_for_email();
+    let email = ask_for_email()?;
     let mut config = load_metrics_config().unwrap_or_default();
     config.level = MetricsLevel::Full;
     config.email = Some(email);
@@ -109,22 +109,38 @@ fn format_age(seconds: u64) -> String {
 static EMAIL_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap());
 
-fn ask_for_email() -> String {
-    println!("Please enter your email address:");
-    let mut email = String::new();
-    io::stdin().read_line(&mut email).unwrap();
-    let email = email.trim().to_string();
-    // validate email
-    if !EMAIL_REGEX.is_match(&email) {
-        println!("Invalid email address");
-        return ask_for_email();
+fn is_valid_email(email: &str) -> bool {
+    EMAIL_REGEX.is_match(email)
+}
+
+fn ask_for_email() -> Result<String> {
+    read_email_from(&mut io::stdin().lock())
+}
+
+fn read_email_from<R: io::BufRead>(reader: &mut R) -> Result<String> {
+    loop {
+        println!("Please enter your email address:");
+        let mut email = String::new();
+        let bytes = reader.read_line(&mut email)?;
+        if bytes == 0 {
+            return Err(eyre!(
+                "email input ended before an address was provided; run `helix metrics full` from an interactive terminal"
+            ));
+        }
+        let email = email.trim();
+        if email.is_empty() || !is_valid_email(email) {
+            println!("Invalid email address");
+            continue;
+        }
+        return Ok(email.to_string());
     }
-    email
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_age;
+    use std::io::Cursor;
+
+    use super::{format_age, is_valid_email, read_email_from};
 
     #[test]
     fn formats_age_for_status_output() {
@@ -133,5 +149,31 @@ mod tests {
         assert_eq!(format_age(60), "1m ago");
         assert_eq!(format_age(3_600), "1h ago");
         assert_eq!(format_age(172_800), "2d ago");
+    }
+
+    #[test]
+    fn validates_email_addresses() {
+        assert!(is_valid_email("user@example.com"));
+        assert!(!is_valid_email(""));
+        assert!(!is_valid_email("not-an-email"));
+        assert!(!is_valid_email("@example.com"));
+    }
+
+    #[test]
+    fn read_email_from_rejects_eof_before_valid_input() {
+        let mut reader = Cursor::new(Vec::new());
+        let error = read_email_from(&mut reader)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("email input ended"));
+    }
+
+    #[test]
+    fn read_email_from_skips_invalid_lines_before_accepting_valid_email() {
+        let mut reader = Cursor::new(b"not-an-email\nuser@example.com\n");
+        assert_eq!(
+            read_email_from(&mut reader).unwrap(),
+            "user@example.com".to_string()
+        );
     }
 }
