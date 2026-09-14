@@ -334,9 +334,24 @@ impl ExecutionContext<'_> {
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<Rows> {
+        self.check_execution_deadline()?;
+        let mut demand = super::requirements::Requirements::new(self.row_budget())?;
+        // Retain immutable types for surviving relationship references. User
+        // properties are needed only by the deletion expressions themselves.
+        for slot in rows.first().into_iter().flat_map(|row| 0..row.len()) {
+            self.check_execution_deadline()?;
+            demand.insert(r::Slot(slot as u32), r::PropertyRequirement::Metadata)?;
+        }
+        for expression in expressions {
+            self.check_execution_deadline()?;
+            expression.try_graph_requirements(|slot, requirement| {
+                self.check_execution_deadline()?;
+                demand.insert(slot, requirement)
+            })?;
+        }
         let mut entities = super::super::mutation::DeletionTargets::new(self.row_budget())?;
         for batch in rows.chunks(limits.batch_rows) {
-            let graph = self.graph_batch(batch).await?;
+            let graph = self.graph_batch_required(batch, demand.values()).await?;
             // The type is immutable. Retain it for references that survive an
             // explicit or detach deletion; properties still require live rows.
             for (entity, data) in &graph.entities {
@@ -402,6 +417,7 @@ impl ExecutionContext<'_> {
                 }
             }
         }
+        drop(demand);
         self.row_delete_entities(entities, detach).await?;
         Ok(rows)
     }

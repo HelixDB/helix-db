@@ -690,7 +690,12 @@ async fn graph_hydration_rejects_invalid_metadata_and_corrupt_encoded_values() {
         .is_err());
     for id in [17, 18, 19, 20] {
         let row = vec![r::Value::Entity(r::Entity::Relationship(id))];
-        let result = ctx.graph_batch(&[row]).await;
+        let result = ctx
+            .graph_batch_required(
+                &[row],
+                &BTreeMap::from([(r::Slot(0), r::PropertyDemand::All)]),
+            )
+            .await;
         match id {
             17 => assert!(result.unwrap().entities.is_empty()),
             18 => assert!(

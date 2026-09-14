@@ -7,6 +7,7 @@ mod computed_depth;
 mod correlated;
 mod correlated_sources;
 mod cursors;
+mod deletion_hydration;
 mod encoding;
 mod hash_join;
 mod mixed_pipeline;

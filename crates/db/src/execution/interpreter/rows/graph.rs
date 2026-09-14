@@ -64,16 +64,6 @@ fn missing(entity: r::Entity) -> r::QueryError {
 }
 
 impl ExecutionContext<'_> {
-    pub(super) async fn graph_batch(&self, rows: &[r::Row]) -> Result<GraphBatch> {
-        self.check_execution_deadline()?;
-        let mut demand = super::requirements::Requirements::new(self.row_budget())?;
-        for slot in rows.first().into_iter().flat_map(|row| 0..row.len()) {
-            self.check_execution_deadline()?;
-            demand.insert(r::Slot(slot as u32), r::PropertyRequirement::All)?;
-        }
-        self.graph_batch_required(rows, demand.values()).await
-    }
-
     pub(super) async fn expression_graph_batch<'a>(
         &self,
         rows: &[r::Row],
@@ -166,6 +156,7 @@ impl ExecutionContext<'_> {
         rows: &[r::Row],
         demand: &BTreeMap<r::Slot, r::PropertyDemand>,
     ) -> Result<GraphBatch> {
+        self.check_execution_deadline()?;
         let mut entities = BTreeMap::<r::Entity, r::PropertyDemand>::new();
         let mut entity_memory = self.row_budget().reserve(0)?;
         let mut entity_bytes = 0_usize;
