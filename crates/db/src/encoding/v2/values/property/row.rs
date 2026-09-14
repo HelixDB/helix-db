@@ -51,7 +51,9 @@ pub(crate) fn encode_properties(properties: &[Property]) -> Bytes {
         rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(properties, Vec::<u8>::new())
             .expect("Property serialization should not fail");
 
-    Bytes::from(bytes)
+    // Owned transaction writes can retain this allocation in storage. Discard
+    // serializer growth capacity once, before sharing the immutable payload.
+    Bytes::from(bytes.into_boxed_slice())
 }
 
 /// Encodes one property value as the canonical type-preserving index identity.
@@ -127,6 +129,21 @@ mod tests {
     fn empty_properties_encode_as_empty_bytes() {
         assert!(encode_properties(&[]).is_empty());
         assert_eq!(decode_properties(&[]).unwrap(), Vec::<Property>::new());
+    }
+
+    #[test]
+    fn owned_property_rows_do_not_retain_serializer_growth_capacity() {
+        for size in [0, 1, 7, 8, 31, 32, 127, 128, 4095, 4096, 65536] {
+            let properties = vec![Property::bytes("native", vec![7; size])];
+            let bytes = encode_properties(&properties);
+            let len = bytes.len();
+            let owned = bytes.try_into_mut().unwrap();
+            assert_eq!(owned.capacity(), len);
+            assert_eq!(decode_properties(&owned).unwrap(), properties);
+        }
+        let (empty, allocation) = crate::allocation_testing::observe(|| encode_properties(&[]));
+        assert!(empty.is_empty());
+        assert_eq!(allocation.allocations, 0);
     }
 
     #[test]

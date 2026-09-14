@@ -297,6 +297,7 @@ fn shape_validation_has_no_heap_frontier_for_scalar_wide_or_deep_values() {
     ] {
         let (peak, live) = observe(|| {
             value.validate_shape().unwrap();
+            value.validate_depth().unwrap();
             OBSERVATION.with(Cell::get).peak
         });
         assert_eq!(
@@ -311,5 +312,46 @@ fn shape_validation_has_no_heap_frontier_for_scalar_wide_or_deep_values() {
     ] {
         let error = value.validate_shape().unwrap_err();
         assert_eq!(error.detail, "ValueDepth");
+    }
+}
+
+#[test]
+fn runtime_depth_rejection_allocates_only_the_error_before_borrowed_value_cloning() {
+    struct NoGraph;
+    impl r::GraphValues for NoGraph {
+        fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
+            panic!("scalar value requested graph data")
+        }
+        fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
+            panic!("scalar value requested graph data")
+        }
+    }
+    let value = (0..96).fold(r::Value::String("x".repeat(1024 * 1024)), |value, _| {
+        r::Value::List(vec![value])
+    });
+    let parameters = BTreeMap::from([("x".into(), value.clone())]);
+    let row = [value.clone()];
+    let evaluation = r::Evaluation {
+        row: &row,
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: usize::MAX,
+        max_value_bytes: usize::MAX,
+    };
+    for expression in [
+        r::Expression::Literal(value),
+        r::Expression::Slot(r::Slot(0)),
+        r::Expression::Parameter("x".into()),
+    ] {
+        let ((error, peak), live) = observe(|| {
+            let error = evaluation.eval(&expression).unwrap_err();
+            (error, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(error.detail, "ValueDepth");
+        assert_eq!(error.phase, r::ErrorPhase::Runtime);
+        let error_bytes =
+            error.category.capacity() + error.detail.capacity() + error.message.capacity();
+        assert_eq!((peak, live), (error_bytes, error_bytes));
     }
 }

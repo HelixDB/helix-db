@@ -13,6 +13,7 @@ use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::values::property::{self, Property};
 use crate::error::Result;
+use crate::query_resources::{self, properties};
 
 use super::{IndexElementKind, IndexEntityId};
 
@@ -74,7 +75,7 @@ impl GraphEntity {
 /// One decoded property row paired with its canonical encoding.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalPropertyRow {
-    properties: Arc<Vec<Property>>,
+    properties: Arc<properties::Decoded>,
     encoded: Bytes,
 }
 
@@ -83,23 +84,32 @@ impl CanonicalPropertyRow {
     pub(crate) fn new(properties: Vec<Property>) -> Self {
         let encoded = property::encode_properties(&properties);
         Self {
-            properties: Arc::new(properties),
+            properties: Arc::new(properties::Decoded::native(properties)),
             encoded,
         }
     }
 
-    /// Decodes one existing canonical property row exactly once.
-    pub(crate) fn decode(encoded: Bytes) -> Result<Self> {
-        let properties = property::decode_properties(&encoded)?;
+    /// Admit the entire transaction-visible snapshot, retaining original bytes
+    /// and all native property types. Both raw and decoded owners share their
+    /// reservations across index consumers without duplicating payloads.
+    pub(crate) fn decode_with_budget(
+        encoded: Bytes,
+        budget: Option<&query_resources::Budget>,
+    ) -> Result<Self> {
+        Self::decode_read(properties::Read::new(encoded, budget)?)
+    }
+
+    pub(crate) fn decode_read(read: properties::Read) -> Result<Self> {
+        let (encoded, properties) = read.decode()?;
         Ok(Self {
-            properties: Arc::new(properties),
+            properties,
             encoded,
         })
     }
 
     /// Borrows the decoded properties.
     pub(crate) fn properties(&self) -> &[Property] {
-        self.properties.as_slice()
+        &self.properties
     }
 
     /// Borrows the exact canonical bytes for storage and validation.
@@ -380,7 +390,8 @@ mod tests {
     #[test]
     fn canonical_row_reuses_exact_v1_bytes() {
         let original = row();
-        let decoded = CanonicalPropertyRow::decode(original.encoded().clone()).unwrap();
+        let decoded =
+            CanonicalPropertyRow::decode_with_budget(original.encoded().clone(), None).unwrap();
 
         assert_eq!(decoded, original);
         assert_eq!(decoded.encoded_len(), original.encoded_len());
@@ -498,7 +509,8 @@ mod tests {
                 .contains("score"),
             "every index family must observe the representation-distinct property"
         );
-        let decoded = CanonicalPropertyRow::decode(after.encoded().clone()).unwrap();
+        let decoded =
+            CanonicalPropertyRow::decode_with_budget(after.encoded().clone(), None).unwrap();
         let PropertyValue::F64(value) = decoded.properties()[0].value else {
             panic!("score remains an f64");
         };

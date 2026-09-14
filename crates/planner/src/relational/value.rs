@@ -94,35 +94,61 @@ mod float_bits {
 impl Value {
     /// Validate externally constructed nested literals before recursive use.
     pub fn validate_shape(&self) -> Result<()> {
-        // The depth check bounds recursion before descending. Walking borrowed
-        // children avoids a heap allocation for every scalar grouping key and
-        // an unadmitted frontier proportional to a wide list or map.
-        fn visit(value: &Value, depth: usize, count: &mut usize) -> Result<()> {
-            *count += 1;
-            if depth >= super::MAX_EXPRESSION_DEPTH || *count > 200_000 {
-                return Err(QueryError::compile(
-                    "ResourceLimit",
-                    "ValueDepth",
-                    "value exceeds structural limits",
-                ));
-            }
-            match value {
-                Value::List(values) => values
-                    .iter()
-                    .try_for_each(|value| visit(value, depth + 1, count)),
-                Value::Map(values) => values
-                    .values()
-                    .try_for_each(|value| visit(value, depth + 1, count)),
-                Value::Null
-                | Value::Boolean(_)
-                | Value::Integer(_)
-                | Value::Float(_)
-                | Value::String(_)
-                | Value::Entity(_)
-                | Value::Path(_) => Ok(()),
-            }
+        if self.within_limits(0, &mut 200_000) {
+            return Ok(());
         }
-        visit(self, 0, &mut 0)
+        Err(QueryError::compile(
+            "ResourceLimit",
+            "ValueDepth",
+            "value exceeds structural limits",
+        ))
+    }
+
+    /// Validate computed or borrowed values before cloning, accounting or
+    /// returning them. Runtime collection cardinality is budgeted separately;
+    /// this check imposes no literal-size cap and allocates no traversal state.
+    ///
+    /// ```
+    /// use helix_planner::relational::Value;
+    /// Value::List(vec![Value::Integer(1)]).validate_depth().unwrap();
+    /// ```
+    pub fn validate_depth(&self) -> Result<()> {
+        self.validate_runtime_shape(0, usize::MAX)
+    }
+
+    pub(super) fn validate_runtime_shape(&self, depth: usize, mut max_items: usize) -> Result<()> {
+        if self.within_limits(depth, &mut max_items) {
+            return Ok(());
+        }
+        Err(QueryError::runtime(
+            "ResourceLimit",
+            "ValueDepth",
+            "value exceeds structural limits",
+        ))
+    }
+
+    // Check depth before descending. Borrowed traversal keeps stack use bounded
+    // without an unadmitted heap frontier proportional to collection width.
+    fn within_limits(&self, depth: usize, remaining: &mut usize) -> bool {
+        if depth >= super::MAX_EXPRESSION_DEPTH || *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        match self {
+            Self::List(values) => values
+                .iter()
+                .all(|value| value.within_limits(depth + 1, remaining)),
+            Self::Map(values) => values
+                .values()
+                .all(|value| value.within_limits(depth + 1, remaining)),
+            Self::Null
+            | Self::Boolean(_)
+            | Self::Integer(_)
+            | Self::Float(_)
+            | Self::String(_)
+            | Self::Entity(_)
+            | Self::Path(_) => true,
+        }
     }
     pub fn truth(&self) -> Result<Option<bool>> {
         match self {
@@ -274,8 +300,32 @@ impl Value {
 pub struct GroupingKey(Value);
 impl GroupingKey {
     pub fn new(value: Value) -> Result<Self> {
-        value.validate_shape()?;
+        value.validate_runtime_shape(0, 200_000)?;
         Ok(Self(value))
+    }
+
+    /// Frame grouping columns without consuming a user value's nesting level.
+    /// The private list wrapper contributes to the shared item budget but is
+    /// internal tuple structure, allowing at most one extra bounded stack frame.
+    ///
+    /// ```
+    /// use helix_planner::relational::{GroupingKey, Value};
+    /// let key = GroupingKey::row(vec![Value::Null, Value::Integer(1)]).unwrap();
+    /// assert_eq!(key, GroupingKey::row(vec![Value::Null, Value::Float(1.0)]).unwrap());
+    /// ```
+    pub fn row(values: Vec<Value>) -> Result<Self> {
+        let mut remaining = 200_000 - 1;
+        if !values
+            .iter()
+            .all(|value| value.within_limits(0, &mut remaining))
+        {
+            return Err(QueryError::runtime(
+                "ResourceLimit",
+                "ValueDepth",
+                "grouping columns exceed structural limits",
+            ));
+        }
+        Ok(Self(Value::List(values)))
     }
     pub fn value(&self) -> &Value {
         &self.0

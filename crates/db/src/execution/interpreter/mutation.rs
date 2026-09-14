@@ -5,6 +5,7 @@ mod contracts;
 mod edge;
 mod index_context;
 mod node;
+mod observations;
 mod ops;
 mod properties;
 mod rows;

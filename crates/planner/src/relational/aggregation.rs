@@ -87,7 +87,12 @@ impl Accumulator {
             })
     }
     pub fn push(&mut self, value: Value, max_items: usize, max_bytes: usize) -> Result<()> {
-        value.validate_shape()?;
+        // Collect adds one logical level. Reject before updating either state
+        // or deduplication, so finish cannot produce an excessively deep value.
+        value.validate_runtime_shape(
+            usize::from(matches!(self.state, State::Collect { .. })),
+            200_000,
+        )?;
         if value == Value::Null {
             return Ok(());
         }

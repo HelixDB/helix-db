@@ -2,6 +2,7 @@ use super::*;
 use helix_planner::context;
 
 mod bound_match;
+mod computed_depth;
 mod correlated;
 mod correlated_sources;
 mod cursors;

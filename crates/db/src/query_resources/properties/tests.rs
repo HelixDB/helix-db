@@ -2,6 +2,105 @@ use super::*;
 use crate::{allocation_testing, HelixDbError};
 
 #[test]
+fn shared_decoded_rows_charge_the_arc_and_release_only_after_the_last_owner() {
+    let input = vec![property::Property::string("value", "x".repeat(4096))];
+    let encoded = property::encode_properties(&input);
+    let budget = Budget::new(64 * 1024);
+    let decoded = Decoded::new(&encoded, prepared::Selection::All, Some(&budget)).unwrap();
+    let before = budget.available();
+    let (shared, allocation) = allocation_testing::observe(|| decoded.share().unwrap());
+    assert_eq!(allocation.allocations, 1);
+    assert_eq!(before - budget.available(), allocation.bytes);
+    let retained = budget.available();
+    let (copy, allocation) = allocation_testing::observe(|| shared.clone());
+    assert_eq!(allocation.allocations, 0);
+    drop(shared);
+    assert_eq!(budget.available(), retained);
+    assert_eq!(&**copy, input.as_slice());
+    drop(copy);
+    assert_eq!(budget.available(), 64 * 1024);
+    let budget = Budget::new(0);
+    let empty = Decoded::new(&[], prepared::Selection::All, Some(&budget)).unwrap();
+    let (result, allocation) = allocation_testing::observe(|| empty.share());
+    assert!(matches!(
+        result,
+        Err(HelixDbError::QueryMemoryLimitExceeded)
+    ));
+    assert_eq!(allocation.allocations, 0);
+    assert_eq!(budget.available(), 0);
+    let native = Decoded::native(input.clone()).share().unwrap();
+    assert_eq!(&**native, input.as_slice());
+    assert_eq!(
+        *native,
+        Decoded::new(&encoded, prepared::Selection::All, None).unwrap()
+    );
+    assert_eq!(format!("{native:?}"), format!("{input:?}"));
+}
+
+#[test]
+fn raw_property_batches_admit_all_reads_before_any_decode_and_keep_iterators_owned() {
+    let encoded =
+        property::encode_properties(&[property::Property::string("value", "x".repeat(4096))]);
+    let budget = Budget::new(64 * 1024);
+    let request = ReadRequest::new(3, Some(&budget)).unwrap();
+    let mut reads = request
+        .attach(vec![Some(encoded.clone()), None, Some(encoded.clone())])
+        .unwrap();
+    assert_eq!(reads.len(), 3);
+    let available = budget.available();
+    assert!(available < 64 * 1024 - 2 * encoded.len());
+    let read = reads.next().unwrap().unwrap();
+    assert_eq!(read.bytes(), encoded);
+    assert_eq!(budget.available(), available);
+    assert!(reads.next().unwrap().is_none());
+    let (bytes, decoded) = read.decode().unwrap();
+    assert_eq!(decoded[0].name, "value");
+    drop(decoded);
+    assert_eq!(budget.available(), available);
+    drop(reads);
+    assert!(budget.available() > available && budget.available() < 64 * 1024);
+    let copy = bytes.clone();
+    drop(bytes);
+    assert!(budget.available() < 64 * 1024);
+    drop(copy);
+    assert_eq!(budget.available(), 64 * 1024);
+    let (result, allocation) =
+        allocation_testing::observe(|| ReadRequest::new(usize::MAX, Some(&budget)));
+    assert!(matches!(
+        result,
+        Err(HelixDbError::QueryMemoryLimitExceeded)
+    ));
+    assert_eq!(allocation.allocations, 0);
+    let budget = Budget::new(encoded.len() + 1024);
+    let request = ReadRequest::new(2, Some(&budget)).unwrap();
+    assert!(matches!(
+        request.attach(vec![Some(encoded.clone()), Some(encoded.clone())]),
+        Err(HelixDbError::QueryMemoryLimitExceeded)
+    ));
+    assert_eq!(budget.available(), encoded.len() + 1024);
+    let values = vec![None, Some(encoded.clone())];
+    let (mut reads, allocation) =
+        allocation_testing::observe(|| ReadRequest::new(2, None).unwrap().attach(values).unwrap());
+    assert_eq!(
+        allocation.allocations, 0,
+        "native batches reuse result handles"
+    );
+    assert_eq!(reads.len(), 2);
+    assert!(reads.next().unwrap().is_none());
+    assert_eq!(reads.next().unwrap().unwrap().decode().unwrap().0, encoded);
+    assert!(reads.next().is_none());
+    let budget = Budget::new(1024);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ReadRequest::new(1, Some(&budget)).unwrap().attach(vec![])
+    }))
+    .is_err());
+    assert_eq!(budget.available(), 1024);
+    let read = Read::new(bytes::Bytes::from_static(b"bad"), Some(&budget)).unwrap();
+    assert!(matches!(read.decode(), Err(HelixDbError::Encoding(_))));
+    assert_eq!(budget.available(), 1024);
+}
+
+#[test]
 fn drained_fields_retain_admission_through_success_failure_and_unwinding() {
     let encoded = property::encode_properties(&[
         property::Property::string("first", "x".repeat(4096)),

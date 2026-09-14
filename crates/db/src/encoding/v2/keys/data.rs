@@ -326,6 +326,14 @@ pub(crate) enum DataKey<'a> {
 }
 
 impl<'a> DataKey<'a> {
+    /// Exact physical length, available before allocating the encoded key.
+    pub(crate) fn encoded_len(&self) -> usize {
+        match self {
+            Self::Global { kind } => kind.encoded_len(),
+            Self::Data { scope, kind } => scope.encoded_len() + kind.encoded_len(),
+        }
+    }
+
     pub(crate) fn data_prefix(scope: DataScope, logical_prefix: Bytes) -> Bytes {
         match scope {
             DataScope::LegacyUnscoped => logical_prefix,
@@ -368,12 +376,7 @@ impl<'a> DataKey<'a> {
     ///  All ids are encoded as big-endian.
     #[inline]
     pub(crate) fn to_bytes(&self) -> Bytes {
-        let mut bytes = match self {
-            Self::Global { kind } => Vec::with_capacity(kind.encoded_len()),
-            Self::Data { scope, kind } => {
-                Vec::with_capacity(scope.encoded_len() + kind.encoded_len())
-            }
-        };
+        let mut bytes = Vec::with_capacity(self.encoded_len());
         match self {
             Self::Global { kind } => kind.encode_into(&mut bytes),
             Self::Data { scope, kind } => {

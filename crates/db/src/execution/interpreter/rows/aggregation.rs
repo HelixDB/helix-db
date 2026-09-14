@@ -77,11 +77,11 @@ impl ExecutionContext<'_> {
                 .await?;
             for row in batch.iter() {
                 let evaluation = self.evaluate(row, parameters, &graph, limits);
-                let key = r::GroupingKey::new(r::Value::List(
+                let key = r::GroupingKey::row(
                     keys.iter()
                         .map(|key| evaluation.eval(key))
                         .collect::<r::Result<_>>()?,
-                ))?;
+                )?;
                 let index = match by_key.get(&key).copied() {
                     Some(index) => index,
                     None => {

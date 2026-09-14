@@ -53,6 +53,7 @@ impl Evaluation<'_> {
         use Expression as E;
         let value = match expression {
             E::Literal(v) => {
+                v.validate_depth()?;
                 self.remaining(v.allocated_bytes())?;
                 v.clone()
             }
@@ -64,6 +65,7 @@ impl Evaluation<'_> {
                         "row schema does not contain a referenced slot",
                     )
                 })?;
+                value.validate_depth()?;
                 self.remaining(value.allocated_bytes())?;
                 value.clone()
             }
@@ -75,6 +77,7 @@ impl Evaluation<'_> {
                         format!("missing parameter ${name}"),
                     )
                 })?;
+                value.validate_depth()?;
                 self.remaining(value.allocated_bytes())?;
                 value.clone()
             }
@@ -83,6 +86,7 @@ impl Evaluation<'_> {
                 Value::Map(mut map) => map.remove(key).unwrap_or(Value::Null),
                 Value::Entity(entity) => {
                     let value = self.graph.property(entity, key)?;
+                    value.validate_depth()?;
                     self.remaining(value.allocated_bytes())?;
                     value.clone()
                 }
@@ -116,6 +120,7 @@ impl Evaluation<'_> {
                     }
                     (Value::Entity(entity), Value::String(key)) => {
                         let value = self.graph.property(entity, &key)?;
+                        value.validate_depth()?;
                         self.remaining(key.capacity().saturating_add(value.allocated_bytes()))?;
                         value.clone()
                     }
@@ -250,6 +255,9 @@ impl Evaluation<'_> {
                 distinct,
             } => self.aggregate(*function, argument.as_deref(), *distinct)?,
         };
+        // Inputs can be individually valid while a new list/map adds a level.
+        // Enforce the runtime contract across clause boundaries as well as ASTs.
+        value.validate_depth()?;
         self.remaining(value.allocated_bytes())?;
         Ok(value)
     }
@@ -300,6 +308,7 @@ impl Evaluation<'_> {
         self.remaining(bytes)?;
         for (key, value) in properties {
             let value = value.as_ref().map_err(Clone::clone)?;
+            value.validate_runtime_shape(1, usize::MAX)?;
             bytes = bytes
                 .saturating_add(key.len())
                 .saturating_add(value.allocated_bytes().saturating_sub(size_of::<Value>()));

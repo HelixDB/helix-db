@@ -20,6 +20,7 @@ use crate::index_lifecycle::graph_mutation::{
 /// Sorted, deduplicated node-row observations with an ordered mutation overlay.
 pub(super) struct ObservedNodeRows {
     rows: BTreeMap<u64, Option<CanonicalPropertyRow>>,
+    _memory: Option<crate::query_resources::Reservation>,
 }
 
 /// Distinct node-existence observations used by batched endpoint validation.
@@ -91,7 +92,7 @@ impl<'db> ExecutionContext<'db> {
         let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
             node_id,
         )));
-        txn.put(&key, encoded)?;
+        txn.put_bytes(key, encoded)?;
         Ok(())
     }
 
@@ -114,7 +115,9 @@ impl<'db> ExecutionContext<'db> {
         let observed = txn
             .get(&key)
             .await?
-            .map(CanonicalPropertyRow::decode)
+            .map(|encoded| {
+                CanonicalPropertyRow::decode_with_budget(encoded, self.row_memory.as_ref())
+            })
             .transpose()?;
         let _ = self
             .set_node_property_observed(txn, node_id, property, observed, index_context)
@@ -207,7 +210,7 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put(
+        txn.put_bytes(
             self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
                 node_id,
             ))),
@@ -235,7 +238,9 @@ impl<'db> ExecutionContext<'db> {
         let observed = txn
             .get(&key)
             .await?
-            .map(CanonicalPropertyRow::decode)
+            .map(|encoded| {
+                CanonicalPropertyRow::decode_with_budget(encoded, self.row_memory.as_ref())
+            })
             .transpose()?;
         let _ = self
             .remove_node_property_observed(txn, node_id, name, observed, index_context)
@@ -291,7 +296,7 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put(
+        txn.put_bytes(
             self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
                 node_id,
             ))),
@@ -305,31 +310,60 @@ impl<'db> ExecutionContext<'db> {
         txn: &DbTransaction,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeRows> {
-        let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
-        let keys = node_ids
-            .iter()
-            .map(|node_id| {
-                self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                    *node_id,
-                )))
+        let requested = super::observations::RowKeys::new(
+            node_ids,
+            super::observations::Kind::Nodes,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        if requested.ids.is_empty() {
+            return Ok(ObservedNodeRows {
+                rows: BTreeMap::new(),
+                _memory: None,
+            });
+        }
+        let memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(helix_planner::relational::allocation::btree_bytes::<
+                    u64,
+                    Option<CanonicalPropertyRow>,
+                >(requested.ids.len()))
             })
-            .collect::<Vec<_>>();
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let rows = node_ids
-            .into_iter()
-            .zip(values)
+            .transpose()?;
+        let keys = &requested.keys;
+        let request = crate::query_resources::properties::ReadRequest::new(
+            keys.len(),
+            self.row_memory.as_ref(),
+        )?;
+        let values = txn.multi_get(keys).await?;
+        let mut decoded = requested
+            .ids
+            .iter()
+            .copied()
+            .zip(request.attach(values)?)
             .map(|(node_id, value)| {
                 value
-                    .map(CanonicalPropertyRow::decode)
+                    .map(CanonicalPropertyRow::decode_read)
                     .transpose()
                     .map(|row| (node_id, row))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        Ok(ObservedNodeRows { rows })
+            });
+        let rows = if self.row_memory.is_some() {
+            // Avoid FromIterator's extra sorting vector while all raw reads
+            // and already decoded snapshots are live.
+            decoded.try_fold(BTreeMap::new(), |mut rows, entry| {
+                let (id, row) = entry?;
+                rows.insert(id, row);
+                Ok::<_, HelixDbError>(rows)
+            })?
+        } else {
+            decoded.collect::<Result<BTreeMap<_, _>>>()?
+        };
+        Ok(ObservedNodeRows {
+            rows,
+            _memory: memory,
+        })
     }
 
     pub(super) async fn observe_node_existence(
@@ -375,7 +409,7 @@ impl<'db> ExecutionContext<'db> {
         let transition = GraphMutationTransition::delete(
             self.tenant_scope,
             GraphEntity::node(node_id),
-            CanonicalPropertyRow::decode(stored)?,
+            CanonicalPropertyRow::decode_with_budget(stored, self.row_memory.as_ref())?,
         );
         let properties = transition
             .before()

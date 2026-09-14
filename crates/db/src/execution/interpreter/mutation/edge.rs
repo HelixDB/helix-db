@@ -27,6 +27,7 @@ pub(super) struct ObservedEdgeRow {
 /// Sorted, deduplicated edge observations with an ordered property overlay.
 pub(super) struct ObservedEdgeRows {
     rows: BTreeMap<u64, ObservedEdgeRow>,
+    _memory: Option<crate::query_resources::Reservation>,
 }
 
 struct ObservedPairState {
@@ -184,7 +185,7 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put(key, encoded)?;
+        txn.put_bytes(key, encoded)?;
         Ok(())
     }
 
@@ -261,7 +262,7 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put(
+        txn.put_bytes(
             self.storage_key(keys::DataKeyKind::EdgePropertyById(
                 keys::EdgePropertyByIdKey::new(edge_id),
             )),
@@ -334,7 +335,7 @@ impl<'db> ExecutionContext<'db> {
                     .active_text_mutation(),
             )
             .await?;
-        txn.put(
+        txn.put_bytes(
             self.storage_key(keys::DataKeyKind::EdgePropertyById(
                 keys::EdgePropertyByIdKey::new(edge_id),
             )),
@@ -348,36 +349,51 @@ impl<'db> ExecutionContext<'db> {
         txn: &DbTransaction,
         edge_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedEdgeRows> {
-        let edge_ids = edge_ids.into_iter().collect::<BTreeSet<_>>();
-        let mut keys = Vec::with_capacity(edge_ids.len().saturating_mul(2));
-        for edge_id in &edge_ids {
-            keys.push(self.storage_key(keys::DataKeyKind::EdgeEndpoints(
-                keys::EdgeEndpointsKey::new(*edge_id),
-            )));
-            keys.push(self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(*edge_id),
-            )));
+        let requested = super::observations::RowKeys::new(
+            edge_ids,
+            super::observations::Kind::Edges,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        if requested.ids.is_empty() {
+            return Ok(ObservedEdgeRows {
+                rows: BTreeMap::new(),
+                _memory: None,
+            });
         }
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let mut values = values.into_iter();
+        let memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(helix_planner::relational::allocation::btree_bytes::<
+                    u64,
+                    ObservedEdgeRow,
+                >(requested.ids.len()))
+            })
+            .transpose()?;
+        let keys = &requested.keys;
+        let request = crate::query_resources::properties::ReadRequest::new(
+            keys.len(),
+            self.row_memory.as_ref(),
+        )?;
+        let values = txn.multi_get(keys).await?;
+        let mut values = request.attach(values)?;
         let mut rows = BTreeMap::new();
-        for edge_id in edge_ids {
+        for edge_id in requested.ids.iter().copied() {
             let endpoints = values
                 .next()
                 .expect("each observed edge has one endpoint result")
                 .map(|value| {
-                    crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::decode(&value)
-                        .map(|endpoints| (endpoints.source(), endpoints.target()))
+                    crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::decode(
+                        value.bytes(),
+                    )
+                    .map(|endpoints| (endpoints.source(), endpoints.target()))
                 })
                 .transpose()?;
             let properties = values
                 .next()
                 .expect("each observed edge has one property result")
-                .map(CanonicalPropertyRow::decode)
+                .map(CanonicalPropertyRow::decode_read)
                 .transpose()?;
             rows.insert(
                 edge_id,
@@ -388,7 +404,10 @@ impl<'db> ExecutionContext<'db> {
             );
         }
         assert!(values.next().is_none());
-        Ok(ObservedEdgeRows { rows })
+        Ok(ObservedEdgeRows {
+            rows,
+            _memory: memory,
+        })
     }
 
     pub(super) async fn observe_edge_deletions(
